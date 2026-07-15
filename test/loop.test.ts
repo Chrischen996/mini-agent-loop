@@ -1,0 +1,235 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { describe, it } from "node:test";
+import {
+  createAgentHistory,
+  runAgentLoop,
+  runAgentTurn,
+} from "../src/loop.ts";
+import { contentAsString } from "../src/content.ts";
+import { makeLlmConfig } from "../src/llm.ts";
+import { createDefaultTools, createReadTool } from "../src/tools/index.ts";
+import {
+  createFauxChat,
+  createInfiniteToolFauxChat,
+  createUnknownToolFauxChat,
+} from "./faux-model.ts";
+
+const dummyLlm = makeLlmConfig({
+  apiKey: "test-key",
+  baseUrl: "http://localhost/v1",
+  model: "faux",
+});
+
+describe("runAgentLoop", () => {
+  it("happy path: user -> assistant(toolCalls) -> tool -> assistant(text)", async () => {
+    const tools = createDefaultTools(process.cwd());
+    const chat = createFauxChat({
+      readPath: "package.json",
+      toolCallId: "call_read_1",
+    });
+
+    const messages = await runAgentLoop("read package.json and summarize", {
+      llm: dummyLlm,
+      tools,
+      chat,
+    });
+
+    const roles = messages.map((m) => m.role);
+    assert.deepEqual(roles, ["system", "user", "assistant", "tool", "assistant"]);
+
+    const firstAssistant = messages[2];
+    assert.equal(firstAssistant.role, "assistant");
+    if (firstAssistant.role !== "assistant") return;
+    assert.ok(firstAssistant.toolCalls?.length === 1);
+    assert.equal(firstAssistant.toolCalls?.[0]?.name, "read");
+    assert.equal(firstAssistant.toolCalls?.[0]?.id, "call_read_1");
+
+    const toolMsg = messages[3];
+    assert.equal(toolMsg.role, "tool");
+    if (toolMsg.role !== "tool") return;
+    assert.equal(toolMsg.toolCallId, "call_read_1");
+    assert.equal(toolMsg.name, "read");
+    assert.notEqual(toolMsg.isError, true);
+    assert.match(contentAsString(toolMsg.content), /"name"\s*:\s*"mini-agent"/);
+
+    const finalAssistant = messages[4];
+    assert.equal(finalAssistant.role, "assistant");
+    if (finalAssistant.role !== "assistant") return;
+    assert.ok(!finalAssistant.toolCalls?.length);
+    assert.match(finalAssistant.content, /mini-agent/);
+  });
+
+  it("every tool call id has a matching tool result", async () => {
+    const tools = createDefaultTools(process.cwd());
+    const chat = createFauxChat({ toolCallId: "id_must_match" });
+
+    const messages = await runAgentLoop("test pairing", {
+      llm: dummyLlm,
+      tools,
+      chat,
+    });
+
+    const callIds = messages
+      .filter((m) => m.role === "assistant")
+      .flatMap((m) => (m.role === "assistant" ? m.toolCalls ?? [] : []))
+      .map((c) => c.id);
+
+    const resultIds = messages
+      .filter((m) => m.role === "tool")
+      .map((m) => (m.role === "tool" ? m.toolCallId : ""));
+
+    for (const id of callIds) {
+      assert.ok(
+        resultIds.includes(id),
+        `missing tool result for tool call id ${id}`,
+      );
+    }
+  });
+
+  it("unknown tool becomes isError tool result without throwing", async () => {
+    const tools = createDefaultTools(process.cwd());
+    const chat = createUnknownToolFauxChat("call_unknown_1");
+
+    const messages = await runAgentLoop("call a missing tool", {
+      llm: dummyLlm,
+      tools,
+      chat,
+    });
+
+    const toolMsg = messages.find((m) => m.role === "tool");
+    assert.ok(toolMsg && toolMsg.role === "tool");
+    if (!toolMsg || toolMsg.role !== "tool") return;
+    assert.equal(toolMsg.isError, true);
+    assert.match(contentAsString(toolMsg.content), /Unknown tool: not_a_real_tool/);
+
+    const final = messages[messages.length - 1];
+    assert.equal(final.role, "assistant");
+  });
+
+  it("validation failure becomes isError tool result without throwing", async () => {
+    const tools = createDefaultTools(process.cwd());
+    let callCount = 0;
+    const chat = async (): Promise<import("../src/types.ts").AssistantMessage> => {
+      callCount += 1;
+      if (callCount === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            {
+              id: "call_bad_args",
+              name: "read",
+              // missing required path
+              arguments: { limit: 1 },
+            },
+          ],
+        };
+      }
+      return { role: "assistant", content: "handled validation error" };
+    };
+
+    const messages = await runAgentLoop("bad args", {
+      llm: dummyLlm,
+      tools,
+      chat,
+    });
+
+    const toolMsg = messages.find((m) => m.role === "tool");
+    assert.ok(toolMsg && toolMsg.role === "tool");
+    if (!toolMsg || toolMsg.role !== "tool") return;
+    assert.equal(toolMsg.isError, true);
+    assert.match(contentAsString(toolMsg.content), /Missing required argument: path/);
+  });
+
+  it("exceeding maxTurns throws a clear error", async () => {
+    const tools = createDefaultTools(process.cwd());
+    const chat = createInfiniteToolFauxChat();
+
+    await assert.rejects(
+      () =>
+        runAgentLoop("loop forever", {
+          llm: dummyLlm,
+          tools,
+          chat,
+          maxTurns: 2,
+        }),
+      /maxTurns exceeded \(2\)/,
+    );
+  });
+});
+
+describe("runAgentTurn", () => {
+  it("preserves history without repeating the system message", async () => {
+    const chat = async (
+      _config: typeof dummyLlm,
+      messages: import("../src/types.ts").AgentMessage[],
+    ): Promise<import("../src/types.ts").AssistantMessage> => {
+      const users = messages.filter((message) => message.role === "user").length;
+      return { role: "assistant", content: `turn ${users}` };
+    };
+    const first = await runAgentTurn(createAgentHistory("system once"), "first", {
+      llm: dummyLlm,
+      tools: [],
+      chat,
+    });
+    const second = await runAgentTurn(first, "second", {
+      llm: dummyLlm,
+      tools: [],
+      chat,
+    });
+
+    assert.equal(second.filter((message) => message.role === "system").length, 1);
+    assert.equal(second.filter((message) => message.role === "user").length, 2);
+    assert.equal(second.filter((message) => message.role === "assistant").length, 2);
+    assert.equal(second.at(-1)?.role, "assistant");
+    if (second.at(-1)?.role === "assistant") {
+      assert.equal(second.at(-1)?.content, "turn 2");
+    }
+  });
+});
+
+describe("createReadTool", () => {
+  it("reads package.json content", async () => {
+    const tool = createReadTool(process.cwd());
+    const result = await tool.execute({ path: "package.json" });
+    assert.notEqual(result.isError, true);
+    assert.match(contentAsString(result.content), /"name"\s*:\s*"mini-agent"/);
+  });
+
+  it("missing file returns isError without throwing", async () => {
+    const tool = createReadTool(process.cwd());
+    const result = await tool.execute({ path: "does-not-exist-xyz.txt" });
+    assert.equal(result.isError, true);
+    assert.match(contentAsString(result.content), /File not found/);
+  });
+
+  it("path escape outside cwd returns isError", async () => {
+    const tool = createReadTool(process.cwd());
+    const result = await tool.execute({ path: "../outside.txt" });
+    assert.equal(result.isError, true);
+    assert.match(contentAsString(result.content), /escapes workspace cwd/);
+  });
+
+  it("symlink escape outside cwd returns isError", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "mini-agent-read-"));
+    const workspace = path.join(root, "workspace");
+    const outside = path.join(root, "outside.txt");
+
+    try {
+      await mkdir(workspace);
+      await writeFile(outside, "outside secret", "utf8");
+      await symlink(outside, path.join(workspace, "linked.txt"));
+
+      const result = await createReadTool(workspace).execute({
+        path: "linked.txt",
+      });
+      assert.equal(result.isError, true);
+      assert.match(contentAsString(result.content), /resolves outside workspace cwd/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
