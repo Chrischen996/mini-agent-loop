@@ -148,7 +148,12 @@ export function createReadTool(cwd: string): Tool<ReadArgs> {
       required: ["path"],
       additionalProperties: false,
     },
-    async execute(args: ReadArgs): Promise<ToolResult> {
+    async execute(args: ReadArgs, signal?: AbortSignal): Promise<ToolResult> {
+      if (signal?.aborted) {
+        const err = new Error("Aborted");
+        err.name = "AbortError";
+        throw err;
+      }
       try {
         if (typeof args.path !== "string" || args.path.trim() === "") {
           return { content: "path must be a non-empty string", isError: true };

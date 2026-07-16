@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express, {
@@ -9,8 +10,13 @@ import express, {
   type Response,
 } from "express";
 import multer from "multer";
+import { documentTextPart, MAX_ATTACHMENT_BYTES } from "./attachments.ts";
 import { contentAsString, imagePart, textPart } from "./content.ts";
-import { loadLlmConfigFromEnv, type ChatFn, type LlmConfig } from "./llm.ts";
+import { DocumentStore } from "./documents.ts";
+import { SessionStore } from "./session-store.ts";
+import { PermissionManager } from "./permissions.ts";
+import { isAbortError, loadLlmConfigFromEnv, type ChatFn, type LlmConfig } from "./llm.ts";
+import { resolveModel } from "./models.ts";
 import {
   createAgentHistory,
   runAgentTurn,
@@ -22,6 +28,7 @@ import {
   type MessagePreprocessor,
 } from "./preprocessors/index.ts";
 import { createDefaultTools } from "./tools/index.ts";
+import { createDocumentEditTool } from "./tools/document-edit.ts";
 import type { Tool } from "./tools/types.ts";
 import type { AgentMessage, ContentPart } from "./types.ts";
 import {
@@ -31,6 +38,7 @@ import {
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 5;
+const MAX_ATTACHMENTS = 5;
 const DEFAULT_IMAGE_PROMPT = "Please analyze the attached image(s).";
 const DEFAULT_REFERENCE_PROMPT = "请阅读引用的文件并说明要点";
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -48,6 +56,7 @@ export type AgentServerOptions = {
   preprocessors?: MessagePreprocessor[];
   chat?: ChatFn;
   workspace?: string;
+  dataDir?: string;
   serveWeb?: boolean;
 };
 
@@ -81,6 +90,11 @@ function safeMessage(message: AgentMessage): Record<string, unknown> {
 
 function safeEvent(event: LoopEvent): Record<string, unknown> {
   switch (event.type) {
+    case "assistant_delta":
+      return {
+        type: "assistant_delta",
+        text: event.text,
+      };
     case "assistant":
       return {
         type: "assistant",
@@ -101,6 +115,20 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         name: event.call.name,
         isError: Boolean(event.result.isError),
         preview: contentAsString(event.result.content).slice(0, 500),
+      };
+    case "permission_required":
+      return {
+        type: "permission_required",
+        requestId: event.request.id,
+        tool: event.request.tool,
+        arguments: event.request.arguments,
+        risk: event.request.risk,
+      };
+    case "aborted":
+      return {
+        type: "aborted",
+        message: "已停止生成",
+        messageCount: event.messages.length,
       };
     case "done":
       return { type: "done", messageCount: event.messages.length };
@@ -209,19 +237,27 @@ export function buildModelPrompt(input: {
 async function parseMessageRequest(
   request: Request,
   workspace: string,
+  documentStore: DocumentStore,
+  sessionId: string,
 ): Promise<{
   displayPrompt: string;
   modelPrompt: string;
   images: ContentPart[];
   imageNames: string[];
+  documents: ContentPart[];
+  documentNames: string[];
   referencedPaths: string[];
 }> {
   const prompt = String(request.body?.prompt ?? "").trim();
-  const files = (request.files ?? []) as Express.Multer.File[];
+  const fileFields = (request.files ?? {}) as Record<string, Express.Multer.File[]>;
+  const imageFiles = fileFields.images ?? [];
+  const documentFiles = fileFields.documents ?? [];
   const images: ContentPart[] = [];
   const imageNames: string[] = [];
+  const documents: ContentPart[] = [];
+  const documentNames: string[] = [];
 
-  for (const file of files) {
+  for (const file of imageFiles) {
     const mimeType = sniffImageMime(file.buffer);
     if (!mimeType) {
       throw new Error(`Unsupported or invalid image: ${file.originalname}`);
@@ -231,11 +267,22 @@ async function parseMessageRequest(
     imageNames.push(source);
   }
 
+  for (const file of documentFiles) {
+    const parsed = await documentStore.addUpload(
+      sessionId,
+      file.originalname || "document",
+      file.buffer,
+      file.mimetype,
+    );
+    documents.push(textPart(documentTextPart(parsed, parsed.id)));
+    documentNames.push(parsed.name);
+  }
+
   const rawRefs = parseReferencedPathsField(request.body?.referencedPaths);
   const referencedPaths = await validateReferencedPaths(workspace, rawRefs);
 
-  if (!prompt && images.length === 0 && referencedPaths.length === 0) {
-    throw new Error("A prompt, image, or referenced path is required");
+  if (!prompt && images.length === 0 && documents.length === 0 && referencedPaths.length === 0) {
+    throw new Error("A prompt, image, document, or referenced path is required");
   }
 
   const built = buildModelPrompt({
@@ -249,6 +296,8 @@ async function parseMessageRequest(
     modelPrompt: built.modelPrompt,
     images,
     imageNames,
+    documents,
+    documentNames,
     referencedPaths,
   };
 }
@@ -257,22 +306,43 @@ export function createAgentServer(options: AgentServerOptions): Express {
   const workspace = path.resolve(options.workspace ?? process.cwd());
   const sessions = new Map<string, Session>();
   const tools = options.tools ?? createDefaultTools(workspace);
+  const dataRoot = path.resolve(options.dataDir ?? path.join(os.homedir(), ".mini-agent"));
+  const documentStore = new DocumentStore(path.join(dataRoot, "documents"));
+  const permissionManager = new PermissionManager();
+  const sessionStore = new SessionStore(path.join(dataRoot, "sessions"));
+  const restorePromise = sessionStore.loadAll().then((restored) => {
+    return Promise.all([...restored.values()].map(async (persisted) => {
+      sessions.set(persisted.id, {
+        id: persisted.id,
+        messages: persisted.messages,
+        createdAt: persisted.createdAt,
+        busy: false,
+      });
+      await documentStore.restoreSession(persisted.id);
+    }));
+  });
   const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { files: MAX_IMAGES, fileSize: MAX_IMAGE_BYTES, fields: 10 },
+    limits: { files: MAX_ATTACHMENTS, fileSize: MAX_ATTACHMENT_BYTES, fields: 10 },
   });
   const app = express();
   app.disable("x-powered-by");
+  app.use(express.json());
+  app.use((_request, _response, next) => {
+    void restorePromise.then(() => next()).catch(next);
+  });
 
   app.get("/api/health", (_request, response) => response.json({ ok: true }));
   app.get("/api/config", (_request, response) => response.json({
     model: options.llm.model,
     modelVision: options.llm.capabilities.input.includes("image"),
     visionPreprocessor: options.preprocessors?.length ? "enabled" : "disabled",
+    contextWindow: resolveModel(options.llm.model, options.llm.baseUrl).contextWindow,
     workspace: path.basename(workspace),
     workspaceLabel: path.basename(workspace),
     maxImages: MAX_IMAGES,
     maxImageBytes: MAX_IMAGE_BYTES,
+    maxAttachments: MAX_ATTACHMENTS,
   }));
 
   app.get("/api/workspace/list", async (request, response) => {
@@ -290,7 +360,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
   });
 
-  app.post("/api/sessions", (_request, response) => {
+  app.post("/api/sessions", async (_request, response) => {
     const id = randomUUID();
     const session: Session = {
       id,
@@ -299,6 +369,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
       busy: false,
     };
     sessions.set(id, session);
+    await sessionStore.create(session);
+    void documentStore.createSession(id);
     response.status(201).json({ id, createdAt: session.createdAt });
   });
 
@@ -317,7 +389,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     });
   });
 
-  app.delete("/api/sessions/:id", (request, response) => {
+  app.delete("/api/sessions/:id", async (request, response) => {
     const session = sessions.get(request.params.id);
     if (!session) {
       response.status(404).json({ error: "Session not found" });
@@ -328,12 +400,58 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     sessions.delete(request.params.id);
+    permissionManager.rejectSession(request.params.id);
+    await sessionStore.remove(request.params.id);
+    void documentStore.removeSession(request.params.id);
+    response.status(204).end();
+  });
+
+  app.get("/api/sessions/:id/files/:fileId", async (request, response) => {
+    if (!sessions.has(request.params.id)) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    try {
+      const output = documentStore.getOutput(request.params.id, request.params.fileId);
+      if (!existsSync(output.path)) {
+        response.status(404).json({ error: "File not found" });
+        return;
+      }
+      response.setHeader("Content-Type", output.artifact.mimeType);
+      response.setHeader("Content-Length", String(output.artifact.size));
+      response.setHeader("Content-Disposition", `attachment; filename="${output.artifact.name}"`);
+      createReadStream(output.path).on("error", (error) => {
+        if (!response.headersSent) response.status(404).json({ error: error.message });
+        else response.destroy(error);
+      }).pipe(response);
+    } catch (error) {
+      response.status(404).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post("/api/sessions/:id/permissions/:requestId", (request, response) => {
+    if (!sessions.has(request.params.id)) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const decision = request.body?.decision;
+    if (decision !== "allow" && decision !== "deny") {
+      response.status(400).json({ error: "decision must be allow or deny" });
+      return;
+    }
+    if (!permissionManager.resolve(request.params.id, request.params.requestId, decision)) {
+      response.status(404).json({ error: "Permission request not found" });
+      return;
+    }
     response.status(204).end();
   });
 
   app.post(
     "/api/sessions/:id/messages",
-    upload.array("images", MAX_IMAGES),
+    upload.fields([
+      { name: "images", maxCount: MAX_IMAGES },
+      { name: "documents", maxCount: MAX_ATTACHMENTS },
+    ]),
     async (request, response) => {
       const session = sessions.get(String(request.params.id));
       if (!session) {
@@ -348,7 +466,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
 
       let input: Awaited<ReturnType<typeof parseMessageRequest>>;
       try {
-        input = await parseMessageRequest(request, workspace);
+        input = await parseMessageRequest(request, workspace, documentStore, String(request.params.id));
       } catch (err) {
         session.busy = false;
         const message = err instanceof Error ? err.message : String(err);
@@ -363,38 +481,80 @@ export function createAgentServer(options: AgentServerOptions): Express {
         Connection: "keep-alive",
       });
       response.flushHeaders();
+      const abortController = new AbortController();
+      const onClientClose = () => {
+        if (!abortController.signal.aborted) abortController.abort();
+      };
+      request.on("close", onClientClose);
       const send = (payload: Record<string, unknown>): void => {
-        response.write(`${JSON.stringify(payload)}\n`);
+        if (!response.writableEnded) {
+          response.write(`${JSON.stringify(payload)}\n`);
+        }
       };
       send({
         type: "user",
         content: input.displayPrompt,
         images: input.imageNames,
+        documents: input.documentNames,
         referencedPaths: input.referencedPaths,
       });
+      const attachments = [...input.documents, ...input.images];
+      const userContent: ContentPart[] | undefined = attachments.length
+        ? [textPart(input.modelPrompt), ...attachments]
+        : undefined;
 
       try {
-        const userContent: ContentPart[] | undefined = input.images.length
-          ? [textPart(input.modelPrompt), ...input.images]
-          : undefined;
+        const operationScope = randomUUID();
         session.messages = await runAgentTurn(
           session.messages,
           input.modelPrompt,
           {
             llm: options.llm,
-            tools,
+            tools: [...tools, createDocumentEditTool(documentStore, String(request.params.id), operationScope) as Tool],
             preprocessors: options.preprocessors ?? [],
             chat: options.chat,
             userContent,
-            onEvent: (event) => send(safeEvent(event)),
+            signal: abortController.signal,
+            authorizeTool: options.chat
+              ? undefined
+              : (tool, args, signal) =>
+                  permissionManager.authorize(
+                    String(request.params.id),
+                    tool,
+                    args,
+                    signal,
+                    (permission) => send(safeEvent({ type: "permission_required", request: permission })),
+                  ),
+            onEvent: (event) => {
+              send(safeEvent(event));
+              if (event.type === "tool_end" && event.result.files) {
+                for (const file of event.result.files) {
+                  send({ type: "file_ready", ...file, downloadUrl: `/api/sessions/${request.params.id}/files/${file.id}` });
+                }
+              }
+            },
           },
         );
+        await sessionStore.save(session);
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        send({ type: "error", message, retryable: isRetryableError(message) });
+        const currentUserContent: ContentPart[] | string = userContent ?? input.modelPrompt;
+        if (session.messages.length === 0 || session.messages[session.messages.length - 1]?.role !== "user") {
+          session.messages = [
+            ...session.messages,
+            { role: "user", content: currentUserContent },
+          ];
+        }
+        await sessionStore.save(session);
+        if (isAbortError(err)) {
+          send({ type: "aborted", message: "已停止生成" });
+        } else {
+          const message = err instanceof Error ? err.message : String(err);
+          send({ type: "error", message, retryable: isRetryableError(message) });
+        }
       } finally {
+        request.off("close", onClientClose);
         session.busy = false;
-        response.end();
+        if (!response.writableEnded) response.end();
       }
     },
   );

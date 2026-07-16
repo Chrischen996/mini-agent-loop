@@ -7,7 +7,7 @@ import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
 } from "./preprocessors/index.ts";
-import { createDefaultTools } from "./tools/index.ts";
+import { createDefaultTools, type ToolName } from "./tools/index.ts";
 import type { ContentPart, MessageContent } from "./types.ts";
 
 const IMAGE_EXT: Record<string, string> = {
@@ -20,15 +20,17 @@ const IMAGE_EXT: Record<string, string> = {
 
 function logEvent(event: LoopEvent): void {
   switch (event.type) {
+    case "assistant_delta":
+      process.stderr.write(event.text);
+      break;
     case "assistant": {
-      const names =
-        event.message.toolCalls?.map((c) => c.name).join(", ") || "(none)";
-      const preview = event.message.content
-        ? event.message.content.slice(0, 120).replace(/\s+/g, " ")
-        : "";
-      console.error(
-        `[assistant] tools=${names}${preview ? ` text=${preview}` : ""}`,
-      );
+      const names = event.message.toolCalls?.map((c) => c.name).join(", ");
+      if (names) {
+        process.stderr.write("\n");
+        console.error(`[assistant] tools=${names}`);
+      } else if (event.message.content) {
+        process.stderr.write("\n");
+      }
       break;
     }
     case "tool_start":
@@ -58,9 +60,21 @@ function isPathInsideCwd(resolvedPath: string, cwd: string): boolean {
 export function parseCliArgs(argv: string[]): {
   prompt: string;
   imagePaths: string[];
+  tools?: ToolName[];
+  excludeTools?: ToolName[];
 } {
   const imagePaths: string[] = [];
   const rest: string[] = [];
+  let tools: ToolName[] | undefined;
+  let excludeTools: ToolName[] | undefined;
+  const validTools = new Set<ToolName>(["read", "bash", "edit", "write", "grep", "find", "ls"]);
+  const parseToolList = (value: string, flag: string): ToolName[] => {
+    const names = value.split(",").map((name) => name.trim()).filter(Boolean);
+    for (const name of names) {
+      if (!validTools.has(name as ToolName)) throw new Error(`Unknown tool in ${flag}: ${name}`);
+    }
+    return names as ToolName[];
+  };
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -79,10 +93,27 @@ export function parseCliArgs(argv: string[]): {
       imagePaths.push(p);
       continue;
     }
+    if (arg === "--tools" || arg === "--exclude-tools") {
+      const next = argv[i + 1];
+      if (!next || next.startsWith("--")) throw new Error(`${arg} requires a comma-separated tool list`);
+      if (arg === "--tools") tools = parseToolList(next, arg);
+      else excludeTools = parseToolList(next, arg);
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--tools=") || arg.startsWith("--exclude-tools=")) {
+      const isExclude = arg.startsWith("--exclude-tools=");
+      const flag = isExclude ? "--exclude-tools" : "--tools";
+      const value = arg.slice(flag.length + 1);
+      if (!value) throw new Error(`${flag}= requires a comma-separated tool list`);
+      if (isExclude) excludeTools = parseToolList(value, flag);
+      else tools = parseToolList(value, flag);
+      continue;
+    }
     rest.push(arg);
   }
 
-  return { prompt: rest.join(" ").trim(), imagePaths };
+  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools };
 }
 
 async function loadImagePart(
@@ -116,7 +147,7 @@ async function loadImagePart(
 }
 
 async function main(): Promise<void> {
-  let parsed: { prompt: string; imagePaths: string[] };
+  let parsed: ReturnType<typeof parseCliArgs>;
   try {
     parsed = parseCliArgs(process.argv.slice(2));
   } catch (err) {
@@ -124,7 +155,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { prompt, imagePaths } = parsed;
+  const { prompt, imagePaths, tools: selectedTools, excludeTools } = parsed;
   if (!prompt && imagePaths.length === 0) {
     console.error(
       'Usage: npx tsx src/cli.ts "<prompt>" [--image path.png]...',
@@ -139,7 +170,7 @@ async function main(): Promise<void> {
     `[config] model=${llm.model} vision=${llm.capabilities.input.includes("image")} policy=${llm.imagePolicy} preprocessor=${vision?.model ?? "disabled"}`,
   );
 
-  const tools = createDefaultTools(cwd);
+  const tools = createDefaultTools(cwd, { tools: selectedTools, excludeTools });
 
   let userContent: MessageContent | undefined;
   if (imagePaths.length > 0) {

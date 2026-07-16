@@ -5,12 +5,15 @@ import {
   ChevronDown,
   ChevronRight,
   FileCode2,
+  FileText,
+  Download,
   Folder,
   ImagePlus,
   LoaderCircle,
   MessageSquarePlus,
   RotateCcw,
   Send,
+  Square,
   Settings2,
   User,
   Wrench,
@@ -24,10 +27,12 @@ type AppConfig = {
   model: string;
   modelVision: boolean;
   visionPreprocessor: "enabled" | "disabled";
+  contextWindow?: number;
   workspace: string;
   workspaceLabel?: string;
   maxImages: number;
   maxImageBytes: number;
+  maxAttachments: number;
 };
 
 type UserMessageItem = {
@@ -36,12 +41,14 @@ type UserMessageItem = {
   content: string;
   images?: Array<{ name: string; url: string }>;
   referencedPaths?: string[];
+  documents?: Array<{ name: string; size: number }>;
 };
 
 type TextPart = {
   type: "text";
   id: string;
   content: string;
+  streaming?: boolean;
 };
 
 type ToolPart = {
@@ -69,7 +76,24 @@ type ErrorItem = {
   retryable?: boolean;
 };
 
-type TimelineItem = UserMessageItem | AssistantTurnItem | ErrorItem;
+type FileReadyItem = {
+  id: string;
+  kind: "file";
+  name: string;
+  size: number;
+  downloadUrl: string;
+};
+
+type PermissionItem = {
+  id: string;
+  kind: "permission";
+  requestId: string;
+  tool: string;
+  risk: "medium" | "high";
+  status: "pending" | "allow" | "deny";
+};
+
+type TimelineItem = UserMessageItem | AssistantTurnItem | ErrorItem | FileReadyItem | PermissionItem;
 
 type PendingImage = {
   id: string;
@@ -77,9 +101,15 @@ type PendingImage = {
   url: string;
 };
 
+type PendingDocument = {
+  id: string;
+  file: File;
+};
+
 type Draft = {
   text: string;
   images: PendingImage[];
+  documents: PendingDocument[];
   referencedPaths: string[];
 };
 
@@ -111,6 +141,10 @@ const ACCEPTED_IMAGE_TYPES = new Set([
   "image/gif",
   "image/webp",
 ]);
+const ACCEPTED_DOCUMENT_TYPES = new Set([
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
 
 function hasAssistantAfterLastUser(items: TimelineItem[]): boolean {
   for (let i = items.length - 1; i >= 0; i -= 1) {
@@ -118,6 +152,43 @@ function hasAssistantAfterLastUser(items: TimelineItem[]): boolean {
     if (items[i]?.kind === "user") return false;
   }
   return false;
+}
+
+
+function formatTokenCount(value: number): string {
+  if (value >= 1000) {
+    const k = value / 1000;
+    return `${k >= 10 ? Math.round(k) : Math.round(k * 10) / 10}k`;
+  }
+  return String(value);
+}
+
+function estimateTokensFromText(text: string): number {
+  // Rough mixed CJK/Latin estimate for UI only.
+  return Math.max(0, Math.ceil(text.length / 3));
+}
+
+function estimateUsedTokens(items: TimelineItem[]): number {
+  let total = 0;
+  for (const item of items) {
+    if (item.kind === "user") {
+      total += estimateTokensFromText(item.content);
+      if (item.referencedPaths) {
+        total += estimateTokensFromText(item.referencedPaths.join("\n"));
+      }
+      continue;
+    }
+    if (item.kind === "assistant_turn") {
+      for (const part of item.parts) {
+        if (part.type === "text") total += estimateTokensFromText(part.content);
+        else {
+          total += estimateTokensFromText(part.details ?? "");
+          total += estimateTokensFromText(part.preview ?? "");
+        }
+      }
+    }
+  }
+  return total;
 }
 
 function makeId(): string {
@@ -224,13 +295,9 @@ function ToolCard({
   part: ToolPart;
   onToggle: (id: string) => void;
 }) {
-  const summary =
-    part.status === "running"
-      ? part.details || "执行中…"
-      : part.preview || part.details || "完成";
   const canExpand = part.status !== "running" && Boolean(part.preview);
   return (
-    <div className={`tool-card ${part.status}`}>
+    <div className={`tool-card ${part.status}${part.open ? " open" : ""}`}>
       <button
         type="button"
         className="tool-card-header"
@@ -238,40 +305,93 @@ function ToolCard({
           if (canExpand) onToggle(part.id);
         }}
         disabled={!canExpand}
+        title={part.details || part.name}
       >
         <span className="tool-card-status">
           {part.status === "running" ? (
-            <LoaderCircle className="spin" size={14} />
+            <LoaderCircle className="spin" size={13} />
           ) : part.status === "error" ? (
-            <AlertCircle size={14} />
+            <AlertCircle size={13} />
           ) : (
-            <Check size={14} />
+            <Check size={13} />
           )}
         </span>
-        <Wrench size={13} />
         <strong>{part.name}</strong>
-        <span className="tool-card-summary">{part.details || ""}</span>
+        <span className="tool-card-summary">
+          {part.details || (part.status === "running" ? "执行中…" : "")}
+        </span>
         {canExpand ? (
-          part.open ? <ChevronDown size={14} /> : <ChevronRight size={14} />
-        ) : null}
+          part.open ? <ChevronDown size={13} /> : <ChevronRight size={13} />
+        ) : (
+          <span className="tool-card-spacer" />
+        )}
       </button>
-      {part.status === "running" && (
-        <div className="tool-card-loading">
-          <span className="tool-card-loading-bar" />
-          正在读取…
-        </div>
-      )}
       {part.open && part.preview && (
         <pre className="tool-card-preview">{part.preview}</pre>
-      )}
-      {!part.open && part.status !== "running" && summary && (
-        <div className="tool-card-snippet">{summary}</div>
       )}
     </div>
   );
 }
 
+function ToolsGroup({
+  tools,
+  onToggle,
+}: {
+  tools: ToolPart[];
+  onToggle: (id: string) => void;
+}) {
+  const running = tools.some((tool) => tool.status === "running");
+  const [expanded, setExpanded] = useState(true);
 
+  useEffect(() => {
+    if (running) {
+      setExpanded(true);
+      return;
+    }
+    if (tools.length >= 3) setExpanded(false);
+  }, [running, tools.length]);
+
+  if (tools.length === 0) return null;
+
+  if (!expanded && !running) {
+    const errors = tools.filter((tool) => tool.status === "error").length;
+    return (
+      <button
+        type="button"
+        className="tools-group-summary"
+        onClick={() => setExpanded(true)}
+      >
+        <Wrench size={13} />
+        <span>
+          使用了 {tools.length} 个工具
+          {errors > 0 ? ` · ${errors} 个失败` : ""}
+        </span>
+        <ChevronRight size={13} />
+      </button>
+    );
+  }
+
+  return (
+    <div className={`tools-group${running ? " running" : ""}`}>
+      <div className="tools-group-header">
+        <span>
+          <Wrench size={12} />
+          工具调用 · {tools.length}
+        </span>
+        {!running && (
+          <button type="button" onClick={() => setExpanded(false)}>
+            收起
+          </button>
+        )}
+      </div>
+      <div className="tools-group-list">
+        {tools.map((tool) => (
+          <ToolCard key={tool.id} part={tool} onToggle={onToggle} />
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function TreeRows({
   nodes,
@@ -350,6 +470,7 @@ export default function App() {
   const [items, setItems] = useState<TimelineItem[]>([]);
   const [prompt, setPrompt] = useState("");
   const [images, setImages] = useState<PendingImage[]>([]);
+  const [documents, setDocuments] = useState<PendingDocument[]>([]);
   const [referencedPaths, setReferencedPaths] = useState<string[]>([]);
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [treeLoading, setTreeLoading] = useState(false);
@@ -358,9 +479,11 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [retryDraft, setRetryDraft] = useState<Draft | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const documentInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const objectUrls = useRef(new Set<string>());
   const activeTurnIdRef = useRef<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const selectedSet = useMemo(() => new Set(referencedPaths), [referencedPaths]);
 
@@ -427,6 +550,9 @@ export default function App() {
     if (config.modelVision) return "模型原生视觉";
     return config.visionPreprocessor === "enabled" ? "视觉预处理" : "文本模式";
   }, [config]);
+
+  const usedTokens = useMemo(() => estimateUsedTokens(items), [items]);
+  const contextWindow = config?.contextWindow ?? 0;
 
   const workspaceLabel = config?.workspaceLabel || config?.workspace || "-";
 
@@ -499,6 +625,7 @@ export default function App() {
       for (const url of objectUrls.current) URL.revokeObjectURL(url);
       objectUrls.current.clear();
       setImages([]);
+      setDocuments([]);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -531,6 +658,35 @@ export default function App() {
     setImages((current) => [...current, ...next]);
     if (firstError) setError(firstError);
     if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const addDocuments = (files: Iterable<File>) => {
+    if (!config) return;
+    setError(null);
+    const candidates = Array.from(files);
+    const available = Math.max(0, config.maxAttachments - images.length - documents.length);
+    const selected = candidates.slice(0, available);
+    const next: PendingDocument[] = [];
+    let firstError: string | null = null;
+    if (candidates.length > available) firstError = `最多添加 ${config.maxAttachments} 个附件`;
+    for (const file of selected) {
+      if (!ACCEPTED_DOCUMENT_TYPES.has(file.type) && !/\.(pdf|docx)$/i.test(file.name)) {
+        firstError ??= `${file.name} 不是支持的文档`;
+        continue;
+      }
+      if (file.size > config.maxImageBytes) {
+        firstError ??= `${file.name} 超过 4MB`;
+        continue;
+      }
+      next.push({ id: makeId(), file });
+    }
+    setDocuments((current) => [...current, ...next]);
+    if (firstError) setError(firstError);
+    if (documentInputRef.current) documentInputRef.current.value = "";
+  };
+
+  const removeDocument = (id: string) => {
+    setDocuments((current) => current.filter((document) => document.id !== id));
   };
 
   const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -579,20 +735,52 @@ export default function App() {
   };
 
   const consumeEvent = (event: StreamEvent) => {
-    if (event.type === "assistant") {
-      const content = String(event.content ?? "").trim();
+    if (event.type === "assistant_delta") {
+      const delta = String(event.text ?? "");
+      if (!delta) return;
       setItems((current) => {
         const ensured = ensureAssistantTurn(current, activeTurnIdRef);
-        if (!content) return ensured.items;
         return patchAssistantTurn(ensured.items, ensured.turnId, (parts) => {
           const last = parts[parts.length - 1];
-          if (last && last.type === "text") {
+          if (last && last.type === "text" && last.streaming) {
+            return [
+              ...parts.slice(0, -1),
+              { ...last, content: `${last.content}${delta}` },
+            ];
+          }
+          return [
+            ...parts,
+            { type: "text", id: makeId(), content: delta, streaming: true },
+          ];
+        });
+      });
+      return;
+    }
+    if (event.type === "assistant") {
+      const content = String(event.content ?? "");
+      setItems((current) => {
+        const ensured = ensureAssistantTurn(current, activeTurnIdRef);
+        if (!content.trim()) return ensured.items;
+        return patchAssistantTurn(ensured.items, ensured.turnId, (parts) => {
+          const last = parts[parts.length - 1];
+          if (last && last.type === "text" && last.streaming) {
+            return [
+              ...parts.slice(0, -1),
+              { ...last, content, streaming: false },
+            ];
+          }
+          if (last && last.type === "text" && !last.streaming) {
+            // Non-stream multi-step assistant messages in one turn.
+            if (last.content === content) return parts;
             return [
               ...parts.slice(0, -1),
               { ...last, content: `${last.content}\n\n${content}` },
             ];
           }
-          return [...parts, { type: "text", id: makeId(), content }];
+          return [
+            ...parts,
+            { type: "text", id: makeId(), content, streaming: false },
+          ];
         });
       });
       return;
@@ -640,6 +828,40 @@ export default function App() {
       );
       return;
     }
+    if (event.type === "aborted") {
+      setItems((current) => {
+        const ensured = ensureAssistantTurn(current, activeTurnIdRef);
+        return ensured.items.map((item) => {
+          if (item.kind !== "assistant_turn" || item.id !== ensured.turnId) return item;
+          const parts = item.parts.map((part) => {
+            if (part.type === "text" && part.streaming) {
+              return { ...part, streaming: false };
+            }
+            if (part.type === "tool" && part.status === "running") {
+              return {
+                ...part,
+                status: "error" as const,
+                preview: "已停止",
+              };
+            }
+            return part;
+          });
+          const hasVisibleText = parts.some(
+            (part) => part.type === "text" && part.content.trim().length > 0,
+          );
+          if (!hasVisibleText) {
+            parts.push({
+              type: "text",
+              id: makeId(),
+              content: "已停止生成",
+              streaming: false,
+            });
+          }
+          return { ...item, parts };
+        });
+      });
+      return;
+    }
     if (event.type === "error") {
       setItems((current) => [
         ...current,
@@ -650,15 +872,60 @@ export default function App() {
           retryable: event.retryable === true,
         },
       ]);
+      return;
+    }
+    if (event.type === "file_ready") {
+      setItems((current) => [
+        ...current,
+        {
+          id: makeId(),
+          kind: "file",
+          name: String(event.name ?? "download"),
+          size: Number(event.size ?? 0),
+          downloadUrl: String(event.downloadUrl ?? ""),
+        },
+      ]);
+      return;
+    }
+    if (event.type === "permission_required") {
+      setItems((current) => [
+        ...current,
+        {
+          id: makeId(),
+          kind: "permission",
+          requestId: String(event.requestId ?? ""),
+          tool: String(event.tool ?? "tool"),
+          risk: event.risk === "high" ? "high" : "medium",
+          status: "pending",
+        },
+      ]);
     }
   };
 
+  const resolvePermission = async (itemId: string, requestId: string, decision: "allow" | "deny") => {
+    if (!sessionId) return;
+    setItems((current) => current.map((item) =>
+      item.kind === "permission" && item.id === itemId ? { ...item, status: decision } : item,
+    ));
+    const response = await fetch(`/api/sessions/${sessionId}/permissions/${requestId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision }),
+    });
+    if (!response.ok) setError(await readError(response));
+  };
+
+  const stopGeneration = () => {
+    abortControllerRef.current?.abort();
+  };
+
   const sendMessage = async (draftOverride?: Draft, isRetry = false) => {
-    const draft = draftOverride ?? { text: prompt, images, referencedPaths };
+
+    const draft = draftOverride ?? { text: prompt, images, documents, referencedPaths };
     const text = draft.text.trim();
     if (
       !ready ||
-      (!text && draft.images.length === 0 && draft.referencedPaths.length === 0) ||
+      (!text && draft.images.length === 0 && draft.documents.length === 0 && draft.referencedPaths.length === 0) ||
       !sessionId
     ) {
       return;
@@ -666,9 +933,12 @@ export default function App() {
     setBusy(true);
     setError(null);
     activeTurnIdRef.current = null;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     const outgoingImages = draft.images;
+    const outgoingDocuments = draft.documents;
     const outgoingRefs = draft.referencedPaths;
-    setRetryDraft({ text, images: outgoingImages, referencedPaths: outgoingRefs });
+    setRetryDraft({ text, images: outgoingImages, documents: outgoingDocuments, referencedPaths: outgoingRefs });
     const displayText =
       text || (outgoingRefs.length > 0 ? "请阅读引用的文件并说明要点" : "分析图片");
     if (!isRetry) {
@@ -681,6 +951,10 @@ export default function App() {
           images: outgoingImages.map((image) => ({
             name: image.file.name,
             url: image.url,
+          })),
+          documents: outgoingDocuments.map((document) => ({
+            name: document.file.name,
+            size: document.file.size,
           })),
           referencedPaths: outgoingRefs,
         },
@@ -695,10 +969,22 @@ export default function App() {
       form.append("prompt", text);
       form.append("referencedPaths", JSON.stringify(outgoingRefs));
       for (const image of outgoingImages) form.append("images", image.file);
-      const response = await fetch(`/api/sessions/${sessionId}/messages`, {
+      for (const document of outgoingDocuments) form.append("documents", document.file);
+      let activeSessionId = sessionId;
+      let response = await fetch(`/api/sessions/${activeSessionId}/messages`, {
         method: "POST",
         body: form,
+        signal: controller.signal,
       });
+      if (response.status === 404) {
+        activeSessionId = await requestSession();
+        setSessionId(activeSessionId);
+        response = await fetch(`/api/sessions/${activeSessionId}/messages`, {
+          method: "POST",
+          body: form,
+          signal: controller.signal,
+        });
+      }
       if (!response.ok) throw new Error(await readError(response));
       if (!response.body) throw new Error("Empty response body");
 
@@ -724,13 +1010,48 @@ export default function App() {
       }
       setRetryDraft(null);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError(message);
-      setItems((current) => [
-        ...current,
-        { id: makeId(), kind: "error", content: message, retryable: true },
-      ]);
+      const aborted =
+        (err instanceof Error && err.name === "AbortError") ||
+        (typeof err === "object" &&
+          err !== null &&
+          "name" in err &&
+          String((err as { name: unknown }).name) === "AbortError");
+      if (aborted) {
+        setItems((current) => {
+          const ensured = ensureAssistantTurn(current, activeTurnIdRef);
+          return ensured.items.map((item) => {
+            if (item.kind !== "assistant_turn" || item.id !== ensured.turnId) return item;
+            const parts = item.parts.map((part) =>
+              part.type === "text" && part.streaming
+                ? { ...part, streaming: false }
+                : part.type === "tool" && part.status === "running"
+                  ? { ...part, status: "error" as const, preview: "已停止" }
+                  : part,
+            );
+            const hasVisibleText = parts.some(
+              (part) => part.type === "text" && part.content.trim().length > 0,
+            );
+            if (!hasVisibleText) {
+              parts.push({
+                type: "text",
+                id: makeId(),
+                content: "已停止生成",
+                streaming: false,
+              });
+            }
+            return { ...item, parts };
+          });
+        });
+      } else {
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        setItems((current) => [
+          ...current,
+          { id: makeId(), kind: "error", content: message, retryable: true },
+        ]);
+      }
     } finally {
+      abortControllerRef.current = null;
       setBusy(false);
     }
   };
@@ -758,17 +1079,6 @@ export default function App() {
           新会话
         </button>
 
-        <div className="environment">
-          <div className="section-label">
-            <Settings2 size={13} />
-            环境
-          </div>
-          <dl>
-            <div><dt>模型</dt><dd>{config?.model ?? "-"}</dd></div>
-            <div><dt>视觉</dt><dd>{visionLabel}</dd></div>
-            <div><dt>空间</dt><dd>{workspaceLabel}</dd></div>
-          </dl>
-        </div>
 
         <div className="workspace-tree-panel">
           <div className="section-label">
@@ -835,6 +1145,38 @@ export default function App() {
           )}
 
           {items.map((item) => {
+            if (item.kind === "permission") {
+              return (
+                <article className={`permission-card ${item.risk}`} key={item.id}>
+                  <div>
+                    <strong>工具需要授权：{item.tool}</strong>
+                    <span>{item.risk === "high" ? "高风险操作" : "会修改工作区或生成文件"}</span>
+                  </div>
+                  {item.status === "pending" ? (
+                    <div className="permission-actions">
+                      <button onClick={() => void resolvePermission(item.id, item.requestId, "deny")}>拒绝</button>
+                      <button className="allow" onClick={() => void resolvePermission(item.id, item.requestId, "allow")}>允许</button>
+                    </div>
+                  ) : (
+                    <span className="permission-decision">{item.status === "allow" ? "已允许" : "已拒绝"}</span>
+                  )}
+                </article>
+              );
+            }
+            if (item.kind === "file") {
+              return (
+                <article className="file-ready-card" key={item.id}>
+                  <FileText size={18} />
+                  <div>
+                    <strong>{item.name}</strong>
+                    <span>{Math.ceil(item.size / 1024)}KB，可下载</span>
+                  </div>
+                  <a href={item.downloadUrl} download={item.name} title="下载文件">
+                    <Download size={17} />
+                  </a>
+                </article>
+              );
+            }
             if (item.kind === "user") {
               return (
                 <article className="message user" key={item.id}>
@@ -862,6 +1204,17 @@ export default function App() {
                         ))}
                       </div>
                     )}
+                    {item.documents && item.documents.length > 0 && (
+                      <div className="message-documents">
+                        {item.documents.map((document) => (
+                          <span className="document-chip" key={document.name}>
+                            <FileText size={13} />
+                            {document.name}
+                            <small>{Math.ceil(document.size / 1024)}KB</small>
+                          </span>
+                        ))}
+                      </div>
+                    )}
                     <div className="markdown">
                       <Markdown rehypePlugins={[rehypeSanitize]}>{item.content}</Markdown>
                     </div>
@@ -870,6 +1223,22 @@ export default function App() {
               );
             }
             if (item.kind === "assistant_turn") {
+              const blocks: Array<
+                | { type: "text"; part: TextPart }
+                | { type: "tools"; tools: ToolPart[]; key: string }
+              > = [];
+              for (const part of item.parts) {
+                if (part.type === "text") {
+                  blocks.push({ type: "text", part });
+                  continue;
+                }
+                const last = blocks[blocks.length - 1];
+                if (last && last.type === "tools") {
+                  last.tools.push(part);
+                } else {
+                  blocks.push({ type: "tools", tools: [part], key: part.id });
+                }
+              }
               const hasRunning = item.parts.some(
                 (part) => part.type === "tool" && part.status === "running",
               );
@@ -885,17 +1254,18 @@ export default function App() {
                         思考中…
                       </div>
                     )}
-                    {item.parts.map((part) =>
-                      part.type === "text" ? (
-                        <div className="markdown assistant-text" key={part.id}>
+                    {blocks.map((block) =>
+                      block.type === "text" ? (
+                        <div className={`markdown assistant-text${block.part.streaming ? " streaming" : ""}`} key={block.part.id}>
                           <Markdown rehypePlugins={[rehypeSanitize]}>
-                            {part.content}
+                            {block.part.content}
                           </Markdown>
+                          {block.part.streaming ? <span className="stream-caret" /> : null}
                         </div>
                       ) : (
-                        <ToolCard
-                          key={part.id}
-                          part={part}
+                        <ToolsGroup
+                          key={block.key}
+                          tools={block.tools}
                           onToggle={toggleToolOpen}
                         />
                       ),
@@ -910,6 +1280,7 @@ export default function App() {
                 </article>
               );
             }
+
             return (
               <div className="error-row" key={item.id}>
                 <AlertCircle size={17} />
@@ -977,6 +1348,20 @@ export default function App() {
             </div>
           )}
 
+          {documents.length > 0 && (
+            <div className="pending-documents">
+              {documents.map((document) => (
+                <div className="pending-document" key={document.id}>
+                  <FileText size={16} />
+                  <span>{document.file.name}</span>
+                  <button onClick={() => removeDocument(document.id)} title={`移除 ${document.file.name}`}>
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="composer">
             <textarea
               value={prompt}
@@ -1009,22 +1394,53 @@ export default function App() {
               >
                 <ImagePlus size={19} />
               </button>
+              <input
+                ref={documentInputRef}
+                type="file"
+                accept="application/pdf,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx"
+                multiple
+                hidden
+                onChange={(event) => addDocuments(event.target.files ? Array.from(event.target.files) : [])}
+              />
               <button
-                className="send-button"
-                onClick={() => void sendMessage()}
-                disabled={
-                  !ready ||
-                  (!prompt.trim() && images.length === 0 && referencedPaths.length === 0)
-                }
-                title="发送"
+                className="icon-button"
+                onClick={() => documentInputRef.current?.click()}
+                disabled={!ready || images.length + documents.length >= (config?.maxAttachments ?? 0)}
+                title="添加 PDF 或 Word 文档"
               >
-                {busy ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}
+                <FileText size={19} />
+              </button>
+              <button
+                className={`send-button${busy ? " stop" : ""}`}
+                onClick={() => {
+                  if (busy) stopGeneration();
+                  else void sendMessage();
+                }}
+                disabled={
+                  busy
+                    ? false
+                    : !config ||
+                      !sessionId ||
+                      (!prompt.trim() &&
+                        images.length === 0 &&
+                        documents.length === 0 &&
+                        referencedPaths.length === 0)
+                }
+                title={busy ? "停止" : "发送"}
+              >
+                {busy ? <Square size={16} /> : <Send size={18} />}
               </button>
             </div>
+          </div>
+          <div className="context-meter" title="模型与当前会话估算上下文（非精确计费）">
+            <span>{config?.model ?? "-"}</span>
+            <span>
+              ~{formatTokenCount(usedTokens)}
+              {contextWindow > 0 ? ` / ${formatTokenCount(contextWindow)}` : ""}
+            </span>
           </div>
         </div>
       </main>
     </div>
   );
 }
-

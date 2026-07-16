@@ -178,6 +178,25 @@ the sidebar only adds a path reference; the agent still uses the `read` tool to
 load contents. Sessions are kept in memory and are cleared when the server
 restarts.
 
+The tool registry follows Pi Agent's seven-tool vocabulary:
+
+- `read`: read text files and supported images.
+- `bash`: execute commands in the workspace with timeout and cancellation.
+- `edit`: apply exact unique replacements using `path` and `edits[]`.
+- `write`: create or overwrite UTF-8 text files.
+- `grep`: regex/literal content search with glob, case, and context options.
+- `find`: find files by glob pattern.
+- `ls`: list directory contents, including dotfiles.
+
+The default active set is Pi's `read`, `bash`, `edit`, and `write`. CLI users
+can opt into the read-only tools with `--tools grep,find,ls`, or remove tools
+with `--exclude-tools bash`. SDK/server callers can pass the equivalent
+selection to `createDefaultTools`.
+
+All tools still use relative paths and reject paths that escape the configured
+workspace or resolve through an outside symlink. `.git` and `node_modules`
+remain protected by the workspace sandbox.
+
 Local API:
 
 ```text

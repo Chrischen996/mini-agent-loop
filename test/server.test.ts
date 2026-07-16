@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import request from "supertest";
+import { contentAsString } from "../src/content.ts";
 import { makeLlmConfig } from "../src/llm.ts";
 import { createAgentServer } from "../src/server.ts";
 import type { AgentMessage, AssistantMessage } from "../src/types.ts";
@@ -68,6 +69,27 @@ describe("agent server", () => {
     assert.doesNotMatch(history.text, /must-not-leak/);
   });
 
+  it("restores sessions after the server instance is recreated", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-session-persist-"));
+    try {
+      const chat = async () => ({ role: "assistant" as const, content: "persisted reply" });
+      const firstApp = createAgentServer({ llm, tools: [], chat, dataDir, serveWeb: false });
+      const created = await request(firstApp).post("/api/sessions");
+      const sessionId = (created.body as { id: string }).id;
+      await request(firstApp)
+        .post(`/api/sessions/${sessionId}/messages`)
+        .field("prompt", "remember this");
+
+      const secondApp = createAgentServer({ llm, tools: [], chat, dataDir, serveWeb: false });
+      const restored = await request(secondApp).get(`/api/sessions/${sessionId}`);
+      assert.equal(restored.status, 200);
+      assert.match(restored.text, /remember this/);
+      assert.match(restored.text, /persisted reply/);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects an empty multipart message", async () => {
     const app = createAgentServer({
       llm,
@@ -81,7 +103,7 @@ describe("agent server", () => {
       .post(`/api/sessions/${sessionId}/messages`)
       .field("prompt", "   ");
     assert.equal(response.status, 400);
-    assert.match(response.text, /prompt, image, or referenced path/i);
+    assert.match(response.text, /prompt, image, document, or referenced path/i);
   });
 
   it("lists workspace files and rejects escapes", async () => {
@@ -174,6 +196,80 @@ describe("agent server", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("extracts an uploaded DOCX into the model context", async () => {
+    let seenPrompt = "";
+    const app = createAgentServer({
+      llm,
+      tools: [],
+      chat: async (_config, messages) => {
+        const user = messages.find((message) => message.role === "user");
+        seenPrompt = user && user.role === "user" ? contentAsString(user.content) : "";
+        return { role: "assistant", content: "document received" };
+      },
+      serveWeb: false,
+    });
+    const created = await request(app).post("/api/sessions");
+    const sessionId = (created.body as { id: string }).id;
+    const document = path.resolve("node_modules/mammoth/test/test-data/single-paragraph.docx");
+    const response = await request(app)
+      .post(`/api/sessions/${sessionId}/messages`)
+      .field("prompt", "总结这个文档")
+      .attach("documents", document);
+    assert.equal(response.status, 200);
+    assert.match(seenPrompt, /Attached document: single-paragraph\.docx/);
+    assert.match(response.text, /"documents":\["single-paragraph\.docx"\]/);
+  });
+
+  it("creates a downloadable edited document from a tool call", async () => {
+    let attachmentId = "";
+    let turn = 0;
+    const app = createAgentServer({
+      llm,
+      tools: [],
+      chat: async (_config, messages) => {
+        turn += 1;
+        const user = messages.find((message) => message.role === "user");
+        if (turn === 1 && user && user.role === "user") {
+          const match = contentAsString(user.content).match(/attachmentId=([^,\]]+)/);
+          attachmentId = match?.[1] ?? "";
+          return {
+            role: "assistant",
+            content: "",
+            toolCalls: [{
+              id: "document-edit-1",
+              name: "document_edit",
+              arguments: {
+                attachmentId,
+                replacements: [{ oldText: "Walking on imported air", newText: "Edited document text" }],
+                outputFormat: "docx",
+              },
+            }],
+          };
+        }
+        return { role: "assistant", content: "已生成下载文件" };
+      },
+      serveWeb: false,
+    });
+    const created = await request(app).post("/api/sessions");
+    const sessionId = (created.body as { id: string }).id;
+    const document = path.resolve("node_modules/mammoth/test/test-data/single-paragraph.docx");
+    const response = await request(app)
+      .post(`/api/sessions/${sessionId}/messages`)
+      .field("prompt", "把文档内容改掉并帮我下载")
+      .attach("documents", document);
+    assert.equal(response.status, 200);
+    const fileEvent = response.text
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { type: string; downloadUrl?: string })
+      .find((event) => event.type === "file_ready");
+    assert.ok(fileEvent?.downloadUrl);
+    const downloaded = await request(app).get(fileEvent!.downloadUrl!);
+    assert.equal(downloaded.status, 200);
+    assert.equal(downloaded.headers["content-type"], "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+    assert.ok(Number(downloaded.headers["content-length"]) > 0);
   });
 
   it("rejects invalid referencedPaths", async () => {

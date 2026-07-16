@@ -13,6 +13,7 @@ const IGNORED_NAMES = new Set([
   ".next",
   ".turbo",
   ".cache",
+  ".mini-agent",
 ]);
 
 export type WorkspaceEntry = {
@@ -260,4 +261,160 @@ export async function validateReferencedPaths(
   }
 
   return normalized;
+}
+
+/**
+ * Resolve a workspace file path for writing.
+ * Allows non-existent files when parents stay inside the workspace.
+ * Existing directories are rejected.
+ */
+export async function resolveWorkspaceWritePath(
+  cwd: string,
+  relativePath: string,
+): Promise<
+  | {
+      ok: true;
+      target: string;
+      realTarget: string;
+      realCwd: string;
+      relative: string;
+      exists: boolean;
+    }
+  | {
+      ok: false;
+      error: string;
+      code?: string;
+    }
+> {
+  const resolvedCwd = path.resolve(cwd);
+  const trimmed = relativePath.trim().replace(/\\/g, "/");
+  if (!trimmed || trimmed === "." || trimmed.endsWith("/")) {
+    return {
+      ok: false,
+      error: "path must be a non-empty file path",
+    };
+  }
+
+  const target = path.resolve(resolvedCwd, trimmed);
+  if (!isPathInsideCwd(target, resolvedCwd)) {
+    return {
+      ok: false,
+      error: `Path escapes workspace cwd: ${relativePath}`,
+    };
+  }
+
+  const relativePosix = toPosixRelative(resolvedCwd, target);
+  const segments = relativePosix.split("/").filter(Boolean);
+  if (
+    segments.some((segment) => segment === ".git" || segment === "node_modules")
+  ) {
+    return {
+      ok: false,
+      error: `Refusing to write under protected path: ${relativePosix}`,
+    };
+  }
+
+  try {
+    const realCwd = await realpath(resolvedCwd);
+
+    try {
+      const realTarget = await realpath(target);
+      if (!isPathInsideCwd(realTarget, realCwd)) {
+        return {
+          ok: false,
+          error: `Path resolves outside workspace cwd: ${relativePath}`,
+        };
+      }
+      const info = await stat(realTarget);
+      if (info.isDirectory()) {
+        return {
+          ok: false,
+          error: `Path is a directory: ${relativePosix || relativePath}`,
+        };
+      }
+      return {
+        ok: true,
+        target,
+        realTarget,
+        realCwd,
+        relative: toPosixRelative(realCwd, realTarget),
+        exists: true,
+      };
+    } catch (err) {
+      if (errorCode(err) !== "ENOENT") {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          ok: false,
+          error: `Failed to resolve ${relativePath}: ${message}`,
+          code: errorCode(err),
+        };
+      }
+    }
+
+    // New file: walk up to an existing ancestor and verify it stays inside cwd.
+    let ancestor = path.dirname(target);
+    while (true) {
+      try {
+        const realAncestor = await realpath(ancestor);
+        if (!isPathInsideCwd(realAncestor, realCwd)) {
+          return {
+            ok: false,
+            error: `Parent path resolves outside workspace cwd: ${relativePath}`,
+          };
+        }
+        const rest = path.relative(ancestor, target);
+        if (rest.startsWith("..") || path.isAbsolute(rest)) {
+          return {
+            ok: false,
+            error: `Path escapes workspace cwd: ${relativePath}`,
+          };
+        }
+        const realTarget = rest ? path.join(realAncestor, rest) : realAncestor;
+        if (!isPathInsideCwd(realTarget, realCwd)) {
+          return {
+            ok: false,
+            error: `Path escapes workspace cwd: ${relativePath}`,
+          };
+        }
+        return {
+          ok: true,
+          target,
+          realTarget,
+          realCwd,
+          relative: toPosixRelative(realCwd, realTarget),
+          exists: false,
+        };
+      } catch (err) {
+        if (errorCode(err) !== "ENOENT") {
+          const message = err instanceof Error ? err.message : String(err);
+          return {
+            ok: false,
+            error: `Failed to resolve parent for ${relativePath}: ${message}`,
+            code: errorCode(err),
+          };
+        }
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) {
+          return {
+            ok: false,
+            error: `Failed to resolve parent for ${relativePath}`,
+          };
+        }
+        if (!isPathInsideCwd(parent, resolvedCwd) && parent !== resolvedCwd) {
+          return {
+            ok: false,
+            error: `Path escapes workspace cwd: ${relativePath}`,
+          };
+        }
+        ancestor = parent;
+      }
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: `Failed to resolve ${relativePath}: ${message}`,
+      code: errorCode(err),
+    };
+  }
 }

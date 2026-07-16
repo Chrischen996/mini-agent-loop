@@ -417,6 +417,7 @@ export async function completeChat(
   config: LlmConfig,
   messages: AgentMessage[],
   tools?: Tool[],
+  signal?: AbortSignal,
 ): Promise<AssistantMessage> {
   const supportsImage = supportsImageInput(config.capabilities);
   const prepared = prepareMessagesForModel(messages, config);
@@ -445,8 +446,10 @@ export async function completeChat(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
+      signal,
     });
   } catch (err) {
+    if (isAbortError(err)) throw err;
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`LLM network error: ${message}`);
   }
@@ -490,3 +493,224 @@ export async function completeChat(
     ...(toolCalls ? { toolCalls } : {}),
   };
 }
+
+export type StreamChatEvent =
+  | { type: "text_delta"; text: string }
+  | { type: "assistant"; message: AssistantMessage };
+
+type ToolCallAccumulator = {
+  id: string;
+  name: string;
+  arguments: string;
+};
+
+export function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const name = "name" in err ? String((err as { name: unknown }).name) : "";
+  const message = err instanceof Error ? err.message : String(err);
+  return name === "AbortError" || /aborted|AbortError/i.test(message);
+}
+
+export function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const err = new Error("Aborted");
+  err.name = "AbortError";
+  throw err;
+}
+
+async function* iterateSseDataLines(
+  response: Response,
+  signal?: AbortSignal,
+): AsyncGenerator<string> {
+  if (!response.body) {
+    throw new Error("LLM stream response missing body");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  const onAbort = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+
+  try {
+  while (true) {
+    throwIfAborted(signal);
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const rawLine of lines) {
+      const line = rawLine.trimEnd();
+      if (!line || line.startsWith(":")) continue;
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data) continue;
+      if (data === "[DONE]") return;
+      yield data;
+    }
+  }
+
+  const trailing = buffer.trim();
+  if (trailing.startsWith("data:")) {
+    const data = trailing.slice(5).trim();
+    if (data && data !== "[DONE]") yield data;
+  }
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+/**
+ * OpenAI-compatible streaming chat. Yields text deltas, then a final assistant
+ * message (including aggregated tool calls).
+ */
+export async function* streamChat(
+  config: LlmConfig,
+  messages: AgentMessage[],
+  tools?: Tool[],
+  signal?: AbortSignal,
+): AsyncGenerator<StreamChatEvent> {
+  const supportsImage = supportsImageInput(config.capabilities);
+  const prepared = prepareMessagesForModel(messages, config);
+
+  if (prepared.notices.length > 0) {
+    console.error(`[llm] ${prepared.notices.join("; ")}`);
+  }
+
+  const body: Record<string, unknown> = {
+    model: config.model,
+    stream: true,
+    messages: toOpenAIMessages(prepared.messages, supportsImage),
+  };
+
+  if (tools && tools.length > 0 && config.capabilities.tools) {
+    body.tools = tools.map(toOpenAITool);
+    body.tool_choice = "auto";
+  }
+
+  const url = `${config.baseUrl}/chat/completions`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`LLM network error: ${message}`);
+  }
+
+  if (!response.ok) {
+    const rawText = await response.text();
+    throw new Error(
+      `LLM HTTP ${response.status}: ${rawText.slice(0, 500) || response.statusText}`,
+    );
+  }
+
+  let content = "";
+  const toolAcc = new Map<number, ToolCallAccumulator>();
+
+  for await (const data of iterateSseDataLines(response, signal)) {
+    let parsed: {
+      choices?: Array<{
+        delta?: {
+          content?: string | null;
+          tool_calls?: Array<{
+            index?: number;
+            id?: string;
+            function?: { name?: string; arguments?: string };
+          }>;
+        };
+        message?: {
+          content?: string | null;
+          tool_calls?: OpenAIToolCall[];
+        };
+      }>;
+    };
+    try {
+      parsed = JSON.parse(data) as typeof parsed;
+    } catch {
+      continue;
+    }
+
+    const choice = parsed.choices?.[0];
+    if (!choice) continue;
+
+    if (choice.message && !choice.delta) {
+      if (typeof choice.message.content === "string" && choice.message.content && !content) {
+        content = choice.message.content;
+        yield { type: "text_delta", text: content };
+      }
+      if (choice.message.tool_calls) {
+        for (const [index, tc] of choice.message.tool_calls.entries()) {
+          toolAcc.set(index, {
+            id: tc.id || `tool_call_${index}`,
+            name: tc.function?.name || "unknown",
+            arguments: tc.function?.arguments ?? "{}",
+          });
+        }
+      }
+      continue;
+    }
+
+    const delta = choice.delta;
+    if (!delta) continue;
+
+    if (typeof delta.content === "string" && delta.content.length > 0) {
+      content += delta.content;
+      yield { type: "text_delta", text: delta.content };
+    }
+
+    if (delta.tool_calls) {
+      for (const tc of delta.tool_calls) {
+        const index = typeof tc.index === "number" ? tc.index : 0;
+        const current = toolAcc.get(index) ?? {
+          id: "",
+          name: "",
+          arguments: "",
+        };
+        if (tc.id) current.id = tc.id;
+        if (tc.function?.name) current.name = tc.function.name;
+        if (typeof tc.function?.arguments === "string") {
+          current.arguments += tc.function.arguments;
+        }
+        toolAcc.set(index, current);
+      }
+    }
+  }
+
+  const rawToolCalls: OpenAIToolCall[] | undefined =
+    toolAcc.size > 0
+      ? [...toolAcc.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([index, item]) => ({
+            id: item.id || `tool_call_${index}`,
+            type: "function" as const,
+            function: {
+              name: item.name || "unknown",
+              arguments: item.arguments || "{}",
+            },
+          }))
+      : undefined;
+
+  const toolCalls = mapToolCalls(rawToolCalls);
+  yield {
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: content || "",
+      ...(toolCalls ? { toolCalls } : {}),
+    },
+  };
+}
+
