@@ -171,20 +171,23 @@ PORT=3001
 AGENT_WORKSPACE=/absolute/path/to/workspace
 ```
 
-The chat supports multi-turn sessions, up to five images per message, file
-selection or clipboard image paste, tool activity events, Markdown rendering,
-and new-session reset. Sessions are kept in memory and are cleared when the
-server restarts.
+The chat supports multi-turn sessions, workspace file-tree path references,
+up to five images per message, file selection or clipboard image paste, tool
+activity events, Markdown rendering, and new-session reset. Selecting a file in
+the sidebar only adds a path reference; the agent still uses the `read` tool to
+load contents. Sessions are kept in memory and are cleared when the server
+restarts.
 
 Local API:
 
 ```text
 GET    /api/health
 GET    /api/config
+GET    /api/workspace/list?path=   lazy directory listing (workspace sandbox)
 POST   /api/sessions
 GET    /api/sessions/:id
 DELETE /api/sessions/:id
-POST   /api/sessions/:id/messages  multipart -> NDJSON stream
+POST   /api/sessions/:id/messages  multipart(prompt, referencedPaths, images) -> NDJSON stream
 ```
 
 ## Test (offline)

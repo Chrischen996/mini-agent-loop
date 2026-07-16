@@ -1,6 +1,7 @@
-import { readFile, realpath } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { imagePart, textPart } from "../content.ts";
+import { resolveWorkspacePath } from "../workspace.ts";
 import type { Tool, ToolResult } from "./types.ts";
 
 export type ReadArgs = {
@@ -22,14 +23,6 @@ const IMAGE_EXT: Record<string, string> = {
   ".gif": "image/gif",
   ".webp": "image/webp",
 };
-
-function isPathInsideCwd(resolvedPath: string, cwd: string): boolean {
-  const relative = path.relative(cwd, resolvedPath);
-  return (
-    relative === "" ||
-    (!relative.startsWith("..") && !path.isAbsolute(relative))
-  );
-}
 
 function applyLineWindow(
   text: string,
@@ -64,7 +57,16 @@ function truncateByBytes(text: string): { text: string; notice?: string } {
   if (buf.byteLength <= MAX_BYTES) {
     return { text };
   }
-  const sliced = buf.subarray(0, MAX_BYTES).toString("utf8");
+  let end = MAX_BYTES;
+  // Back up past an incomplete UTF-8 sequence before decoding. Buffer's
+  // decoder otherwise inserts U+FFFD into the tool result.
+  while (end > 0 && (buf[end - 1]! & 0xc0) === 0x80) end -= 1;
+  if (end > 0 && (buf[end - 1]! & 0x80) !== 0) {
+    const lead = buf[end - 1]!;
+    const expected = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+    if (MAX_BYTES - (end - 1) < expected) end -= 1;
+  }
+  const sliced = buf.subarray(0, end).toString("utf8");
   return {
     text: sliced,
     notice: `truncated to ${MAX_BYTES} bytes (original ${buf.byteLength} bytes)`,
@@ -152,27 +154,17 @@ export function createReadTool(cwd: string): Tool<ReadArgs> {
           return { content: "path must be a non-empty string", isError: true };
         }
 
-        const target = path.resolve(resolvedCwd, args.path);
-        if (!isPathInsideCwd(target, resolvedCwd)) {
-          return {
-            content: `Path escapes workspace cwd: ${args.path}`,
-            isError: true,
-          };
+        const resolved = await resolveWorkspacePath(resolvedCwd, args.path);
+        if (!resolved.ok) {
+          if (resolved.code === "ENOENT") {
+            return { content: `File not found: ${args.path}`, isError: true };
+          }
+          return { content: resolved.error, isError: true };
         }
 
         let buf: Buffer;
         try {
-          const [realCwd, realTarget] = await Promise.all([
-            realpath(resolvedCwd),
-            realpath(target),
-          ]);
-          if (!isPathInsideCwd(realTarget, realCwd)) {
-            return {
-              content: `Path resolves outside workspace cwd: ${args.path}`,
-              isError: true,
-            };
-          }
-          buf = await readFile(realTarget);
+          buf = await readFile(resolved.realTarget);
         } catch (err) {
           const code =
             err && typeof err === "object" && "code" in err
@@ -194,7 +186,7 @@ export function createReadTool(cwd: string): Tool<ReadArgs> {
           };
         }
 
-        const mime = mimeFromPath(target) ?? sniffImageMime(buf);
+        const mime = mimeFromPath(resolved.target) ?? sniffImageMime(buf);
         if (mime) {
           if (buf.byteLength > MAX_IMAGE_BYTES) {
             return {

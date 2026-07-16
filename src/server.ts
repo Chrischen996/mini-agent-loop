@@ -24,9 +24,15 @@ import {
 import { createDefaultTools } from "./tools/index.ts";
 import type { Tool } from "./tools/types.ts";
 import type { AgentMessage, ContentPart } from "./types.ts";
+import {
+  listWorkspaceDirectory,
+  validateReferencedPaths,
+} from "./workspace.ts";
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 5;
+const DEFAULT_IMAGE_PROMPT = "Please analyze the attached image(s).";
+const DEFAULT_REFERENCE_PROMPT = "请阅读引用的文件并说明要点";
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 type Session = {
@@ -144,11 +150,72 @@ function sniffImageMime(buffer: Buffer): string | undefined {
   return undefined;
 }
 
-function parseMessageRequest(request: Request): {
+
+function parseReferencedPathsField(raw: unknown): string[] {
+  if (raw === undefined || raw === null || raw === "") return [];
+  if (Array.isArray(raw)) {
+    return raw.map((item) => String(item));
+  }
+  if (typeof raw !== "string") {
+    throw new Error("referencedPaths must be a JSON string array");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("referencedPaths must be valid JSON");
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error("referencedPaths must be a JSON array");
+  }
+  return parsed.map((item) => String(item));
+}
+
+function formatReferencedBlock(paths: string[]): string {
+  return [
+    "Referenced workspace files (use the read tool; do not invent contents):",
+    ...paths.map((item) => `- ${item}`),
+  ].join("\n");
+}
+
+export function buildModelPrompt(input: {
   prompt: string;
+  referencedPaths: string[];
+  hasImages: boolean;
+}): { displayPrompt: string; modelPrompt: string } {
+  const text = input.prompt.trim();
+  const refs = input.referencedPaths;
+
+  let displayPrompt = text;
+  if (!displayPrompt) {
+    if (refs.length > 0) displayPrompt = DEFAULT_REFERENCE_PROMPT;
+    else if (input.hasImages) displayPrompt = "分析图片";
+    else displayPrompt = "";
+  }
+
+  let base = text;
+  if (!base) {
+    if (refs.length > 0) base = DEFAULT_REFERENCE_PROMPT;
+    else if (input.hasImages) base = DEFAULT_IMAGE_PROMPT;
+  }
+
+  const modelPrompt = refs.length > 0
+    ? `${base}\n\n${formatReferencedBlock(refs)}`
+    : base;
+
+  return { displayPrompt, modelPrompt };
+}
+
+async function parseMessageRequest(
+  request: Request,
+  workspace: string,
+): Promise<{
+  displayPrompt: string;
+  modelPrompt: string;
   images: ContentPart[];
   imageNames: string[];
-} {
+  referencedPaths: string[];
+}> {
   const prompt = String(request.body?.prompt ?? "").trim();
   const files = (request.files ?? []) as Express.Multer.File[];
   const images: ContentPart[] = [];
@@ -164,13 +231,25 @@ function parseMessageRequest(request: Request): {
     imageNames.push(source);
   }
 
-  if (!prompt && images.length === 0) {
-    throw new Error("A prompt or at least one image is required");
+  const rawRefs = parseReferencedPathsField(request.body?.referencedPaths);
+  const referencedPaths = await validateReferencedPaths(workspace, rawRefs);
+
+  if (!prompt && images.length === 0 && referencedPaths.length === 0) {
+    throw new Error("A prompt, image, or referenced path is required");
   }
+
+  const built = buildModelPrompt({
+    prompt,
+    referencedPaths,
+    hasImages: images.length > 0,
+  });
+
   return {
-    prompt: prompt || "Please analyze the attached image(s).",
+    displayPrompt: built.displayPrompt,
+    modelPrompt: built.modelPrompt,
     images,
     imageNames,
+    referencedPaths,
   };
 }
 
@@ -180,7 +259,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
   const tools = options.tools ?? createDefaultTools(workspace);
   const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { files: MAX_IMAGES, fileSize: MAX_IMAGE_BYTES, fields: 2 },
+    limits: { files: MAX_IMAGES, fileSize: MAX_IMAGE_BYTES, fields: 10 },
   });
   const app = express();
   app.disable("x-powered-by");
@@ -191,9 +270,25 @@ export function createAgentServer(options: AgentServerOptions): Express {
     modelVision: options.llm.capabilities.input.includes("image"),
     visionPreprocessor: options.preprocessors?.length ? "enabled" : "disabled",
     workspace: path.basename(workspace),
+    workspaceLabel: path.basename(workspace),
     maxImages: MAX_IMAGES,
     maxImageBytes: MAX_IMAGE_BYTES,
   }));
+
+  app.get("/api/workspace/list", async (request, response) => {
+    const relativePath = String(request.query.path ?? "");
+    try {
+      const result = await listWorkspaceDirectory(workspace, relativePath);
+      response.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status =
+        err && typeof err === "object" && "status" in err
+          ? Number((err as { status: unknown }).status) || 400
+          : 400;
+      response.status(status).json({ error: message });
+    }
+  });
 
   app.post("/api/sessions", (_request, response) => {
     const id = randomUUID();
@@ -251,9 +346,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
       }
       session.busy = true;
 
-      let input: ReturnType<typeof parseMessageRequest>;
+      let input: Awaited<ReturnType<typeof parseMessageRequest>>;
       try {
-        input = parseMessageRequest(request);
+        input = await parseMessageRequest(request, workspace);
       } catch (err) {
         session.busy = false;
         const message = err instanceof Error ? err.message : String(err);
@@ -271,20 +366,29 @@ export function createAgentServer(options: AgentServerOptions): Express {
       const send = (payload: Record<string, unknown>): void => {
         response.write(`${JSON.stringify(payload)}\n`);
       };
-      send({ type: "user", content: input.prompt, images: input.imageNames });
+      send({
+        type: "user",
+        content: input.displayPrompt,
+        images: input.imageNames,
+        referencedPaths: input.referencedPaths,
+      });
 
       try {
         const userContent: ContentPart[] | undefined = input.images.length
-          ? [textPart(input.prompt), ...input.images]
+          ? [textPart(input.modelPrompt), ...input.images]
           : undefined;
-        session.messages = await runAgentTurn(session.messages, input.prompt, {
-          llm: options.llm,
-          tools,
-          preprocessors: options.preprocessors ?? [],
-          chat: options.chat,
-          userContent,
-          onEvent: (event) => send(safeEvent(event)),
-        });
+        session.messages = await runAgentTurn(
+          session.messages,
+          input.modelPrompt,
+          {
+            llm: options.llm,
+            tools,
+            preprocessors: options.preprocessors ?? [],
+            chat: options.chat,
+            userContent,
+            onEvent: (event) => send(safeEvent(event)),
+          },
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         send({ type: "error", message, retryable: isRetryableError(message) });

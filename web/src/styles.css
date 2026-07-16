@@ -48,10 +48,12 @@ button:disabled {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   padding: 22px 18px 18px;
   color: #ecf4f1;
   background: #18201f;
   border-right: 1px solid #2c3936;
+  overflow: hidden;
 }
 
 .brand {
@@ -617,6 +619,7 @@ button:disabled {
 
   .brand span:last-child,
   .environment,
+  .workspace-tree-panel,
   .connection-state {
     display: none;
   }
@@ -672,4 +675,343 @@ button:disabled {
   .message-images {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+}
+
+.workspace-tree-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 22px;
+}
+
+.workspace-tree {
+  flex: 1 1 auto;
+  min-height: 120px;
+  max-height: min(48vh, 420px);
+  margin-top: 10px;
+  overflow: auto;
+  border: 1px solid #2a3533;
+  border-radius: 8px;
+  background: #121917;
+}
+
+.tree-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  color: #9eb0ac;
+  font-size: 12px;
+}
+
+.tree-status.error {
+  flex-wrap: wrap;
+  color: #f0b4a8;
+}
+
+.tree-status button {
+  color: #dff7ef;
+  background: transparent;
+  border: 1px solid #2f4b45;
+  border-radius: 4px;
+  padding: 2px 8px;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 10px 4px 8px;
+  color: #d5e3de;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  font-size: 12px;
+}
+
+.tree-row:hover {
+  background: #22312e;
+}
+
+.tree-row.selected {
+  color: #e8fff8;
+  background: #1a3b34;
+}
+
+.tree-row.file .tree-name {
+  color: #cfe0da;
+}
+
+.tree-icon {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  color: #8ea49e;
+}
+
+.tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-error {
+  padding: 2px 10px 8px;
+  color: #f0b4a8;
+  font-size: 11px;
+}
+
+.pending-refs,
+.message-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pending-refs {
+  margin-bottom: 8px;
+}
+
+.message-refs {
+  margin-bottom: 8px;
+}
+
+.ref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 4px 8px;
+  color: #134c41;
+  background: #d8f3eb;
+  border: 1px solid #9ed7c8;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.ref-chip.editable button {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 2px;
+  color: #134c41;
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  padding: 0;
+}
+
+.ref-chip.editable button:hover {
+  background: #bfe8db;
+}
+
+.message.user .ref-chip {
+  color: #e8fff8;
+  background: #1f5b4e;
+  border-color: #2f7a69;
+}
+
+.sidebar .connection-state {
+  margin-top: 14px;
+  flex: 0 0 auto;
+}
+
+/* Align status classes used by the chat panel */
+.status-dot.ok {
+  background: #42ba8d;
+  box-shadow: 0 0 0 3px rgb(66 186 141 / 12%);
+}
+
+.status-dot.bad {
+  background: #d46a57;
+}
+
+/* User message refs should stay readable on light chat background */
+.message.user .ref-chip {
+  color: #134c41;
+  background: #d8f3eb;
+  border-color: #9ed7c8;
+}
+
+.chat-panel {
+  /* ensure renamed main area still fills when HMR/class mix occurs */
+  min-height: 0;
+}
+
+.conversation,
+.timeline {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.timeline {
+  padding: 28px max(24px, calc((100% - 860px) / 2));
+  scrollbar-color: #b7c4c0 transparent;
+}
+
+.chat-main {
+  display: grid;
+  grid-template-rows: 64px minmax(0, 1fr) auto;
+  min-width: 0;
+  height: 100%;
+  background: #f7f9f8;
+}
+
+/* Nested tool cards inside assistant turns */
+.assistant-text + .tool-card,
+.tool-card + .assistant-text,
+.tool-card + .tool-card {
+  margin-top: 10px;
+}
+
+.assistant-thinking {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: #6d7d78;
+  font-size: 13px;
+}
+
+.assistant-thinking.subtle {
+  margin-top: 8px;
+  margin-bottom: 0;
+  color: #8a9893;
+  font-size: 12px;
+}
+
+.tool-card {
+  max-width: 680px;
+  margin: 8px 0 4px;
+  overflow: hidden;
+  background: #f3f8f6;
+  border: 1px solid #d5e3de;
+  border-radius: 10px;
+}
+
+.tool-card.running {
+  border-color: #b9d8cf;
+  background: linear-gradient(180deg, #f7fbfa 0%, #eef6f3 100%);
+}
+
+.tool-card.done {
+  border-color: #cfe0da;
+}
+
+.tool-card.error {
+  background: #fdf3f0;
+  border-color: #efd0c6;
+}
+
+.tool-card-header {
+  display: grid;
+  grid-template-columns: 18px 14px auto minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 10px 12px;
+  color: #2f403c;
+  background: transparent;
+  border: 0;
+  text-align: left;
+}
+
+.tool-card-header:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.tool-card-header strong {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tool-card-status {
+  display: grid;
+  place-items: center;
+  color: #2f8f78;
+}
+
+.tool-card.error .tool-card-status {
+  color: #c45b45;
+}
+
+.tool-card-summary {
+  overflow: hidden;
+  color: #6a7b76;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-card-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 10px;
+  color: #5f7f76;
+  font-size: 12px;
+}
+
+.tool-card-loading-bar {
+  position: relative;
+  display: block;
+  width: 72px;
+  height: 4px;
+  overflow: hidden;
+  background: #d7e8e2;
+  border-radius: 999px;
+}
+
+.tool-card-loading-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  background: #2f8f78;
+  border-radius: inherit;
+  animation: tool-loading 1s ease-in-out infinite;
+}
+
+@keyframes tool-loading {
+  0% { transform: translateX(-10%); }
+  50% { transform: translateX(140%); }
+  100% { transform: translateX(-10%); }
+}
+
+.tool-card-snippet {
+  overflow: hidden;
+  max-height: 42px;
+  padding: 0 12px 10px;
+  color: #667772;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tool-card-preview {
+  max-height: 220px;
+  margin: 0;
+  padding: 0 12px 12px;
+  overflow: auto;
+  color: #3b4b47;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.message.assistant .message-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }

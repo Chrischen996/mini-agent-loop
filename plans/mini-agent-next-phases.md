@@ -19,15 +19,18 @@
 - 图片读取和 vision preprocessing
 - Express API、多轮内存 session、NDJSON 事件流
 - React/Vite GUI
-- 离线测试 25 项全部通过
+- 离线测试 34 项全部通过
 - TypeScript 类型检查通过
+- LLM wire protocol、tool-call 映射和错误脱敏测试已补齐
+- `read` 的 offset/limit、行数上限和 UTF-8 字节边界测试已补齐
+- 生产前端构建已验证通过
 
 当前未完成验证：
 
 - 真实 OpenAI-compatible API 的完整多轮工具调用
 - 真实 DeepSeek tool calling
 - 真实 vision provider 调用
-- 生产环境下的 server/GUI 构建和启动
+- 生产环境 server/GUI 的实际启动和端到端访问
 
 ## Phase 4 - 真实模型与协议稳定性
 
