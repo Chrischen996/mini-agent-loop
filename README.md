@@ -209,6 +209,21 @@ DELETE /api/sessions/:id
 POST   /api/sessions/:id/messages  multipart(prompt, referencedPaths, images) -> NDJSON stream
 ```
 
+## Terminal TUI
+
+The terminal client uses the same Agent Core and tool registry as the CLI and
+Web GUI. It renders streaming assistant output and tool activity directly to
+the terminal using ANSI sequences:
+
+```bash
+npm run tui
+```
+
+The current adapter is dependency-free and intentionally small. Its boundary
+is `src/tui/main.ts`; it can be replaced by an Ink renderer later without
+changing the Agent Loop, tools, or Web API. Use `/clear`, `/quit`, or `Ctrl+C`
+inside the terminal client.
+
 ## Test (offline)
 
 Uses Node’s built-in test runner + a scripted faux model (no API key):
