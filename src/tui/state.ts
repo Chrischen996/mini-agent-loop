@@ -9,7 +9,7 @@ export type ToolState = "running" | "done" | "error";
 export type ChatMessage =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string }
-  | { kind: "tool_call"; id: string; name: string; args: string; status: ToolState; result?: string; durationMs?: number; startedAt: number }
+  | { kind: "tool_call"; id: string; name: string; args: string; rawArgs: Record<string, unknown>; status: ToolState; result?: string; durationMs?: number; startedAt: number }
   | { kind: "error"; text: string };
 
 export type TuiState = {
@@ -82,12 +82,14 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         }
 
         case "tool_start": {
-          const args = shortPreview(JSON.stringify(event.call.arguments), 120);
+          const rawArgs = (event.call.arguments ?? {}) as Record<string, unknown>;
+          const args = shortPreview(JSON.stringify(rawArgs), 120);
           const card: ChatMessage = {
             kind: "tool_call",
             id: event.call.id,
             name: event.call.name,
             args,
+            rawArgs,
             status: "running",
             startedAt: Date.now(),
           };
