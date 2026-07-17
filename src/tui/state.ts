@@ -18,11 +18,13 @@ export type TuiState = {
   busy: boolean;
   status: string;
   modelName: string;
+  usedTokens: number;
 };
 
 export type TuiAction =
   | { type: "USER_MESSAGE"; text: string }
   | { type: "LOOP_EVENT"; event: LoopEvent }
+  | { type: "MODEL_CHANGED"; modelName: string }
   | { type: "RESET" };
 
 function shortPreview(s: string, max = 200): string {
@@ -37,6 +39,7 @@ export function createInitialState(modelName: string): TuiState {
     busy: false,
     status: "就绪",
     modelName,
+    usedTokens: 0,
   };
 }
 
@@ -54,6 +57,9 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     case "RESET":
       return createInitialState(state.modelName);
 
+    case "MODEL_CHANGED":
+      return { ...state, modelName: action.modelName, status: "就绪", usedTokens: 0 };
+
     case "LOOP_EVENT": {
       const event = action.event;
       switch (event.type) {
@@ -65,19 +71,24 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           };
 
         case "assistant": {
-          const text = typeof event.message.content === "string"
+          // Prefer streamed text; the final assistant event often has content=""
+          const contentText = typeof event.message.content === "string"
             ? event.message.content
-            : state.streamingText;
+            : "";
+          const text = contentText || state.streamingText;
           const hasTools = (event.message.toolCalls?.length ?? 0) > 0;
+          // Only skip if we genuinely have nothing to show
           if (!text && !hasTools) return { ...state, streamingText: "" };
           const newMessages: ChatMessage[] = text
             ? [...state.messages, { kind: "assistant", text }]
             : state.messages;
+          const usedTokens = event.usage?.totalTokens ?? state.usedTokens;
           return {
             ...state,
             messages: newMessages,
             streamingText: "",
             status: hasTools ? "执行工具..." : "就绪",
+            usedTokens,
           };
         }
 

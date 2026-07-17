@@ -31,8 +31,18 @@ npm install
 |---|---|---|
 | `OPENAI_API_KEY` | yes\* | — |
 | `DEEPSEEK_API_KEY` | yes\* (DeepSeek alt) | — |
+| `GEMINI_API_KEY` | no | — |
+| `DASHSCOPE_API_KEY` | no | — |
+| `ZHIPU_API_KEY` | no | — |
+| `MOONSHOT_API_KEY` | no | — |
+| `XAI_API_KEY` | no | — |
+| `MISTRAL_API_KEY` | no | — |
+| `GROQ_API_KEY` | no | — |
+| `OPENROUTER_API_KEY` | no | — |
+| `SILICONFLOW_API_KEY` | no | — |
 | `OPENAI_BASE_URL` | no | OpenAI or DeepSeek auto |
 | `OPENAI_MODEL` | no | `gpt-4o-mini` / `deepseek-chat` |
+| `MINI_AGENT_MODELS` | no | — |
 | `VISION_API_KEY` | no\* | — |
 | `VISION_BASE_URL` | no\* | — |
 | `VISION_MODEL` | no\* | — |
@@ -42,7 +52,9 @@ npm install
 | `VISION_RETRY_DELAY_MS` | no | `1000` |
 | `VISION_FALLBACK_MODEL` | no | — |
 
-\* Real runs need either `OPENAI_API_KEY` or `DEEPSEEK_API_KEY`.
+\* Real runs need at least one supported provider key.
+`/model` only lists
+models whose declared key is configured.
 The vision variables are optional. For the generic provider, the three
 `VISION_API_KEY`, `VISION_BASE_URL`, and `VISION_MODEL` values must be set
 together. When configured, images sent to a text-only main model are analyzed
@@ -80,6 +92,39 @@ DEEPSEEK_API_KEY=sk-...
 ```
 
 Get a key at [https://platform.deepseek.com](https://platform.deepseek.com). Prefer `deepseek-chat` (not `deepseek-reasoner`) for tool loops.
+
+#### Model providers
+
+The main transport supports OpenAI Chat Completions compatible APIs. The built-in
+catalog includes OpenAI, DeepSeek, Google Gemini's OpenAI-compatible endpoint,
+DashScope/Qwen, Zhipu GLM, Moonshot/Kimi, xAI, Mistral, Groq, OpenRouter, and
+SiliconFlow. Configure a provider key and run the Ink TUI, then use `/model`:
+
+```bash
+npm run tui:ink
+
+# examples inside the TUI
+/model
+/model deepseek-chat
+/model google/gemini-2.5-pro
+/model openrouter/anthropic/claude-sonnet-4
+```
+
+Claude entries use OpenRouter because Anthropic's native Messages API is not the
+same wire protocol. A model is not shown merely because it exists in the static
+catalog; its provider key must be configured.
+
+For a new model or private OpenAI-compatible gateway, add it without changing
+source code:
+
+```bash
+CUSTOM_LLM_KEY=sk-...
+MINI_AGENT_MODELS='[{"provider":"company","id":"company-model-v1","baseUrl":"https://llm.example/v1","apiKeyEnv":"CUSTOM_LLM_KEY","input":["text"],"tools":true,"contextWindow":128000}]'
+```
+
+`MINI_AGENT_MODELS` is a JSON array. Each entry requires `provider`, `id`,
+`baseUrl`, and `apiKeyEnv`; optional fields are `input`, `tools`, and
+`contextWindow`.
 
 #### Vision preprocessing for DeepSeek
 
@@ -211,18 +256,16 @@ POST   /api/sessions/:id/messages  multipart(prompt, referencedPaths, images) ->
 
 ## Terminal TUI
 
-The terminal client uses the same Agent Core and tool registry as the CLI and
-Web GUI. It renders streaming assistant output and tool activity directly to
-the terminal using ANSI sequences:
+The Ink terminal client uses the same Agent Core and tool registry as the CLI
+and Web GUI. It supports streaming output, tool activity, file completion, and
+the local `/model` selector:
 
 ```bash
 npm run tui
 ```
 
-The current adapter is dependency-free and intentionally small. Its boundary
-is `src/tui/main.ts`; it can be replaced by an Ink renderer later without
-changing the Agent Loop, tools, or Web API. Use `/clear`, `/quit`, or `Ctrl+C`
-inside the terminal client.
+Use `/model`, `/clear`, `/quit`, or `Ctrl+C` inside the terminal client. The
+previous dependency-free ANSI client remains available as `npm run tui:legacy`.
 
 ## Test (offline)
 

@@ -47,7 +47,7 @@ function ReadView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> })
 
 /** bash – show command + stdout */
 function BashView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> }): React.ReactElement {
-  const cmd = str(msg.rawArgs.cmd) || str(msg.rawArgs.command) || str(msg.rawArgs.input) || "…";
+  const cmd = str(msg.rawArgs.command) || str(msg.rawArgs.cmd) || str(msg.rawArgs.input) || "…";
   const isRunning = msg.status === "running";
   const isError = msg.status === "error";
   const outputLines = msg.result ? previewLines(msg.result, 15) : [];

@@ -7,6 +7,7 @@ import {
   streamChat,
   type ChatFn,
   type LlmConfig,
+  type StreamChatUsage,
 } from "./llm.ts";
 import { resolveModel } from "./models.ts";
 import type { MessagePreprocessor } from "./preprocessors/index.ts";
@@ -45,7 +46,7 @@ export type AgentLoopOptions = {
 
 export type LoopEvent =
   | { type: "assistant_delta"; text: string }
-  | { type: "assistant"; message: AssistantMessage }
+  | { type: "assistant"; message: AssistantMessage; usage?: StreamChatUsage }
   | { type: "tool_start"; call: ToolCall }
   | { type: "tool_end"; call: ToolCall; result: ToolResult }
   | { type: "aborted"; messages: AgentMessage[] }
@@ -182,6 +183,7 @@ export async function runAgentTurn(
         };
         let sawFinal = false;
         let streamed = "";
+        let lastUsage: StreamChatUsage | undefined;
         try {
           for await (const event of streamChat(llm, messages, tools, signal)) {
             if (event.type === "text_delta") {
@@ -190,6 +192,7 @@ export async function runAgentTurn(
               continue;
             }
             assistant = event.message;
+            lastUsage = event.usage;
             sawFinal = true;
           }
         } catch (err) {
@@ -207,6 +210,86 @@ export async function runAgentTurn(
         if (!sawFinal) {
           throw new Error("LLM stream ended without a final assistant message");
         }
+        messages.push(assistant);
+        onEvent?.({ type: "assistant", message: assistant, usage: lastUsage });
+        const calls = assistant.toolCalls ?? [];
+        if (calls.length === 0) {
+          onEvent?.({ type: "done", messages });
+          return messages;
+        }
+
+        const toolMessages: ToolResultMessage[] = [];
+        const completedToolIds = new Set<string>();
+        for (const call of calls) {
+          if (signal?.aborted) {
+            appendStoppedToolResults(messages, calls, completedToolIds, onEvent);
+            onEvent?.({ type: "aborted", messages });
+            return messages;
+          }
+          onEvent?.({ type: "tool_start", call });
+
+          let result: ToolResult;
+
+          if (call.argumentsParseError) {
+            result = {
+              content: `Invalid tool arguments JSON: ${call.argumentsParseError}`,
+              isError: true,
+            };
+          } else {
+            const tool = tools.find((t) => t.name === call.name);
+            if (!tool) {
+              result = {
+                content: `Unknown tool: ${call.name}`,
+                isError: true,
+              };
+            } else {
+              try {
+                const args = validateToolArgs(tool, call.arguments);
+                await authorizeTool?.(tool, args, signal);
+                result = await tool.execute(args, signal);
+              } catch (err) {
+                if (isAbortError(err)) {
+                  result = { content: "已停止", isError: true };
+                  toolMessages.push({
+                    role: "tool",
+                    toolCallId: call.id,
+                    name: call.name,
+                    content: result.content,
+                    isError: true,
+                  });
+                  completedToolIds.add(call.id);
+                  onEvent?.({ type: "tool_end", call, result });
+                  messages.push(...toolMessages);
+                  appendStoppedToolResults(messages, calls, completedToolIds, onEvent);
+                  onEvent?.({ type: "aborted", messages });
+                  return messages;
+                }
+                result = {
+                  content: err instanceof Error ? err.message : String(err),
+                  isError: true,
+                };
+              }
+            }
+          }
+
+          toolMessages.push({
+            role: "tool",
+            toolCallId: call.id,
+            name: call.name,
+            content: result.content,
+            isError: result.isError,
+          });
+          completedToolIds.add(call.id);
+          onEvent?.({ type: "tool_end", call, result });
+        }
+
+        const processedToolMessages = await applyPreprocessors(
+          toolMessages,
+          preprocessors,
+          preprocessContext,
+        );
+        messages.push(...processedToolMessages);
+        continue;
       }
     } catch (err) {
       if (isAbortError(err)) {
@@ -215,6 +298,8 @@ export async function runAgentTurn(
       }
       throw err;
     }
+
+    // useInjectedChat path: push assistant and handle tools
     messages.push(assistant);
     onEvent?.({ type: "assistant", message: assistant });
 

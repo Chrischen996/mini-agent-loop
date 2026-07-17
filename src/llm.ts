@@ -13,11 +13,13 @@ import {
   visionAnalysisAsText,
 } from "./content.ts";
 import {
+  getAvailableModels,
   parseImagePolicy,
   resolveModel,
   supportsImageInput,
   type ImagePolicy,
   type ModelCapabilities,
+  type ModelRef,
 } from "./models.ts";
 import type { Tool } from "./tools/types.ts";
 import type {
@@ -33,9 +35,11 @@ import { parseToolArgumentsJson } from "./validate.ts";
 
 export type LlmConfig = {
   apiKey: string;
+  provider: string;
   baseUrl: string;
   model: string;
   capabilities: ModelCapabilities;
+  contextWindow: number;
   imagePolicy: ImagePolicy;
 };
 
@@ -85,9 +89,14 @@ export function loadLlmConfigFromEnv(): LlmConfig {
     /deepseek/i.test(process.env.OPENAI_BASE_URL ?? "") ||
     /deepseek/i.test(process.env.OPENAI_MODEL ?? "");
 
-  const model =
-    process.env.OPENAI_MODEL ||
-    (useDeepSeek ? "deepseek-chat" : "gpt-4o-mini");
+  const available = getAvailableModels();
+  const firstConfigured = available[0];
+  const model = process.env.OPENAI_MODEL ||
+    (useDeepSeek
+      ? "deepseek/deepseek-chat"
+      : firstConfigured
+        ? `${firstConfigured.provider}/${firstConfigured.id}`
+        : "openai/gpt-4o-mini");
 
   const resolved = resolveModel(model, process.env.OPENAI_BASE_URL);
   const baseUrl = (
@@ -96,7 +105,11 @@ export function loadLlmConfigFromEnv(): LlmConfig {
     (useDeepSeek ? "https://api.deepseek.com/v1" : "https://api.openai.com/v1")
   ).replace(/\/$/, "");
 
-  const apiKey = resolved.apiKeyEnv
+  const apiKeyNames = [
+    ...resolved.apiKeyEnv,
+    ...(process.env.OPENAI_BASE_URL ? ["OPENAI_API_KEY"] : []),
+  ];
+  const apiKey = apiKeyNames
     .map((name) => process.env[name])
     .find((value): value is string => Boolean(value));
 
@@ -104,7 +117,7 @@ export function loadLlmConfigFromEnv(): LlmConfig {
     throw new Error(
       [
         `Missing API key for model ${resolved.id}.`,
-        `Set one of: ${resolved.apiKeyEnv.join(", ")}.`,
+        `Set one of: ${apiKeyNames.join(", ")}.`,
       ].join("\n"),
     );
   }
@@ -113,27 +126,62 @@ export function loadLlmConfigFromEnv(): LlmConfig {
 
   return {
     apiKey,
+    provider: resolved.provider,
     baseUrl,
     model: resolved.id,
     capabilities: resolved.capabilities,
+    contextWindow: resolved.contextWindow,
     imagePolicy,
   };
 }
 
 /** Test helper / explicit config builder. */
 export function makeLlmConfig(
-  partial: Omit<LlmConfig, "capabilities" | "imagePolicy"> & {
+  partial: Pick<LlmConfig, "apiKey" | "baseUrl" | "model"> & {
+    provider?: string;
     capabilities?: ModelCapabilities;
+    contextWindow?: number;
     imagePolicy?: ImagePolicy;
   },
 ): LlmConfig {
   const resolved = resolveModel(partial.model, partial.baseUrl);
   return {
     apiKey: partial.apiKey,
+    provider: partial.provider ?? resolved.provider,
     baseUrl: partial.baseUrl.replace(/\/$/, ""),
     model: partial.model,
     capabilities: partial.capabilities ?? resolved.capabilities,
+    contextWindow: partial.contextWindow ?? resolved.contextWindow,
     imagePolicy: partial.imagePolicy ?? "placeholder",
+  };
+}
+
+export function switchLlmModel(config: LlmConfig, model: ModelRef | string): LlmConfig {
+  const resolved = typeof model === "string" ? resolveModel(model) : model;
+  const apiKey = resolved.apiKeyEnv
+    .map((name) => process.env[name])
+    .find((value): value is string => Boolean(value));
+
+  // If no env var key found but the new model targets the same base URL as the
+  // current config, reuse the existing API key. This covers the case where
+  // DeepSeek (or any provider) is configured via OPENAI_API_KEY + OPENAI_BASE_URL
+  // rather than the provider-specific env var name.
+  const effectiveApiKey = apiKey
+    ?? (resolved.baseUrl === config.baseUrl ? config.apiKey : undefined);
+
+  if (!effectiveApiKey) {
+    throw new Error(
+      `Missing API key for model ${resolved.id}. Set one of: ${resolved.apiKeyEnv.join(", ")}.`,
+    );
+  }
+  return {
+    ...config,
+    apiKey: effectiveApiKey,
+    provider: resolved.provider,
+    baseUrl: resolved.baseUrl,
+    model: resolved.id,
+    capabilities: resolved.capabilities,
+    contextWindow: resolved.contextWindow,
   };
 }
 
@@ -494,9 +542,15 @@ export async function completeChat(
   };
 }
 
+export type StreamChatUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
+
 export type StreamChatEvent =
   | { type: "text_delta"; text: string }
-  | { type: "assistant"; message: AssistantMessage };
+  | { type: "assistant"; message: AssistantMessage; usage?: StreamChatUsage };
 
 type ToolCallAccumulator = {
   id: string;
@@ -619,12 +673,19 @@ export async function* streamChat(
 
   let content = "";
   const toolAcc = new Map<number, ToolCallAccumulator>();
+  let usage: StreamChatUsage | undefined;
 
   for await (const data of iterateSseDataLines(response, signal)) {
     let parsed: {
+      usage?: {
+        prompt_tokens?: number;
+        completion_tokens?: number;
+        total_tokens?: number;
+      };
       choices?: Array<{
         delta?: {
           content?: string | null;
+          reasoning_content?: string | null;
           tool_calls?: Array<{
             index?: number;
             id?: string;
@@ -633,6 +694,7 @@ export async function* streamChat(
         };
         message?: {
           content?: string | null;
+          reasoning_content?: string | null;
           tool_calls?: OpenAIToolCall[];
         };
       }>;
@@ -641,6 +703,15 @@ export async function* streamChat(
       parsed = JSON.parse(data) as typeof parsed;
     } catch {
       continue;
+    }
+
+    // Capture usage whenever it appears (some providers send it mid-stream or at end)
+    if (parsed.usage) {
+      usage = {
+        promptTokens: parsed.usage.prompt_tokens ?? 0,
+        completionTokens: parsed.usage.completion_tokens ?? 0,
+        totalTokens: parsed.usage.total_tokens ?? 0,
+      };
     }
 
     const choice = parsed.choices?.[0];
@@ -665,6 +736,12 @@ export async function* streamChat(
 
     const delta = choice.delta;
     if (!delta) continue;
+
+    // Emit reasoning_content as text deltas (DeepSeek reasoning models)
+    if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) {
+      content += delta.reasoning_content;
+      yield { type: "text_delta", text: delta.reasoning_content };
+    }
 
     if (typeof delta.content === "string" && delta.content.length > 0) {
       content += delta.content;
@@ -711,6 +788,6 @@ export async function* streamChat(
       content: content || "",
       ...(toolCalls ? { toolCalls } : {}),
     },
+    ...(usage ? { usage } : {}),
   };
 }
-
