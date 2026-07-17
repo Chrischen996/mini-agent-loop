@@ -162,6 +162,45 @@ describe("runAgentLoop", () => {
 });
 
 describe("runAgentTurn", () => {
+  it("compacts before a model call and emits a context event", async () => {
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+    const history = [
+      ...createAgentHistory("system"),
+      ...Array.from({ length: 8 }, (_, index) => ({ role: "user" as const, content: `message ${index} ${"x".repeat(80)}` })),
+    ];
+    const messages = await runAgentTurn(history, "latest", {
+      llm: makeLlmConfig({ apiKey: "test", baseUrl: "http://localhost/v1", model: "faux", contextWindow: 100, maxTokens: 20 }),
+      tools: [],
+      context: { keepRecentMessages: 2 },
+      onEvent: (event) => events.push(event),
+      chat: async () => ({ role: "assistant", content: "ok" }),
+    });
+    assert.equal(messages.at(-1)?.role, "assistant");
+    assert.ok(events.some((event) => event.type === "context_compacted"));
+  });
+
+  it("retries one provider context overflow after compaction", async () => {
+    let calls = 0;
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+    const history = [
+      ...createAgentHistory("system"),
+      ...Array.from({ length: 5 }, (_, index) => ({ role: "user" as const, content: `message ${index}` })),
+    ];
+    const messages = await runAgentTurn(history, "latest", {
+      llm: makeLlmConfig({ apiKey: "test", baseUrl: "http://localhost/v1", model: "faux" }),
+      tools: [],
+      onEvent: (event) => events.push(event),
+      chat: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("context length exceeded");
+        return { role: "assistant", content: "recovered" };
+      },
+    });
+    assert.equal(calls, 2);
+    assert.equal(messages.at(-1)?.role, "assistant");
+    assert.ok(events.some((event) => event.type === "context_compacted" && event.reason === "provider context overflow"));
+  });
+
   it("preserves history without repeating the system message", async () => {
     const chat = async (
       _config: typeof dummyLlm,

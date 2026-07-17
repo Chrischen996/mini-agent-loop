@@ -92,7 +92,7 @@ describe("LLM environment config", () => {
       process.env.DEEPSEEK_API_KEY = "deepseek-key";
       delete process.env.OPENAI_BASE_URL;
 
-      process.env.OPENAI_MODEL = "deepseek-chat";
+      process.env.OPENAI_MODEL = "deepseek-v4-flash";
       assert.equal(loadLlmConfigFromEnv().apiKey, "deepseek-key");
 
       process.env.OPENAI_MODEL = "gpt-4o-mini";

@@ -5,6 +5,7 @@ import {
   getAllModels,
   getAvailableModels,
   MODEL_REGISTRY,
+  resolveModel,
 } from "../src/models.ts";
 
 describe("model selection", () => {
@@ -12,45 +13,74 @@ describe("model selection", () => {
     const models = getAvailableModels({ DEEPSEEK_API_KEY: "test" });
     assert.deepEqual(
       models.map((model) => model.id),
-      ["deepseek-chat", "deepseek-reasoner", "deepseek-v4.0-flsh", "deepseek-v4.0.pro"],
+      ["deepseek-v4-flash", "deepseek-v4-pro"],
     );
-    assert.equal(models.find((model) => model.id === "deepseek-v4.0-flsh")?.contextWindow, 131072);
-    assert.equal(models.find((model) => model.id === "deepseek-v4.0.pro")?.contextWindow, 131072);
+    assert.equal(models.find((model) => model.id === "deepseek-v4-flash")?.contextWindow, 1000000);
+    assert.equal(models.find((model) => model.id === "deepseek-v4-pro")?.contextWindow, 1000000);
     assert.equal(getAvailableModels({ OPENAI_API_KEY: "test" }).some((model) => model.provider === "deepseek"), false);
   });
 
-  it("covers the built-in OpenAI-compatible provider catalog", () => {
+  it("assigns and normalizes output limits for custom models", () => {
+    const env = {
+      CUSTOM_LLM_KEY: "test",
+      MINI_AGENT_MODELS: JSON.stringify([{
+        provider: "small-gateway",
+        id: "small-model",
+        baseUrl: "https://small.example/v1",
+        apiKeyEnv: "CUSTOM_LLM_KEY",
+        contextWindow: 100,
+        maxTokens: 1000,
+      }]),
+    };
+    const model = getAvailableModels(env).find((item) => item.id === "small-model");
+    assert.equal(model?.maxTokens, 99);
+  });
+
+  it("covers the generated multi-provider catalog", () => {
     const env = {
       OPENAI_API_KEY: "test",
       DEEPSEEK_API_KEY: "test",
       GEMINI_API_KEY: "test",
-      DASHSCOPE_API_KEY: "test",
-      ZHIPU_API_KEY: "test",
       MOONSHOT_API_KEY: "test",
       XAI_API_KEY: "test",
       MISTRAL_API_KEY: "test",
       GROQ_API_KEY: "test",
       OPENROUTER_API_KEY: "test",
-      SILICONFLOW_API_KEY: "test",
     };
     assert.deepEqual(
       [...new Set(getAvailableModels(env).map((model) => model.provider))],
-      ["deepseek", "openai", "google", "dashscope", "zhipu", "moonshot", "xai", "mistral", "groq", "openrouter", "siliconflow"],
+      ["deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai"],
     );
+    assert.equal(getAllModels().length, 1057);
+    assert.ok(getAllModels().every((model) => model.contextWindow > 0 && model.maxTokens > 0));
   });
 
   it("matches qualified and unqualified model references case-insensitively", () => {
-    const models = [MODEL_REGISTRY["deepseek-chat"]!];
-    assert.equal(findExactModelReferenceMatch("DEEPSEEK/DEEPSEEK-CHAT", models)?.model?.id, "deepseek-chat");
-    assert.equal(findExactModelReferenceMatch("DeepSeek-Chat", models)?.model?.id, "deepseek-chat");
+    const models = [MODEL_REGISTRY["deepseek-v4-flash"]!];
+    assert.equal(findExactModelReferenceMatch("DEEPSEEK/DEEPSEEK-V4-FLASH", models)?.model?.id, "deepseek-v4-flash");
+    assert.equal(findExactModelReferenceMatch("DeepSeek-V4-Flash", models)?.model?.id, "deepseek-v4-flash");
+  });
+
+  it("maps legacy DeepSeek aliases to the generated catalog", () => {
+    assert.equal(resolveModel("deepseek/deepseek-chat").id, "deepseek-v4-flash");
+    assert.equal(resolveModel("deepseek-reasoner").id, "deepseek-v4-pro");
+  });
+
+  it("keeps Anthropic native transport when using a custom gateway", () => {
+    const model = getAllModels().find((item) => item.provider === "anthropic");
+    assert.ok(model?.piModel);
+    const resolved = resolveModel(`anthropic/${model.id}`, "https://anthropic-gateway.example/v1");
+    assert.equal(resolved.baseUrl, "https://anthropic-gateway.example/v1");
+    assert.ok(resolved.piModel);
+    assert.equal(resolved.api, "anthropic-messages");
   });
 
   it("reports duplicate unqualified ids as ambiguous", () => {
     const models = [
-      { ...MODEL_REGISTRY["gpt-4o"]!, provider: "gateway-a" },
-      { ...MODEL_REGISTRY["gpt-4o"]!, provider: "gateway-b", baseUrl: "https://other.example/v1" },
+      { ...MODEL_REGISTRY["gpt-4.1"]!, provider: "gateway-a" },
+      { ...MODEL_REGISTRY["gpt-4.1"]!, provider: "gateway-b", baseUrl: "https://other.example/v1" },
     ];
-    const match = findExactModelReferenceMatch("gpt-4o", models);
+    const match = findExactModelReferenceMatch("gpt-4.1", models);
     assert.equal(match?.ambiguous, true);
     if (match?.ambiguous) assert.equal(match.matches.length, 2);
   });

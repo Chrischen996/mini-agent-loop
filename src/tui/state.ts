@@ -6,19 +6,44 @@ export type MessageRole = "user" | "assistant" | "tool";
 
 export type ToolState = "running" | "done" | "error";
 
+export type ToolCardState = {
+  id: string;
+  name: string;
+  args?: string;
+  preview?: string;
+  status: ToolState;
+  durationMs?: number;
+};
+
+export type WorkflowStep = {
+  id: string;
+  label: string;
+  status: "pending" | "running" | "done" | "error";
+};
+
+export type TimelineEvent = {
+  id: string;
+  timestamp: number;
+  icon: "✓" | "▶" | "✗" | "•";
+  label: string;
+  detail?: string;
+};
+
 export type ChatMessage =
   | { kind: "user"; text: string }
-  | { kind: "assistant"; text: string }
+  | { kind: "assistant"; text: string; reasoning?: string }
   | { kind: "tool_call"; id: string; name: string; args: string; rawArgs: Record<string, unknown>; status: ToolState; result?: string; durationMs?: number; startedAt: number }
   | { kind: "error"; text: string };
 
 export type TuiState = {
   messages: ChatMessage[];
   streamingText: string;
+  streamingReasoning: string;
   busy: boolean;
   status: string;
   modelName: string;
   usedTokens: number;
+  contextTokens: number;
 };
 
 export type TuiAction =
@@ -36,10 +61,12 @@ export function createInitialState(modelName: string): TuiState {
   return {
     messages: [],
     streamingText: "",
+    streamingReasoning: "",
     busy: false,
     status: "就绪",
     modelName,
     usedTokens: 0,
+    contextTokens: 0,
   };
 }
 
@@ -52,6 +79,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         busy: true,
         status: "思考中...",
         streamingText: "",
+        streamingReasoning: "",
       };
 
     case "RESET":
@@ -66,7 +94,12 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         case "assistant_delta":
           return {
             ...state,
-            streamingText: state.streamingText + event.text,
+            streamingText: event.kind === "answer"
+              ? state.streamingText + event.text
+              : state.streamingText,
+            streamingReasoning: event.kind === "reasoning"
+              ? state.streamingReasoning + event.text
+              : state.streamingReasoning,
             status: "输出中...",
           };
 
@@ -76,21 +109,42 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ? event.message.content
             : "";
           const text = contentText || state.streamingText;
+          const reasoning = state.streamingReasoning || undefined;
           const hasTools = (event.message.toolCalls?.length ?? 0) > 0;
           // Only skip if we genuinely have nothing to show
-          if (!text && !hasTools) return { ...state, streamingText: "" };
-          const newMessages: ChatMessage[] = text
-            ? [...state.messages, { kind: "assistant", text }]
+          if (!text && !reasoning && !hasTools) return { ...state, streamingText: "", streamingReasoning: "" };
+          const assistantMsg: ChatMessage = { kind: "assistant", text: text || "", ...(reasoning ? { reasoning } : {}) };
+          const newMessages: ChatMessage[] = (text || reasoning)
+            ? [...state.messages, assistantMsg]
             : state.messages;
           const usedTokens = event.usage?.totalTokens ?? state.usedTokens;
+          const contextTokens = event.usage?.promptTokens ?? state.contextTokens;
           return {
             ...state,
             messages: newMessages,
             streamingText: "",
+            streamingReasoning: "",
             status: hasTools ? "执行工具..." : "就绪",
             usedTokens,
+            contextTokens,
           };
         }
+
+        case "error":
+          return {
+            ...state,
+            messages: [...state.messages, { kind: "error", text: event.message }],
+            streamingText: "",
+            streamingReasoning: "",
+            status: "请求失败",
+          };
+
+        case "context_compacted":
+          return {
+            ...state,
+            contextTokens: event.afterTokens,
+            status: `上下文已压缩 ${event.beforeTokens} → ${event.afterTokens} tokens`,
+          };
 
         case "tool_start": {
           const rawArgs = (event.call.arguments ?? {}) as Record<string, unknown>;
@@ -140,6 +194,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             busy: false,
             streamingText: "",
+            streamingReasoning: "",
             status: "已中止",
           };
 
@@ -148,6 +203,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             busy: false,
             streamingText: "",
+            streamingReasoning: "",
             status: "就绪",
           };
 

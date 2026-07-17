@@ -1,9 +1,14 @@
 import { contentAsString } from "./content.ts";
-import { compactHistory, type ContextManagerOptions } from "./context.ts";
+import {
+  compactHistory,
+  estimateContextTokens,
+  type ContextManagerOptions,
+} from "./context.ts";
 import type { PermissionRequest } from "./permissions.ts";
 import {
   completeChat,
   isAbortError,
+  isContextOverflowError,
   streamChat,
   type ChatFn,
   type LlmConfig,
@@ -45,8 +50,10 @@ export type AgentLoopOptions = {
 };
 
 export type LoopEvent =
-  | { type: "assistant_delta"; text: string }
+  | { type: "assistant_delta"; text: string; kind: "reasoning" | "answer" }
+  | { type: "context_compacted"; beforeTokens: number; afterTokens: number; reason: string }
   | { type: "assistant"; message: AssistantMessage; usage?: StreamChatUsage }
+  | { type: "error"; message: string }
   | { type: "tool_start"; call: ToolCall }
   | { type: "tool_end"; call: ToolCall; result: ToolResult }
   | { type: "aborted"; messages: AgentMessage[] }
@@ -92,6 +99,34 @@ async function applyPreprocessors(
     current = await preprocessor.process(current, context);
   }
   return current;
+}
+
+function compactForModel(
+  messages: AgentMessage[],
+  llm: LlmConfig,
+  tools: Tool[],
+  context: ContextManagerOptions | undefined,
+  onEvent: ((event: LoopEvent) => void) | undefined,
+  reason: string,
+  force = false,
+): AgentMessage[] {
+  const reserveTokens = Math.max(1, Math.min(context?.reserveTokens ?? llm.maxTokens, llm.contextWindow - 1));
+  const budget = Math.max(1, llm.contextWindow - reserveTokens);
+  const beforeTokens = estimateContextTokens(messages, tools);
+  if (!force && beforeTokens <= budget) return messages;
+
+  const toolTokens = estimateContextTokens([], tools);
+  const compacted = compactHistory(messages, {
+    ...context,
+    force,
+    maxTokens: Math.max(1, budget - toolTokens),
+    keepRecentMessages: force ? 2 : context?.keepRecentMessages,
+  });
+  const afterTokens = estimateContextTokens(compacted, tools);
+  if (compacted !== messages) {
+    onEvent?.({ type: "context_compacted", beforeTokens, afterTokens, reason });
+  }
+  return compacted;
 }
 
 
@@ -165,11 +200,16 @@ export async function runAgentTurn(
     preprocessContext,
   );
   const messages: AgentMessage[] = [...compactHistory(history, context), ...initialBatch];
+  let overflowRetries = 0;
 
   for (let turn = 1; turn <= maxTurns; turn++) {
     if (signal?.aborted) {
       onEvent?.({ type: "aborted", messages });
       return messages;
+    }
+    const preparedMessages = compactForModel(messages, llm, tools, context, onEvent, "token budget");
+    if (preparedMessages !== messages) {
+      messages.splice(0, messages.length, ...preparedMessages);
     }
     let assistant: AssistantMessage;
     try {
@@ -187,8 +227,8 @@ export async function runAgentTurn(
         try {
           for await (const event of streamChat(llm, messages, tools, signal)) {
             if (event.type === "text_delta") {
-              streamed += event.text;
-              onEvent?.({ type: "assistant_delta", text: event.text });
+              if (event.kind === "answer") streamed += event.text;
+              onEvent?.({ type: "assistant_delta", text: event.text, kind: event.kind });
               continue;
             }
             assistant = event.message;
@@ -295,6 +335,25 @@ export async function runAgentTurn(
       if (isAbortError(err)) {
         onEvent?.({ type: "aborted", messages });
         return messages;
+      }
+      const maxRetries = context?.maxCompactionRetries ?? 1;
+      if (isContextOverflowError(err) && overflowRetries < maxRetries) {
+        overflowRetries += 1;
+        const compacted = compactForModel(
+          messages,
+          llm,
+          tools,
+          context,
+          onEvent,
+          "provider context overflow",
+          true,
+        );
+        if (compacted === messages) {
+          throw new Error("Context window overflowed and could not be compacted further");
+        }
+        messages.splice(0, messages.length, ...compacted);
+        turn -= 1;
+        continue;
       }
       throw err;
     }

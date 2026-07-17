@@ -1,6 +1,5 @@
 import React, { useReducer, useState, useCallback, useRef, useEffect } from "react";
 import { Box, Text, useApp, useInput, useStdout, type Key } from "ink";
-import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import { readdir, stat } from "node:fs/promises";
 import * as nodePath from "node:path";
@@ -19,8 +18,8 @@ import {
   runAgentTurn,
   type LoopEvent,
 } from "../loop.ts";
-import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig } from "../llm.ts";
-import { findExactModelReferenceMatch, getAvailableModels } from "../models.ts";
+import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm.ts";
+import { findExactModelReferenceMatch, getAllModels, resolveModel, type ModelRef } from "../models.ts";
 import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
@@ -31,7 +30,7 @@ import type { AgentMessage, MessageContent } from "../types.ts";
 
 type AppProps = { cwd: string };
 
-function modelChoices(query = "", models = getAvailableModels()): {
+function modelChoices(query = "", models = getAllModels()): {
   references: string[];
   contextWindows: Record<string, number>;
 } {
@@ -56,6 +55,31 @@ type SlashCommand =
   | { cmd: "grep"; pattern: string; path: string }
   | null;
 
+type ModelCommand = {
+  reference: string;
+  overrides: ModelSwitchOverrides;
+};
+
+function parseModelCommand(raw: string): ModelCommand {
+  const tokens = raw.trim().split(/\s+/).filter(Boolean);
+  const referenceParts: string[] = [];
+  const overrides: ModelSwitchOverrides = {};
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token === "--base-url") {
+      overrides.baseUrl = tokens[++index];
+    } else if (token === "--api-key") {
+      overrides.apiKey = tokens[++index];
+    } else if (token === "--api-key-env") {
+      const envName = tokens[++index];
+      if (envName) overrides.apiKey = process.env[envName];
+    } else {
+      referenceParts.push(token);
+    }
+  }
+  return { reference: referenceParts.join(" "), overrides };
+}
+
 function parseSlashCommand(input: string): SlashCommand {
   const s = input.trim();
   if (!s.startsWith("/")) return null;
@@ -76,7 +100,15 @@ const PATH_COMMANDS = new Set(["read", "ls", "find", "grep"]);
 
 // ─── autocomplete modes ──────────────────────────────────────────────────────
 
-type AcMode = "command" | "file" | "model" | "model-picker" | null;
+type AcMode = "command" | "file" | "model" | "model-picker" | "model-setup" | null;
+
+type ModelSetupState = {
+  model: ModelRef;
+  baseUrl: string;
+  apiKey: string;
+  field: "baseUrl" | "apiKey";
+  error?: string;
+};
 
 type FileAcTrigger = {
   fragment: string;
@@ -137,6 +169,7 @@ export function App({ cwd }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const termWidth = stdout?.columns ?? 80;
+  const [showThinking, setShowThinking] = useState(true);
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const vision = loadVisionConfigFromEnv();
   const allToolsRef = useRef<Tool[]>(createAllTools(cwd));
@@ -155,6 +188,7 @@ export function App({ cwd }: AppProps): React.ReactElement {
   const [modelCandidates, setModelCandidates] = useState<string[]>([]);
   const [modelContextWindows, setModelContextWindows] = useState<Record<string, number>>({});
   const [modelQuery, setModelQuery] = useState("");
+  const [modelSetup, setModelSetup] = useState<ModelSetupState | undefined>();
   const [fileFragment, setFileFragment] = useState("");
   const fileTriggerRef = useRef<FileAcTrigger | null>(null);
   const acDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -166,6 +200,7 @@ export function App({ cwd }: AppProps): React.ReactElement {
     setModelCandidates([]);
     setModelContextWindows({});
     setModelQuery("");
+    setModelSetup(undefined);
     setFileFragment("");
     fileTriggerRef.current = null;
     setAcIndex(0);
@@ -183,6 +218,8 @@ export function App({ cwd }: AppProps): React.ReactElement {
       setAcIndex((index) => Math.min(index, Math.max(0, choices.references.length - 1)));
       return;
     }
+
+    if (acMode === "model-setup") return;
 
     // Command palette: input starts with / and no space yet
     if (/^\/[^/\s]*$/.test(input)) {
@@ -266,16 +303,43 @@ export function App({ cwd }: AppProps): React.ReactElement {
     setAcMode("model-picker");
   }, []);
 
-  const selectModel = useCallback((reference: string) => {
-    const match = findExactModelReferenceMatch(reference, getAvailableModels());
+  const startModelSetup = useCallback((model: ModelRef, overrides: ModelSwitchOverrides = {}) => {
+    const providerKey = model.apiKeyEnv
+      .map((name) => process.env[name])
+      .find((value): value is string => Boolean(value));
+    const canReuseCurrentKey = model.provider === llm.provider && model.baseUrl === llm.baseUrl;
+    setModelSetup({
+      model,
+      baseUrl: overrides.baseUrl || model.baseUrl,
+      apiKey: overrides.apiKey ?? (canReuseCurrentKey ? llm.apiKey : providerKey ?? ""),
+      field: "baseUrl",
+    });
+    setInput(overrides.baseUrl || model.baseUrl);
+    setAcMode("model-setup");
+    setAcIndex(0);
+  }, [llm.apiKey, llm.baseUrl, llm.provider]);
+
+  const commitModelSetup = useCallback((setup: ModelSetupState, apiKey: string) => {
+    try {
+      setLlm((current) => switchLlmModel(current, setup.model, {
+        baseUrl: setup.baseUrl,
+        apiKey,
+      }));
+      dispatch({ type: "MODEL_CHANGED", modelName: setup.model.id });
+      setInput("");
+      clearAc();
+    } catch (error) {
+      setModelSetup({ ...setup, apiKey, error: error instanceof Error ? error.message : String(error) });
+      setInput(apiKey);
+    }
+  }, [clearAc]);
+
+  const selectModel = useCallback((reference: string, overrides: ModelSwitchOverrides = {}) => {
+    const match = findExactModelReferenceMatch(reference, getAllModels());
     if (!match) {
-      const choices = modelChoices();
-      setModelQuery(reference);
-      setModelCandidates(choices.references);
-      setModelContextWindows(choices.contextWindows);
-      setAcIndex(0);
-      setInput(reference);
-      setAcMode("model-picker");
+      // An unknown id is a valid custom OpenAI-compatible model. Let the
+      // user configure its gateway instead of trapping them in an empty picker.
+      startModelSetup(resolveModel(reference, overrides.baseUrl), overrides);
       return;
     }
     if (match.ambiguous || !match.model) {
@@ -288,21 +352,22 @@ export function App({ cwd }: AppProps): React.ReactElement {
       setAcMode("model-picker");
       return;
     }
-    try {
-      setLlm((current) => switchLlmModel(current, match.model!));
-      dispatch({ type: "MODEL_CHANGED", modelName: match.model.id });
-      setInput("");
-      clearAc();
-    } catch (error) {
-      dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: { id: "model", name: "model", arguments: {} }, result: { content: error instanceof Error ? error.message : String(error), isError: true } } });
-      clearAc();
-    }
-  }, [clearAc]);
+    startModelSetup(match.model, overrides);
+  }, [startModelSetup]);
 
   // ── keyboard handler ─────────────────────────────────────────────────────
 
   useInput((_ch: string, key: Key) => {
     if (key.ctrl && _ch === "c") { abortRef.current.abort(); exit(); return; }
+    if (key.ctrl && _ch === "t") { setShowThinking((v) => !v); return; }
+
+    if (acMode === "model-setup") {
+      if (key.escape) {
+        setInput("");
+        clearAc();
+      }
+      return;
+    }
 
     if (acMode === "command") {
       const len = cmdCandidates.length;
@@ -374,7 +439,19 @@ export function App({ cwd }: AppProps): React.ReactElement {
 
   const handleSubmit = useCallback(async (text: string) => {
     const trimmed = text.trim();
-    if (!trimmed || state.busy) return;
+    const allowEmptyApiKey = acMode === "model-setup" && modelSetup?.field === "apiKey";
+    if ((!trimmed && !allowEmptyApiKey) || state.busy) return;
+
+    if (acMode === "model-setup" && modelSetup) {
+      if (modelSetup.field === "baseUrl") {
+        const baseUrl = trimmed.replace(/\/$/, "");
+        setModelSetup({ ...modelSetup, baseUrl, field: "apiKey", error: undefined });
+        setInput(modelSetup.apiKey);
+      } else {
+        commitModelSetup(modelSetup, trimmed);
+      }
+      return;
+    }
 
     clearAc();
 
@@ -392,14 +469,14 @@ export function App({ cwd }: AppProps): React.ReactElement {
     }
 
     if (/^\/model(?:\s+.*)?$/i.test(trimmed)) {
-      const reference = trimmed.replace(/^\/model\s*/i, "").trim();
-      if (!reference) {
+      const parsed = parseModelCommand(trimmed.replace(/^\/model\s*/i, ""));
+      if (!parsed.reference) {
         setInput("");
         openModelPicker();
       } else {
-        const match = findExactModelReferenceMatch(reference, getAvailableModels());
-        if (match?.model && !match.ambiguous) selectModel(match.model.id);
-        else openModelPicker(reference);
+        const match = findExactModelReferenceMatch(parsed.reference, getAllModels());
+        if (match?.model && !match.ambiguous) selectModel(parsed.reference, parsed.overrides);
+        else openModelPicker(parsed.reference);
       }
       return;
     }
@@ -435,10 +512,10 @@ export function App({ cwd }: AppProps): React.ReactElement {
       });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: { id: "llm-error", name: "llm", arguments: {} }, result: { content: errMsg, isError: true } } });
+      dispatch({ type: "LOOP_EVENT", event: { type: "error", message: errMsg } });
       dispatch({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
     }
-  }, [state.busy, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc]);
+  }, [state.busy, acMode, modelSetup, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup]);
 
   // ── render ────────────────────────────────────────────────────────────────
 
@@ -446,15 +523,18 @@ export function App({ cwd }: AppProps): React.ReactElement {
     <Box flexDirection="column">
       <Box paddingX={1} gap={2}>
         <Text color="cyan" bold>mini-agent</Text>
-        {state.busy
-          ? <Box gap={1}><Text color="yellow"><Spinner type="dots" /></Text><Text dimColor>{state.status}</Text></Box>
-          : <Text dimColor>{state.status}</Text>
-        }
         <Text dimColor>[/help] [Ctrl+C]</Text>
       </Box>
       <Text dimColor>{"─".repeat(termWidth)}</Text>
 
-      <MessageFeed messages={state.messages} streamingText={state.streamingText} />
+      <MessageFeed
+        messages={state.messages}
+        streamingText={state.streamingText}
+        streamingReasoning={state.streamingReasoning}
+        showThinking={showThinking}
+        busy={state.busy}
+        status={state.status}
+      />
 
       <Text dimColor>{"─".repeat(termWidth)}</Text>
 
@@ -486,6 +566,17 @@ export function App({ cwd }: AppProps): React.ReactElement {
         />
       )}
 
+      {acMode === "model-setup" && modelSetup && (
+        <Box flexDirection="column" paddingX={2}>
+          <Text color="cyan" bold>── 配置模型 ──</Text>
+          <Text>模型: {modelSetup.model.provider}/{modelSetup.model.id}</Text>
+          <Text dimColor>Base URL: {modelSetup.field === "baseUrl" ? "正在编辑" : modelSetup.baseUrl}</Text>
+          <Text dimColor>API Key: {modelSetup.field === "apiKey" ? "正在编辑" : "已设置"}</Text>
+          {modelSetup.error && <Text color="red">{modelSetup.error}</Text>}
+          <Text dimColor>Enter 确认当前字段，Esc 取消</Text>
+        </Box>
+      )}
+
       {/* Input row */}
       <Box paddingX={1} gap={1}>
         <Text color="green" bold>{state.busy ? "…" : ">"}</Text>
@@ -496,6 +587,7 @@ export function App({ cwd }: AppProps): React.ReactElement {
               <TextInput
                 value={input}
                 onChange={setInput}
+                mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
                 onSubmit={(val) => {
                   if ((acMode === "model" || acMode === "model-picker") && modelCandidates[acIndex]) {
                     selectModel(modelCandidates[acIndex]!);
@@ -503,12 +595,17 @@ export function App({ cwd }: AppProps): React.ReactElement {
                     void handleSubmit(val);
                   }
                 }}
-                placeholder={acMode === "model-picker" ? "搜索模型" : "输入消息，/ 命令，或 @文件 引用"}
+                placeholder={
+                  acMode === "model-picker" ? "搜索模型"
+                    : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "输入 Base URL"
+                      : acMode === "model-setup" ? "输入 API Key，可留空使用环境变量"
+                        : "输入消息，/ 命令，或 @文件 引用"
+                }
               />
             )
           }
         </Box>
-        <Text dimColor>{state.modelName} · {state.usedTokens > 0 ? `${formatContextWindow(state.usedTokens)} / ` : ""}{formatContextWindow(llm.contextWindow)}</Text>
+        <Text dimColor>[think:{showThinking ? "on" : "off"}]  {state.modelName} · {state.contextTokens > 0 ? `${formatContextWindow(state.contextTokens)} / ` : ""}{formatContextWindow(llm.contextWindow)}</Text>
       </Box>
     </Box>
   );

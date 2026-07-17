@@ -14,6 +14,7 @@ import {
 } from "./content.ts";
 import {
   getAvailableModels,
+  getPiModels,
   parseImagePolicy,
   resolveModel,
   supportsImageInput,
@@ -22,6 +23,14 @@ import {
   type ModelRef,
 } from "./models.ts";
 import type { Tool } from "./tools/types.ts";
+import type {
+  AssistantMessage as PiAssistantMessage,
+  Context as PiContext,
+  ImageContent as PiImageContent,
+  Message as PiMessage,
+  TextContent as PiTextContent,
+  Tool as PiTool,
+} from "./pi-ai/types.ts";
 import type {
   AgentMessage,
   AssistantMessage,
@@ -40,8 +49,46 @@ export type LlmConfig = {
   model: string;
   capabilities: ModelCapabilities;
   contextWindow: number;
+  maxTokens: number;
+  timeoutMs?: number;
+  piModel?: ModelRef["piModel"];
+  reasoning: boolean;
   imagePolicy: ImagePolicy;
 };
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+
+function configuredTimeout(raw: string | undefined): number {
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 1_000 ? Math.floor(value) : DEFAULT_REQUEST_TIMEOUT_MS;
+}
+
+function requestTimeout(config: LlmConfig): number {
+  return config.timeoutMs ?? configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS);
+}
+
+function createRequestSignal(parent: AbortSignal | undefined, timeoutMs: number): {
+  signal: AbortSignal;
+  didTimeout: () => boolean;
+  cleanup: () => void;
+} {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const onAbort = () => controller.abort();
+  parent?.addEventListener("abort", onAbort, { once: true });
+  return {
+    signal: controller.signal,
+    didTimeout: () => timedOut,
+    cleanup: () => {
+      clearTimeout(timer);
+      parent?.removeEventListener("abort", onAbort);
+    },
+  };
+}
 
 export type ChatFn = (
   config: LlmConfig,
@@ -93,7 +140,7 @@ export function loadLlmConfigFromEnv(): LlmConfig {
   const firstConfigured = available[0];
   const model = process.env.OPENAI_MODEL ||
     (useDeepSeek
-      ? "deepseek/deepseek-chat"
+      ? "deepseek/deepseek-v4-flash"
       : firstConfigured
         ? `${firstConfigured.provider}/${firstConfigured.id}`
         : "openai/gpt-4o-mini");
@@ -113,7 +160,7 @@ export function loadLlmConfigFromEnv(): LlmConfig {
     .map((name) => process.env[name])
     .find((value): value is string => Boolean(value));
 
-  if (!apiKey) {
+  if (!apiKey && !resolved.piModel) {
     throw new Error(
       [
         `Missing API key for model ${resolved.id}.`,
@@ -125,12 +172,16 @@ export function loadLlmConfigFromEnv(): LlmConfig {
   const imagePolicy = parseImagePolicy(process.env.IMAGE_POLICY);
 
   return {
-    apiKey,
+    apiKey: apiKey ?? "",
     provider: resolved.provider,
     baseUrl,
     model: resolved.id,
     capabilities: resolved.capabilities,
     contextWindow: resolved.contextWindow,
+    maxTokens: resolved.maxTokens,
+    timeoutMs: configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS),
+    piModel: resolved.piModel,
+    reasoning: resolved.reasoning,
     imagePolicy,
   };
 }
@@ -141,6 +192,9 @@ export function makeLlmConfig(
     provider?: string;
     capabilities?: ModelCapabilities;
     contextWindow?: number;
+    maxTokens?: number;
+    timeoutMs?: number;
+    reasoning?: boolean;
     imagePolicy?: ImagePolicy;
   },
 ): LlmConfig {
@@ -152,12 +206,30 @@ export function makeLlmConfig(
     model: partial.model,
     capabilities: partial.capabilities ?? resolved.capabilities,
     contextWindow: partial.contextWindow ?? resolved.contextWindow,
+    maxTokens: partial.maxTokens ?? resolved.maxTokens,
+    timeoutMs: partial.timeoutMs,
+    piModel: resolved.piModel,
+    reasoning: partial.reasoning ?? resolved.reasoning,
     imagePolicy: partial.imagePolicy ?? "placeholder",
   };
 }
 
-export function switchLlmModel(config: LlmConfig, model: ModelRef | string): LlmConfig {
-  const resolved = typeof model === "string" ? resolveModel(model) : model;
+export type ModelSwitchOverrides = {
+  baseUrl?: string;
+  apiKey?: string;
+};
+
+export function switchLlmModel(
+  config: LlmConfig,
+  model: ModelRef | string,
+  overrides: ModelSwitchOverrides = {},
+): LlmConfig {
+  const requestedBaseUrl = overrides.baseUrl?.trim().replace(/\/$/, "");
+  const resolved = typeof model === "string"
+    ? resolveModel(model, requestedBaseUrl)
+    : requestedBaseUrl
+      ? resolveModel(`${model.provider}/${model.id}`, requestedBaseUrl)
+      : model;
   const apiKey = resolved.apiKeyEnv
     .map((name) => process.env[name])
     .find((value): value is string => Boolean(value));
@@ -166,22 +238,26 @@ export function switchLlmModel(config: LlmConfig, model: ModelRef | string): Llm
   // current config, reuse the existing API key. This covers the case where
   // DeepSeek (or any provider) is configured via OPENAI_API_KEY + OPENAI_BASE_URL
   // rather than the provider-specific env var name.
-  const effectiveApiKey = apiKey
-    ?? (resolved.baseUrl === config.baseUrl ? config.apiKey : undefined);
+  const effectiveApiKey = overrides.apiKey?.trim()
+    || apiKey
+    || (resolved.baseUrl === config.baseUrl ? config.apiKey : undefined);
 
-  if (!effectiveApiKey) {
+  if (!effectiveApiKey && !resolved.piModel) {
     throw new Error(
       `Missing API key for model ${resolved.id}. Set one of: ${resolved.apiKeyEnv.join(", ")}.`,
     );
   }
   return {
     ...config,
-    apiKey: effectiveApiKey,
+    apiKey: effectiveApiKey ?? "",
     provider: resolved.provider,
     baseUrl: resolved.baseUrl,
     model: resolved.id,
     capabilities: resolved.capabilities,
     contextWindow: resolved.contextWindow,
+    maxTokens: resolved.maxTokens,
+    piModel: resolved.piModel,
+    reasoning: resolved.reasoning,
   };
 }
 
@@ -461,12 +537,159 @@ function mapToolCalls(
   });
 }
 
+function toPiContent(content: MessageContent): Array<PiTextContent | PiImageContent> {
+  const result: Array<PiTextContent | PiImageContent> = [];
+  for (const part of normalizeToParts(content)) {
+    if (part.type === "text") result.push({ type: "text", text: part.text });
+    else if (part.type === "vision_analysis") result.push({ type: "text", text: visionAnalysisAsText(part) });
+    else result.push({ type: "image", data: part.data, mimeType: part.mimeType });
+  }
+  return result;
+}
+
+function toPiMessages(messages: AgentMessage[]): { systemPrompt?: string; messages: PiMessage[] } {
+  const systemPrompt = messages
+    .filter((message) => message.role === "system")
+    .map((message) => message.content)
+    .join("\n\n") || undefined;
+  const converted: PiMessage[] = [];
+
+  for (const message of messages) {
+    if (message.role === "system") continue;
+    if (message.role === "user") {
+      converted.push({ role: "user", content: toPiContent(message.content), timestamp: Date.now() });
+    } else if (message.role === "assistant") {
+      converted.push({
+        role: "assistant",
+        content: [
+          ...(message.content ? [{ type: "text", text: message.content } satisfies PiTextContent] : []),
+          ...(message.toolCalls ?? []).map((call) => ({
+            type: "toolCall" as const,
+            id: call.id,
+            name: call.name,
+            arguments: call.arguments,
+          })),
+        ],
+        api: "openai-completions",
+        provider: "mini-agent",
+        model: "history",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: message.toolCalls?.length ? "toolUse" : "stop",
+        timestamp: Date.now(),
+      });
+    } else {
+      converted.push({
+        role: "toolResult",
+        toolCallId: message.toolCallId,
+        toolName: message.name,
+        content: toPiContent(message.content),
+        isError: Boolean(message.isError),
+        timestamp: Date.now(),
+      });
+    }
+  }
+  return { systemPrompt, messages: converted };
+}
+
+function toPiContext(messages: AgentMessage[], tools?: Tool[]): PiContext {
+  const converted = toPiMessages(messages);
+  return {
+    systemPrompt: converted.systemPrompt,
+    messages: converted.messages,
+    tools: tools?.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    } as PiTool)),
+  };
+}
+
+function fromPiAssistant(message: PiAssistantMessage): {
+  message: AssistantMessage;
+  usage: StreamChatUsage;
+} {
+  const text = message.content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("");
+  const toolCalls = message.content
+    .filter((part) => part.type === "toolCall")
+    .map((part) => ({ id: part.id, name: part.name, arguments: part.arguments }));
+  return {
+    message: {
+      role: "assistant",
+      content: text,
+      ...(toolCalls.length > 0 ? { toolCalls } : {}),
+    },
+    usage: {
+      promptTokens: message.usage.input,
+      completionTokens: message.usage.output,
+      totalTokens: message.usage.totalTokens,
+    },
+  };
+}
+
+async function completePiChat(
+  config: LlmConfig,
+  messages: AgentMessage[],
+  tools?: Tool[],
+  signal?: AbortSignal,
+): Promise<AssistantMessage> {
+  const model = config.piModel;
+  if (!model) throw new Error("Pi model configuration is missing");
+  const requestModel = config.baseUrl && config.baseUrl !== model.baseUrl
+    ? { ...model, baseUrl: config.baseUrl }
+    : model;
+  const result = await getPiModels().completeSimple(requestModel, toPiContext(messages, tools), {
+    maxTokens: config.maxTokens,
+    timeoutMs: requestTimeout(config),
+    signal,
+    apiKey: config.apiKey,
+    reasoning: config.reasoning ? "medium" : undefined,
+  });
+  return fromPiAssistant(result).message;
+}
+
+async function* streamPiChat(
+  config: LlmConfig,
+  messages: AgentMessage[],
+  tools?: Tool[],
+  signal?: AbortSignal,
+): AsyncGenerator<StreamChatEvent> {
+  const model = config.piModel;
+  if (!model) throw new Error("Pi model configuration is missing");
+  const requestModel = config.baseUrl && config.baseUrl !== model.baseUrl
+    ? { ...model, baseUrl: config.baseUrl }
+    : model;
+  const stream = getPiModels().streamSimple(requestModel, toPiContext(messages, tools), {
+    maxTokens: config.maxTokens,
+    timeoutMs: requestTimeout(config),
+    signal,
+    apiKey: config.apiKey,
+    reasoning: config.reasoning ? "medium" : undefined,
+  });
+  for await (const event of stream) {
+    if (event.type === "text_delta") {
+      yield { type: "text_delta", text: event.delta, kind: "answer" };
+    } else if (event.type === "thinking_delta") {
+      yield { type: "text_delta", text: event.delta, kind: "reasoning" };
+    } else if (event.type === "done") {
+      const converted = fromPiAssistant(event.message);
+      yield { type: "assistant", message: converted.message, usage: converted.usage };
+    } else if (event.type === "error") {
+      if (event.reason === "aborted") throw new DOMException("The operation was aborted", "AbortError");
+      throw new Error(event.error.errorMessage || "Pi provider stream failed");
+    }
+  }
+}
+
 export async function completeChat(
   config: LlmConfig,
   messages: AgentMessage[],
   tools?: Tool[],
   signal?: AbortSignal,
 ): Promise<AssistantMessage> {
+  if (config.piModel) return completePiChat(config, messages, tools, signal);
   const supportsImage = supportsImageInput(config.capabilities);
   const prepared = prepareMessagesForModel(messages, config);
 
@@ -476,6 +699,7 @@ export async function completeChat(
 
   const body: Record<string, unknown> = {
     model: config.model,
+    max_tokens: config.maxTokens,
     messages: toOpenAIMessages(prepared.messages, supportsImage),
   };
 
@@ -485,6 +709,7 @@ export async function completeChat(
   }
 
   const url = `${config.baseUrl}/chat/completions`;
+  const request = createRequestSignal(signal, requestTimeout(config));
   let response: Response;
   try {
     response = await fetch(url, {
@@ -494,15 +719,20 @@ export async function completeChat(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
-      signal,
+      signal: request.signal,
     });
   } catch (err) {
+    request.cleanup();
+    if (request.didTimeout()) {
+      throw new Error(`LLM request timed out after ${requestTimeout(config)}ms. Check the proxy URL and availability.`);
+    }
     if (isAbortError(err)) throw err;
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`LLM network error: ${message}`);
   }
 
   const rawText = await response.text();
+  request.cleanup();
   if (!response.ok) {
     throw new Error(
       `LLM HTTP ${response.status}: ${rawText.slice(0, 500) || response.statusText}`,
@@ -548,8 +778,13 @@ export type StreamChatUsage = {
   totalTokens: number;
 };
 
+export function isContextOverflowError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(context length|context window|maximum context|max context|too many tokens|prompt is too long|token limit|input.*token)/i.test(message);
+}
+
 export type StreamChatEvent =
-  | { type: "text_delta"; text: string }
+  | { type: "text_delta"; text: string; kind: "reasoning" | "answer" }
   | { type: "assistant"; message: AssistantMessage; usage?: StreamChatUsage };
 
 type ToolCallAccumulator = {
@@ -627,6 +862,10 @@ export async function* streamChat(
   tools?: Tool[],
   signal?: AbortSignal,
 ): AsyncGenerator<StreamChatEvent> {
+  if (config.piModel) {
+    yield* streamPiChat(config, messages, tools, signal);
+    return;
+  }
   const supportsImage = supportsImageInput(config.capabilities);
   const prepared = prepareMessagesForModel(messages, config);
 
@@ -637,6 +876,7 @@ export async function* streamChat(
   const body: Record<string, unknown> = {
     model: config.model,
     stream: true,
+    max_tokens: config.maxTokens,
     messages: toOpenAIMessages(prepared.messages, supportsImage),
   };
 
@@ -646,6 +886,7 @@ export async function* streamChat(
   }
 
   const url = `${config.baseUrl}/chat/completions`;
+  const request = createRequestSignal(signal, requestTimeout(config));
   let response: Response;
   try {
     response = await fetch(url, {
@@ -656,9 +897,13 @@ export async function* streamChat(
         Accept: "text/event-stream",
       },
       body: JSON.stringify(body),
-      signal,
+      signal: request.signal,
     });
   } catch (err) {
+    request.cleanup();
+    if (request.didTimeout()) {
+      throw new Error(`LLM request timed out after ${requestTimeout(config)}ms. Check the proxy URL and availability.`);
+    }
     if (isAbortError(err)) throw err;
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`LLM network error: ${message}`);
@@ -675,7 +920,7 @@ export async function* streamChat(
   const toolAcc = new Map<number, ToolCallAccumulator>();
   let usage: StreamChatUsage | undefined;
 
-  for await (const data of iterateSseDataLines(response, signal)) {
+  for await (const data of iterateSseDataLines(response, request.signal)) {
     let parsed: {
       usage?: {
         prompt_tokens?: number;
@@ -720,7 +965,7 @@ export async function* streamChat(
     if (choice.message && !choice.delta) {
       if (typeof choice.message.content === "string" && choice.message.content && !content) {
         content = choice.message.content;
-        yield { type: "text_delta", text: content };
+        yield { type: "text_delta", text: content, kind: "answer" };
       }
       if (choice.message.tool_calls) {
         for (const [index, tc] of choice.message.tool_calls.entries()) {
@@ -739,13 +984,12 @@ export async function* streamChat(
 
     // Emit reasoning_content as text deltas (DeepSeek reasoning models)
     if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) {
-      content += delta.reasoning_content;
-      yield { type: "text_delta", text: delta.reasoning_content };
+      yield { type: "text_delta", text: delta.reasoning_content, kind: "reasoning" };
     }
 
     if (typeof delta.content === "string" && delta.content.length > 0) {
       content += delta.content;
-      yield { type: "text_delta", text: delta.content };
+      yield { type: "text_delta", text: delta.content, kind: "answer" };
     }
 
     if (delta.tool_calls) {
@@ -765,6 +1009,13 @@ export async function* streamChat(
       }
     }
   }
+
+  if (request.didTimeout()) {
+    request.cleanup();
+    throw new Error(`LLM request timed out after ${requestTimeout(config)}ms. Check the proxy URL and availability.`);
+  }
+
+  request.cleanup();
 
   const rawToolCalls: OpenAIToolCall[] | undefined =
     toolAcc.size > 0

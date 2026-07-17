@@ -10,7 +10,7 @@ export type CommandDef = {
 };
 
 export const SLASH_COMMANDS: CommandDef[] = [
-  { name: "model", usage: "/model [ref]", description: "切换模型" },
+  { name: "model", usage: "/model [ref] [--base-url URL] [--api-key-env ENV]", description: "切换模型和网关" },
   { name: "read",  usage: "/read <path>",          description: "读取文件内容" },
   { name: "bash",  usage: "/bash <cmd>",            description: "执行 Shell 命令" },
   { name: "ls",    usage: "/ls [path]",             description: "列出目录" },
@@ -105,7 +105,7 @@ export function ModelPicker({ candidates, contextWindows, selectedIndex, query, 
   return (
     <Box flexDirection="column" paddingX={2}>
       <Text dimColor>── 模型 {query || "全部"} ──────────────</Text>
-      {visible.length === 0 && <Text color="yellow">没有匹配的已认证模型</Text>}
+      {visible.length === 0 && <Text color="yellow">没有匹配的模型</Text>}
       {visible.map((model, i) => {
         const index = start + i;
         return (

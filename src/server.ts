@@ -94,6 +94,14 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
       return {
         type: "assistant_delta",
         text: event.text,
+        kind: event.kind,
+      };
+    case "context_compacted":
+      return {
+        type: "context_compacted",
+        beforeTokens: event.beforeTokens,
+        afterTokens: event.afterTokens,
+        reason: event.reason,
       };
     case "assistant":
       return {
@@ -101,6 +109,8 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         content: event.message.content,
         tools: event.message.toolCalls?.map((call) => call.name) ?? [],
       };
+    case "error":
+      return { type: "error", message: event.message };
     case "tool_start":
       return {
         type: "tool_start",
@@ -338,6 +348,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     modelVision: options.llm.capabilities.input.includes("image"),
     visionPreprocessor: options.preprocessors?.length ? "enabled" : "disabled",
     contextWindow: resolveModel(options.llm.model, options.llm.baseUrl).contextWindow,
+    maxTokens: options.llm.maxTokens,
     workspace: path.basename(workspace),
     workspaceLabel: path.basename(workspace),
     maxImages: MAX_IMAGES,

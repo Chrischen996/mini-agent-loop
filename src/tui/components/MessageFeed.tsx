@@ -228,10 +228,22 @@ function ToolCallRow({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }>
 type MessageFeedProps = {
   messages: ChatMessage[];
   streamingText: string;
+  streamingReasoning?: string;
+  showThinking?: boolean;
+  busy?: boolean;
+  status?: string;
   maxMessages?: number;
 };
 
-export function MessageFeed({ messages, streamingText, maxMessages = 100 }: MessageFeedProps): React.ReactElement {
+export function MessageFeed({
+  messages,
+  streamingText,
+  streamingReasoning = "",
+  showThinking = true,
+  busy = false,
+  status = "思考中...",
+  maxMessages = 100,
+}: MessageFeedProps): React.ReactElement {
   const visible = messages.slice(-maxMessages);
 
   return (
@@ -248,7 +260,14 @@ export function MessageFeed({ messages, streamingText, maxMessages = 100 }: Mess
         if (msg.kind === "assistant") {
           return (
             <Box key={i} marginBottom={1} flexDirection="column">
-              <Text color="cyan" wrap="wrap">{msg.text}</Text>
+              {showThinking && msg.reasoning && (
+                <Box flexDirection="column" marginBottom={1} paddingLeft={1}>
+                  <Text dimColor italic>{"<think>"}</Text>
+                  <Text dimColor wrap="wrap">{msg.reasoning}</Text>
+                  <Text dimColor italic>{"</think>"}</Text>
+                </Box>
+              )}
+              {msg.text && <Text color="cyan" wrap="wrap">{msg.text}</Text>}
             </Box>
           );
         }
@@ -265,10 +284,25 @@ export function MessageFeed({ messages, streamingText, maxMessages = 100 }: Mess
         return null;
       })}
 
-      {/* Live streaming assistant text */}
+      {/* Live streaming reasoning */}
+      {showThinking && streamingReasoning ? (
+        <Box marginBottom={0} flexDirection="column" paddingLeft={1}>
+          <Text dimColor italic>{"<think>"}</Text>
+          <Text dimColor wrap="wrap">{streamingReasoning}</Text>
+        </Box>
+      ) : null}
+
+      {/* Live streaming answer text */}
       {streamingText ? (
         <Box marginBottom={1} flexDirection="column">
           <Text color="cyan" wrap="wrap">{streamingText}</Text>
+        </Box>
+      ) : null}
+
+      {busy && !streamingText && !streamingReasoning ? (
+        <Box marginBottom={1} gap={1}>
+          <Text color="yellow"><Spinner type="dots" /></Text>
+          <Text dimColor>{status}</Text>
         </Box>
       ) : null}
     </Box>

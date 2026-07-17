@@ -91,28 +91,29 @@ export OPENAI_MODEL=deepseek-chat
 DEEPSEEK_API_KEY=sk-...
 ```
 
-Get a key at [https://platform.deepseek.com](https://platform.deepseek.com). Prefer `deepseek-chat` (not `deepseek-reasoner`) for tool loops.
+Get a key at [https://platform.deepseek.com](https://platform.deepseek.com). The current default is `deepseek-v4-flash`.
 
 #### Model providers
 
-The main transport supports OpenAI Chat Completions compatible APIs. The built-in
-catalog includes OpenAI, DeepSeek, Google Gemini's OpenAI-compatible endpoint,
-DashScope/Qwen, Zhipu GLM, Moonshot/Kimi, xAI, Mistral, Groq, OpenRouter, and
-SiliconFlow. Configure a provider key and run the Ink TUI, then use `/model`:
+The built-in catalog contains the generated multi-provider model definitions.
+Run the Ink TUI, then use `/model` to search all adapted models:
 
 ```bash
 npm run tui:ink
 
 # examples inside the TUI
 /model
-/model deepseek-chat
+/model deepseek/deepseek-v4-flash
 /model google/gemini-2.5-pro
 /model openrouter/anthropic/claude-sonnet-4
+# use a custom OpenAI-compatible gateway and an environment-stored key
+/model openai/gpt-4.1 --base-url https://llm.example/v1 --api-key-env COMPANY_LLM_KEY
 ```
 
-Claude entries use OpenRouter because Anthropic's native Messages API is not the
-same wire protocol. A model is not shown merely because it exists in the static
-catalog; its provider key must be configured.
+Models are shown even when their provider credential is not configured. Selecting
+one does not persist the key; the provider validates credentials when the next
+request is sent. `--api-key VALUE` is also supported for a temporary in-memory
+override, but `--api-key-env ENV_NAME` is preferred.
 
 For a new model or private OpenAI-compatible gateway, add it without changing
 source code:
@@ -264,7 +265,8 @@ the local `/model` selector:
 npm run tui
 ```
 
-Use `/model`, `/clear`, `/quit`, or `Ctrl+C` inside the terminal client. The
+Use `/model`, `/clear`, `/quit`, or `Ctrl+C` inside the terminal client. `/model`
+also accepts `--base-url`, `--api-key-env`, and temporary `--api-key` overrides. The
 previous dependency-free ANSI client remains available as `npm run tui:legacy`.
 
 ## Test (offline)

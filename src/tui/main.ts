@@ -97,6 +97,9 @@ function handleEvent(state: TuiState, event: LoopEvent): void {
       state.streamingText = "";
       state.status = event.message.toolCalls?.length ? "准备执行工具..." : "";
       break;
+    case "context_compacted":
+      state.status = `上下文已压缩 ${event.beforeTokens} → ${event.afterTokens} tokens`;
+      break;
     case "tool_start":
       state.tools.push({ id: event.call.id, name: event.call.name, status: "running" });
       state.status = `正在执行 ${event.call.name}...`;

@@ -84,11 +84,13 @@ describe("completeChat wire protocol", () => {
 
       const body = JSON.parse(String(requestInit?.body)) as {
         model: string;
+        max_tokens: number;
         messages: Array<Record<string, unknown>>;
         tools: Array<Record<string, unknown>>;
         tool_choice: string;
       };
       assert.equal(body.model, "deepseek-chat");
+      assert.equal(body.max_tokens, 16384);
       assert.equal(body.tool_choice, "auto");
       assert.equal(body.messages[3]?.role, "tool");
       assert.equal(body.messages[3]?.tool_call_id, "call_previous");

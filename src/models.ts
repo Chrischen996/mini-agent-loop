@@ -1,3 +1,6 @@
+import { builtinModels } from "./pi-ai/providers/all.ts";
+import type { Api, Model as PiModel } from "./pi-ai/types.ts";
+
 export type ModelCapabilities = {
   input: Array<"text" | "image">;
   tools: boolean;
@@ -5,13 +8,20 @@ export type ModelCapabilities = {
 
 export type ModelRef = {
   id: string;
+  name: string;
   provider: string;
-  /** This transport currently supports OpenAI Chat Completions compatible APIs. */
-  protocol: "openai-compatible";
+  api: Api;
+  protocol: "pi" | "openai-compatible";
   baseUrl: string;
   apiKeyEnv: string[];
   capabilities: ModelCapabilities;
   contextWindow: number;
+  maxTokens: number;
+  reasoning: boolean;
+  thinkingLevelMap?: Record<string, string | null>;
+  cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  compat?: Record<string, unknown>;
+  piModel?: PiModel<Api>;
 };
 
 export type ModelReferenceMatch = {
@@ -25,166 +35,85 @@ export type ModelReferenceMatch = {
 
 export type ImagePolicy = "placeholder" | "fail" | "strip";
 
-type ModelPreset = {
-  provider: string;
-  baseUrl: string;
-  apiKeyEnv: string[];
-  models: Array<{
-    id: string;
-    contextWindow: number;
-    vision?: boolean;
-    tools?: boolean;
-  }>;
+const PROVIDER_ENV_KEYS: Record<string, string[]> = {
+  "amazon-bedrock": ["AWS_ACCESS_KEY_ID", "AWS_PROFILE", "AWS_REGION"],
+  "ant-ling": ["ANT_LING_API_KEY"],
+  anthropic: ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+  "azure-openai-responses": ["AZURE_OPENAI_API_KEY"],
+  cerebras: ["CEREBRAS_API_KEY"],
+  "cloudflare-ai-gateway": ["CLOUDFLARE_AI_GATEWAY_API_KEY"],
+  "cloudflare-workers-ai": ["CLOUDFLARE_API_TOKEN"],
+  deepseek: ["DEEPSEEK_API_KEY"],
+  fireworks: ["FIREWORKS_API_KEY"],
+  "github-copilot": ["COPILOT_GITHUB_TOKEN"],
+  google: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+  "google-vertex": ["GOOGLE_CLOUD_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS"],
+  groq: ["GROQ_API_KEY"],
+  huggingface: ["HF_TOKEN", "HUGGINGFACE_API_KEY"],
+  "kimi-coding": ["KIMI_API_KEY"],
+  minimax: ["MINIMAX_API_KEY"],
+  "minimax-cn": ["MINIMAX_CN_API_KEY"],
+  mistral: ["MISTRAL_API_KEY"],
+  moonshotai: ["MOONSHOT_API_KEY"],
+  "moonshotai-cn": ["MOONSHOT_API_KEY"],
+  nvidia: ["NVIDIA_API_KEY"],
+  openai: ["OPENAI_API_KEY"],
+  "openai-codex": ["OPENAI_CODEX_AUTH_JSON", "OPENAI_API_KEY"],
+  opencode: ["OPENCODE_API_KEY"],
+  "opencode-go": ["OPENCODE_API_KEY"],
+  openrouter: ["OPENROUTER_API_KEY"],
+  together: ["TOGETHER_API_KEY"],
+  "vercel-ai-gateway": ["AI_GATEWAY_API_KEY"],
+  xai: ["XAI_API_KEY"],
+  xiaomi: ["XIAOMI_API_KEY"],
+  "xiaomi-token-plan-cn": ["XIAOMI_API_KEY"],
+  "xiaomi-token-plan-ams": ["XIAOMI_API_KEY"],
+  "xiaomi-token-plan-sgp": ["XIAOMI_API_KEY"],
+  zai: ["ZAI_API_KEY"],
+  "zai-coding-cn": ["ZAI_CODING_CN_API_KEY"],
 };
 
-const PRESETS: ModelPreset[] = [
-  {
-    provider: "deepseek",
-    baseUrl: "https://api.deepseek.com/v1",
-    apiKeyEnv: ["DEEPSEEK_API_KEY"],
-    models: [
-      // Current production models (verified via /v1/models)
-      { id: "deepseek-v4-flash", contextWindow: 131072 },
-      { id: "deepseek-v4-pro", contextWindow: 131072 },
-      // Legacy / classic models (may be available on some plans)
-      { id: "deepseek-chat", contextWindow: 65536 },
-      { id: "deepseek-reasoner", contextWindow: 65536 },
-    ],
-  },
-  {
-    provider: "openai",
-    baseUrl: "https://api.openai.com/v1",
-    apiKeyEnv: ["OPENAI_API_KEY"],
-    models: [
-      { id: "gpt-4.1", contextWindow: 1047576, vision: true },
-      { id: "gpt-4.1-mini", contextWindow: 1047576, vision: true },
-      { id: "gpt-4.1-nano", contextWindow: 1047576, vision: true },
-      { id: "gpt-4o", contextWindow: 128000, vision: true },
-      { id: "gpt-4o-mini", contextWindow: 128000, vision: true },
-      { id: "o3", contextWindow: 200000, vision: true },
-      { id: "o4-mini", contextWindow: 200000, vision: true },
-    ],
-  },
-  {
-    provider: "google",
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    apiKeyEnv: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-    models: [
-      { id: "gemini-2.5-pro", contextWindow: 1048576, vision: true },
-      { id: "gemini-2.5-flash", contextWindow: 1048576, vision: true },
-      { id: "gemini-2.0-flash", contextWindow: 1048576, vision: true },
-    ],
-  },
-  {
-    provider: "dashscope",
-    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    apiKeyEnv: ["DASHSCOPE_API_KEY"],
-    models: [
-      { id: "qwen-max", contextWindow: 32768 },
-      { id: "qwen-plus", contextWindow: 131072 },
-      { id: "qwen-turbo", contextWindow: 1000000 },
-      { id: "qwen3-235b-a22b", contextWindow: 131072 },
-      { id: "qwen-vl-max", contextWindow: 131072, vision: true },
-      { id: "qwen-vl-plus", contextWindow: 131072, vision: true },
-    ],
-  },
-  {
-    provider: "zhipu",
-    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-    apiKeyEnv: ["ZHIPU_API_KEY"],
-    models: [
-      { id: "glm-4-plus", contextWindow: 128000 },
-      { id: "glm-4-air", contextWindow: 128000 },
-      { id: "glm-4-flash", contextWindow: 128000 },
-      { id: "glm-4v-plus", contextWindow: 8192, vision: true },
-    ],
-  },
-  {
-    provider: "moonshot",
-    baseUrl: "https://api.moonshot.cn/v1",
-    apiKeyEnv: ["MOONSHOT_API_KEY"],
-    models: [
-      { id: "moonshot-v1-8k", contextWindow: 8192 },
-      { id: "moonshot-v1-32k", contextWindow: 32768 },
-      { id: "moonshot-v1-128k", contextWindow: 131072 },
-      { id: "kimi-k2-0711-preview", contextWindow: 131072 },
-    ],
-  },
-  {
-    provider: "xai",
-    baseUrl: "https://api.x.ai/v1",
-    apiKeyEnv: ["XAI_API_KEY"],
-    models: [
-      { id: "grok-3", contextWindow: 131072 },
-      { id: "grok-3-mini", contextWindow: 131072 },
-      { id: "grok-4", contextWindow: 256000, vision: true },
-    ],
-  },
-  {
-    provider: "mistral",
-    baseUrl: "https://api.mistral.ai/v1",
-    apiKeyEnv: ["MISTRAL_API_KEY"],
-    models: [
-      { id: "mistral-large-latest", contextWindow: 131072 },
-      { id: "mistral-small-latest", contextWindow: 32768 },
-      { id: "codestral-latest", contextWindow: 256000 },
-      { id: "pixtral-large-latest", contextWindow: 131072, vision: true },
-    ],
-  },
-  {
-    provider: "groq",
-    baseUrl: "https://api.groq.com/openai/v1",
-    apiKeyEnv: ["GROQ_API_KEY"],
-    models: [
-      { id: "llama-3.3-70b-versatile", contextWindow: 131072 },
-      { id: "meta-llama/llama-4-maverick-17b-128e-instruct", contextWindow: 131072, vision: true },
-      { id: "qwen/qwen3-32b", contextWindow: 131072 },
-    ],
-  },
-  {
-    provider: "openrouter",
-    baseUrl: "https://openrouter.ai/api/v1",
-    apiKeyEnv: ["OPENROUTER_API_KEY"],
-    models: [
-      { id: "anthropic/claude-sonnet-4", contextWindow: 200000, vision: true },
-      { id: "anthropic/claude-opus-4", contextWindow: 200000, vision: true },
-      { id: "google/gemini-2.5-pro", contextWindow: 1048576, vision: true },
-      { id: "meta-llama/llama-4-maverick", contextWindow: 1048576, vision: true },
-      { id: "x-ai/grok-3", contextWindow: 131072 },
-      { id: "mistralai/mistral-large", contextWindow: 131072 },
-    ],
-  },
-  {
-    provider: "siliconflow",
-    baseUrl: "https://api.siliconflow.cn/v1",
-    apiKeyEnv: ["SILICONFLOW_API_KEY"],
-    models: [
-      { id: "deepseek-ai/DeepSeek-V3", contextWindow: 65536 },
-      { id: "deepseek-ai/DeepSeek-R1", contextWindow: 65536 },
-      { id: "Qwen/Qwen3-235B-A22B", contextWindow: 131072 },
-      { id: "meta-llama/Llama-4-Maverick-17B-128E-Instruct", contextWindow: 131072, vision: true },
-    ],
-  },
-];
+const piRuntime = builtinModels();
 
-const BUILT_IN_MODELS = PRESETS.flatMap((preset) =>
-  preset.models.map<ModelRef>((model) => ({
+function supportsNativeCustomBaseUrl(model: ModelRef): boolean {
+  return model.api === "anthropic-messages";
+}
+
+function toModelRef(model: PiModel<Api>): ModelRef {
+  return {
     id: model.id,
-    provider: preset.provider,
-    protocol: "openai-compatible",
-    baseUrl: preset.baseUrl,
-    apiKeyEnv: preset.apiKeyEnv,
+    name: model.name,
+    provider: model.provider,
+    api: model.api,
+    protocol: "pi",
+    baseUrl: model.baseUrl,
+    apiKeyEnv: PROVIDER_ENV_KEYS[model.provider] ?? [],
     capabilities: {
-      input: model.vision ? ["text", "image"] : ["text"],
-      tools: model.tools ?? true,
+      input: model.input,
+      tools: true,
     },
     contextWindow: model.contextWindow,
-  })),
-);
+    maxTokens: model.maxTokens,
+    reasoning: model.reasoning,
+    thinkingLevelMap: model.thinkingLevelMap,
+    cost: model.cost,
+    compat: model.compat as Record<string, unknown> | undefined,
+    piModel: model,
+  };
+}
 
-export const MODEL_REGISTRY: Record<string, ModelRef> = Object.fromEntries(
-  BUILT_IN_MODELS.map((model) => [model.id, model]),
-);
+const BUILT_IN_MODELS = piRuntime.getModels().map(toModelRef);
+
+export const MODEL_REGISTRY: Record<string, ModelRef> = {};
+for (const model of BUILT_IN_MODELS) {
+  MODEL_REGISTRY[model.id] ??= model;
+}
+
+function positiveInteger(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : fallback;
+}
 
 function parseCustomModels(raw: string | undefined): ModelRef[] {
   if (!raw?.trim()) return [];
@@ -204,17 +133,22 @@ function parseCustomModels(raw: string | undefined): ModelRef[] {
       ? item.apiKeyEnv.filter((name): name is string => typeof name === "string")
       : typeof item.apiKeyEnv === "string" ? [item.apiKeyEnv] : [];
     if (apiKeyEnv.length === 0) continue;
-    const input = Array.isArray(item.input) && item.input.includes("image")
-      ? ["text", "image"] as Array<"text" | "image">
-      : ["text"] as Array<"text" | "image">;
+    const contextWindow = positiveInteger(item.contextWindow, 128000);
     models.push({
       id: item.id,
+      name: typeof item.name === "string" ? item.name : item.id,
       provider: item.provider,
+      api: "openai-completions",
       protocol: "openai-compatible",
       baseUrl: item.baseUrl.replace(/\/$/, ""),
       apiKeyEnv,
-      capabilities: { input, tools: item.tools !== false },
-      contextWindow: typeof item.contextWindow === "number" ? item.contextWindow : 128000,
+      capabilities: {
+        input: Array.isArray(item.input) && item.input.includes("image") ? ["text", "image"] : ["text"],
+        tools: item.tools !== false,
+      },
+      contextWindow,
+      maxTokens: Math.min(positiveInteger(item.maxTokens, 16384), Math.max(1, contextWindow - 1)),
+      reasoning: item.reasoning === true,
     });
   }
   return models;
@@ -227,9 +161,10 @@ export function getAllModels(env: NodeJS.ProcessEnv = process.env): ModelRef[] {
 }
 
 export function getAvailableModels(env: NodeJS.ProcessEnv = process.env): ModelRef[] {
-  return getAllModels(env).filter((model) =>
-    model.apiKeyEnv.some((name) => Boolean(env[name])),
-  );
+  return getAllModels(env).filter((model) => {
+    if (model.protocol === "openai-compatible") return model.apiKeyEnv.some((name) => Boolean(env[name]));
+    return model.apiKeyEnv.length === 0 || model.apiKeyEnv.some((name) => Boolean(env[name]));
+  });
 }
 
 export function findExactModelReferenceMatch(
@@ -238,54 +173,60 @@ export function findExactModelReferenceMatch(
 ): ModelReferenceMatch | undefined {
   const normalized = reference.trim().toLowerCase();
   if (!normalized) return undefined;
-  const qualifiedMatches = models.filter((model) =>
-    `${model.provider}/${model.id}`.toLowerCase() === normalized,
-  );
-  const matches = qualifiedMatches.length > 0
-    ? qualifiedMatches
-    : models.filter((model) => model.id.toLowerCase() === normalized);
+  const usableModels = models.filter((model): model is ModelRef => Boolean(model));
+  const qualifiedMatches = usableModels.filter((model) => `${model.provider}/${model.id}`.toLowerCase() === normalized);
+  const matches = qualifiedMatches.length > 0 ? qualifiedMatches : usableModels.filter((model) => model.id.toLowerCase() === normalized);
   if (matches.length === 0) return undefined;
   if (matches.length > 1) return { ambiguous: true, matches };
   return { model: matches[0] };
 }
 
-function inferProvider(baseUrl: string): { provider: string; apiKeyEnv: string[] } {
-  const url = baseUrl.toLowerCase();
-  for (const preset of PRESETS) {
-    try {
-      if (url.includes(new URL(preset.baseUrl).hostname)) {
-        return { provider: preset.provider, apiKeyEnv: preset.apiKeyEnv };
-      }
-    } catch {
-      // Ignore malformed custom URLs and use the generic fallback.
-    }
-  }
-  return { provider: "custom", apiKeyEnv: ["OPENAI_API_KEY"] };
-}
-
 export function resolveModel(modelId: string, baseUrl?: string): ModelRef {
+  const legacyAliases: Record<string, string> = {
+    "deepseek-chat": "deepseek-v4-flash",
+    "deepseek/deepseek-chat": "deepseek/deepseek-v4-flash",
+    "deepseek-reasoner": "deepseek-v4-pro",
+    "deepseek/deepseek-reasoner": "deepseek/deepseek-v4-pro",
+  };
+  modelId = legacyAliases[modelId.trim().toLowerCase()] ?? modelId;
   const normalizedBaseUrl = baseUrl?.replace(/\/$/, "");
   const all = getAllModels();
-  const exactReference = findExactModelReferenceMatch(modelId, all);
-  if (exactReference?.model && !exactReference.ambiguous) {
-    return { ...exactReference.model, baseUrl: normalizedBaseUrl || exactReference.model.baseUrl };
+  const exact = findExactModelReferenceMatch(modelId, all);
+  if (exact?.model && !exact.ambiguous) {
+    const matched = exact.model;
+    return {
+      ...matched,
+      baseUrl: normalizedBaseUrl || matched.baseUrl,
+      piModel: normalizedBaseUrl && normalizedBaseUrl !== matched.baseUrl
+        ? supportsNativeCustomBaseUrl(matched) ? matched.piModel : undefined
+        : matched.piModel,
+    };
   }
   const idMatches = all.filter((model) => model.id.toLowerCase() === modelId.toLowerCase());
   const known = normalizedBaseUrl
     ? idMatches.find((model) => normalizedBaseUrl.startsWith(model.baseUrl) || model.baseUrl.startsWith(normalizedBaseUrl))
-    : idMatches[0];
-  if (known) return { ...known, baseUrl: normalizedBaseUrl || known.baseUrl };
-
-  const fallbackBaseUrl = normalizedBaseUrl || "https://api.openai.com/v1";
-  const inferred = inferProvider(fallbackBaseUrl);
+    : idMatches.find((model) => model.apiKeyEnv.some((name) => Boolean(process.env[name]))) ?? idMatches[0];
+  if (known) {
+    return {
+      ...known,
+      baseUrl: normalizedBaseUrl || known.baseUrl,
+      piModel: normalizedBaseUrl && normalizedBaseUrl !== known.baseUrl
+        ? supportsNativeCustomBaseUrl(known) ? known.piModel : undefined
+        : known.piModel,
+    };
+  }
   return {
     id: modelId,
-    provider: inferred.provider,
+    name: modelId,
+    provider: "custom",
+    api: "openai-completions",
     protocol: "openai-compatible",
-    baseUrl: fallbackBaseUrl,
-    apiKeyEnv: inferred.apiKeyEnv,
+    baseUrl: normalizedBaseUrl || "https://api.openai.com/v1",
+    apiKeyEnv: ["OPENAI_API_KEY"],
     capabilities: { input: ["text"], tools: true },
     contextWindow: 128000,
+    maxTokens: 16384,
+    reasoning: false,
   };
 }
 
@@ -296,4 +237,8 @@ export function supportsImageInput(capabilities: ModelCapabilities): boolean {
 export function parseImagePolicy(raw: string | undefined): ImagePolicy {
   if (raw === "fail" || raw === "strip" || raw === "placeholder") return raw;
   return "placeholder";
+}
+
+export function getPiModels(): typeof piRuntime {
+  return piRuntime;
 }
