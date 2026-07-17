@@ -31,6 +31,8 @@ type TuiState = {
 };
 
 const ANSI = {
+  alternateScreen: "\x1b[?1049h",
+  mainScreen: "\x1b[?1049l",
   clear: "\x1b[2J\x1b[H",
   hideCursor: "\x1b[?25l",
   showCursor: "\x1b[?25h",
@@ -70,7 +72,8 @@ function render(state: TuiState): void {
   }
 
   lines.push("", `${ANSI.dim}${state.status}${ANSI.reset}`, `${state.busy ? "" : "> "}${state.input}`);
-  process.stdout.write(ANSI.clear + lines.join("\n"));
+  // Redraw inside the alternate screen so raw-mode keystrokes replace the frame.
+  process.stdout.write(`${ANSI.clear}${lines.join("\n")}`);
 }
 
 function handleEvent(state: TuiState, event: LoopEvent): void {
@@ -130,11 +133,14 @@ async function main(): Promise<void> {
   };
   const abortController = new AbortController();
   const tools = createDefaultTools(cwd);
+  let screenActive = false;
 
   const cleanup = () => {
+    if (!screenActive) return;
+    screenActive = false;
     if (process.stdin.isRaw) process.stdin.setRawMode(false);
     process.stdin.pause();
-    process.stdout.write(`${ANSI.showCursor}\n`);
+    process.stdout.write(`${ANSI.showCursor}${ANSI.mainScreen}`);
   };
   const quit = () => {
     abortController.abort();
@@ -142,7 +148,8 @@ async function main(): Promise<void> {
     process.exit(0);
   };
 
-  process.stdout.write(ANSI.hideCursor);
+  process.stdout.write(`${ANSI.alternateScreen}${ANSI.hideCursor}`);
+  screenActive = true;
   process.stdin.setRawMode(true);
   process.stdin.resume();
   process.stdin.setEncoding("utf8");
