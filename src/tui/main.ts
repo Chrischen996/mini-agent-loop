@@ -42,6 +42,7 @@ const ANSI = {
   green: "\x1b[32m",
   yellow: "\x1b[33m",
   red: "\x1b[31m",
+  moveTo: (row: number, col: number) => `\x1b[${row};${col}H`,
 };
 
 function short(value: string, max = 160): string {
@@ -74,6 +75,16 @@ function render(state: TuiState): void {
   lines.push("", `${ANSI.dim}${state.status}${ANSI.reset}`, `${state.busy ? "" : "> "}${state.input}`);
   // Redraw inside the alternate screen so raw-mode keystrokes replace the frame.
   process.stdout.write(`${ANSI.clear}${lines.join("\n")}`);
+
+  if (state.busy) {
+    // Hide cursor while model is running so it doesn't flicker around.
+    process.stdout.write(ANSI.hideCursor);
+  } else {
+    // Position cursor at end of the input line and make it visible.
+    const inputRow = lines.length; // 1-based: last line
+    const inputCol = 3 + state.input.length; // "> " = 2 chars, then input text
+    process.stdout.write(`${ANSI.moveTo(inputRow, inputCol)}${ANSI.showCursor}`);
+  }
 }
 
 function handleEvent(state: TuiState, event: LoopEvent): void {
@@ -186,6 +197,7 @@ async function main(): Promise<void> {
         },
       });
       state.pendingUser = undefined;
+      render(state);
     } catch (error) {
       state.pendingUser = undefined;
       state.busy = false;
