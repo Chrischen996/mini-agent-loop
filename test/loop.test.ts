@@ -201,6 +201,122 @@ describe("runAgentTurn", () => {
     assert.ok(events.some((event) => event.type === "context_compacted" && event.reason === "provider context overflow"));
   });
 
+  it("prepareNextTurn: switches model between turns and emits model_switched event", async () => {
+    const modelsUsed: string[] = [];
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+
+    // Turn 1: returns a tool call. Turn 2: returns plain text (after model switch).
+    let callCount = 0;
+    const chat = async (
+      config: typeof dummyLlm,
+      _messages: import("../src/types.ts").AgentMessage[],
+      _tools: unknown,
+    ): Promise<import("../src/types.ts").AssistantMessage> => {
+      modelsUsed.push(config.model);
+      callCount += 1;
+      if (callCount === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_1", name: "read", arguments: { path: "package.json" } }],
+        };
+      }
+      return { role: "assistant", content: "done" };
+    };
+
+    const altLlm = makeLlmConfig({
+      apiKey: "alt-key",
+      baseUrl: "http://localhost/v1",
+      model: "gpt-4o",
+    });
+
+    const messages = await runAgentTurn(createAgentHistory(), "go", {
+      llm: dummyLlm,
+      tools: createDefaultTools(process.cwd()),
+      chat,
+      onEvent: (event) => events.push(event),
+      prepareNextTurn: ({ toolResults, currentLlm }) => {
+        // After a turn with tool calls, switch to altLlm
+        if (toolResults.length > 0 && currentLlm.model !== altLlm.model) {
+          return { llm: altLlm };
+        }
+      },
+    });
+
+    assert.equal(modelsUsed[0], "faux", "first turn uses original model");
+    assert.equal(modelsUsed[1], "gpt-4o", "second turn uses switched model");
+    const switchEvent = events.find((e) => e.type === "model_switched");
+    assert.ok(switchEvent && switchEvent.type === "model_switched");
+    if (switchEvent?.type === "model_switched") {
+      assert.equal(switchEvent.previousModel, "faux");
+      assert.equal(switchEvent.nextModel, "gpt-4o");
+      assert.equal(switchEvent.turn, 1);
+    }
+    assert.equal(messages.at(-1)?.role, "assistant");
+  });
+
+  it("prepareNextTurn: no update returned leaves model unchanged", async () => {
+    const modelsUsed: string[] = [];
+    let callCount = 0;
+    const chat = async (
+      config: typeof dummyLlm,
+    ): Promise<import("../src/types.ts").AssistantMessage> => {
+      modelsUsed.push(config.model);
+      callCount += 1;
+      if (callCount === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_2", name: "read", arguments: { path: "package.json" } }],
+        };
+      }
+      return { role: "assistant", content: "unchanged" };
+    };
+
+    await runAgentTurn(createAgentHistory(), "go", {
+      llm: dummyLlm,
+      tools: createDefaultTools(process.cwd()),
+      chat,
+      prepareNextTurn: () => undefined,
+    });
+
+    assert.ok(modelsUsed.every((m) => m === "faux"), "model stays unchanged");
+  });
+
+  it("prepareNextTurn: receives correct TurnContext fields", async () => {
+    let capturedCtx: import("../src/loop.ts").TurnContext | undefined;
+    let callCount = 0;
+    const chat = async (): Promise<import("../src/types.ts").AssistantMessage> => {
+      callCount += 1;
+      if (callCount === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_3", name: "read", arguments: { path: "package.json" } }],
+        };
+      }
+      return { role: "assistant", content: "ctx-verified" };
+    };
+
+    await runAgentTurn(createAgentHistory(), "verify ctx", {
+      llm: dummyLlm,
+      tools: createDefaultTools(process.cwd()),
+      chat,
+      prepareNextTurn: (ctx) => {
+        // Capture only the first call (turn with tool results)
+        if (!capturedCtx) capturedCtx = ctx;
+        return undefined;
+      },
+    });
+
+    assert.ok(capturedCtx, "prepareNextTurn was called");
+    assert.equal(capturedCtx?.turn, 1);
+    assert.equal(capturedCtx?.currentLlm.model, "faux");
+    assert.ok(Array.isArray(capturedCtx?.toolResults) && capturedCtx.toolResults.length === 1);
+    assert.ok(capturedCtx?.messages.length > 0);
+    assert.equal(capturedCtx?.assistantMessage.role, "assistant");
+  });
+
   it("preserves history without repeating the system message", async () => {
     const chat = async (
       _config: typeof dummyLlm,

@@ -169,7 +169,6 @@ export function App({ cwd }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const termWidth = stdout?.columns ?? 80;
-  const [showThinking, setShowThinking] = useState(true);
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const vision = loadVisionConfigFromEnv();
   const allToolsRef = useRef<Tool[]>(createAllTools(cwd));
@@ -179,6 +178,33 @@ export function App({ cwd }: AppProps): React.ReactElement {
   const [input, setInput] = useState("");
   const historyRef = useRef<AgentMessage[]>(createAgentHistory());
   const abortRef = useRef<AbortController>(new AbortController());
+  // ink-text-input still receives the same keystroke as useInput; after Ctrl/Alt+T
+  // it may append "t" (or a control char). Swallow that one onChange tick.
+  const suppressInputEchoRef = useRef(false);
+
+  // Throttle assistant_delta events to reduce TUI flicker during streaming.
+  // Buffer deltas and flush every 50ms instead of dispatching each token immediately.
+  const deltaBufferRef = useRef<{ text: string; kind: "reasoning" | "answer" }>({ text: "", kind: "answer" });
+  const deltaTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup delta timer on unmount
+  useEffect(() => {
+    return () => {
+      if (deltaTimerRef.current) {
+        clearTimeout(deltaTimerRef.current);
+        deltaTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const setInputSafe = useCallback((value: string) => {
+    if (suppressInputEchoRef.current) {
+      suppressInputEchoRef.current = false;
+      return;
+    }
+    // Drop control characters that terminals may inject with Ctrl/Alt combos.
+    setInput(value.replace(/[\u0000-\u001F\u007F]/g, ""));
+  }, []);
 
   // ── autocomplete state ───────────────────────────────────────────────────
   const [acMode, setAcMode] = useState<AcMode>(null);
@@ -358,8 +384,30 @@ export function App({ cwd }: AppProps): React.ReactElement {
   // ── keyboard handler ─────────────────────────────────────────────────────
 
   useInput((_ch: string, key: Key) => {
-    if (key.ctrl && _ch === "c") { abortRef.current.abort(); exit(); return; }
-    if (key.ctrl && _ch === "t") { setShowThinking((v) => !v); return; }
+    if (key.ctrl && (_ch === "c" || _ch === "C")) { abortRef.current.abort(); exit(); return; }
+
+    // Ctrl+T: cycle global thinking mode (hidden → summary → full)
+    // Some terminals report ctrl+t as input="t" + key.ctrl, others as a control char.
+    if (key.ctrl && (_ch === "t" || _ch === "T" || _ch === "\u0014")) {
+      suppressInputEchoRef.current = true;
+      dispatch({ type: "TOGGLE_THINKING_MODE" });
+      return;
+    }
+    // Alt+T: toggle expand/collapse of focused (or last) reasoning message.
+    if (key.meta && (_ch === "t" || _ch === "T") && !key.ctrl) {
+      suppressInputEchoRef.current = true;
+      dispatch({ type: "TOGGLE_MESSAGE_THINKING" });
+      return;
+    }
+    // Alt+↑ / Alt+↓: move focus among reasoning messages
+    if (!acMode && key.meta && key.upArrow) {
+      dispatch({ type: "FOCUS_NEXT_REASONING", direction: -1 });
+      return;
+    }
+    if (!acMode && key.meta && key.downArrow) {
+      dispatch({ type: "FOCUS_NEXT_REASONING", direction: 1 });
+      return;
+    }
 
     if (acMode === "model-setup") {
       if (key.escape) {
@@ -508,7 +556,29 @@ export function App({ cwd }: AppProps): React.ReactElement {
         preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
         signal: abortRef.current.signal,
         userContent,
-        onEvent: (event: LoopEvent) => { dispatch({ type: "LOOP_EVENT", event }); },
+        onEvent: (event: LoopEvent) => {
+          // Throttle assistant_delta to reduce flicker
+          if (event.type === "assistant_delta") {
+            deltaBufferRef.current.text += event.text;
+            deltaBufferRef.current.kind = event.kind;
+            if (!deltaTimerRef.current) {
+              deltaTimerRef.current = setTimeout(() => {
+                const buffered = deltaBufferRef.current;
+                if (buffered.text) {
+                  dispatch({
+                    type: "LOOP_EVENT",
+                    event: { type: "assistant_delta", text: buffered.text, kind: buffered.kind },
+                  });
+                  deltaBufferRef.current = { text: "", kind: "answer" };
+                }
+                deltaTimerRef.current = null;
+              }, 50);
+            }
+            return;
+          }
+          // All other events dispatch immediately
+          dispatch({ type: "LOOP_EVENT", event });
+        },
       });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -531,7 +601,9 @@ export function App({ cwd }: AppProps): React.ReactElement {
         messages={state.messages}
         streamingText={state.streamingText}
         streamingReasoning={state.streamingReasoning}
-        showThinking={showThinking}
+        thinkingMode={state.thinkingMode}
+        expandedThinking={state.expandedThinking}
+        focusedMessageIndex={state.focusedMessageIndex}
         busy={state.busy}
         status={state.status}
       />
@@ -586,7 +658,7 @@ export function App({ cwd }: AppProps): React.ReactElement {
             : (
               <TextInput
                 value={input}
-                onChange={setInput}
+                onChange={setInputSafe}
                 mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
                 onSubmit={(val) => {
                   if ((acMode === "model" || acMode === "model-picker") && modelCandidates[acIndex]) {
@@ -605,7 +677,7 @@ export function App({ cwd }: AppProps): React.ReactElement {
             )
           }
         </Box>
-        <Text dimColor>[think:{showThinking ? "on" : "off"}]  {state.modelName} · {state.contextTokens > 0 ? `${formatContextWindow(state.contextTokens)} / ` : ""}{formatContextWindow(llm.contextWindow)}</Text>
+        <Text dimColor>[think:{state.thinkingMode}] [Ctrl+T/Alt+T]  {state.modelName} · {state.contextTokens > 0 ? `${formatContextWindow(state.contextTokens)} / ` : ""}{formatContextWindow(llm.contextWindow)}</Text>
       </Box>
     </Box>
   );

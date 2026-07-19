@@ -6,6 +6,11 @@ export type MessageRole = "user" | "assistant" | "tool";
 
 export type ToolState = "running" | "done" | "error";
 
+/** Global thinking display mode for extended reasoning (DeepSeek / Claude). */
+export type ThinkingDisplayMode = "hidden" | "summary" | "full";
+
+export const THINKING_MODE_ORDER: ThinkingDisplayMode[] = ["hidden", "summary", "full"];
+
 export type ToolCardState = {
   id: string;
   name: string;
@@ -44,13 +49,26 @@ export type TuiState = {
   modelName: string;
   usedTokens: number;
   contextTokens: number;
+  /** Global default for how thinking blocks are shown. */
+  thinkingMode: ThinkingDisplayMode;
+  /**
+   * Message indices whose thinking is force-expanded (overrides summary).
+   * Stored as a sorted unique array for stable React updates.
+   */
+  expandedThinking: number[];
+  /** Currently focused message index for keyboard navigation; -1 = none. */
+  focusedMessageIndex: number;
 };
 
 export type TuiAction =
   | { type: "USER_MESSAGE"; text: string }
   | { type: "LOOP_EVENT"; event: LoopEvent }
   | { type: "MODEL_CHANGED"; modelName: string }
-  | { type: "RESET" };
+  | { type: "RESET" }
+  | { type: "TOGGLE_THINKING_MODE" }
+  | { type: "TOGGLE_MESSAGE_THINKING"; index?: number }
+  | { type: "SET_FOCUSED_MESSAGE"; index: number }
+  | { type: "FOCUS_NEXT_REASONING"; direction: 1 | -1 };
 
 function shortPreview(s: string, max = 200): string {
   const oneLine = s.replace(/\s+/g, " ").trim();
@@ -67,7 +85,20 @@ export function createInitialState(modelName: string): TuiState {
     modelName,
     usedTokens: 0,
     contextTokens: 0,
+    thinkingMode: "summary",
+    expandedThinking: [],
+    focusedMessageIndex: -1,
   };
+}
+
+/** Indices of assistant messages that carry reasoning content. */
+export function reasoningMessageIndices(messages: ChatMessage[]): number[] {
+  const indices: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg?.kind === "assistant" && msg.reasoning) indices.push(i);
+  }
+  return indices;
 }
 
 export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
@@ -83,10 +114,63 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       };
 
     case "RESET":
-      return createInitialState(state.modelName);
+      return {
+        ...createInitialState(state.modelName),
+        thinkingMode: state.thinkingMode,
+      };
 
     case "MODEL_CHANGED":
-      return { ...state, modelName: action.modelName, status: "就绪", usedTokens: 0 };
+      return { ...state, modelName: action.modelName, status: "就绪", usedTokens: 0, contextTokens: 0 };
+
+    case "TOGGLE_THINKING_MODE": {
+      const current = THINKING_MODE_ORDER.indexOf(state.thinkingMode);
+      const next = THINKING_MODE_ORDER[(current + 1) % THINKING_MODE_ORDER.length] ?? "summary";
+      return {
+        ...state,
+        thinkingMode: next,
+        expandedThinking: [],
+        status:
+          next === "hidden" ? "思考过程: 隐藏"
+            : next === "summary" ? "思考过程: 摘要"
+              : "思考过程: 完整",
+      };
+    }
+
+    case "TOGGLE_MESSAGE_THINKING": {
+      const indices = reasoningMessageIndices(state.messages);
+      if (indices.length === 0) return state;
+      const target =
+        typeof action.index === "number"
+          ? action.index
+          : state.focusedMessageIndex >= 0
+            ? state.focusedMessageIndex
+            : indices[indices.length - 1]!;
+      if (!indices.includes(target)) return state;
+      const expanded = new Set(state.expandedThinking);
+      if (expanded.has(target)) expanded.delete(target);
+      else expanded.add(target);
+      return {
+        ...state,
+        expandedThinking: [...expanded].sort((a, b) => a - b),
+        focusedMessageIndex: target,
+      };
+    }
+
+    case "SET_FOCUSED_MESSAGE":
+      return { ...state, focusedMessageIndex: action.index };
+
+    case "FOCUS_NEXT_REASONING": {
+      const indices = reasoningMessageIndices(state.messages);
+      if (indices.length === 0) return { ...state, focusedMessageIndex: -1 };
+      const currentPos = indices.indexOf(state.focusedMessageIndex);
+      let nextPos: number;
+      if (currentPos < 0) {
+        nextPos = action.direction === 1 ? 0 : indices.length - 1;
+      } else {
+        nextPos = (currentPos + action.direction + indices.length) % indices.length;
+      }
+      return { ...state, focusedMessageIndex: indices[nextPos]! };
+    }
 
     case "LOOP_EVENT": {
       const event = action.event;

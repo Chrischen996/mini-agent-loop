@@ -58,6 +58,21 @@ export type AgentServerOptions = {
   workspace?: string;
   dataDir?: string;
   serveWeb?: boolean;
+  /**
+   * Called after each inner turn (assistant response + tool results).
+   * Return a {@link import("./loop.ts").NextTurnUpdate} to switch models or
+   * adjust context options, or return `undefined` to keep current settings.
+   */
+  prepareNextTurn?: import("./loop.ts").AgentLoopOptions["prepareNextTurn"];
+  /**
+   * Optional relay registry.  When provided, `switchLlmModel()` calls inside
+   * `prepareNextTurn` will automatically apply matching relay configuration
+   * (baseUrl + key resolver) to the new model without extra boilerplate.
+   *
+   * Populated automatically from `MINI_AGENT_RELAY` when the server starts;
+   * callers can also supply a programmatic registry here.
+   */
+  relayRegistry?: import("./relay.ts").RelayRegistry;
 };
 
 function safeMessage(message: AgentMessage): Record<string, unknown> {
@@ -142,6 +157,22 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
       };
     case "done":
       return { type: "done", messageCount: event.messages.length };
+    case "model_switched":
+      return {
+        type: "model_switched",
+        previousModel: event.previousModel,
+        nextModel: event.nextModel,
+        turn: event.turn,
+      };
+    case "retry_attempt":
+      return {
+        type: "retry_attempt",
+        errorType: event.errorType,
+        attempt: event.attempt,
+        maxRetries: event.maxRetries,
+        delayMs: event.delayMs,
+        errorMessage: event.errorMessage.slice(0, 200),
+      };
   }
 }
 
@@ -526,6 +557,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
             chat: options.chat,
             userContent,
             signal: abortController.signal,
+            prepareNextTurn: options.prepareNextTurn,
             authorizeTool: options.chat
               ? undefined
               : (tool, args, signal) =>

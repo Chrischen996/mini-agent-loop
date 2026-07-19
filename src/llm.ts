@@ -1,6 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import {
+  applyRelayIfMatched,
+  loadRelayRegistryFromEnv,
+  type RelayRegistry,
+} from "./relay.ts";
+import {
   extractImageParts,
   extractVisionAnalysisParts,
   hasImageParts,
@@ -54,6 +59,16 @@ export type LlmConfig = {
   piModel?: ModelRef["piModel"];
   reasoning: boolean;
   imagePolicy: ImagePolicy;
+  /**
+   * Optional dynamic API key resolver.  When present, called before every LLM
+   * request; the returned value overrides the static `apiKey` field.
+   *
+   * Use cases:
+   * - OAuth / short-lived token refresh
+   * - Key-pool round-robin rotation (anti-rate-limit)
+   * - Relay / gateway with a different auth scheme than the upstream provider
+   */
+  getApiKey?: () => string | Promise<string>;
 };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
@@ -171,7 +186,7 @@ export function loadLlmConfigFromEnv(): LlmConfig {
 
   const imagePolicy = parseImagePolicy(process.env.IMAGE_POLICY);
 
-  return {
+  const base: LlmConfig = {
     apiKey: apiKey ?? "",
     provider: resolved.provider,
     baseUrl,
@@ -184,6 +199,10 @@ export function loadLlmConfigFromEnv(): LlmConfig {
     reasoning: resolved.reasoning,
     imagePolicy,
   };
+
+  // Apply relay from MINI_AGENT_RELAY env var (overrides baseUrl + adds getApiKey)
+  const relayRegistry = loadRelayRegistryFromEnv();
+  return applyRelayIfMatched(base, relayRegistry);
 }
 
 /** Test helper / explicit config builder. */
@@ -223,6 +242,7 @@ export function switchLlmModel(
   config: LlmConfig,
   model: ModelRef | string,
   overrides: ModelSwitchOverrides = {},
+  relayRegistry?: RelayRegistry,
 ): LlmConfig {
   const requestedBaseUrl = overrides.baseUrl?.trim().replace(/\/$/, "");
   const resolved = typeof model === "string"
@@ -247,9 +267,11 @@ export function switchLlmModel(
       `Missing API key for model ${resolved.id}. Set one of: ${resolved.apiKeyEnv.join(", ")}.`,
     );
   }
-  return {
+  const next: LlmConfig = {
     ...config,
     apiKey: effectiveApiKey ?? "",
+    // Clear any inherited getApiKey — the new model may need a different resolver
+    getApiKey: undefined,
     provider: resolved.provider,
     baseUrl: resolved.baseUrl,
     model: resolved.id,
@@ -259,6 +281,24 @@ export function switchLlmModel(
     piModel: resolved.piModel,
     reasoning: resolved.reasoning,
   };
+
+  // Apply relay for the new model if a registry is provided
+  if (relayRegistry && relayRegistry.length > 0) {
+    return applyRelayIfMatched(next, relayRegistry);
+  }
+  return next;
+}
+
+/**
+ * Resolve the effective API key for a request.
+ * Calls `getApiKey()` when present, otherwise falls back to the static `apiKey`.
+ * This is the single authoritative place all request paths should call.
+ */
+export async function resolveEffectiveApiKey(config: LlmConfig): Promise<string> {
+  if (config.getApiKey) {
+    return await config.getApiKey();
+  }
+  return config.apiKey;
 }
 
 type OpenAIToolCall = {
@@ -710,12 +750,13 @@ export async function completeChat(
 
   const url = `${config.baseUrl}/chat/completions`;
   const request = createRequestSignal(signal, requestTimeout(config));
+  const effectiveKey = await resolveEffectiveApiKey(config);
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${config.apiKey}`,
+        Authorization: `Bearer ${effectiveKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
@@ -781,6 +822,94 @@ export type StreamChatUsage = {
 export function isContextOverflowError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /(context length|context window|maximum context|max context|too many tokens|prompt is too long|token limit|input.*token)/i.test(message);
+}
+
+// ─── Retry Mechanism ─────────────────────────────────────────────────────────
+
+export type RetryableErrorType =
+  | "rate_limit"        // 429, rate limit exceeded
+  | "server_overload"   // 503, 502, 504
+  | "network"           // ECONNREFUSED, ETIMEDOUT, fetch failures
+  | "timeout"           // request timeout (our internal timer)
+  | "context_overflow"; // token limit (handled separately with compaction)
+
+export type RetryStrategy = {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  backoffMultiplier: number;
+};
+
+/**
+ * Classify an error to determine if and how it should be retried.
+ * Returns null for non-retryable errors (auth, validation, etc).
+ */
+export function classifyError(error: unknown): RetryableErrorType | null {
+  const message = error instanceof Error ? error.message : String(error);
+  
+  // Rate limit (429 or explicit rate limit messages)
+  if (/rate limit|429|too many requests|quota exceeded/i.test(message)) {
+    return "rate_limit";
+  }
+  
+  // Server overload / temporary unavailability
+  if (/502|503|504|server (busy|overload|unavailable)|service unavailable/i.test(message)) {
+    return "server_overload";
+  }
+  
+  // Network failures
+  if (/network error|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|fetch failed|ECONNRESET/i.test(message)) {
+    return "network";
+  }
+  
+  // Our internal timeout
+  if (/timed out after.*ms/i.test(message)) {
+    return "timeout";
+  }
+  
+  // Context overflow (handled separately)
+  if (isContextOverflowError(error)) {
+    return "context_overflow";
+  }
+  
+  return null;
+}
+
+/**
+ * Get retry strategy for a specific error type.
+ * Strategies use exponential backoff with jitter.
+ */
+export function getRetryStrategy(errorType: RetryableErrorType): RetryStrategy {
+  switch (errorType) {
+    case "rate_limit":
+      // Aggressive backoff for rate limits
+      return { maxRetries: 3, baseDelayMs: 2000, maxDelayMs: 60000, backoffMultiplier: 3 };
+    case "server_overload":
+      // Moderate backoff for server issues
+      return { maxRetries: 3, baseDelayMs: 1000, maxDelayMs: 10000, backoffMultiplier: 2 };
+    case "network":
+      // Quick retry for network glitches
+      return { maxRetries: 2, baseDelayMs: 500, maxDelayMs: 5000, backoffMultiplier: 2 };
+    case "timeout":
+      // Single retry for timeouts (may need longer timeout instead)
+      return { maxRetries: 1, baseDelayMs: 0, maxDelayMs: 0, backoffMultiplier: 1 };
+    case "context_overflow":
+      // No retry here; handled by compaction logic
+      return { maxRetries: 0, baseDelayMs: 0, maxDelayMs: 0, backoffMultiplier: 1 };
+  }
+}
+
+/**
+ * Calculate backoff delay with jitter for a given retry attempt.
+ * Jitter reduces thundering herd when many clients retry simultaneously.
+ */
+export function calculateBackoff(attempt: number, strategy: RetryStrategy): number {
+  if (strategy.baseDelayMs === 0) return 0;
+  const exponential = strategy.baseDelayMs * Math.pow(strategy.backoffMultiplier, attempt - 1);
+  const capped = Math.min(exponential, strategy.maxDelayMs);
+  // Add ±20% jitter
+  const jitter = capped * (0.8 + Math.random() * 0.4);
+  return Math.floor(jitter);
 }
 
 export type StreamChatEvent =
@@ -887,12 +1016,13 @@ export async function* streamChat(
 
   const url = `${config.baseUrl}/chat/completions`;
   const request = createRequestSignal(signal, requestTimeout(config));
+  const effectiveKey = await resolveEffectiveApiKey(config);
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${config.apiKey}`,
+        Authorization: `Bearer ${effectiveKey}`,
         "Content-Type": "application/json",
         Accept: "text/event-stream",
       },

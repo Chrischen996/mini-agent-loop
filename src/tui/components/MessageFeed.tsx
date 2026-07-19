@@ -1,12 +1,31 @@
 import React from "react";
 import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
-import type { ChatMessage } from "../state.ts";
+import type { ChatMessage, ThinkingDisplayMode } from "../state.ts";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
+const THINKING_SUMMARY_LINES = 3;
+const THINKING_AUTO_COLLAPSE_LINES = 15;
+
 function str(v: unknown): string {
   return typeof v === "string" ? v : "";
+}
+
+/**
+ * Format assistant message text for better readability in TUI.
+ * Enhances markdown-style formatting with terminal-friendly alternatives.
+ */
+function formatAssistantText(raw: string): string {
+  return raw
+    // ## Headers → with separator lines
+    .replace(/^## (.+)$/gm, "\n━━━ $1 ━━━")
+    // ### Subheaders → with arrow prefix
+    .replace(/^### (.+)$/gm, "\n▸ $1")
+    // **bold** → brackets (more visible in plain text)
+    .replace(/\*\*([^*]+)\*\*/g, "【$1】")
+    // Horizontal rule --- → full-width line
+    .replace(/^---+$/gm, "─".repeat(60));
 }
 
 function previewLines(text: string, max = 10): string[] {
@@ -14,6 +33,124 @@ function previewLines(text: string, max = 10): string[] {
   const visible = lines.slice(0, max);
   if (lines.length > max) visible.push(`… (${lines.length - max} more lines)`);
   return visible;
+}
+
+function estimateTokens(text: string): number {
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k tokens`;
+  return `${tokens} tokens`;
+}
+
+// ─── ThinkingBlock ───────────────────────────────────────────────────────────
+
+type ThinkingBlockProps = {
+  content: string;
+  isStreaming?: boolean;
+  mode: ThinkingDisplayMode;
+  /** Force full expand for this block (per-message override). */
+  forceExpanded?: boolean;
+  focused?: boolean;
+  onToggle?: () => void;
+};
+
+/**
+ * Collapsible extended-thinking display.
+ *
+ * - hidden: nothing
+ * - summary: first N lines + token count + expand hint
+ * - full: complete content
+ *
+ * Streaming content auto-collapses after THINKING_AUTO_COLLAPSE_LINES lines
+ * unless mode is already "full" or forceExpanded is true.
+ */
+export function ThinkingBlock({
+  content,
+  isStreaming = false,
+  mode,
+  forceExpanded = false,
+  focused = false,
+}: ThinkingBlockProps): React.ReactElement | null {
+  if (mode === "hidden" && !forceExpanded) return null;
+  if (!content) return null;
+
+  const lines = content.split("\n");
+  const tokenCount = estimateTokens(content);
+  const streamingShouldCollapse =
+    isStreaming &&
+    !forceExpanded &&
+    mode !== "full" &&
+    lines.length > THINKING_AUTO_COLLAPSE_LINES;
+  const showFull =
+    forceExpanded ||
+    mode === "full" ||
+    (mode === "summary" && !isStreaming && lines.length <= THINKING_SUMMARY_LINES) ||
+    (isStreaming && !streamingShouldCollapse && mode !== "summary");
+
+  // Distinctive panel: magenta frame + status badge.
+  // Streaming = yellow energy; focused = cyan highlight; idle = magenta signature.
+  const frameColor = focused ? "cyan" : isStreaming ? "yellow" : "magenta";
+  const badgeBg = focused ? "cyan" : isStreaming ? "yellow" : "magenta";
+  const badgeFg = "black";
+  const badgeLabel = isStreaming ? " THINKING… " : showFull ? " THINK " : " THINK ▸ ";
+  const actionHint = !isStreaming
+    ? (showFull
+      ? (focused ? "Alt+T collapse" : "Alt+T")
+      : (focused ? "Alt+T expand" : "Alt+T"))
+    : "streaming";
+
+  const body = !showFull
+    ? (() => {
+        const preview = lines.slice(0, THINKING_SUMMARY_LINES).join("\n");
+        const remaining = Math.max(0, lines.length - THINKING_SUMMARY_LINES);
+        return (
+          <>
+            <Text color="white" dimColor wrap="wrap">{preview}</Text>
+            {remaining > 0 && (
+              <Text color="magenta" dimColor>
+                ··· {remaining} more lines{isStreaming ? " · live" : ""}
+              </Text>
+            )}
+          </>
+        );
+      })()
+    : <Text color="white" dimColor wrap="wrap">{content}</Text>;
+
+  return (
+    <Box
+      flexDirection="column"
+      marginY={1}
+      paddingX={1}
+      borderStyle="round"
+      borderColor={frameColor}
+    >
+      {/* Title bar */}
+      <Box justifyContent="space-between" marginBottom={0}>
+        <Box gap={1}>
+          <Text backgroundColor={badgeBg} color={badgeFg} bold>
+            {badgeLabel}
+          </Text>
+          <Text color={frameColor} dimColor={!focused && !isStreaming}>
+            {formatTokenCount(tokenCount)}
+          </Text>
+          {isStreaming && (
+            <Text color="yellow">
+              <Spinner type="dots" />
+            </Text>
+          )}
+        </Box>
+        <Text color={frameColor} dimColor>
+          {actionHint}
+        </Text>
+      </Box>
+      {/* Divider-ish spacing + body */}
+      <Box flexDirection="column" marginTop={0}>
+        {body}
+      </Box>
+    </Box>
+  );
 }
 
 // ─── tool-specific views ─────────────────────────────────────────────────────
@@ -229,7 +366,11 @@ type MessageFeedProps = {
   messages: ChatMessage[];
   streamingText: string;
   streamingReasoning?: string;
+  /** @deprecated Prefer thinkingMode. Kept for backward compatibility. */
   showThinking?: boolean;
+  thinkingMode?: ThinkingDisplayMode;
+  expandedThinking?: number[];
+  focusedMessageIndex?: number;
   busy?: boolean;
   status?: string;
   maxMessages?: number;
@@ -240,34 +381,45 @@ export function MessageFeed({
   streamingText,
   streamingReasoning = "",
   showThinking = true,
+  thinkingMode,
+  expandedThinking = [],
+  focusedMessageIndex = -1,
   busy = false,
   status = "思考中...",
   maxMessages = 100,
 }: MessageFeedProps): React.ReactElement {
-  const visible = messages.slice(-maxMessages);
+  const effectiveMode: ThinkingDisplayMode =
+    thinkingMode ?? (showThinking ? "summary" : "hidden");
+  const expandedSet = new Set(expandedThinking);
+  // Slice keeps last N messages; map absolute indices for focus/expand state.
+  const startIndex = Math.max(0, messages.length - maxMessages);
+  const visible = messages.slice(startIndex);
 
   return (
     <Box flexDirection="column" flexGrow={1} paddingX={1}>
-      {visible.map((msg, i) => {
+      {visible.map((msg, offset) => {
+        const absoluteIndex = startIndex + offset;
         if (msg.kind === "user") {
           return (
-            <Box key={i} marginBottom={1} gap={1}>
+            <Box key={absoluteIndex} marginBottom={1} gap={1}>
               <Text color="green" bold>{">"}</Text>
               <Text color="white">{msg.text}</Text>
             </Box>
           );
         }
         if (msg.kind === "assistant") {
+          const formattedText = msg.text ? formatAssistantText(msg.text) : "";
           return (
-            <Box key={i} marginBottom={1} flexDirection="column">
-              {showThinking && msg.reasoning && (
-                <Box flexDirection="column" marginBottom={1} paddingLeft={1}>
-                  <Text dimColor italic>{"<think>"}</Text>
-                  <Text dimColor wrap="wrap">{msg.reasoning}</Text>
-                  <Text dimColor italic>{"</think>"}</Text>
-                </Box>
+            <Box key={absoluteIndex} marginBottom={1} flexDirection="column">
+              {msg.reasoning && (
+                <ThinkingBlock
+                  content={msg.reasoning}
+                  mode={effectiveMode}
+                  forceExpanded={expandedSet.has(absoluteIndex)}
+                  focused={focusedMessageIndex === absoluteIndex}
+                />
               )}
-              {msg.text && <Text color="cyan" wrap="wrap">{msg.text}</Text>}
+              {formattedText && <Text color="cyan" wrap="wrap">{formattedText}</Text>}
             </Box>
           );
         }
@@ -276,7 +428,7 @@ export function MessageFeed({
         }
         if (msg.kind === "error") {
           return (
-            <Box key={i} marginBottom={1}>
+            <Box key={absoluteIndex} marginBottom={1}>
               <Text color="red">✗ {msg.text}</Text>
             </Box>
           );
@@ -285,11 +437,12 @@ export function MessageFeed({
       })}
 
       {/* Live streaming reasoning */}
-      {showThinking && streamingReasoning ? (
-        <Box marginBottom={0} flexDirection="column" paddingLeft={1}>
-          <Text dimColor italic>{"<think>"}</Text>
-          <Text dimColor wrap="wrap">{streamingReasoning}</Text>
-        </Box>
+      {streamingReasoning ? (
+        <ThinkingBlock
+          content={streamingReasoning}
+          isStreaming
+          mode={effectiveMode}
+        />
       ) : null}
 
       {/* Live streaming answer text */}
