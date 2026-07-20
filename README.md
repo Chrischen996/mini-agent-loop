@@ -57,6 +57,9 @@ npm install
 | `EXTERNAL_CODEBASE_MAX_RESULT_BYTES` | no | `102400` |
 | `EXTERNAL_CODEBASE_MAX_CACHE_BYTES` | no | `1073741824` |
 | `EXTERNAL_CODEBASE_CACHE_TTL_HOURS` | no | `24` |
+| `DEEPWIKI_ENABLED` | no | `0` |
+| `DEEPWIKI_TIMEOUT_MS` | no | `30000` |
+| `DEEPWIKI_MAX_RESULT_BYTES` | no | `102400` |
 | `MINI_AGENT_MCP_CONFIG` | no | — |
 | `MINI_AGENT_MCP_AUTO_APPROVE` | no | `0` |
 
@@ -252,12 +255,15 @@ External public GitHub analysis adds four tools by default:
 - `codebase_open`: create a read-only handle for `owner/repo` or a GitHub URL.
 - `codebase_search`: search the pinned Git revision with file and line evidence.
 - `codebase_read`: read bounded source ranges from the pinned revision.
-- `codebase_explain`: reserved for the optional DeepWiki provider and currently returns an unavailable error.
+- `codebase_explain`: optional DeepWiki semantic structure, contents, and question operations.
 
 External repositories are shallow bare clones under `~/.mini-agent/codebases`.
 The agent never checks them out or executes their code. Git authentication,
 global Git configuration, hooks, submodules, and LFS smudge are disabled for
 this path. Set `EXTERNAL_CODEBASE_ENABLED=0` to remove these tools.
+DeepWiki is disabled by default. Set `DEEPWIKI_ENABLED=1` to enable the fixed
+official endpoint `https://mcp.deepwiki.com/mcp`; only the public repository
+name and requested question are sent to it.
 
 All tools still use relative paths and reject paths that escape the configured
 workspace or resolve through an outside symlink. `.git` and `node_modules`
@@ -311,7 +317,8 @@ approval. MCP tools are exposed to models with names such as
 not bypass approval. `/api/config` returns only server id, state, tool count,
 and sanitized errors, never commands, arguments, or environment values.
 
-This release implements MCP tools over stdio only. Streamable HTTP, OAuth,
+User-configured MCP tools in this release use stdio. DeepWiki internally uses
+the fixed official Streamable HTTP endpoint. OAuth,
 dynamic `tools/list_changed`, resources, prompts, sampling, elicitation, and
 task-required tools remain out of scope.
 

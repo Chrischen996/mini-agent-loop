@@ -38,6 +38,34 @@ describe("PermissionManager", () => {
     await assert.rejects(pending, /Permission denied/);
   });
 
+  it("automatically allows read-only codebase operations after opening a handle", async () => {
+    const manager = new PermissionManager();
+    for (const name of ["codebase_search", "codebase_read", "codebase_explain"]) {
+      await manager.authorize("session", { ...writeTool, name }, {}, undefined, () => {
+        throw new Error(`${name} should not request permission`);
+      });
+    }
+  });
+
+  it("keeps codebase_open behind a medium-risk approval", async () => {
+    const manager = new PermissionManager();
+    let requestId = "";
+    const pending = manager.authorize(
+      "session",
+      { ...writeTool, name: "codebase_open" },
+      { repository: "octo/project" },
+      undefined,
+      (request) => {
+        requestId = request.id;
+        assert.equal(request.risk, "medium");
+      },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(requestId);
+    manager.resolve("session", requestId, "deny");
+    await assert.rejects(pending, /Permission denied/);
+  });
+
   it("never auto-allows an MCP tool based on its name or annotations", async () => {
     const manager = new PermissionManager();
     const remoteRead: Tool = {

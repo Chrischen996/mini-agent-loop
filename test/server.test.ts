@@ -16,6 +16,19 @@ const llm = makeLlmConfig({
 });
 
 describe("agent server", () => {
+  it("reports only whether DeepWiki is enabled", async () => {
+    const app = createAgentServer({
+      llm,
+      tools: [],
+      chat: async () => ({ role: "assistant", content: "ok" }),
+      serveWeb: false,
+      deepWikiEnabled: true,
+    });
+    const config = await request(app).get("/api/config");
+    assert.deepEqual((config.body as { deepWiki: unknown }).deepWiki, { enabled: true });
+    assert.doesNotMatch(config.text, /mcp\.deepwiki\.com/);
+  });
+
   it("keeps a multi-turn session and streams safe NDJSON events", async () => {
     const chat = async (
       _config: typeof llm,
@@ -42,6 +55,7 @@ describe("agent server", () => {
     assert.equal(config.status, 200);
     assert.doesNotMatch(config.text, /must-not-leak/);
     assert.equal((config.body as { mcp: { enabled: boolean } }).mcp.enabled, true);
+    assert.equal((config.body as { deepWiki: { enabled: boolean } }).deepWiki.enabled, false);
 
     const created = await request(app).post("/api/sessions");
     assert.equal(created.status, 201);

@@ -29,6 +29,8 @@ import {
 } from "./preprocessors/index.ts";
 import { createTools } from "./tools/index.ts";
 import { createRepositoryStoreFromEnv, RepositoryStore } from "./codebase/repository-store.ts";
+import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
+import type { CodebaseSemanticProvider } from "./codebase/deepwiki-provider.ts";
 import { createDocumentEditTool } from "./tools/document-edit.ts";
 import type { Tool } from "./tools/types.ts";
 import type { AgentMessage, ContentPart } from "./types.ts";
@@ -78,6 +80,8 @@ export type AgentServerOptions = {
   relayRegistry?: import("./relay.ts").RelayRegistry;
   codebaseEnabled?: boolean;
   codebaseStore?: RepositoryStore;
+  codebaseProvider?: CodebaseSemanticProvider;
+  deepWikiEnabled?: boolean;
   mcpTools?: Tool[];
   mcpStatuses?: McpServerStatus[];
 };
@@ -369,7 +373,11 @@ export function createAgentServer(options: AgentServerOptions): Express {
   const codebaseEnabled = options.codebaseEnabled ?? process.env.EXTERNAL_CODEBASE_ENABLED !== "0";
   const codebaseStore = options.codebaseStore ?? (codebaseEnabled ? createRepositoryStoreFromEnv(path.join(dataRoot, "codebases")) : undefined);
   const tools = options.tools ?? mergeToolSets(
-    createTools(workspace, { codebase: codebaseEnabled, codebaseStore }),
+    createTools(workspace, {
+      codebase: codebaseEnabled,
+      codebaseStore,
+      codebaseProvider: options.codebaseProvider,
+    }),
     options.mcpTools ?? [],
   );
   const documentStore = new DocumentStore(path.join(dataRoot, "documents"));
@@ -412,6 +420,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
     externalCodebase: {
       enabled: codebaseEnabled,
       allowedHosts: codebaseEnabled ? ["github.com"] : [],
+    },
+    deepWiki: {
+      enabled: options.deepWikiEnabled ?? Boolean(options.codebaseProvider),
     },
     mcp: {
       enabled: options.mcpStatuses?.some((status) => status.state === "ready") ?? false,
@@ -663,18 +674,25 @@ async function startServer(): Promise<void> {
   const llm = loadLlmConfigFromEnv();
   const vision = loadVisionConfigFromEnv();
   const workspace = path.resolve(process.env.AGENT_WORKSPACE ?? process.cwd());
-  const mcpRuntime = await createMcpRuntimeFromEnv(workspace);
+  const codebaseRuntime = createCodebaseRuntimeFromEnv();
+  const mcpRuntime = await createMcpRuntimeFromEnv(workspace).catch(async (error) => {
+    await codebaseRuntime.close();
+    throw error;
+  });
   let app: Express;
   try {
     app = createAgentServer({
       llm,
       workspace,
+      codebaseStore: codebaseRuntime.store,
+      codebaseProvider: codebaseRuntime.semanticProvider,
+      deepWikiEnabled: codebaseRuntime.deepWikiEnabled,
       mcpTools: mcpRuntime.snapshot(),
       mcpStatuses: mcpRuntime.statuses(),
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
     });
   } catch (error) {
-    await mcpRuntime.close();
+    await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
     throw error;
   }
   const port = Number(process.env.PORT ?? 3001);
@@ -685,10 +703,10 @@ async function startServer(): Promise<void> {
       listener.on("error", reject);
     });
   } catch (error) {
-    await mcpRuntime.close();
+    await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
     throw error;
   }
-  server.on("close", () => void mcpRuntime.close());
+  server.on("close", () => void Promise.all([mcpRuntime.close(), codebaseRuntime.close()]));
   const shutdown = () => server.close();
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);

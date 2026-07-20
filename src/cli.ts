@@ -10,6 +10,7 @@ import {
 import { createTools, type ToolName } from "./tools/index.ts";
 import { createMcpApprovalGate } from "./mcp/approval.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
+import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
 import type { ContentPart, MessageContent } from "./types.ts";
 
 const IMAGE_EXT: Record<string, string> = {
@@ -191,20 +192,31 @@ async function main(): Promise<void> {
     userContent = parts;
   }
 
-  const mcpRuntime = await createMcpRuntimeFromEnv(cwd);
+  const codebaseRuntime = createCodebaseRuntimeFromEnv();
+  const mcpRuntime = await createMcpRuntimeFromEnv(cwd).catch(async (error) => {
+    await codebaseRuntime.close();
+    throw error;
+  });
   let tools;
   try {
     tools = mergeToolSets(
-      createTools(cwd, { tools: selectedTools, excludeTools, codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }),
+      createTools(cwd, {
+        tools: selectedTools,
+        excludeTools,
+        codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
+        codebaseStore: codebaseRuntime.store,
+        codebaseProvider: codebaseRuntime.semanticProvider,
+      }),
       mcpRuntime.snapshot(),
     );
   } catch (error) {
-    await mcpRuntime.close();
+    await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
     throw error;
   }
   for (const status of mcpRuntime.statuses()) {
     console.error(`[mcp] server=${status.id} state=${status.state} tools=${status.toolCount}${status.error ? ` error=${status.error}` : ""}`);
   }
+  console.error(`[deepwiki] enabled=${codebaseRuntime.deepWikiEnabled}`);
 
   let messages;
   try {
@@ -220,7 +232,7 @@ async function main(): Promise<void> {
       onEvent: logEvent,
     });
   } finally {
-    await mcpRuntime.close();
+    await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
   }
 
   const lastAssistant = [...messages]

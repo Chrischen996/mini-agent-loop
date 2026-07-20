@@ -3,6 +3,7 @@ import { render } from "ink";
 import { App } from "./App.tsx";
 import { createAllTools, createTools } from "../tools/index.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "../mcp/runtime.ts";
+import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
 
 const cwd = process.cwd();
 
@@ -12,14 +13,22 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) {
 }
 
 async function main(): Promise<void> {
-  const mcpRuntime = await createMcpRuntimeFromEnv(cwd);
+  const codebaseRuntime = createCodebaseRuntimeFromEnv();
+  const mcpRuntime = await createMcpRuntimeFromEnv(cwd).catch(async (error) => {
+    await codebaseRuntime.close();
+    throw error;
+  });
   try {
     const mcpTools = mcpRuntime.snapshot();
     const app = render(
       <App
         cwd={cwd}
         agentTools={mergeToolSets(
-          createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }),
+          createTools(cwd, {
+            codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
+            codebaseStore: codebaseRuntime.store,
+            codebaseProvider: codebaseRuntime.semanticProvider,
+          }),
           mcpTools,
         )}
         allTools={mergeToolSets(createAllTools(cwd), mcpTools)}
@@ -27,7 +36,7 @@ async function main(): Promise<void> {
     );
     await app.waitUntilExit();
   } finally {
-    await mcpRuntime.close();
+    await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
   }
 }
 

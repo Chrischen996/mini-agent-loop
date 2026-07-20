@@ -19,7 +19,17 @@ type Pending = {
   reject: (error: Error) => void;
 };
 
-const AUTO_ALLOWED = new Set(["read", "grep", "find", "ls", "list", "search"]);
+const AUTO_ALLOWED = new Set([
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "list",
+  "search",
+  "codebase_search",
+  "codebase_read",
+  "codebase_explain",
+]);
 
 export class PermissionManager {
   private readonly pending = new Map<string, Pending>();

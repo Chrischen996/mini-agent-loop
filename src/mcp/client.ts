@@ -3,6 +3,8 @@ import {
   getDefaultEnvironment,
   StdioClientTransport,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type {
   McpCallResult,
   McpClientConnection,
@@ -79,14 +81,28 @@ class SdkMcpClientConnection implements McpClientConnection {
   }
 }
 
-export async function createStdioMcpClient(
-  config: McpStdioServerConfig,
+async function connectMcpClient(
+  transport: Transport,
+  timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<McpClientConnection> {
   const client = new Client(
     { name: "mini-agent", version: "0.1.0" },
     { capabilities: {} },
   );
+  try {
+    await client.connect(transport, { signal, timeout: timeoutMs });
+    return new SdkMcpClientConnection(client, timeoutMs);
+  } catch (error) {
+    await transport.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function createStdioMcpClient(
+  config: McpStdioServerConfig,
+  signal?: AbortSignal,
+): Promise<McpClientConnection> {
   const transport = new StdioClientTransport({
     command: config.command,
     args: config.args,
@@ -96,11 +112,19 @@ export async function createStdioMcpClient(
   });
   // Always drain stderr so a noisy server cannot block on a full pipe.
   transport.stderr?.on("data", () => undefined);
-  try {
-    await client.connect(transport, { signal, timeout: config.timeoutMs });
-    return new SdkMcpClientConnection(client, config.timeoutMs);
-  } catch (error) {
-    await transport.close().catch(() => undefined);
-    throw error;
-  }
+  return connectMcpClient(transport, config.timeoutMs, signal);
+}
+
+export async function createStreamableHttpMcpClient(
+  options: {
+    url: URL;
+    timeoutMs: number;
+    fetch?: typeof globalThis.fetch;
+  },
+  signal?: AbortSignal,
+): Promise<McpClientConnection> {
+  const transport = new StreamableHTTPClientTransport(options.url, {
+    fetch: options.fetch,
+  });
+  return connectMcpClient(transport, options.timeoutMs, signal);
 }

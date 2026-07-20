@@ -14,6 +14,7 @@ import { createTools } from "../tools/index.ts";
 import type { AgentMessage } from "../types.ts";
 import { createMcpApprovalGate, mcpAutoApproveFromEnv } from "../mcp/approval.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "../mcp/runtime.ts";
+import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
 
 type ToolView = {
   id: string;
@@ -148,15 +149,23 @@ async function main(): Promise<void> {
     status: "就绪",
   };
   const abortController = new AbortController();
-  const mcpRuntime = await createMcpRuntimeFromEnv(cwd);
+  const codebaseRuntime = createCodebaseRuntimeFromEnv();
+  const mcpRuntime = await createMcpRuntimeFromEnv(cwd).catch(async (error) => {
+    await codebaseRuntime.close();
+    throw error;
+  });
   let tools;
   try {
     tools = mergeToolSets(
-      createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }),
+      createTools(cwd, {
+        codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
+        codebaseStore: codebaseRuntime.store,
+        codebaseProvider: codebaseRuntime.semanticProvider,
+      }),
       mcpRuntime.snapshot(),
     );
   } catch (error) {
-    await mcpRuntime.close();
+    await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
     throw error;
   }
   let screenActive = false;
@@ -171,7 +180,7 @@ async function main(): Promise<void> {
   const quit = () => {
     abortController.abort();
     cleanup();
-    void mcpRuntime.close().finally(() => process.exit(0));
+    void Promise.all([mcpRuntime.close(), codebaseRuntime.close()]).finally(() => process.exit(0));
   };
 
   process.stdout.write(`${ANSI.alternateScreen}${ANSI.hideCursor}`);

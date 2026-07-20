@@ -17,6 +17,7 @@ import {
 import type { Tool } from "./types.ts";
 import { createRepositoryStoreFromEnv, RepositoryStore } from "../codebase/repository-store.ts";
 import { createCodebaseTools } from "../codebase/tools.ts";
+import type { CodebaseSemanticProvider } from "../codebase/deepwiki-provider.ts";
 
 export type { JsonSchema, Tool, ToolResult } from "./types.ts";
 export type { ReadArgs } from "./read.ts";
@@ -69,13 +70,20 @@ export function createAllTools(cwd: string): Tool[] {
   ];
 }
 
-export function createTools(cwd: string, options: ToolSelection & { codebase?: boolean; codebaseStore?: RepositoryStore } = {}): Tool[] {
+export function createTools(cwd: string, options: ToolSelection & {
+  codebase?: boolean;
+  codebaseStore?: RepositoryStore;
+  codebaseProvider?: CodebaseSemanticProvider;
+} = {}): Tool[] {
   const tools = createDefaultTools(cwd, options);
   const explicitSelection = options.tools;
   const codebaseNames = new Set(["codebase_open", "codebase_search", "codebase_read", "codebase_explain"]);
   const selectedCodebase = explicitSelection ? explicitSelection.filter((name) => codebaseNames.has(name)) : [...codebaseNames];
   if (options.codebase !== false) {
-    tools.push(...createCodebaseTools(options.codebaseStore ?? createRepositoryStoreFromEnv()).filter((tool) => selectedCodebase.includes(tool.name as ToolName) && !options.excludeTools?.includes(tool.name as ToolName)));
+    tools.push(...createCodebaseTools(
+      options.codebaseStore ?? createRepositoryStoreFromEnv(),
+      { semanticProvider: options.codebaseProvider },
+    ).filter((tool) => selectedCodebase.includes(tool.name as ToolName) && !options.excludeTools?.includes(tool.name as ToolName)));
   }
   return tools;
 }
