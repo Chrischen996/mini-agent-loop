@@ -1,11 +1,15 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Document, Packer, Paragraph, TextRun } from "docx";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { parseDocumentUpload, type ParsedDocument } from "./attachments.ts";
 import type { FileArtifact } from "./tools/types.ts";
+
+// The ESM bundle conflicts with pdf-parse's legacy PDF.js under Node 24.
+const require = createRequire(import.meta.url);
+const { PDFDocument, StandardFonts, rgb } = require("pdf-lib") as typeof import("pdf-lib");
 
 type Attachment = ParsedDocument & { id: string; sessionId: string; sourcePath: string };
 

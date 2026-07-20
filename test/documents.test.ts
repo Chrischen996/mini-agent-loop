@@ -14,7 +14,7 @@ describe("document output", () => {
     const sessionId = "test-pdf-session";
     await store.createSession(sessionId);
     try {
-      const source = await createPdfFixture("Original PDF content");
+      const source = await createPdfFixture();
       const attachment = await store.addUpload(sessionId, "source.pdf", source, "application/pdf");
       const artifact = await store.edit(sessionId, {
         attachmentId: attachment.id,
