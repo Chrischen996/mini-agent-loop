@@ -27,6 +27,19 @@ import type {
 } from "./types.ts";
 import { validateToolArgs } from "./validate.ts";
 
+export type NextTurnUpdate = {
+  llm?: LlmConfig;
+  context?: ContextManagerOptions;
+};
+
+export type TurnContext = {
+  turn: number;
+  currentLlm: LlmConfig;
+  assistantMessage: AssistantMessage;
+  toolResults: ToolResultMessage[];
+  messages: AgentMessage[];
+};
+
 export type AgentLoopOptions = {
   llm: LlmConfig;
   tools: Tool[];
@@ -48,6 +61,7 @@ export type AgentLoopOptions = {
   /** Context compaction settings for long-running sessions. */
   context?: ContextManagerOptions;
   authorizeTool?: (tool: Tool, args: Record<string, unknown>, signal?: AbortSignal) => Promise<void>;
+  prepareNextTurn?: (context: TurnContext) => NextTurnUpdate | void | Promise<NextTurnUpdate | void>;
 };
 
 export type LoopEvent =
@@ -193,7 +207,7 @@ export async function runAgentTurn(
   options: AgentTurnOptions,
 ): Promise<AgentMessage[]> {
   const {
-    llm,
+    llm: initialLlm,
     tools,
     maxTurns = 10,
     chat = completeChat,
@@ -205,13 +219,14 @@ export async function runAgentTurn(
     authorizeTool,
   } = options;
   const useInjectedChat = options.chat !== undefined;
+  let currentLlm = initialLlm;
+  let currentContext = context;
 
-  const resolvedModel = resolveModel(llm.model, llm.baseUrl);
   const preprocessContext = {
     userPrompt: userText,
     targetModel: {
-      ...resolvedModel,
-      capabilities: llm.capabilities,
+      ...resolveModel(currentLlm.model, currentLlm.baseUrl),
+      capabilities: currentLlm.capabilities,
     },
   };
   const initialBatch = await applyPreprocessors(
@@ -224,15 +239,41 @@ export async function runAgentTurn(
     preprocessors,
     preprocessContext,
   );
-  const messages: AgentMessage[] = [...compactHistory(history, context), ...initialBatch];
+  const messages: AgentMessage[] = [...compactHistory(history, currentContext), ...initialBatch];
   let overflowRetries = 0;
+
+  const prepareNextTurn = async (
+    turn: number,
+    assistantMessage: AssistantMessage,
+    toolResults: ToolResultMessage[],
+  ): Promise<void> => {
+    const update = await options.prepareNextTurn?.({
+      turn,
+      currentLlm,
+      assistantMessage,
+      toolResults,
+      messages: [...messages],
+    });
+    if (update?.llm) {
+      const previousModel = currentLlm.model;
+      currentLlm = update.llm;
+      if (previousModel !== currentLlm.model) {
+        onEvent?.({ type: "model_switched", previousModel, nextModel: currentLlm.model, turn });
+      }
+      preprocessContext.targetModel = {
+        ...resolveModel(currentLlm.model, currentLlm.baseUrl),
+        capabilities: currentLlm.capabilities,
+      };
+    }
+    if (update?.context) currentContext = update.context;
+  };
 
   for (let turn = 1; turn <= maxTurns; turn++) {
     if (signal?.aborted) {
       onEvent?.({ type: "aborted", messages });
       return messages;
     }
-    const preparedMessages = compactForModel(messages, llm, tools, context, onEvent, "token budget");
+    const preparedMessages = compactForModel(messages, currentLlm, tools, currentContext, onEvent, "token budget");
     if (preparedMessages !== messages) {
       messages.splice(0, messages.length, ...preparedMessages);
     }
@@ -240,7 +281,7 @@ export async function runAgentTurn(
     try {
       if (useInjectedChat) {
         // Injected chat (tests) stays non-streaming for deterministic offline coverage.
-        assistant = await chat(llm, messages, tools);
+        assistant = await chat(currentLlm, messages, tools);
       } else {
         assistant = {
           role: "assistant",
@@ -250,7 +291,7 @@ export async function runAgentTurn(
         let streamed = "";
         let lastUsage: StreamChatUsage | undefined;
         try {
-          for await (const event of streamChat(llm, messages, tools, signal)) {
+          for await (const event of streamChat(currentLlm, messages, tools, signal)) {
             if (event.type === "text_delta") {
               if (event.kind === "answer") streamed += event.text;
               onEvent?.({ type: "assistant_delta", text: event.text, kind: event.kind });
@@ -348,12 +389,13 @@ export async function runAgentTurn(
           onEvent?.({ type: "tool_end", call, result });
         }
 
-        const processedToolMessages = await applyPreprocessors(
+        const processedToolMessages = (await applyPreprocessors(
           toolMessages,
           preprocessors,
           preprocessContext,
-        );
+        )) as ToolResultMessage[];
         messages.push(...processedToolMessages);
+        await prepareNextTurn(turn, assistant, processedToolMessages);
         continue;
       }
     } catch (err) {
@@ -361,14 +403,14 @@ export async function runAgentTurn(
         onEvent?.({ type: "aborted", messages });
         return messages;
       }
-      const maxRetries = context?.maxCompactionRetries ?? 1;
+      const maxRetries = currentContext?.maxCompactionRetries ?? 1;
       if (isContextOverflowError(err) && overflowRetries < maxRetries) {
         overflowRetries += 1;
         const compacted = compactForModel(
           messages,
-          llm,
+          currentLlm,
           tools,
-          context,
+          currentContext,
           onEvent,
           "provider context overflow",
           true,
@@ -458,12 +500,13 @@ export async function runAgentTurn(
       onEvent?.({ type: "tool_end", call, result });
     }
 
-    const processedToolMessages = await applyPreprocessors(
+    const processedToolMessages = (await applyPreprocessors(
       toolMessages,
       preprocessors,
       preprocessContext,
-    );
+    )) as ToolResultMessage[];
     messages.push(...processedToolMessages);
+    await prepareNextTurn(turn, assistant, processedToolMessages);
   }
 
   throw new Error(`maxTurns exceeded (${maxTurns})`);
