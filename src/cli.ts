@@ -7,7 +7,9 @@ import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
 } from "./preprocessors/index.ts";
-import { createDefaultTools, type ToolName } from "./tools/index.ts";
+import { createTools, type ToolName } from "./tools/index.ts";
+import { createMcpApprovalGate } from "./mcp/approval.ts";
+import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
 import type { ContentPart, MessageContent } from "./types.ts";
 
 const IMAGE_EXT: Record<string, string> = {
@@ -62,12 +64,14 @@ export function parseCliArgs(argv: string[]): {
   imagePaths: string[];
   tools?: ToolName[];
   excludeTools?: ToolName[];
+  allowMcpTools: boolean;
 } {
   const imagePaths: string[] = [];
   const rest: string[] = [];
   let tools: ToolName[] | undefined;
   let excludeTools: ToolName[] | undefined;
-  const validTools = new Set<ToolName>(["read", "bash", "edit", "write", "grep", "find", "ls"]);
+  let allowMcpTools = false;
+  const validTools = new Set<ToolName>(["read", "bash", "edit", "write", "grep", "find", "ls", "codebase_open", "codebase_search", "codebase_read", "codebase_explain"]);
   const parseToolList = (value: string, flag: string): ToolName[] => {
     const names = value.split(",").map((name) => name.trim()).filter(Boolean);
     for (const name of names) {
@@ -85,6 +89,10 @@ export function parseCliArgs(argv: string[]): {
       }
       imagePaths.push(next);
       i += 1;
+      continue;
+    }
+    if (arg === "--allow-mcp-tools") {
+      allowMcpTools = true;
       continue;
     }
     if (arg.startsWith("--image=")) {
@@ -113,7 +121,7 @@ export function parseCliArgs(argv: string[]): {
     rest.push(arg);
   }
 
-  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools };
+  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools, allowMcpTools };
 }
 
 async function loadImagePart(
@@ -155,7 +163,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { prompt, imagePaths, tools: selectedTools, excludeTools } = parsed;
+  const { prompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools } = parsed;
   if (!prompt && imagePaths.length === 0) {
     console.error(
       'Usage: npx tsx src/cli.ts "<prompt>" [--image path.png]...',
@@ -170,8 +178,6 @@ async function main(): Promise<void> {
     `[config] model=${llm.model} vision=${llm.capabilities.input.includes("image")} policy=${llm.imagePolicy} preprocessor=${vision?.model ?? "disabled"}`,
   );
 
-  const tools = createDefaultTools(cwd, { tools: selectedTools, excludeTools });
-
   let userContent: MessageContent | undefined;
   if (imagePaths.length > 0) {
     const parts: ContentPart[] = [
@@ -185,13 +191,37 @@ async function main(): Promise<void> {
     userContent = parts;
   }
 
-  const messages = await runAgentLoop(prompt || "Please analyze the attached image(s).", {
-    llm,
-    tools,
-    userContent,
-    preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
-    onEvent: logEvent,
-  });
+  const mcpRuntime = await createMcpRuntimeFromEnv(cwd);
+  let tools;
+  try {
+    tools = mergeToolSets(
+      createTools(cwd, { tools: selectedTools, excludeTools, codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }),
+      mcpRuntime.snapshot(),
+    );
+  } catch (error) {
+    await mcpRuntime.close();
+    throw error;
+  }
+  for (const status of mcpRuntime.statuses()) {
+    console.error(`[mcp] server=${status.id} state=${status.state} tools=${status.toolCount}${status.error ? ` error=${status.error}` : ""}`);
+  }
+
+  let messages;
+  try {
+    messages = await runAgentLoop(prompt || "Please analyze the attached image(s).", {
+      llm,
+      tools,
+      userContent,
+      preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+      authorizeTool: createMcpApprovalGate({
+        allow: allowMcpTools,
+        approvalHint: "Rerun with --allow-mcp-tools to approve remote MCP calls for this invocation.",
+      }),
+      onEvent: logEvent,
+    });
+  } finally {
+    await mcpRuntime.close();
+  }
 
   const lastAssistant = [...messages]
     .reverse()

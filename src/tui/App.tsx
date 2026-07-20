@@ -24,11 +24,12 @@ import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
 } from "../preprocessors/index.ts";
-import { createAllTools, createDefaultTools } from "../tools/index.ts";
+import { createAllTools, createTools } from "../tools/index.ts";
 import type { Tool } from "../tools/types.ts";
 import type { AgentMessage, MessageContent } from "../types.ts";
+import { createMcpApprovalGate, mcpAutoApproveFromEnv } from "../mcp/approval.ts";
 
-type AppProps = { cwd: string };
+type AppProps = { cwd: string; agentTools?: Tool[]; allTools?: Tool[] };
 
 function modelChoices(query = "", models = getAllModels()): {
   references: string[];
@@ -165,14 +166,14 @@ function parseAtRefs(input: string): string[] {
 
 // ─── main app ────────────────────────────────────────────────────────────────
 
-export function App({ cwd }: AppProps): React.ReactElement {
+export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const termWidth = stdout?.columns ?? 80;
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const vision = loadVisionConfigFromEnv();
-  const allToolsRef = useRef<Tool[]>(createAllTools(cwd));
-  const agentToolsRef = useRef<Tool[]>(createDefaultTools(cwd));
+  const allToolsRef = useRef<Tool[]>(allTools ?? createAllTools(cwd));
+  const agentToolsRef = useRef<Tool[]>(agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
   const [input, setInput] = useState("");
@@ -556,6 +557,10 @@ export function App({ cwd }: AppProps): React.ReactElement {
         preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
         signal: abortRef.current.signal,
         userContent,
+        authorizeTool: createMcpApprovalGate({
+          allow: mcpAutoApproveFromEnv(),
+          approvalHint: "Restart with MINI_AGENT_MCP_AUTO_APPROVE=1 to approve MCP calls in the TUI.",
+        }),
         onEvent: (event: LoopEvent) => {
           // Throttle assistant_delta to reduce flicker
           if (event.type === "assistant_delta") {

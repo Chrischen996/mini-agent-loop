@@ -37,4 +37,26 @@ describe("PermissionManager", () => {
     assert.equal(manager.resolve("session", requestId, "deny"), true);
     await assert.rejects(pending, /Permission denied/);
   });
+
+  it("never auto-allows an MCP tool based on its name or annotations", async () => {
+    const manager = new PermissionManager();
+    const remoteRead: Tool = {
+      ...writeTool,
+      name: "read",
+      source: { kind: "mcp", serverId: "remote", toolName: "read" },
+      annotations: { readOnlyHint: true },
+    };
+    let requestId = "";
+    let seenRisk = "";
+    const pending = manager.authorize("session", remoteRead, {}, undefined, (request) => {
+      requestId = request.id;
+      seenRisk = request.risk;
+      assert.deepEqual(request.source, remoteRead.source);
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(requestId);
+    assert.equal(seenRisk, "high");
+    manager.resolve("session", requestId, "deny");
+    await assert.rejects(pending, /Permission denied/);
+  });
 });

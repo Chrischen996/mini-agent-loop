@@ -15,7 +15,7 @@ user prompt
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 22.19+
 - An OpenAI-compatible API key (for real model runs)
 
 ## Setup
@@ -51,6 +51,14 @@ npm install
 | `VISION_RETRIES` | no | `1` |
 | `VISION_RETRY_DELAY_MS` | no | `1000` |
 | `VISION_FALLBACK_MODEL` | no | — |
+| `EXTERNAL_CODEBASE_ENABLED` | no | `1` |
+| `EXTERNAL_CODEBASE_FETCH_TIMEOUT_MS` | no | `60000` |
+| `EXTERNAL_CODEBASE_MAX_FILE_BYTES` | no | `262144` |
+| `EXTERNAL_CODEBASE_MAX_RESULT_BYTES` | no | `102400` |
+| `EXTERNAL_CODEBASE_MAX_CACHE_BYTES` | no | `1073741824` |
+| `EXTERNAL_CODEBASE_CACHE_TTL_HOURS` | no | `24` |
+| `MINI_AGENT_MCP_CONFIG` | no | — |
+| `MINI_AGENT_MCP_AUTO_APPROVE` | no | `0` |
 
 \* Real runs need at least one supported provider key.
 `/model` only lists
@@ -239,9 +247,73 @@ can opt into the read-only tools with `--tools grep,find,ls`, or remove tools
 with `--exclude-tools bash`. SDK/server callers can pass the equivalent
 selection to `createDefaultTools`.
 
+External public GitHub analysis adds four tools by default:
+
+- `codebase_open`: create a read-only handle for `owner/repo` or a GitHub URL.
+- `codebase_search`: search the pinned Git revision with file and line evidence.
+- `codebase_read`: read bounded source ranges from the pinned revision.
+- `codebase_explain`: reserved for the optional DeepWiki provider and currently returns an unavailable error.
+
+External repositories are shallow bare clones under `~/.mini-agent/codebases`.
+The agent never checks them out or executes their code. Git authentication,
+global Git configuration, hooks, submodules, and LFS smudge are disabled for
+this path. Set `EXTERNAL_CODEBASE_ENABLED=0` to remove these tools.
+
 All tools still use relative paths and reject paths that escape the configured
 workspace or resolve through an outside symlink. `.git` and `node_modules`
 remain protected by the workspace sandbox.
+
+### MCP tools
+
+The agent can load tools from explicitly configured MCP servers over `stdio`.
+It does not auto-discover project configuration because an MCP stdio entry can
+execute a local command. Set `MINI_AGENT_MCP_CONFIG` to a file you trust:
+
+```json
+{
+  "mcpServers": {
+    "local-search": {
+      "transport": "stdio",
+      "command": "node",
+      "args": ["/absolute/path/to/server.mjs"],
+      "env": {
+        "TOKEN": "${MCP_SEARCH_TOKEN}"
+      },
+      "required": false,
+      "includeTools": ["search"],
+      "timeoutMs": 30000,
+      "maxTools": 16,
+      "maxSchemaBytes": 262144,
+      "maxResultBytes": 1048576
+    }
+  }
+}
+```
+
+Relative `cwd` values are resolved from the config file directory. `${NAME}`
+environment references must exist when the agent starts. Optional servers
+degrade to an error status; a failed server with `required: true` prevents
+startup. `excludeTools`, `enabled`, and per-server limits are also supported.
+
+```bash
+export MINI_AGENT_MCP_CONFIG=/absolute/path/to/mcp.json
+
+# The one-shot CLI denies MCP calls unless this invocation opts in.
+npm start -- --allow-mcp-tools "使用已配置的远端工具查询数据"
+
+# Terminal clients use an explicit environment opt-in for this first release.
+MINI_AGENT_MCP_AUTO_APPROVE=1 npm run tui
+```
+
+The Web GUI uses its existing per-call permission prompt instead of automatic
+approval. MCP tools are exposed to models with names such as
+`mcp__local-search__search`; remote annotations are display hints only and do
+not bypass approval. `/api/config` returns only server id, state, tool count,
+and sanitized errors, never commands, arguments, or environment values.
+
+This release implements MCP tools over stdio only. Streamable HTTP, OAuth,
+dynamic `tools/list_changed`, resources, prompts, sampling, elicitation, and
+task-required tools remain out of scope.
 
 Local API:
 
@@ -338,5 +410,5 @@ mini-agent/
 
 ## Non-goals (this teaching cut)
 
-Streaming, general extension loading, parallel tools, permission UI, MCP,
-session tree, multi-provider registry.
+General extension loading, parallel tools, MCP resources/prompts/sampling,
+Streamable HTTP/OAuth, session tree, and sub-agent orchestration.

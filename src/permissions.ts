@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Tool } from "./tools/types.ts";
+import type { Tool, ToolSource } from "./tools/types.ts";
 
 export type PermissionDecision = "allow" | "deny";
 export type PermissionRisk = "medium" | "high";
@@ -9,6 +9,7 @@ export type PermissionRequest = {
   tool: string;
   arguments: Record<string, unknown>;
   risk: PermissionRisk;
+  source?: ToolSource;
 };
 
 type Pending = {
@@ -35,7 +36,7 @@ export class PermissionManager {
     signal: AbortSignal | undefined,
     onRequest: (request: PermissionRequest) => void,
   ): Promise<void> {
-    if (AUTO_ALLOWED.has(tool.name)) return;
+    if (tool.source?.kind !== "mcp" && AUTO_ALLOWED.has(tool.name)) return;
     if (signal?.aborted) throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
     const key = this.key(sessionId, tool, args);
     if (this.approved.has(key)) return;
@@ -44,7 +45,8 @@ export class PermissionManager {
       sessionId,
       tool: tool.name,
       arguments: args,
-      risk: tool.name === "bash" || tool.name === "delete" ? "high" : "medium",
+      risk: tool.source?.kind === "mcp" || tool.name === "bash" || tool.name === "delete" ? "high" : "medium",
+      source: tool.source,
     };
     return await new Promise<void>((resolve, reject) => {
       this.pending.set(request.id, { request, key, resolve, reject });

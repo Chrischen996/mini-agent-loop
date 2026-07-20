@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { DocumentStore } from "../src/documents.ts";
+import { createPdfFixture } from "./pdf-fixture.ts";
 
 describe("document output", () => {
   it("exports an edited PDF artifact", async () => {
@@ -13,7 +14,7 @@ describe("document output", () => {
     const sessionId = "test-pdf-session";
     await store.createSession(sessionId);
     try {
-      const source = await readFile(path.resolve("node_modules/pdf-parse/test/data/01-valid.pdf"));
+      const source = await createPdfFixture("Original PDF content");
       const attachment = await store.addUpload(sessionId, "source.pdf", source, "application/pdf");
       const artifact = await store.edit(sessionId, {
         attachmentId: attachment.id,

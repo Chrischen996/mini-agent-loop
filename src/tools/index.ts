@@ -15,6 +15,8 @@ import {
   createSearchTool,
 } from "./workspace-tools.ts";
 import type { Tool } from "./types.ts";
+import { createRepositoryStoreFromEnv, RepositoryStore } from "../codebase/repository-store.ts";
+import { createCodebaseTools } from "../codebase/tools.ts";
 
 export type { JsonSchema, Tool, ToolResult } from "./types.ts";
 export type { ReadArgs } from "./read.ts";
@@ -38,7 +40,7 @@ export {
   createSearchTool,
 } from "./workspace-tools.ts";
 
-export type ToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls";
+export type ToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls" | "codebase_open" | "codebase_search" | "codebase_read" | "codebase_explain";
 
 export type ToolSelection = {
   tools?: ToolName[];
@@ -65,4 +67,15 @@ export function createAllTools(cwd: string): Tool[] {
     createFindTool(cwd) as Tool,
     createLsTool(cwd) as Tool,
   ];
+}
+
+export function createTools(cwd: string, options: ToolSelection & { codebase?: boolean; codebaseStore?: RepositoryStore } = {}): Tool[] {
+  const tools = createDefaultTools(cwd, options);
+  const explicitSelection = options.tools;
+  const codebaseNames = new Set(["codebase_open", "codebase_search", "codebase_read", "codebase_explain"]);
+  const selectedCodebase = explicitSelection ? explicitSelection.filter((name) => codebaseNames.has(name)) : [...codebaseNames];
+  if (options.codebase !== false) {
+    tools.push(...createCodebaseTools(options.codebaseStore ?? createRepositoryStoreFromEnv()).filter((tool) => selectedCodebase.includes(tool.name as ToolName) && !options.excludeTools?.includes(tool.name as ToolName)));
+  }
+  return tools;
 }

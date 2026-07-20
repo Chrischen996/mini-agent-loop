@@ -17,9 +17,25 @@ export type FileArtifact = {
   reused?: boolean;
 };
 
+export type ToolAnnotations = {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+};
+
+export type ToolSource =
+  | { kind: "local" }
+  | { kind: "mcp"; serverId: string; toolName: string };
+
 export type Tool<TArgs = Record<string, unknown>> = {
   name: string;
   description: string;
+  displayName?: string;
+  source?: ToolSource;
+  /** Advisory metadata only. Never use remote hints as an authorization decision. */
+  annotations?: ToolAnnotations;
   /** OpenAI function parameters object (JSON Schema). */
   parameters: JsonSchema;
   execute: (args: TArgs, signal?: AbortSignal) => Promise<ToolResult>;

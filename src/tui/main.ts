@@ -10,8 +10,10 @@ import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
 } from "../preprocessors/index.ts";
-import { createDefaultTools } from "../tools/index.ts";
+import { createTools } from "../tools/index.ts";
 import type { AgentMessage } from "../types.ts";
+import { createMcpApprovalGate, mcpAutoApproveFromEnv } from "../mcp/approval.ts";
+import { createMcpRuntimeFromEnv, mergeToolSets } from "../mcp/runtime.ts";
 
 type ToolView = {
   id: string;
@@ -146,7 +148,17 @@ async function main(): Promise<void> {
     status: "就绪",
   };
   const abortController = new AbortController();
-  const tools = createDefaultTools(cwd);
+  const mcpRuntime = await createMcpRuntimeFromEnv(cwd);
+  let tools;
+  try {
+    tools = mergeToolSets(
+      createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }),
+      mcpRuntime.snapshot(),
+    );
+  } catch (error) {
+    await mcpRuntime.close();
+    throw error;
+  }
   let screenActive = false;
 
   const cleanup = () => {
@@ -159,7 +171,7 @@ async function main(): Promise<void> {
   const quit = () => {
     abortController.abort();
     cleanup();
-    process.exit(0);
+    void mcpRuntime.close().finally(() => process.exit(0));
   };
 
   process.stdout.write(`${ANSI.alternateScreen}${ANSI.hideCursor}`);
@@ -194,6 +206,10 @@ async function main(): Promise<void> {
         tools,
         preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
         signal: abortController.signal,
+        authorizeTool: createMcpApprovalGate({
+          allow: mcpAutoApproveFromEnv(),
+          approvalHint: "Restart with MINI_AGENT_MCP_AUTO_APPROVE=1 to approve MCP calls in the TUI.",
+        }),
         onEvent: (event) => {
           handleEvent(state, event);
           render(state);

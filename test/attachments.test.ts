@@ -2,14 +2,16 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, it } from "node:test";
+// Initialize pdf-lib before pdf-parse's bundled legacy PDF.js under Node 24.
+import "pdf-lib";
+import { createPdfFixture } from "./pdf-fixture.ts";
 import { documentTextPart, parseDocumentUpload } from "../src/attachments.ts";
 
 const moduleRoot = path.resolve("node_modules");
 
 describe("document attachments", () => {
   it("extracts text from a PDF", async () => {
-    const file = path.join(moduleRoot, "pdf-parse/test/data/01-valid.pdf");
-    const parsed = await parseDocumentUpload("sample.pdf", await readFile(file), "application/pdf");
+    const parsed = await parseDocumentUpload("sample.pdf", await createPdfFixture("Original PDF content"), "application/pdf");
     assert.equal(parsed.mimeType, "application/pdf");
     assert.ok(parsed.text.length > 0);
     assert.match(documentTextPart(parsed), /Attached document: sample\.pdf/);

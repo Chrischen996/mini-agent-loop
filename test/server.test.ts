@@ -29,11 +29,19 @@ describe("agent server", () => {
       tools: [],
       chat,
       serveWeb: false,
+      mcpStatuses: [{
+        id: "fixture",
+        transport: "stdio",
+        required: false,
+        state: "ready",
+        toolCount: 2,
+      }],
     });
 
     const config = await request(app).get("/api/config");
     assert.equal(config.status, 200);
     assert.doesNotMatch(config.text, /must-not-leak/);
+    assert.equal((config.body as { mcp: { enabled: boolean } }).mcp.enabled, true);
 
     const created = await request(app).post("/api/sessions");
     assert.equal(created.status, 201);

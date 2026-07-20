@@ -27,10 +27,13 @@ import {
   loadVisionConfigFromEnv,
   type MessagePreprocessor,
 } from "./preprocessors/index.ts";
-import { createDefaultTools } from "./tools/index.ts";
+import { createTools } from "./tools/index.ts";
+import { createRepositoryStoreFromEnv, RepositoryStore } from "./codebase/repository-store.ts";
 import { createDocumentEditTool } from "./tools/document-edit.ts";
 import type { Tool } from "./tools/types.ts";
 import type { AgentMessage, ContentPart } from "./types.ts";
+import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
+import type { McpServerStatus } from "./mcp/types.ts";
 import {
   listWorkspaceDirectory,
   validateReferencedPaths,
@@ -73,6 +76,10 @@ export type AgentServerOptions = {
    * callers can also supply a programmatic registry here.
    */
   relayRegistry?: import("./relay.ts").RelayRegistry;
+  codebaseEnabled?: boolean;
+  codebaseStore?: RepositoryStore;
+  mcpTools?: Tool[];
+  mcpStatuses?: McpServerStatus[];
 };
 
 function safeMessage(message: AgentMessage): Record<string, unknown> {
@@ -85,7 +92,7 @@ function safeMessage(message: AgentMessage): Record<string, unknown> {
             toolCalls: message.toolCalls.map((call) => ({
               id: call.id,
               name: call.name,
-              arguments: call.arguments,
+              arguments: redactSensitiveArguments(call.arguments),
             })),
           }
         : {}),
@@ -131,7 +138,7 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         type: "tool_start",
         id: event.call.id,
         name: event.call.name,
-        arguments: event.call.arguments,
+        arguments: redactSensitiveArguments(event.call.arguments),
       };
     case "tool_end":
       return {
@@ -146,8 +153,9 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         type: "permission_required",
         requestId: event.request.id,
         tool: event.request.tool,
-        arguments: event.request.arguments,
+        arguments: redactSensitiveArguments(event.request.arguments),
         risk: event.request.risk,
+        source: event.request.source,
       };
     case "aborted":
       return {
@@ -174,6 +182,17 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         errorMessage: event.errorMessage.slice(0, 200),
       };
   }
+}
+
+function redactSensitiveArguments(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactSensitiveArguments);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, child]) => [
+    key,
+    /authorization|cookie|password|secret|token|api[_-]?key/i.test(key)
+      ? "[REDACTED]"
+      : redactSensitiveArguments(child),
+  ]));
 }
 
 function isRetryableError(message: string): boolean {
@@ -346,8 +365,13 @@ async function parseMessageRequest(
 export function createAgentServer(options: AgentServerOptions): Express {
   const workspace = path.resolve(options.workspace ?? process.cwd());
   const sessions = new Map<string, Session>();
-  const tools = options.tools ?? createDefaultTools(workspace);
   const dataRoot = path.resolve(options.dataDir ?? path.join(os.homedir(), ".mini-agent"));
+  const codebaseEnabled = options.codebaseEnabled ?? process.env.EXTERNAL_CODEBASE_ENABLED !== "0";
+  const codebaseStore = options.codebaseStore ?? (codebaseEnabled ? createRepositoryStoreFromEnv(path.join(dataRoot, "codebases")) : undefined);
+  const tools = options.tools ?? mergeToolSets(
+    createTools(workspace, { codebase: codebaseEnabled, codebaseStore }),
+    options.mcpTools ?? [],
+  );
   const documentStore = new DocumentStore(path.join(dataRoot, "documents"));
   const permissionManager = new PermissionManager();
   const sessionStore = new SessionStore(path.join(dataRoot, "sessions"));
@@ -385,6 +409,14 @@ export function createAgentServer(options: AgentServerOptions): Express {
     maxImages: MAX_IMAGES,
     maxImageBytes: MAX_IMAGE_BYTES,
     maxAttachments: MAX_ATTACHMENTS,
+    externalCodebase: {
+      enabled: codebaseEnabled,
+      allowedHosts: codebaseEnabled ? ["github.com"] : [],
+    },
+    mcp: {
+      enabled: options.mcpStatuses?.some((status) => status.state === "ready") ?? false,
+      servers: options.mcpStatuses ?? [],
+    },
   }));
 
   app.get("/api/workspace/list", async (request, response) => {
@@ -631,16 +663,35 @@ async function startServer(): Promise<void> {
   const llm = loadLlmConfigFromEnv();
   const vision = loadVisionConfigFromEnv();
   const workspace = path.resolve(process.env.AGENT_WORKSPACE ?? process.cwd());
-  const app = createAgentServer({
-    llm,
-    workspace,
-    preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
-  });
+  const mcpRuntime = await createMcpRuntimeFromEnv(workspace);
+  let app: Express;
+  try {
+    app = createAgentServer({
+      llm,
+      workspace,
+      mcpTools: mcpRuntime.snapshot(),
+      mcpStatuses: mcpRuntime.statuses(),
+      preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+    });
+  } catch (error) {
+    await mcpRuntime.close();
+    throw error;
+  }
   const port = Number(process.env.PORT ?? 3001);
-  await new Promise<void>((resolve, reject) => {
-    const server = app.listen(port, "127.0.0.1", () => resolve());
-    server.on("error", reject);
-  });
+  let server: ReturnType<typeof app.listen>;
+  try {
+    server = await new Promise<ReturnType<typeof app.listen>>((resolve, reject) => {
+      const listener = app.listen(port, "127.0.0.1", () => resolve(listener));
+      listener.on("error", reject);
+    });
+  } catch (error) {
+    await mcpRuntime.close();
+    throw error;
+  }
+  server.on("close", () => void mcpRuntime.close());
+  const shutdown = () => server.close();
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
   console.log(`Mini Agent server: http://127.0.0.1:${port}`);
 }
 
