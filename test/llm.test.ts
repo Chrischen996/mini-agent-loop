@@ -18,6 +18,34 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("completeChat wire protocol", () => {
+  it("uses Agnes AI's documented endpoint and thinking parameter", async () => {
+    const originalFetch = globalThis.fetch;
+    let requestUrl = "";
+    let requestBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (input, init) => {
+      requestUrl = String(input);
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return jsonResponse({
+        choices: [{ message: { content: "done" }, finish_reason: "stop" }],
+      });
+    }) as typeof fetch;
+
+    try {
+      const agnes = makeLlmConfig({
+        apiKey: "agnes-test-key",
+        baseUrl: "https://apihub.agnes-ai.com/v1",
+        model: "agnes-ai/agnes-2.0-flash",
+      });
+      await completeChat(agnes, [{ role: "user", content: "plan a task" }]);
+
+      assert.equal(requestUrl, "https://apihub.agnes-ai.com/v1/chat/completions");
+      assert.equal(requestBody?.model, "agnes-2.0-flash");
+      assert.deepEqual(requestBody?.chat_template_kwargs, { enable_thinking: true });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("serializes tools, tool results, and maps tool calls", async () => {
     const originalFetch = globalThis.fetch;
     let requestUrl = "";

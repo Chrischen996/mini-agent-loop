@@ -38,6 +38,7 @@ describe("model selection", () => {
 
   it("covers the generated multi-provider catalog", () => {
     const env = {
+      AGNES_API_KEY: "test",
       OPENAI_API_KEY: "test",
       DEEPSEEK_API_KEY: "test",
       GEMINI_API_KEY: "test",
@@ -49,10 +50,19 @@ describe("model selection", () => {
     };
     assert.deepEqual(
       [...new Set(getAvailableModels(env).map((model) => model.provider))],
-      ["deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai"],
+      ["agnes-ai", "deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai"],
     );
-    assert.equal(getAllModels().length, 1057);
+    assert.equal(getAllModels().length, 1059);
     assert.ok(getAllModels().every((model) => model.contextWindow > 0 && model.maxTokens > 0));
+  });
+
+  it("registers Agnes AI with its documented OpenAI-compatible capabilities", () => {
+    const models = getAvailableModels({ AGNES_API_KEY: "test" })
+      .filter((model) => model.provider === "agnes-ai");
+    assert.deepEqual(models.map((model) => model.id), ["agnes-2.0-flash", "agnes-2.5-flash"]);
+    assert.ok(models.every((model) => model.baseUrl === "https://apihub.agnes-ai.com/v1"));
+    assert.ok(models.every((model) => model.capabilities.tools && model.capabilities.input.includes("image")));
+    assert.ok(models.every((model) => model.contextWindow === 524288 && model.maxTokens === 65536));
   });
 
   it("matches qualified and unqualified model references case-insensitively", () => {

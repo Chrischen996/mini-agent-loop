@@ -37,6 +37,7 @@ export type ImagePolicy = "placeholder" | "fail" | "strip";
 
 const PROVIDER_ENV_KEYS: Record<string, string[]> = {
   "amazon-bedrock": ["AWS_ACCESS_KEY_ID", "AWS_PROFILE", "AWS_REGION"],
+  "agnes-ai": ["AGNES_API_KEY"],
   "ant-ling": ["ANT_LING_API_KEY"],
   anthropic: ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
   "azure-openai-responses": ["AZURE_OPENAI_API_KEY"],

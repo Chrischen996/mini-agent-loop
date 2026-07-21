@@ -2,6 +2,7 @@ import { createImagesModels, type ImagesProvider, type MutableImagesModels } fro
 import { MODELS } from "../models.generated.ts";
 import { type CreateModelsOptions, createModels, type MutableModels, type Provider } from "../models.ts";
 import type { Api, KnownProvider, Model } from "../types.ts";
+import { agnesAiProvider } from "./agnes-ai.ts";
 import { amazonBedrockProvider } from "./amazon-bedrock.ts";
 import { antLingProvider } from "./ant-ling.ts";
 import { anthropicProvider } from "./anthropic.ts";
@@ -70,6 +71,7 @@ export function getBuiltinModels<TProvider extends KnownProvider>(
 export function builtinProviders(): Provider[] {
 	return [
 		amazonBedrockProvider(),
+		agnesAiProvider(),
 		antLingProvider(),
 		anthropicProvider(),
 		azureOpenAIResponsesProvider(),

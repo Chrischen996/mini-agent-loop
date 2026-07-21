@@ -31,6 +31,7 @@ npm install
 |---|---|---|
 | `OPENAI_API_KEY` | yes\* | — |
 | `DEEPSEEK_API_KEY` | yes\* (DeepSeek alt) | — |
+| `AGNES_API_KEY` | no | — |
 | `GEMINI_API_KEY` | no | — |
 | `DASHSCOPE_API_KEY` | no | — |
 | `ZHIPU_API_KEY` | no | — |
@@ -103,6 +104,25 @@ DEEPSEEK_API_KEY=sk-...
 ```
 
 Get a key at [https://platform.deepseek.com](https://platform.deepseek.com). The current default is `deepseek-v4-flash`.
+
+#### Agnes AI
+
+Agnes AI uses the OpenAI-compatible Chat Completions API. Its stable model is
+`agnes-2.0-flash`; `agnes-2.5-flash` is a preview model and requires access on
+the Agnes account.
+
+```bash
+export AGNES_API_KEY=your-agnes-api-key
+export OPENAI_MODEL=agnes-ai/agnes-2.0-flash
+
+# To use the preview model when your key has been enabled:
+# export OPENAI_MODEL=agnes-ai/agnes-2.5-flash
+```
+
+Both models support streaming, tool calls, and image URLs. Their endpoint is
+`https://apihub.agnes-ai.com/v1/chat/completions`; no base URL override is
+needed. When `AGNES_API_KEY` is the only configured provider key, the default
+selection is `agnes-2.0-flash`.
 
 #### Model providers
 

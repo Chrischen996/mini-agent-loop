@@ -2,6 +2,7 @@
 // Do not edit manually - run 'npm run generate-models' to update
 
 import { AMAZON_BEDROCK_MODELS } from "./providers/amazon-bedrock.models.ts";
+import { AGNES_AI_MODELS } from "./providers/agnes-ai.models.ts";
 import { ANT_LING_MODELS } from "./providers/ant-ling.models.ts";
 import { ANTHROPIC_MODELS } from "./providers/anthropic.models.ts";
 import { AZURE_OPENAI_RESPONSES_MODELS } from "./providers/azure-openai-responses.models.ts";
@@ -39,6 +40,7 @@ import { ZAI_CODING_CN_MODELS } from "./providers/zai-coding-cn.models.ts";
 
 export const MODELS = {
 	"amazon-bedrock": AMAZON_BEDROCK_MODELS,
+	"agnes-ai": AGNES_AI_MODELS,
 	"ant-ling": ANT_LING_MODELS,
 	"anthropic": ANTHROPIC_MODELS,
 	"azure-openai-responses": AZURE_OPENAI_RESPONSES_MODELS,
