@@ -198,7 +198,7 @@ npm run build
 ## 暂不做的功能
 
 - 完整 TUI
-- MCP 和 extension loader
+- MCP resources/prompts/sampling 等协议能力和 extension loader
 - 多 provider registry
 - 权限审批 UI
 - session tree、fork、compact

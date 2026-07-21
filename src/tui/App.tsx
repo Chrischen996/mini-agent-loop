@@ -25,11 +25,11 @@ import {
   loadVisionConfigFromEnv,
 } from "../preprocessors/index.ts";
 import { createAllTools, createTools } from "../tools/index.ts";
-import type { Tool } from "../tools/types.ts";
+import { resolveToolProvider, type ToolProvider } from "../tools/types.ts";
 import type { AgentMessage, MessageContent } from "../types.ts";
 import { createMcpApprovalGate, mcpAutoApproveFromEnv } from "../mcp/approval.ts";
 
-type AppProps = { cwd: string; agentTools?: Tool[]; allTools?: Tool[] };
+type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 
 function modelChoices(query = "", models = getAllModels()): {
   references: string[];
@@ -172,8 +172,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const termWidth = stdout?.columns ?? 80;
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const vision = loadVisionConfigFromEnv();
-  const allToolsRef = useRef<Tool[]>(allTools ?? createAllTools(cwd));
-  const agentToolsRef = useRef<Tool[]>(agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
+  const allToolsRef = useRef<ToolProvider>(allTools ?? createAllTools(cwd));
+  const agentToolsRef = useRef<ToolProvider>(agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
   const [input, setInput] = useState("");
@@ -451,7 +451,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   // ── direct tool invocation ────────────────────────────────────────────────
 
   const runDirectTool = useCallback(async (toolName: string, args: Record<string, unknown>) => {
-    const tool = allToolsRef.current.find((t) => t.name === toolName);
+    const tool = resolveToolProvider(allToolsRef.current).find((t) => t.name === toolName);
     const fakeCall = { id: `direct-${Date.now()}`, name: toolName, arguments: args };
     if (!tool) {
       dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: fakeCall, result: { content: `Unknown tool: ${toolName}`, isError: true } } });
@@ -471,7 +471,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const resolveAtRefs = useCallback(async (text: string): Promise<MessageContent> => {
     const paths = parseAtRefs(text);
     if (paths.length === 0) return text;
-    const readTool = allToolsRef.current.find((t) => t.name === "read");
+    const readTool = resolveToolProvider(allToolsRef.current).find((t) => t.name === "read");
     if (!readTool) return text;
     const parts: MessageContent = [{ type: "text", text }];
     for (const p of paths) {

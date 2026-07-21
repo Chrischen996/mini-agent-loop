@@ -32,7 +32,7 @@ import { createRepositoryStoreFromEnv, RepositoryStore } from "./codebase/reposi
 import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
 import type { CodebaseSemanticProvider } from "./codebase/deepwiki-provider.ts";
 import { createDocumentEditTool } from "./tools/document-edit.ts";
-import type { Tool } from "./tools/types.ts";
+import { resolveToolProvider, type Tool, type ToolProvider } from "./tools/types.ts";
 import type { AgentMessage, ContentPart } from "./types.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
 import type { McpServerStatus } from "./mcp/types.ts";
@@ -57,7 +57,7 @@ type Session = {
 
 export type AgentServerOptions = {
   llm: LlmConfig;
-  tools?: Tool[];
+  tools?: ToolProvider;
   preprocessors?: MessagePreprocessor[];
   chat?: ChatFn;
   workspace?: string;
@@ -82,8 +82,8 @@ export type AgentServerOptions = {
   codebaseStore?: RepositoryStore;
   codebaseProvider?: CodebaseSemanticProvider;
   deepWikiEnabled?: boolean;
-  mcpTools?: Tool[];
-  mcpStatuses?: McpServerStatus[];
+  mcpTools?: ToolProvider;
+  mcpStatuses?: McpServerStatus[] | (() => McpServerStatus[]);
 };
 
 function safeMessage(message: AgentMessage): Record<string, unknown> {
@@ -372,14 +372,20 @@ export function createAgentServer(options: AgentServerOptions): Express {
   const dataRoot = path.resolve(options.dataDir ?? path.join(os.homedir(), ".mini-agent"));
   const codebaseEnabled = options.codebaseEnabled ?? process.env.EXTERNAL_CODEBASE_ENABLED !== "0";
   const codebaseStore = options.codebaseStore ?? (codebaseEnabled ? createRepositoryStoreFromEnv(path.join(dataRoot, "codebases")) : undefined);
-  const tools = options.tools ?? mergeToolSets(
-    createTools(workspace, {
+  let tools: ToolProvider;
+  if (options.tools) {
+    tools = options.tools;
+  } else {
+    const localTools = createTools(workspace, {
       codebase: codebaseEnabled,
       codebaseStore,
       codebaseProvider: options.codebaseProvider,
-    }),
-    options.mcpTools ?? [],
-  );
+    });
+    tools = () => mergeToolSets(
+      localTools,
+      resolveToolProvider(options.mcpTools ?? []),
+    );
+  }
   const documentStore = new DocumentStore(path.join(dataRoot, "documents"));
   const permissionManager = new PermissionManager();
   const sessionStore = new SessionStore(path.join(dataRoot, "sessions"));
@@ -406,29 +412,34 @@ export function createAgentServer(options: AgentServerOptions): Express {
   });
 
   app.get("/api/health", (_request, response) => response.json({ ok: true }));
-  app.get("/api/config", (_request, response) => response.json({
-    model: options.llm.model,
-    modelVision: options.llm.capabilities.input.includes("image"),
-    visionPreprocessor: options.preprocessors?.length ? "enabled" : "disabled",
-    contextWindow: resolveModel(options.llm.model, options.llm.baseUrl).contextWindow,
-    maxTokens: options.llm.maxTokens,
-    workspace: path.basename(workspace),
-    workspaceLabel: path.basename(workspace),
-    maxImages: MAX_IMAGES,
-    maxImageBytes: MAX_IMAGE_BYTES,
-    maxAttachments: MAX_ATTACHMENTS,
-    externalCodebase: {
-      enabled: codebaseEnabled,
-      allowedHosts: codebaseEnabled ? ["github.com"] : [],
-    },
-    deepWiki: {
-      enabled: options.deepWikiEnabled ?? Boolean(options.codebaseProvider),
-    },
-    mcp: {
-      enabled: options.mcpStatuses?.some((status) => status.state === "ready") ?? false,
-      servers: options.mcpStatuses ?? [],
-    },
-  }));
+  app.get("/api/config", (_request, response) => {
+    const mcpStatuses = typeof options.mcpStatuses === "function"
+      ? options.mcpStatuses()
+      : options.mcpStatuses ?? [];
+    response.json({
+      model: options.llm.model,
+      modelVision: options.llm.capabilities.input.includes("image"),
+      visionPreprocessor: options.preprocessors?.length ? "enabled" : "disabled",
+      contextWindow: resolveModel(options.llm.model, options.llm.baseUrl).contextWindow,
+      maxTokens: options.llm.maxTokens,
+      workspace: path.basename(workspace),
+      workspaceLabel: path.basename(workspace),
+      maxImages: MAX_IMAGES,
+      maxImageBytes: MAX_IMAGE_BYTES,
+      maxAttachments: MAX_ATTACHMENTS,
+      externalCodebase: {
+        enabled: codebaseEnabled,
+        allowedHosts: codebaseEnabled ? ["github.com"] : [],
+      },
+      deepWiki: {
+        enabled: options.deepWikiEnabled ?? Boolean(options.codebaseProvider),
+      },
+      mcp: {
+        enabled: mcpStatuses.some((status) => status.state === "ready"),
+        servers: mcpStatuses,
+      },
+    });
+  });
 
   app.get("/api/workspace/list", async (request, response) => {
     const relativePath = String(request.query.path ?? "");
@@ -590,12 +601,17 @@ export function createAgentServer(options: AgentServerOptions): Express {
 
       try {
         const operationScope = randomUUID();
+        const documentTool = createDocumentEditTool(
+          documentStore,
+          String(request.params.id),
+          operationScope,
+        ) as Tool;
         session.messages = await runAgentTurn(
           session.messages,
           input.modelPrompt,
           {
             llm: options.llm,
-            tools: [...tools, createDocumentEditTool(documentStore, String(request.params.id), operationScope) as Tool],
+            tools: () => [...resolveToolProvider(tools), documentTool],
             preprocessors: options.preprocessors ?? [],
             chat: options.chat,
             userContent,
@@ -687,8 +703,8 @@ async function startServer(): Promise<void> {
       codebaseStore: codebaseRuntime.store,
       codebaseProvider: codebaseRuntime.semanticProvider,
       deepWikiEnabled: codebaseRuntime.deepWikiEnabled,
-      mcpTools: mcpRuntime.snapshot(),
-      mcpStatuses: mcpRuntime.statuses(),
+      mcpTools: () => mcpRuntime.snapshot(),
+      mcpStatuses: () => mcpRuntime.statuses(),
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
     });
   } catch (error) {

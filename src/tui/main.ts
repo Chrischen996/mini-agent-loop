@@ -13,7 +13,7 @@ import {
 import { createTools } from "../tools/index.ts";
 import type { AgentMessage } from "../types.ts";
 import { createMcpApprovalGate, mcpAutoApproveFromEnv } from "../mcp/approval.ts";
-import { createMcpRuntimeFromEnv, mergeToolSets } from "../mcp/runtime.ts";
+import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
 
 type ToolView = {
@@ -156,14 +156,12 @@ async function main(): Promise<void> {
   });
   let tools;
   try {
-    tools = mergeToolSets(
-      createTools(cwd, {
-        codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
-        codebaseStore: codebaseRuntime.store,
-        codebaseProvider: codebaseRuntime.semanticProvider,
-      }),
-      mcpRuntime.snapshot(),
-    );
+    tools = mcpRuntime.toolProvider(createTools(cwd, {
+      codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
+      codebaseStore: codebaseRuntime.store,
+      codebaseProvider: codebaseRuntime.semanticProvider,
+    }));
+    tools();
   } catch (error) {
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
     throw error;

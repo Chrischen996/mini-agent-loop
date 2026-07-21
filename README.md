@@ -288,6 +288,9 @@ execute a local command. Set `MINI_AGENT_MCP_CONFIG` to a file you trust:
       "required": false,
       "includeTools": ["search"],
       "timeoutMs": 30000,
+      "reconnect": true,
+      "reconnectDelayMs": 1000,
+      "maxReconnectDelayMs": 30000,
       "maxTools": 16,
       "maxSchemaBytes": 262144,
       "maxResultBytes": 1048576
@@ -297,9 +300,14 @@ execute a local command. Set `MINI_AGENT_MCP_CONFIG` to a file you trust:
 ```
 
 Relative `cwd` values are resolved from the config file directory. `${NAME}`
-environment references must exist when the agent starts. Optional servers
-degrade to an error status; a failed server with `required: true` prevents
-startup. `excludeTools`, `enabled`, and per-server limits are also supported.
+environment references must exist when the agent starts. Optional servers enter
+a reconnecting or error state when unavailable; a failed server with
+`required: true` still prevents initial startup. `excludeTools`, `enabled`, and
+per-server limits are also supported.
+Connected servers that exit are removed from the active tool registry and
+reconnected with bounded exponential backoff by default. Set `reconnect` to
+`false` to disable this, or tune `reconnectDelayMs` and
+`maxReconnectDelayMs`.
 
 ```bash
 export MINI_AGENT_MCP_CONFIG=/absolute/path/to/mcp.json
@@ -314,13 +322,16 @@ MINI_AGENT_MCP_AUTO_APPROVE=1 npm run tui
 The Web GUI uses its existing per-call permission prompt instead of automatic
 approval. MCP tools are exposed to models with names such as
 `mcp__local-search__search`; remote annotations are display hints only and do
-not bypass approval. `/api/config` returns only server id, state, tool count,
-and sanitized errors, never commands, arguments, or environment values.
+not bypass approval. `/api/config` returns only sanitized server status
+metadata, never commands, arguments, or environment values.
+When a server advertises and sends `tools/list_changed`, the agent refreshes
+the complete paginated catalog. The next inner model turn receives the updated
+tool set without restarting the process. Changes to the MCP JSON configuration
+itself still require a restart.
 
 User-configured MCP tools in this release use stdio. DeepWiki internally uses
-the fixed official Streamable HTTP endpoint. OAuth,
-dynamic `tools/list_changed`, resources, prompts, sampling, elicitation, and
-task-required tools remain out of scope.
+the fixed official Streamable HTTP endpoint. OAuth, resources, prompts,
+sampling, elicitation, and task-required tools remain out of scope.
 
 Local API:
 

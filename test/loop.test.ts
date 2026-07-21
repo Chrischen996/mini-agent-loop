@@ -11,6 +11,7 @@ import {
 import { contentAsString } from "../src/content.ts";
 import { makeLlmConfig } from "../src/llm.ts";
 import { createDefaultTools, createReadTool } from "../src/tools/index.ts";
+import type { Tool } from "../src/tools/types.ts";
 import {
   createFauxChat,
   createInfiniteToolFauxChat,
@@ -315,6 +316,50 @@ describe("runAgentTurn", () => {
     assert.ok(Array.isArray(capturedCtx?.toolResults) && capturedCtx.toolResults.length === 1);
     assert.ok(capturedCtx?.messages.length > 0);
     assert.equal(capturedCtx?.assistantMessage.role, "assistant");
+  });
+
+  it("resolves a dynamic tool provider before every inner turn", async () => {
+    const refreshedTool: Tool = {
+      name: "refreshed",
+      description: "available after refresh",
+      parameters: { type: "object" },
+      execute: async () => ({ content: "refreshed" }),
+    };
+    let catalog: Tool[];
+    const refreshTool: Tool = {
+      name: "refresh",
+      description: "refresh tools",
+      parameters: { type: "object" },
+      execute: async () => {
+        catalog = [refreshedTool];
+        return { content: "updated" };
+      },
+    };
+    catalog = [refreshTool];
+    const seen: string[][] = [];
+    const chat = async (
+      _config: typeof dummyLlm,
+      _messages: import("../src/types.ts").AgentMessage[],
+      tools: Tool[] = [],
+    ): Promise<import("../src/types.ts").AssistantMessage> => {
+      seen.push(tools.map((tool) => tool.name));
+      if (seen.length === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "refresh_1", name: "refresh", arguments: {} }],
+        };
+      }
+      return { role: "assistant", content: "saw refreshed tools" };
+    };
+
+    await runAgentTurn(createAgentHistory(), "refresh", {
+      llm: dummyLlm,
+      tools: () => [...catalog],
+      chat,
+    });
+
+    assert.deepEqual(seen, [["refresh"], ["refreshed"]]);
   });
 
   it("preserves history without repeating the system message", async () => {

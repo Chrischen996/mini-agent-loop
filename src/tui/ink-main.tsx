@@ -2,7 +2,7 @@ import React from "react";
 import { render } from "ink";
 import { App } from "./App.tsx";
 import { createAllTools, createTools } from "../tools/index.ts";
-import { createMcpRuntimeFromEnv, mergeToolSets } from "../mcp/runtime.ts";
+import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
 
 const cwd = process.cwd();
@@ -19,19 +19,16 @@ async function main(): Promise<void> {
     throw error;
   });
   try {
-    const mcpTools = mcpRuntime.snapshot();
+    const agentTools = createTools(cwd, {
+      codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
+      codebaseStore: codebaseRuntime.store,
+      codebaseProvider: codebaseRuntime.semanticProvider,
+    });
     const app = render(
       <App
         cwd={cwd}
-        agentTools={mergeToolSets(
-          createTools(cwd, {
-            codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
-            codebaseStore: codebaseRuntime.store,
-            codebaseProvider: codebaseRuntime.semanticProvider,
-          }),
-          mcpTools,
-        )}
-        allTools={mergeToolSets(createAllTools(cwd), mcpTools)}
+        agentTools={mcpRuntime.toolProvider(agentTools)}
+        allTools={mcpRuntime.toolProvider(createAllTools(cwd))}
       />,
     );
     await app.waitUntilExit();

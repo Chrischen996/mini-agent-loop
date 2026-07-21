@@ -17,7 +17,7 @@ import {
 } from "./llm.ts";
 import { resolveModel } from "./models.ts";
 import type { MessagePreprocessor } from "./preprocessors/index.ts";
-import type { Tool, ToolResult } from "./tools/types.ts";
+import { resolveToolProvider, type Tool, type ToolProvider, type ToolResult } from "./tools/types.ts";
 import type {
   AgentMessage,
   AssistantMessage,
@@ -42,7 +42,7 @@ export type TurnContext = {
 
 export type AgentLoopOptions = {
   llm: LlmConfig;
-  tools: Tool[];
+  tools: ToolProvider;
   systemPrompt?: string;
   /** Hard stop for runaway loops. Default: 10 */
   maxTurns?: number;
@@ -281,7 +281,8 @@ export async function runAgentTurn(
       onEvent?.({ type: "aborted", messages });
       return messages;
     }
-    const preparedMessages = compactForModel(messages, currentLlm, tools, currentContext, onEvent, "token budget");
+    const turnTools = resolveToolProvider(tools);
+    const preparedMessages = compactForModel(messages, currentLlm, turnTools, currentContext, onEvent, "token budget");
     if (preparedMessages !== messages) {
       messages.splice(0, messages.length, ...preparedMessages);
     }
@@ -289,7 +290,7 @@ export async function runAgentTurn(
     try {
       if (useInjectedChat) {
         // Injected chat (tests) stays non-streaming for deterministic offline coverage.
-        assistant = await chat(currentLlm, messages, tools);
+        assistant = await chat(currentLlm, messages, turnTools);
       } else {
         assistant = {
           role: "assistant",
@@ -299,7 +300,7 @@ export async function runAgentTurn(
         let streamed = "";
         let lastUsage: StreamChatUsage | undefined;
         try {
-          for await (const event of streamChat(currentLlm, messages, tools, signal)) {
+          for await (const event of streamChat(currentLlm, messages, turnTools, signal)) {
             if (event.type === "text_delta") {
               if (event.kind === "answer") streamed += event.text;
               onEvent?.({ type: "assistant_delta", text: event.text, kind: event.kind });
@@ -350,7 +351,7 @@ export async function runAgentTurn(
               isError: true,
             };
           } else {
-            const tool = tools.find((t) => t.name === call.name);
+            const tool = turnTools.find((t) => t.name === call.name);
             if (!tool) {
               result = {
                 content: `Unknown tool: ${call.name}`,
@@ -417,7 +418,7 @@ export async function runAgentTurn(
         const compacted = compactForModel(
           messages,
           currentLlm,
-          tools,
+          turnTools,
           currentContext,
           onEvent,
           "provider context overflow",
@@ -461,7 +462,7 @@ export async function runAgentTurn(
           isError: true,
         };
       } else {
-        const tool = tools.find((t) => t.name === call.name);
+        const tool = turnTools.find((t) => t.name === call.name);
         if (!tool) {
           result = {
             content: `Unknown tool: ${call.name}`,

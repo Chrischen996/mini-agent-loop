@@ -7,6 +7,7 @@ import request from "supertest";
 import { contentAsString } from "../src/content.ts";
 import { makeLlmConfig } from "../src/llm.ts";
 import { createAgentServer } from "../src/server.ts";
+import type { Tool } from "../src/tools/types.ts";
 import type { AgentMessage, AssistantMessage } from "../src/types.ts";
 
 const llm = makeLlmConfig({
@@ -30,6 +31,7 @@ describe("agent server", () => {
   });
 
   it("keeps a multi-turn session and streams safe NDJSON events", async () => {
+    let mcpState: "ready" | "reconnecting" = "ready";
     const chat = async (
       _config: typeof llm,
       messages: AgentMessage[],
@@ -42,11 +44,11 @@ describe("agent server", () => {
       tools: [],
       chat,
       serveWeb: false,
-      mcpStatuses: [{
+      mcpStatuses: () => [{
         id: "fixture",
         transport: "stdio",
         required: false,
-        state: "ready",
+        state: mcpState,
         toolCount: 2,
       }],
     });
@@ -56,6 +58,13 @@ describe("agent server", () => {
     assert.doesNotMatch(config.text, /must-not-leak/);
     assert.equal((config.body as { mcp: { enabled: boolean } }).mcp.enabled, true);
     assert.equal((config.body as { deepWiki: { enabled: boolean } }).deepWiki.enabled, false);
+    mcpState = "reconnecting";
+    const reconnectingConfig = await request(app).get("/api/config");
+    assert.equal((reconnectingConfig.body as { mcp: { enabled: boolean } }).mcp.enabled, false);
+    assert.equal(
+      (reconnectingConfig.body as { mcp: { servers: Array<{ state: string }> } }).mcp.servers[0]?.state,
+      "reconnecting",
+    );
 
     const created = await request(app).post("/api/sessions");
     assert.equal(created.status, 201);
@@ -89,6 +98,37 @@ describe("agent server", () => {
       ["user", "assistant", "user", "assistant"],
     );
     assert.doesNotMatch(history.text, /must-not-leak/);
+  });
+
+  it("resolves a dynamic tool provider for each HTTP message", async () => {
+    const makeTool = (name: string): Tool => ({
+      name,
+      description: name,
+      parameters: { type: "object" },
+      execute: async () => ({ content: name }),
+    });
+    let catalog = [makeTool("first")];
+    const app = createAgentServer({
+      llm,
+      tools: () => catalog,
+      chat: async (_config, _messages, tools = []) => ({
+        role: "assistant",
+        content: tools.map((tool) => tool.name).join(","),
+      }),
+      serveWeb: false,
+    });
+    const created = await request(app).post("/api/sessions");
+    const sessionId = (created.body as { id: string }).id;
+    const first = await request(app)
+      .post(`/api/sessions/${sessionId}/messages`)
+      .field("prompt", "first");
+    assert.match(first.text, /first/);
+    catalog = [makeTool("second")];
+    const second = await request(app)
+      .post(`/api/sessions/${sessionId}/messages`)
+      .field("prompt", "second");
+    assert.match(second.text, /second/);
+    assert.doesNotMatch(second.text, /\bfirst\b/);
   });
 
   it("restores sessions after the server instance is recreated", async () => {

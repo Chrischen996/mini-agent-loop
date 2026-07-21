@@ -17,6 +17,11 @@ const MAX_TOOL_PAGES = 100;
 
 class SdkMcpClientConnection implements McpClientConnection {
   private closed = false;
+  private closeError: Error | undefined;
+  private lastError: Error | undefined;
+  private pendingToolsChanged = false;
+  private readonly toolsChangedListeners = new Set<() => void>();
+  private readonly closeListeners = new Set<(error?: Error) => void>();
   private readonly client: Client;
   private readonly timeoutMs: number;
 
@@ -74,6 +79,47 @@ class SdkMcpClientConnection implements McpClientConnection {
     return result as McpCallResult;
   }
 
+  onToolsChanged(listener: () => void): () => void {
+    this.toolsChangedListeners.add(listener);
+    if (this.pendingToolsChanged) {
+      this.pendingToolsChanged = false;
+      queueMicrotask(() => {
+        if (this.toolsChangedListeners.has(listener)) listener();
+      });
+    }
+    return () => this.toolsChangedListeners.delete(listener);
+  }
+
+  onClose(listener: (error?: Error) => void): () => void {
+    this.closeListeners.add(listener);
+    if (this.closeError) {
+      queueMicrotask(() => {
+        if (this.closeListeners.has(listener)) listener(this.closeError);
+      });
+    }
+    return () => this.closeListeners.delete(listener);
+  }
+
+  handleToolsChanged(): void {
+    if (this.closed) return;
+    if (this.toolsChangedListeners.size === 0) {
+      this.pendingToolsChanged = true;
+      return;
+    }
+    for (const listener of this.toolsChangedListeners) listener();
+  }
+
+  handleError(error: Error): void {
+    this.lastError = error;
+  }
+
+  handleClose(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.closeError = this.lastError ?? new Error("MCP connection closed");
+    for (const listener of this.closeListeners) listener(this.closeError);
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -86,13 +132,29 @@ async function connectMcpClient(
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<McpClientConnection> {
+  let connection: SdkMcpClientConnection;
   const client = new Client(
     { name: "mini-agent", version: "0.1.0" },
-    { capabilities: {} },
+    {
+      capabilities: {},
+      listChanged: {
+        tools: {
+          autoRefresh: false,
+          debounceMs: 100,
+          onChanged: (error) => {
+            if (error) connection.handleError(error);
+            else connection.handleToolsChanged();
+          },
+        },
+      },
+    },
   );
+  connection = new SdkMcpClientConnection(client, timeoutMs);
+  client.onerror = (error) => connection.handleError(error);
+  client.onclose = () => connection.handleClose();
   try {
     await client.connect(transport, { signal, timeout: timeoutMs });
-    return new SdkMcpClientConnection(client, timeoutMs);
+    return connection;
   } catch (error) {
     await transport.close().catch(() => undefined);
     throw error;

@@ -40,3 +40,9 @@ export type Tool<TArgs = Record<string, unknown>> = {
   parameters: JsonSchema;
   execute: (args: TArgs, signal?: AbortSignal) => Promise<ToolResult>;
 };
+
+export type ToolProvider = Tool[] | (() => Tool[]);
+
+export function resolveToolProvider(provider: ToolProvider): Tool[] {
+  return typeof provider === "function" ? provider() : provider;
+}

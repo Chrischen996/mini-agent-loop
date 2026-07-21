@@ -4,6 +4,8 @@ import type { LoadedMcpConfig, McpStdioServerConfig } from "./types.ts";
 
 const MAX_SERVERS = 16;
 const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_RECONNECT_DELAY_MS = 1_000;
+const DEFAULT_MAX_RECONNECT_DELAY_MS = 30_000;
 const DEFAULT_MAX_TOOLS = 64;
 const DEFAULT_MAX_SCHEMA_BYTES = 262_144;
 const DEFAULT_MAX_RESULT_BYTES = 1_048_576;
@@ -94,6 +96,21 @@ function parseServer(
   const cwd = input.cwd
     ? path.resolve(configDirectory, input.cwd as string)
     : workspace;
+  const reconnectDelayMs = positiveInteger(
+    input.reconnectDelayMs,
+    DEFAULT_RECONNECT_DELAY_MS,
+    `MCP server ${id}.reconnectDelayMs`,
+    300_000,
+  );
+  const maxReconnectDelayMs = positiveInteger(
+    input.maxReconnectDelayMs,
+    DEFAULT_MAX_RECONNECT_DELAY_MS,
+    `MCP server ${id}.maxReconnectDelayMs`,
+    300_000,
+  );
+  if (maxReconnectDelayMs < reconnectDelayMs) {
+    throw new Error(`MCP server ${id}.maxReconnectDelayMs must be greater than or equal to reconnectDelayMs`);
+  }
   return {
     id,
     transport: "stdio",
@@ -103,6 +120,9 @@ function parseServer(
     env: resolveEnvironment(input.env, id, environment),
     enabled: boolean(input.enabled, true, `MCP server ${id}.enabled`),
     required: boolean(input.required, false, `MCP server ${id}.required`),
+    reconnect: boolean(input.reconnect, true, `MCP server ${id}.reconnect`),
+    reconnectDelayMs,
+    maxReconnectDelayMs,
     includeTools: input.includeTools === undefined
       ? undefined
       : stringArray(input.includeTools, `MCP server ${id}.includeTools`),

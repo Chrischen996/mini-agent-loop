@@ -9,7 +9,7 @@ import {
 } from "./preprocessors/index.ts";
 import { createTools, type ToolName } from "./tools/index.ts";
 import { createMcpApprovalGate } from "./mcp/approval.ts";
-import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
+import { createMcpRuntimeFromEnv } from "./mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
 import type { ContentPart, MessageContent } from "./types.ts";
 
@@ -199,16 +199,14 @@ async function main(): Promise<void> {
   });
   let tools;
   try {
-    tools = mergeToolSets(
-      createTools(cwd, {
-        tools: selectedTools,
-        excludeTools,
-        codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
-        codebaseStore: codebaseRuntime.store,
-        codebaseProvider: codebaseRuntime.semanticProvider,
-      }),
-      mcpRuntime.snapshot(),
-    );
+    tools = mcpRuntime.toolProvider(createTools(cwd, {
+      tools: selectedTools,
+      excludeTools,
+      codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
+      codebaseStore: codebaseRuntime.store,
+      codebaseProvider: codebaseRuntime.semanticProvider,
+    }));
+    tools();
   } catch (error) {
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
     throw error;

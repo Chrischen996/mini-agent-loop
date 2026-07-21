@@ -99,6 +99,7 @@ export function createMcpTools(
   client: McpClientConnection,
   definitions: McpToolDefinition[],
   usedNames: Set<string>,
+  assignedNames?: Map<string, string>,
 ): { tools: Tool[]; skippedTaskTools: string[] } {
   const include = config.includeTools ? new Set(config.includeTools) : undefined;
   const exclude = new Set(config.excludeTools);
@@ -123,7 +124,19 @@ export function createMcpTools(
       throw new Error(`MCP server ${config.id} returned duplicate tool ${definition.name}`);
     }
     remoteNames.add(definition.name);
-    const name = createMcpToolName(config.id, definition.name, usedNames);
+    const identity = `${config.id}\0${definition.name}`;
+    let name = assignedNames?.get(identity);
+    if (name) {
+      if (usedNames.has(name)) throw new Error(`Duplicate MCP tool name assignment: ${name}`);
+      usedNames.add(name);
+    } else {
+      const blockedNames = assignedNames
+        ? new Set([...usedNames, ...assignedNames.values()])
+        : usedNames;
+      name = createMcpToolName(config.id, definition.name, blockedNames);
+      usedNames.add(name);
+      assignedNames?.set(identity, name);
+    }
     return {
       name,
       displayName: definition.title ?? definition.annotations?.title ?? definition.name,

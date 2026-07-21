@@ -12,6 +12,9 @@ export type McpStdioServerConfig = {
   includeTools?: string[];
   excludeTools: string[];
   timeoutMs: number;
+  reconnect: boolean;
+  reconnectDelayMs: number;
+  maxReconnectDelayMs: number;
   maxTools: number;
   maxSchemaBytes: number;
   maxResultBytes: number;
@@ -22,7 +25,7 @@ export type LoadedMcpConfig = {
   servers: McpStdioServerConfig[];
 };
 
-export type McpServerState = "disabled" | "connecting" | "ready" | "error" | "closed";
+export type McpServerState = "disabled" | "connecting" | "reconnecting" | "ready" | "error" | "closed";
 
 export type McpServerStatus = {
   id: string;
@@ -30,6 +33,7 @@ export type McpServerStatus = {
   required: boolean;
   state: McpServerState;
   toolCount: number;
+  reconnectAttempt?: number;
   error?: string;
   warning?: string;
 };
@@ -63,6 +67,8 @@ export type McpClientConnection = {
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<McpCallResult>;
+  onToolsChanged?(listener: () => void): () => void;
+  onClose?(listener: (error?: Error) => void): () => void;
   close(): Promise<void>;
 };
 
