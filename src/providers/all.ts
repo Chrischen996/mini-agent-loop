@@ -38,6 +38,7 @@ import { xiaomiTokenPlanCnProvider } from "./xiaomi-token-plan-cn.ts";
 import { xiaomiTokenPlanSgpProvider } from "./xiaomi-token-plan-sgp.ts";
 import { zaiProvider } from "./zai.ts";
 import { zaiCodingCnProvider } from "./zai-coding-cn.ts";
+import { qwenProvider } from "./qwen.ts";
 
 type BuiltinModelApi<
 	TProvider extends KnownProvider,
@@ -104,6 +105,7 @@ export function builtinProviders(): Provider[] {
 		xiaomiTokenPlanSgpProvider(),
 		zaiProvider(),
 		zaiCodingCnProvider(),
+		qwenProvider(),
 	];
 }
 

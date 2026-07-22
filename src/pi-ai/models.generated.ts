@@ -37,6 +37,7 @@ import { XIAOMI_TOKEN_PLAN_CN_MODELS } from "./providers/xiaomi-token-plan-cn.mo
 import { XIAOMI_TOKEN_PLAN_SGP_MODELS } from "./providers/xiaomi-token-plan-sgp.models.ts";
 import { ZAI_MODELS } from "./providers/zai.models.ts";
 import { ZAI_CODING_CN_MODELS } from "./providers/zai-coding-cn.models.ts";
+import { QWEN_MODELS } from "./providers/qwen.models.ts";
 
 export const MODELS = {
 	"amazon-bedrock": AMAZON_BEDROCK_MODELS,
@@ -75,4 +76,5 @@ export const MODELS = {
 	"xiaomi-token-plan-sgp": XIAOMI_TOKEN_PLAN_SGP_MODELS,
 	"zai": ZAI_MODELS,
 	"zai-coding-cn": ZAI_CODING_CN_MODELS,
+	"qwen": QWEN_MODELS,
 } as const;

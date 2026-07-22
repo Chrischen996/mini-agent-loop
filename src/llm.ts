@@ -5,6 +5,7 @@ import {
   loadRelayRegistryFromEnv,
   type RelayRegistry,
 } from "./relay.ts";
+import { getActiveProfile, loadProfileStoreSync } from "./profile-store.ts";
 import {
   extractImageParts,
   extractVisionAnalysisParts,
@@ -146,6 +147,32 @@ export function loadDotEnvFile(
 export function loadLlmConfigFromEnv(): LlmConfig {
   loadDotEnvFile();
 
+  // ── 1. Active profile (highest precedence) ─────────────────────────────────
+  const profileStore = loadProfileStoreSync();
+  const activeProfile = profileStore ? getActiveProfile(profileStore) : null;
+
+  if (activeProfile) {
+    // Profile fully specifies model, baseUrl, and apiKey.
+    const resolved = resolveModel(activeProfile.model, activeProfile.baseUrl);
+    const imagePolicy = parseImagePolicy(process.env.IMAGE_POLICY);
+    const base: LlmConfig = {
+      apiKey: activeProfile.apiKey,
+      provider: resolved.provider,
+      baseUrl: activeProfile.baseUrl || resolved.baseUrl,
+      model: resolved.id,
+      capabilities: resolved.capabilities,
+      contextWindow: resolved.contextWindow,
+      maxTokens: resolved.maxTokens,
+      timeoutMs: configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS),
+      piModel: resolved.piModel,
+      reasoning: resolved.reasoning,
+      imagePolicy,
+    };
+    const relayRegistry = loadRelayRegistryFromEnv();
+    return applyRelayIfMatched(base, relayRegistry);
+  }
+
+  // ── 2. Existing environment-variable / fallback logic ──────────────────────
   const useDeepSeek =
     Boolean(process.env.DEEPSEEK_API_KEY) ||
     /deepseek/i.test(process.env.OPENAI_BASE_URL ?? "") ||

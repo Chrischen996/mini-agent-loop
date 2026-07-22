@@ -1,3 +1,4 @@
+
 import { builtinModels } from "./pi-ai/providers/all.ts";
 import type { Api, Model as PiModel } from "./pi-ai/types.ts";
 
@@ -72,6 +73,7 @@ const PROVIDER_ENV_KEYS: Record<string, string[]> = {
   "xiaomi-token-plan-sgp": ["XIAOMI_API_KEY"],
   zai: ["ZAI_API_KEY"],
   "zai-coding-cn": ["ZAI_CODING_CN_API_KEY"],
+  qwen: ["DASHSCOPE_API_KEY"],
 };
 
 const piRuntime = builtinModels();
@@ -229,6 +231,82 @@ export function resolveModel(modelId: string, baseUrl?: string): ModelRef {
     maxTokens: 16384,
     reasoning: false,
   };
+}
+
+/** Levenshtein edit distance between two lowercase strings. */
+function levenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  const dp: number[] = Array.from({ length: n + 1 }, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    let prev = dp[0];
+    dp[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const temp = dp[j];
+      dp[j] = a[i - 1] === b[j - 1] ? prev : 1 + Math.min(prev, dp[j], dp[j - 1]);
+      prev = temp;
+    }
+  }
+  return dp[n];
+}
+
+/**
+ * Score how well a single search term matches a field value.
+ * Returns 0 if no match, or a positive score:
+ *   4 = exact match
+ *   3 = prefix match
+ *   2 = substring match
+ *   1 = fuzzy (edit distance ≤ floor(term.length / 2.5), minimum 1)
+ */
+function scoreTerm(term: string, field: string): number {
+  if (!term) return 2; // empty term matches everything at substring level
+  if (field === term) return 4;
+  if (field.startsWith(term)) return 3;
+  if (field.includes(term)) return 2;
+  // Allow ~1 edit per 2-3 chars: catches transpositions like 'agens'→'agnes'
+  const threshold = Math.max(1, Math.floor(term.length / 2.5));
+  if (levenshtein(term, field) <= threshold) return 1;
+  // Also try fuzzy against each '-' or '/' separated word in the field
+  const words = field.split(/[-/_.]/);
+  for (const word of words) {
+    if (word.length >= 3 && levenshtein(term, word) <= threshold) return 1;
+  }
+  return 0;
+}
+
+/**
+ * Search models by a free-text query, matching across `id`, `name`, and `provider`.
+ * All whitespace-separated terms must match (AND logic).
+ * Results are sorted by descending match score (best first).
+ */
+export function searchModels(query: string, models: ModelRef[] = getAllModels()): ModelRef[] {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return models;
+
+  const scored: Array<{ model: ModelRef; score: number }> = [];
+  for (const model of models) {
+    const qualifiedId = `${model.provider}/${model.id}`.toLowerCase();
+    const modelId = model.id.toLowerCase();
+    const modelName = model.name.toLowerCase();
+    const provider = model.provider.toLowerCase();
+
+    let totalScore = 0;
+    for (const term of terms) {
+      const s = Math.max(
+        scoreTerm(term, qualifiedId),
+        scoreTerm(term, modelId),
+        scoreTerm(term, modelName),
+        scoreTerm(term, provider),
+      );
+      if (s === 0) { totalScore = 0; break; } // all terms must match
+      totalScore += s;
+    }
+
+    if (totalScore > 0) scored.push({ model, score: totalScore });
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map((s) => s.model);
 }
 
 export function supportsImageInput(capabilities: ModelCapabilities): boolean {

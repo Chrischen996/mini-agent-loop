@@ -19,7 +19,15 @@ import {
   type LoopEvent,
 } from "../loop.ts";
 import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm.ts";
-import { findExactModelReferenceMatch, getAllModels, resolveModel, type ModelRef } from "../models.ts";
+import { findExactModelReferenceMatch, getAllModels, resolveModel, searchModels, type ModelRef } from "../models.ts";
+import {
+  activateProfile,
+  listProfiles,
+  loadProfileStore,
+  removeProfile,
+  saveProfile,
+  type ModelProfileStore,
+} from "../profile-store.ts";
 import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
@@ -35,9 +43,7 @@ function modelChoices(query = "", models = getAllModels()): {
   references: string[];
   contextWindows: Record<string, number>;
 } {
-  const filtered = models.filter((model) =>
-    `${model.provider}/${model.id}`.toLowerCase().includes(query.toLowerCase()),
-  );
+  const filtered = query.trim() ? searchModels(query, models) : models;
   return {
     references: filtered.map((model) => `${model.provider}/${model.id}`),
     contextWindows: Object.fromEntries(
@@ -101,7 +107,7 @@ const PATH_COMMANDS = new Set(["read", "ls", "find", "grep"]);
 
 // ─── autocomplete modes ──────────────────────────────────────────────────────
 
-type AcMode = "command" | "file" | "model" | "model-picker" | "model-setup" | null;
+type AcMode = "command" | "file" | "model" | "model-picker" | "model-setup" | "profile-name" | "profile-list" | null;
 
 type ModelSetupState = {
   model: ModelRef;
@@ -109,6 +115,11 @@ type ModelSetupState = {
   apiKey: string;
   field: "baseUrl" | "apiKey";
   error?: string;
+};
+
+type ProfileListState = {
+  profiles: ReturnType<typeof listProfiles>;
+  selectedIndex: number;
 };
 
 type FileAcTrigger = {
@@ -179,6 +190,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const [input, setInput] = useState("");
   const historyRef = useRef<AgentMessage[]>(createAgentHistory());
   const abortRef = useRef<AbortController>(new AbortController());
+  // Profile state
+  const [pendingProfileSetup, setPendingProfileSetup] = useState<{ model: ModelRef; baseUrl: string; apiKey: string } | null>(null);
+  const [profileListState, setProfileListState] = useState<ProfileListState | null>(null);
+  const [profileStore, setProfileStore] = useState<ModelProfileStore | null>(null);
   // ink-text-input still receives the same keystroke as useInput; after Ctrl/Alt+T
   // it may append "t" (or a control char). Swallow that one onChange tick.
   const suppressInputEchoRef = useRef(false);
@@ -231,6 +246,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     setFileFragment("");
     fileTriggerRef.current = null;
     setAcIndex(0);
+    setPendingProfileSetup(null);
+    setProfileListState(null);
+  }, []);
+
+  // Load profile store on mount
+  useEffect(() => {
+    loadProfileStore().then(setProfileStore).catch(() => { /* non-fatal */ });
   }, []);
 
   // Watch input → update autocomplete
@@ -346,20 +368,47 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     setAcIndex(0);
   }, [llm.apiKey, llm.baseUrl, llm.provider]);
 
-  const commitModelSetup = useCallback((setup: ModelSetupState, apiKey: string) => {
+  const commitModelSetup = useCallback(async (setup: ModelSetupState, apiKey: string) => {
     try {
       setLlm((current) => switchLlmModel(current, setup.model, {
         baseUrl: setup.baseUrl,
         apiKey,
       }));
       dispatch({ type: "MODEL_CHANGED", modelName: setup.model.id });
+      setModelSetup(undefined);
+      setAcMode(null);
       setInput("");
-      clearAc();
+      // Auto-save as a named profile (fire-and-forget, non-fatal)
+      const defaultName = `${setup.model.provider}-${setup.model.id}`
+        .replace(/[^a-zA-Z0-9_-]/g, "-")
+        .replace(/-+/g, "-")
+        .slice(0, 40);
+      try {
+        const updated = await saveProfile(defaultName, {
+          model: `${setup.model.provider}/${setup.model.id}`,
+          baseUrl: setup.baseUrl,
+          apiKey,
+        });
+        setProfileStore(updated);
+      } catch { /* non-fatal: model is already switched in memory */ }
     } catch (error) {
       setModelSetup({ ...setup, apiKey, error: error instanceof Error ? error.message : String(error) });
       setInput(apiKey);
     }
-  }, [clearAc]);
+  }, []);
+
+  const openProfileList = useCallback(async () => {
+    try {
+      const store = await loadProfileStore();
+      setProfileStore(store);
+      const profiles = listProfiles(store);
+      setProfileListState({ profiles, selectedIndex: 0 });
+      setAcMode("profile-list");
+      setInput("");
+    } catch {
+      // ignore
+    }
+  }, []);
 
   const selectModel = useCallback((reference: string, overrides: ModelSwitchOverrides = {}) => {
     const match = findExactModelReferenceMatch(reference, getAllModels());
@@ -407,6 +456,33 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     }
     if (!acMode && key.meta && key.downArrow) {
       dispatch({ type: "FOCUS_NEXT_REASONING", direction: 1 });
+      return;
+    }
+
+    if (acMode === "profile-name") {
+      if (key.escape) {
+        // User skipped saving — just clear
+        setInput("");
+        clearAc();
+      }
+      return;
+    }
+
+    if (acMode === "profile-list" && profileListState) {
+      const len = profileListState.profiles.length;
+      if (key.upArrow && len > 0) {
+        setProfileListState((s) => s ? { ...s, selectedIndex: (s.selectedIndex - 1 + len) % len } : s);
+        return;
+      }
+      if (key.downArrow && len > 0) {
+        setProfileListState((s) => s ? { ...s, selectedIndex: (s.selectedIndex + 1) % len } : s);
+        return;
+      }
+      if (key.escape) {
+        setInput("");
+        clearAc();
+        return;
+      }
       return;
     }
 
@@ -491,13 +567,47 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const allowEmptyApiKey = acMode === "model-setup" && modelSetup?.field === "apiKey";
     if ((!trimmed && !allowEmptyApiKey) || state.busy) return;
 
+    // Profile name step: save the new/updated profile
+    if (acMode === "profile-name" && pendingProfileSetup) {
+      const profileName = trimmed || "default";
+      try {
+        const updated = await saveProfile(profileName, {
+          model: `${pendingProfileSetup.model.provider}/${pendingProfileSetup.model.id}`,
+          baseUrl: pendingProfileSetup.baseUrl,
+          apiKey: pendingProfileSetup.apiKey,
+        });
+        setProfileStore(updated);
+      } catch { /* non-fatal */ }
+      setPendingProfileSetup(null);
+      setInput("");
+      setAcMode(null);
+      return;
+    }
+
+    // Profile list: activate selected profile on Enter
+    if (acMode === "profile-list" && profileListState) {
+      const selected = profileListState.profiles[profileListState.selectedIndex];
+      if (selected) {
+        try {
+          const updated = await activateProfile(selected.name);
+          setProfileStore(updated);
+          const newLlm = loadLlmConfigFromEnv();
+          setLlm(newLlm);
+          dispatch({ type: "MODEL_CHANGED", modelName: newLlm.model });
+        } catch { /* non-fatal */ }
+      }
+      setInput("");
+      clearAc();
+      return;
+    }
+
     if (acMode === "model-setup" && modelSetup) {
       if (modelSetup.field === "baseUrl") {
         const baseUrl = trimmed.replace(/\/$/, "");
         setModelSetup({ ...modelSetup, baseUrl, field: "apiKey", error: undefined });
         setInput(modelSetup.apiKey);
       } else {
-        commitModelSetup(modelSetup, trimmed);
+        void commitModelSetup(modelSetup, trimmed);
       }
       return;
     }
@@ -514,6 +624,28 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     if (trimmed === "/help" || trimmed === "/?") {
       dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: { id: "help", name: "help", arguments: {} }, result: { content: SLASH_COMMANDS.map((c) => `${c.usage.padEnd(28)} ${c.description}`).join("\n"), isError: false } } });
       setInput("");
+      return;
+    }
+
+    // /profiles: show profile list
+    if (/^\/profiles?$/i.test(trimmed)) {
+      await openProfileList();
+      return;
+    }
+
+    // /profiles delete <name>
+    const profileDeleteMatch = trimmed.match(/^\/profiles?\s+delete\s+(.+)$/i);
+    if (profileDeleteMatch) {
+      const name = profileDeleteMatch[1]!.trim();
+      try {
+        const updated = await removeProfile(name);
+        setProfileStore(updated);
+        dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: { id: "profiles-delete", name: "profiles delete", arguments: {} }, result: { content: `Profile "${name}" deleted.`, isError: false } } });
+      } catch (err) {
+        dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: { id: "profiles-delete", name: "profiles delete", arguments: {} }, result: { content: err instanceof Error ? err.message : String(err), isError: true } } });
+      }
+      setInput("");
+      dispatch({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
       return;
     }
 
@@ -590,7 +722,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       dispatch({ type: "LOOP_EVENT", event: { type: "error", message: errMsg } });
       dispatch({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
     }
-  }, [state.busy, acMode, modelSetup, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup]);
+  }, [state.busy, acMode, modelSetup, pendingProfileSetup, profileListState, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup, openProfileList]);
 
   // ── render ────────────────────────────────────────────────────────────────
 
@@ -654,6 +786,29 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         </Box>
       )}
 
+      {acMode === "profile-name" && pendingProfileSetup && (
+        <Box flexDirection="column" paddingX={2}>
+          <Text color="cyan" bold>── 保存配置文件 ──</Text>
+          <Text>模型: {pendingProfileSetup.model.provider}/{pendingProfileSetup.model.id}</Text>
+          <Text dimColor>输入配置文件名称（Enter 保存，Esc 跳过）:</Text>
+        </Box>
+      )}
+
+      {acMode === "profile-list" && profileListState && (
+        <Box flexDirection="column" paddingX={2}>
+          <Text color="cyan" bold>── 配置文件列表 ──</Text>
+          {profileListState.profiles.length === 0 && <Text dimColor>无已保存的配置文件</Text>}
+          {profileListState.profiles.map((p, i) => (
+            <Text key={p.name} color={i === profileListState.selectedIndex ? "green" : undefined}>
+              {i === profileListState.selectedIndex ? "▶ " : "  "}
+              {p.active ? "✓ " : "  "}
+              {p.name} ({p.model}) — {p.baseUrl}
+            </Text>
+          ))}
+          <Text dimColor>↑↓ 选择，Enter 激活，Esc 取消，/profiles delete &lt;name&gt; 删除</Text>
+        </Box>
+      )}
+
       {/* Input row */}
       <Box paddingX={1} gap={1}>
         <Text color="green" bold>{state.busy ? "…" : ">"}</Text>
@@ -676,7 +831,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                   acMode === "model-picker" ? "搜索模型"
                     : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "输入 Base URL"
                       : acMode === "model-setup" ? "输入 API Key，可留空使用环境变量"
-                        : "输入消息，/ 命令，或 @文件 引用"
+                        : acMode === "profile-name" ? "输入配置文件名称（例如 coding-fast）"
+                          : acMode === "profile-list" ? "↑↓ 选择配置文件，Enter 激活"
+                            : "输入消息，/ 命令，或 @文件 引用"
                 }
               />
             )

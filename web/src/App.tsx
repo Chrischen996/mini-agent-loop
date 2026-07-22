@@ -478,6 +478,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [retryDraft, setRetryDraft] = useState<Draft | null>(null);
+  const [pendingQueue, setPendingQueue] = useState<Draft[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const documentInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -622,6 +623,7 @@ export default function App() {
       setPrompt("");
       setRetryDraft(null);
       setReferencedPaths([]);
+      setPendingQueue([]);
       for (const url of objectUrls.current) URL.revokeObjectURL(url);
       objectUrls.current.clear();
       setImages([]);
@@ -917,6 +919,7 @@ export default function App() {
 
   const stopGeneration = () => {
     abortControllerRef.current?.abort();
+    setPendingQueue([]);
   };
 
   const sendMessage = async (draftOverride?: Draft, isRetry = false) => {
@@ -924,12 +927,42 @@ export default function App() {
     const draft = draftOverride ?? { text: prompt, images, documents, referencedPaths };
     const text = draft.text.trim();
     if (
-      !ready ||
-      (!text && draft.images.length === 0 && draft.documents.length === 0 && draft.referencedPaths.length === 0) ||
-      !sessionId
+      !config ||
+      !sessionId ||
+      (!text && draft.images.length === 0 && draft.documents.length === 0 && draft.referencedPaths.length === 0)
     ) {
       return;
     }
+
+    const displayTextForQueue =
+      text || (draft.referencedPaths.length > 0 ? "请阅读引用的文件并说明要点" : "分析图片");
+
+    // If already busy, enqueue the message and show it in the timeline immediately
+    if (busy) {
+      const queuedDraft: Draft = {
+        text,
+        images: draft.images,
+        documents: draft.documents,
+        referencedPaths: draft.referencedPaths,
+      };
+      setPendingQueue((q) => [...q, queuedDraft]);
+      setItems((current) => [
+        ...current,
+        {
+          id: makeId(),
+          kind: "user",
+          content: displayTextForQueue,
+          images: draft.images.map((image) => ({ name: image.file.name, url: image.url })),
+          documents: draft.documents.map((document) => ({ name: document.file.name, size: document.file.size })),
+          referencedPaths: draft.referencedPaths,
+        },
+      ]);
+      setPrompt("");
+      setImages([]);
+      setReferencedPaths([]);
+      return;
+    }
+
     setBusy(true);
     setError(null);
     activeTurnIdRef.current = null;
@@ -1053,6 +1086,15 @@ export default function App() {
     } finally {
       abortControllerRef.current = null;
       setBusy(false);
+      // Drain the queue: automatically send the next pending message
+      setPendingQueue((q) => {
+        const [next, ...rest] = q;
+        if (next) {
+          // Defer by one frame so React flushes busy=false before sendMessage checks it
+          setTimeout(() => void sendMessage(next, false), 0);
+        }
+        return rest;
+      });
     }
   };
 
@@ -1373,9 +1415,9 @@ export default function App() {
                 }
               }}
               onPaste={handlePaste}
-              placeholder="输入消息，或从左侧引用文件"
+              placeholder={busy ? "输入消息（当前响应结束后自动发送）" : "输入消息，或从左侧引用文件"}
               rows={1}
-              disabled={!config || busy}
+              disabled={!config || !sessionId}
             />
             <div className="composer-actions">
               <input
@@ -1389,7 +1431,7 @@ export default function App() {
               <button
                 className="icon-button"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={!ready || images.length >= (config?.maxImages ?? 0)}
+                disabled={!config || !sessionId || images.length >= (config?.maxImages ?? 0)}
                 title="添加图片"
               >
                 <ImagePlus size={19} />
@@ -1405,30 +1447,39 @@ export default function App() {
               <button
                 className="icon-button"
                 onClick={() => documentInputRef.current?.click()}
-                disabled={!ready || images.length + documents.length >= (config?.maxAttachments ?? 0)}
+                disabled={!config || !sessionId || images.length + documents.length >= (config?.maxAttachments ?? 0)}
                 title="添加 PDF 或 Word 文档"
               >
                 <FileText size={19} />
               </button>
+              {pendingQueue.length > 0 && (
+                <span className="queue-badge" title={`${pendingQueue.length} 条消息等待发送`}>
+                  {pendingQueue.length}
+                </span>
+              )}
               <button
-                className={`send-button${busy ? " stop" : ""}`}
+                className={`send-button${busy && !prompt.trim() && images.length === 0 && documents.length === 0 && referencedPaths.length === 0 ? " stop" : ""}`}
                 onClick={() => {
-                  if (busy) stopGeneration();
-                  else void sendMessage();
+                  if (busy && !prompt.trim() && images.length === 0 && documents.length === 0 && referencedPaths.length === 0) {
+                    stopGeneration();
+                  } else {
+                    void sendMessage();
+                  }
                 }}
                 disabled={
-                  busy
-                    ? false
-                    : !config ||
-                      !sessionId ||
-                      (!prompt.trim() &&
-                        images.length === 0 &&
-                        documents.length === 0 &&
-                        referencedPaths.length === 0)
+                  !config ||
+                  !sessionId ||
+                  (!busy &&
+                    !prompt.trim() &&
+                    images.length === 0 &&
+                    documents.length === 0 &&
+                    referencedPaths.length === 0)
                 }
-                title={busy ? "停止" : "发送"}
+                title={busy && !prompt.trim() && images.length === 0 && documents.length === 0 && referencedPaths.length === 0 ? "停止" : busy ? "加入队列" : "发送"}
               >
-                {busy ? <Square size={16} /> : <Send size={18} />}
+                {busy && !prompt.trim() && images.length === 0 && documents.length === 0 && referencedPaths.length === 0
+                  ? <Square size={16} />
+                  : <Send size={18} />}
               </button>
             </div>
           </div>

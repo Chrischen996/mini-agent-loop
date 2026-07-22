@@ -6,6 +6,7 @@ import {
   getAvailableModels,
   MODEL_REGISTRY,
   resolveModel,
+  searchModels,
 } from "../src/models.ts";
 
 describe("model selection", () => {
@@ -52,7 +53,7 @@ describe("model selection", () => {
       [...new Set(getAvailableModels(env).map((model) => model.provider))],
       ["agnes-ai", "deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai"],
     );
-    assert.equal(getAllModels().length, 1059);
+    assert.equal(getAllModels().length, 1075);
     assert.ok(getAllModels().every((model) => model.contextWindow > 0 && model.maxTokens > 0));
   });
 
@@ -119,5 +120,52 @@ describe("model selection", () => {
     assert.equal(custom?.id, "company-model-v1");
     assert.deepEqual(custom?.capabilities.input, ["text", "image"]);
     assert.equal(custom?.contextWindow, 64000);
+    it("searchModels returns all models for an empty query", () => {
+      const all = getAllModels();
+      assert.equal(searchModels("").length, all.length);
+      assert.equal(searchModels("   ").length, all.length);
+    });
+  
+    it("searchModels finds models by exact substring in id", () => {
+      const results = searchModels("deepseek-v4");
+      assert.ok(results.length >= 2);
+      assert.ok(results.every((m) => m.id.includes("deepseek-v4")));
+    });
+  
+    it("searchModels finds models by provider substring", () => {
+      const results = searchModels("anthropic");
+      assert.ok(results.length > 0);
+      assert.ok(results.every((m) => m.provider === "anthropic" || m.id.includes("anthropic") || m.name.toLowerCase().includes("anthropic")));
+    });
+  
+    it("searchModels fuzzy-matches a typo ('agens' → agnes-ai models)", () => {
+      const results = searchModels("agens");
+      assert.ok(results.length > 0, "Expected fuzzy matches for 'agens'");
+      assert.ok(results.some((m) => m.provider === "agnes-ai"), "Expected at least one agnes-ai model");
+    });
+  
+    it("searchModels ranks exact prefix matches before fuzzy matches", () => {
+      // 'deepseek' is a substring of 'deepseek-v4-flash' — should outrank anything fuzzy
+      const results = searchModels("deepseek");
+      assert.ok(results.length > 0);
+      // All results that don't include 'deepseek' in id/name/provider should come after those that do
+      const substringIdx = results.findIndex((m) => m.id.includes("deepseek") || m.provider.includes("deepseek"));
+      assert.equal(substringIdx, 0, "Substring match should be ranked first");
+    });
+  
+    it("searchModels returns empty for a completely unrelated query", () => {
+      const results = searchModels("zzzzzzzzzzzzzzzzz");
+      assert.equal(results.length, 0);
+    });
+  
+    it("searchModels supports multi-word AND queries", () => {
+      // Both 'deepseek' and 'flash' must appear
+      const results = searchModels("deepseek flash");
+      assert.ok(results.length > 0);
+      assert.ok(results.every((m) =>
+        (`${m.provider}/${m.id} ${m.name}`).toLowerCase().includes("flash") &&
+        (`${m.provider}/${m.id} ${m.name}`).toLowerCase().includes("deepseek"),
+      ));
+    });
   });
 });

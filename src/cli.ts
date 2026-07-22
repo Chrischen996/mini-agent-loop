@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { imagePart, textPart } from "./content.ts";

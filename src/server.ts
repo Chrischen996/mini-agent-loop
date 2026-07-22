@@ -17,6 +17,7 @@ import { SessionStore } from "./session-store.ts";
 import { PermissionManager } from "./permissions.ts";
 import { isAbortError, loadLlmConfigFromEnv, type ChatFn, type LlmConfig } from "./llm.ts";
 import { resolveModel } from "./models.ts";
+import { getActiveProfile, loadProfileStore } from "./profile-store.ts";
 import {
   createAgentHistory,
   runAgentTurn,
@@ -412,10 +413,17 @@ export function createAgentServer(options: AgentServerOptions): Express {
   });
 
   app.get("/api/health", (_request, response) => response.json({ ok: true }));
-  app.get("/api/config", (_request, response) => {
+  app.get("/api/config", async (_request, response) => {
     const mcpStatuses = typeof options.mcpStatuses === "function"
       ? options.mcpStatuses()
       : options.mcpStatuses ?? [];
+    // Resolve active profile name (never expose apiKey)
+    let activeProfileName: string | null = null;
+    try {
+      const store = await loadProfileStore();
+      activeProfileName = store.activeProfile;
+    } catch { /* non-fatal */ }
+
     response.json({
       model: options.llm.model,
       modelVision: options.llm.capabilities.input.includes("image"),
@@ -438,6 +446,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         enabled: mcpStatuses.some((status) => status.state === "ready"),
         servers: mcpStatuses,
       },
+      activeProfile: activeProfileName,
     });
   });
 

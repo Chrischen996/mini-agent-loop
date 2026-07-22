@@ -20,6 +20,21 @@ user prompt
 
 ## Setup
 
+Install the published CLI globally:
+
+```bash
+npm install --global @krischen99999/mini-agent-loop
+mini-agent-loop "用一句话介绍你自己"
+```
+
+Or run it without a global install:
+
+```bash
+npx @krischen99999/mini-agent-loop "用一句话介绍你自己"
+```
+
+For local development from the repository:
+
 ```bash
 cd mini-agent
 npm install

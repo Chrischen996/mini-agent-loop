@@ -54,7 +54,10 @@ describe("runAgentLoop", () => {
     assert.equal(toolMsg.toolCallId, "call_read_1");
     assert.equal(toolMsg.name, "read");
     assert.notEqual(toolMsg.isError, true);
-    assert.match(contentAsString(toolMsg.content), /"name"\s*:\s*"mini-agent"/);
+    assert.match(
+      contentAsString(toolMsg.content),
+      /"name"\s*:\s*"@krischen99999\/mini-agent-loop"/,
+    );
 
     const finalAssistant = messages[4];
     assert.equal(finalAssistant.role, "assistant");
@@ -396,7 +399,10 @@ describe("createReadTool", () => {
     const tool = createReadTool(process.cwd());
     const result = await tool.execute({ path: "package.json" });
     assert.notEqual(result.isError, true);
-    assert.match(contentAsString(result.content), /"name"\s*:\s*"mini-agent"/);
+    assert.match(
+      contentAsString(result.content),
+      /"name"\s*:\s*"@krischen99999\/mini-agent-loop"/,
+    );
   });
 
   it("missing file returns isError without throwing", async () => {
