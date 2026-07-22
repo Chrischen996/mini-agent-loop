@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import {
   createAgentHistory,
+  MaxTurnsExceededError,
   runAgentLoop,
   runAgentTurn,
 } from "../src/loop.ts";
@@ -148,24 +149,43 @@ describe("runAgentLoop", () => {
     assert.match(contentAsString(toolMsg.content), /Missing required argument: path/);
   });
 
-  it("exceeding maxTurns throws a clear error", async () => {
+  it("exceeding maxTurns preserves partial history in a typed stop error", async () => {
     const tools = createDefaultTools(process.cwd());
     const chat = createInfiniteToolFauxChat();
+    const events: import("../src/loop.ts").LoopEvent[] = [];
 
     await assert.rejects(
-      () =>
-        runAgentLoop("loop forever", {
-          llm: dummyLlm,
-          tools,
-          chat,
-          maxTurns: 2,
-        }),
-      /maxTurns exceeded \(2\)/,
+      () => runAgentLoop("loop forever", { llm: dummyLlm, tools, chat, maxTurns: 2, onEvent: (event) => events.push(event) }),
+      (error: unknown) => {
+        assert.ok(error instanceof MaxTurnsExceededError);
+        assert.equal(error.maxTurns, 2);
+        assert.equal(error.messages.filter((message) => message.role === "tool").length, 2);
+        return true;
+      },
     );
+    assert.ok(events.some((event) => event.type === "max_turns" && event.maxTurns === 2));
   });
 });
 
 describe("runAgentTurn", () => {
+  it("retries a reasoning-only assistant response before completing", async () => {
+    let calls = 0;
+    const messages = await runAgentTurn(createAgentHistory(), "continue", {
+      llm: dummyLlm,
+      tools: [],
+      chat: async () => {
+        calls += 1;
+        return calls === 1
+          ? { role: "assistant", content: "" }
+          : { role: "assistant", content: "continued" };
+      },
+    });
+
+    assert.equal(calls, 2);
+    assert.equal(messages.at(-1)?.role, "assistant");
+    assert.equal(messages.at(-1)?.content, "continued");
+  });
+
   it("compacts before a model call and emits a context event", async () => {
     const events: import("../src/loop.ts").LoopEvent[] = [];
     const history = [

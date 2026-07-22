@@ -4,7 +4,7 @@ import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { imagePart, textPart } from "./content.ts";
 import { loadLlmConfigFromEnv } from "./llm.ts";
-import { previewContent, runAgentLoop, type LoopEvent } from "./loop.ts";
+import { MaxTurnsExceededError, previewContent, runAgentLoop, type LoopEvent } from "./loop.ts";
 import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
@@ -48,6 +48,9 @@ function logEvent(event: LoopEvent): void {
       );
       break;
     }
+    case "max_turns":
+      console.error(`[max_turns] reached limit ${event.maxTurns}; partial history preserved`);
+      break;
     case "done":
       console.error(`[done] messages=${event.messages.length}`);
       break;
@@ -231,6 +234,10 @@ async function main(): Promise<void> {
       }),
       onEvent: logEvent,
     });
+  } catch (error) {
+    if (!(error instanceof MaxTurnsExceededError)) throw error;
+    messages = error.messages;
+    console.error(`[max_turns] reached limit ${error.maxTurns}; returning partial history`);
   } finally {
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
   }

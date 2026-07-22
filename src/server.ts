@@ -138,6 +138,12 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
       };
     case "error":
       return { type: "error", message: event.message };
+    case "max_turns":
+      return {
+        type: "max_turns",
+        maxTurns: event.maxTurns,
+        messageCount: event.messages.length,
+      };
     case "tool_start":
       return {
         type: "tool_start",

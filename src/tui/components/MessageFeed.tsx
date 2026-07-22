@@ -5,7 +5,7 @@ import type { ChatMessage, ThinkingDisplayMode } from "../state.ts";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-const THINKING_SUMMARY_LINES = 3;
+const THINKING_SUMMARY_LINES = 1;
 const THINKING_AUTO_COLLAPSE_LINES = 15;
 
 function str(v: unknown): string {
@@ -163,7 +163,7 @@ function ReadView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> })
   const lines = msg.result ? previewLines(msg.result) : [];
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
         {isRunning ? <Text color="yellow"><Spinner type="dots" /></Text>
           : <Text color={isError ? "red" : "green"}>{isError ? "✗" : "✓"}</Text>}
@@ -190,7 +190,7 @@ function BashView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> })
   const outputLines = msg.result ? previewLines(msg.result, 15) : [];
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
         {isRunning ? <Text color="yellow"><Spinner type="dots" /></Text>
           : <Text color={isError ? "red" : "green"}>{isError ? "✗" : "✓"}</Text>}
@@ -221,7 +221,7 @@ function FileWriteView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" 
   const previewSrc = contentArg ? previewLines(contentArg, 5) : [];
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
         {isRunning ? <Text color="yellow"><Spinner type="dots" /></Text>
           : <Text color={isError ? "red" : "green"}>{isError ? "✗" : "✓"}</Text>}
@@ -258,7 +258,7 @@ function GrepView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> })
     : 0;
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
         {isRunning ? <Text color="yellow"><Spinner type="dots" /></Text>
           : <Text color={isError ? "red" : "green"}>{isError ? "✗" : "✓"}</Text>}
@@ -288,7 +288,7 @@ function FileListView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }
   const items = msg.result ? previewLines(msg.result, 12) : [];
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
         {isRunning ? <Text color="yellow"><Spinner type="dots" /></Text>
           : <Text color={isError ? "red" : "green"}>{isError ? "✗" : "✓"}</Text>}
@@ -314,7 +314,7 @@ function GenericView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }>
   const resultLines = msg.result ? previewLines(msg.result, 6) : [];
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
         {isRunning ? <Text color="yellow"><Spinner type="dots" /></Text>
           : <Text color={isError ? "red" : "green"}>{isError ? "✗" : "✓"}</Text>}
@@ -401,7 +401,7 @@ export function MessageFeed({
         const absoluteIndex = startIndex + offset;
         if (msg.kind === "user") {
           return (
-            <Box key={absoluteIndex} marginBottom={1} gap={1}>
+            <Box key={absoluteIndex} marginBottom={0} gap={1}>
               <Text color="green" bold>{">"}</Text>
               <Text color="white">{msg.text}</Text>
             </Box>
@@ -410,7 +410,7 @@ export function MessageFeed({
         if (msg.kind === "assistant") {
           const formattedText = msg.text ? formatAssistantText(msg.text) : "";
           return (
-            <Box key={absoluteIndex} marginBottom={1} flexDirection="column">
+            <Box key={absoluteIndex} marginBottom={0} flexDirection="column">
               {msg.reasoning && (
                 <ThinkingBlock
                   content={msg.reasoning}
@@ -428,7 +428,7 @@ export function MessageFeed({
         }
         if (msg.kind === "error") {
           return (
-            <Box key={absoluteIndex} marginBottom={1}>
+            <Box key={absoluteIndex} marginBottom={0}>
               <Text color="red">✗ {msg.text}</Text>
             </Box>
           );
@@ -447,13 +447,13 @@ export function MessageFeed({
 
       {/* Live streaming answer text */}
       {streamingText ? (
-        <Box marginBottom={1} flexDirection="column">
+        <Box marginBottom={0} flexDirection="column">
           <Text color="cyan" wrap="wrap">{streamingText}</Text>
         </Box>
       ) : null}
 
       {busy && !streamingText && !streamingReasoning ? (
-        <Box marginBottom={1} gap={1}>
+        <Box marginBottom={0} gap={1}>
           <Text color="yellow"><Spinner type="dots" /></Text>
           <Text dimColor>{status}</Text>
         </Box>

@@ -3,6 +3,7 @@ import { contentAsString } from "../content.ts";
 import { loadLlmConfigFromEnv } from "../llm.ts";
 import {
   createAgentHistory,
+  MaxTurnsExceededError,
   runAgentTurn,
   type LoopEvent,
 } from "../loop.ts";
@@ -225,6 +226,14 @@ async function main(): Promise<void> {
       state.pendingUser = undefined;
       render(state);
     } catch (error) {
+      if (error instanceof MaxTurnsExceededError) {
+        state.history = error.messages;
+        state.pendingUser = undefined;
+        state.busy = false;
+        state.status = `已达到最大执行轮数 (${error.maxTurns})，本轮已停止`;
+        render(state);
+        return;
+      }
       state.pendingUser = undefined;
       state.busy = false;
       state.status = `错误: ${error instanceof Error ? error.message : String(error)}`;

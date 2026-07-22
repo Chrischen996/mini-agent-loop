@@ -461,6 +461,11 @@ mini-agent/
 4. Loop stops when assistant has zero tool calls
 5. `maxTurns` hard-stops runaway loops
 
+When `maxTurns` is reached, the loop raises the typed `MaxTurnsExceededError`
+with the partial message history attached. The TUI preserves that history and
+shows a controlled-stop status, while the CLI reports the limit and returns the
+latest partial assistant output instead of treating the stop as an API failure.
+
 ## Non-goals (this teaching cut)
 
 General extension loading, parallel tools, MCP resources/prompts/sampling,

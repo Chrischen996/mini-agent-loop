@@ -15,6 +15,7 @@ import {
 import { tuiReducer, createInitialState } from "./state.ts";
 import {
   createAgentHistory,
+  MaxTurnsExceededError,
   runAgentTurn,
   type LoopEvent,
 } from "../loop.ts";
@@ -713,11 +714,31 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             }
             return;
           }
+          // Flush any pending delta buffer before dispatching a non-delta event.
+          // This prevents a race where the final `assistant` event arrives before
+          // the 50ms throttle timer fires, causing streamingText to be empty and
+          // the assistant message to be silently dropped by the reducer.
+          if (deltaTimerRef.current) {
+            clearTimeout(deltaTimerRef.current);
+            deltaTimerRef.current = null;
+            const buffered = deltaBufferRef.current;
+            if (buffered.text) {
+              dispatch({
+                type: "LOOP_EVENT",
+                event: { type: "assistant_delta", text: buffered.text, kind: buffered.kind },
+              });
+              deltaBufferRef.current = { text: "", kind: "answer" };
+            }
+          }
           // All other events dispatch immediately
           dispatch({ type: "LOOP_EVENT", event });
         },
       });
     } catch (err) {
+      if (err instanceof MaxTurnsExceededError) {
+        historyRef.current = err.messages;
+        return;
+      }
       const errMsg = err instanceof Error ? err.message : String(err);
       dispatch({ type: "LOOP_EVENT", event: { type: "error", message: errMsg } });
       dispatch({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });

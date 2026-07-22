@@ -223,6 +223,15 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             status: "请求失败",
           };
 
+        case "max_turns":
+          return {
+            ...state,
+            busy: false,
+            streamingText: "",
+            streamingReasoning: "",
+            status: `已达到最大执行轮数 (${event.maxTurns})，本轮已停止`,
+          };
+
         case "context_compacted":
           return {
             ...state,

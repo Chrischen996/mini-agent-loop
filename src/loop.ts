@@ -32,6 +32,19 @@ export type NextTurnUpdate = {
   context?: ContextManagerOptions;
 };
 
+/** Raised when the loop reaches its configured safety limit with partial history. */
+export class MaxTurnsExceededError extends Error {
+  readonly messages: AgentMessage[];
+  readonly maxTurns: number;
+
+  constructor(messages: AgentMessage[], maxTurns: number) {
+    super(`maxTurns exceeded (${maxTurns})`);
+    this.name = "MaxTurnsExceededError";
+    this.messages = messages;
+    this.maxTurns = maxTurns;
+  }
+}
+
 export type TurnContext = {
   turn: number;
   currentLlm: LlmConfig;
@@ -69,6 +82,7 @@ export type LoopEvent =
   | { type: "context_compacted"; beforeTokens: number; afterTokens: number; reason: string }
   | { type: "assistant"; message: AssistantMessage; usage?: StreamChatUsage }
   | { type: "error"; message: string }
+  | { type: "max_turns"; maxTurns: number; messages: AgentMessage[] }
   | { type: "tool_start"; call: ToolCall }
   | { type: "tool_end"; call: ToolCall; result: ToolResult }
   | { type: "aborted"; messages: AgentMessage[] }
@@ -127,6 +141,8 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "- Use --- to separate major topics",
   "- Keep paragraphs concise (2-3 sentences max)",
 ].join("\n");
+
+const MAX_EMPTY_ASSISTANT_RESPONSES = 2;
 
 export type AgentTurnOptions = Omit<AgentLoopOptions, "systemPrompt">;
 
@@ -249,6 +265,7 @@ export async function runAgentTurn(
   );
   const messages: AgentMessage[] = [...compactHistory(history, currentContext), ...initialBatch];
   let overflowRetries = 0;
+  let emptyAssistantResponses = 0;
 
   const prepareNextTurn = async (
     turn: number,
@@ -325,13 +342,28 @@ export async function runAgentTurn(
         if (!sawFinal) {
           throw new Error("LLM stream ended without a final assistant message");
         }
-        messages.push(assistant);
-        onEvent?.({ type: "assistant", message: assistant, usage: lastUsage });
         const calls = assistant.toolCalls ?? [];
         if (calls.length === 0) {
+          if (assistant.content.trim().length === 0) {
+            onEvent?.({ type: "assistant", message: assistant, usage: lastUsage });
+            emptyAssistantResponses += 1;
+            if (emptyAssistantResponses > MAX_EMPTY_ASSISTANT_RESPONSES) {
+              throw new Error(
+                `LLM returned an empty assistant response ${emptyAssistantResponses} times; stopping to avoid a silent loop`,
+              );
+            }
+            continue;
+          }
+          emptyAssistantResponses = 0;
+          messages.push(assistant);
+          onEvent?.({ type: "assistant", message: assistant, usage: lastUsage });
           onEvent?.({ type: "done", messages });
           return messages;
         }
+
+        emptyAssistantResponses = 0;
+        messages.push(assistant);
+        onEvent?.({ type: "assistant", message: assistant, usage: lastUsage });
 
         const toolMessages: ToolResultMessage[] = [];
         const completedToolIds = new Set<string>();
@@ -435,14 +467,28 @@ export async function runAgentTurn(
     }
 
     // useInjectedChat path: push assistant and handle tools
-    messages.push(assistant);
-    onEvent?.({ type: "assistant", message: assistant });
-
     const calls = assistant.toolCalls ?? [];
     if (calls.length === 0) {
+      if (assistant.content.trim().length === 0) {
+        onEvent?.({ type: "assistant", message: assistant });
+        emptyAssistantResponses += 1;
+        if (emptyAssistantResponses > MAX_EMPTY_ASSISTANT_RESPONSES) {
+          throw new Error(
+            `LLM returned an empty assistant response ${emptyAssistantResponses} times; stopping to avoid a silent loop`,
+          );
+        }
+        continue;
+      }
+      emptyAssistantResponses = 0;
+      messages.push(assistant);
+      onEvent?.({ type: "assistant", message: assistant });
       onEvent?.({ type: "done", messages });
       return messages;
     }
+
+    emptyAssistantResponses = 0;
+    messages.push(assistant);
+    onEvent?.({ type: "assistant", message: assistant });
 
     const toolMessages: ToolResultMessage[] = [];
     const completedToolIds = new Set<string>();
@@ -518,7 +564,9 @@ export async function runAgentTurn(
     await prepareNextTurn(turn, assistant, processedToolMessages);
   }
 
-  throw new Error(`maxTurns exceeded (${maxTurns})`);
+  const stopError = new MaxTurnsExceededError(messages, maxTurns);
+  onEvent?.({ type: "max_turns", maxTurns, messages });
+  throw stopError;
 }
 
 /** Helper for logging / tests */
