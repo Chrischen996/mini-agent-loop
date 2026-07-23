@@ -18,6 +18,7 @@ export type ToolCardState = {
   args?: string;
   preview?: string;
   status: ToolState;
+  startedAt?: number;
   durationMs?: number;
 };
 
@@ -50,6 +51,14 @@ export type ChatMessage =
 
 export type TuiState = {
   messages: ChatMessage[];
+  /** First user prompt in the active conversation. */
+  goal: string;
+  /** Tool-backed steps shown in the workflow sidebar. */
+  steps: WorkflowStep[];
+  /** Workspace paths seen in tool arguments during this conversation. */
+  touchedFiles: string[];
+  /** Tool activity cards, kept separately from the chat feed for the sidebar. */
+  toolCards: ToolCardState[];
   streamingText: string;
   streamingReasoning: string;
   busy: boolean;
@@ -85,9 +94,51 @@ function shortPreview(s: string, max = 200): string {
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
 }
 
+function toolTarget(args: Record<string, unknown>): string | undefined {
+  for (const key of ["path", "file", "pattern", "command", "cmd"]) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function toolLabel(name: string, args: Record<string, unknown>): string {
+  const target = toolTarget(args);
+  return shortPreview(target ? `${name} ${target}` : name, 48);
+}
+
+function toolPaths(args: Record<string, unknown>): string[] {
+  const paths: string[] = [];
+  for (const key of ["path", "file", "source", "destination", "from", "to"]) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim() && !paths.includes(value.trim())) {
+      paths.push(value.trim());
+    }
+  }
+  return paths;
+}
+
+function resultPreview(content: unknown): string {
+  if (typeof content === "string") return shortPreview(content, 180);
+  if (Array.isArray(content)) {
+    const text = content
+      .filter((part): part is { type: "text"; text: string } =>
+        typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string",
+      )
+      .map((part) => part.text)
+      .join(" ");
+    return text ? shortPreview(text, 180) : "[binary]";
+  }
+  return "";
+}
+
 export function createInitialState(modelName: string): TuiState {
   return {
     messages: [],
+    goal: "",
+    steps: [],
+    touchedFiles: [],
+    toolCards: [],
     streamingText: "",
     streamingReasoning: "",
     busy: false,
@@ -117,6 +168,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...state,
         messages: [...state.messages, { kind: "user", text: action.text }],
+        goal: state.goal || action.text,
         busy: true,
         status: "思考中...",
         streamingText: "",
@@ -252,6 +304,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         case "tool_start": {
           const rawArgs = (event.call.arguments ?? {}) as Record<string, unknown>;
           const args = shortPreview(JSON.stringify(rawArgs), 120);
+          const startedAt = Date.now();
+          const paths = toolPaths(rawArgs);
           const card: ChatMessage = {
             kind: "tool_call",
             id: event.call.id,
@@ -259,21 +313,33 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             args,
             rawArgs,
             status: "running",
-            startedAt: Date.now(),
+            startedAt,
+          };
+          const sidebarCard: ToolCardState = {
+            id: event.call.id,
+            name: event.call.name,
+            args,
+            status: "running",
+            startedAt,
+          };
+          const step: WorkflowStep = {
+            id: event.call.id,
+            label: toolLabel(event.call.name, rawArgs),
+            status: "running",
           };
           return {
             ...state,
             messages: [...state.messages, card],
+            steps: [...state.steps.filter((item) => item.id !== step.id), step],
+            touchedFiles: [...state.touchedFiles, ...paths.filter((path) => !state.touchedFiles.includes(path))].slice(-50),
+            toolCards: [...state.toolCards.filter((item) => item.id !== sidebarCard.id), sidebarCard],
             status: `${event.call.name}...`,
           };
         }
 
         case "tool_end": {
-          const result =
-            typeof event.result.content === "string"
-              ? shortPreview(event.result.content, 200)
-              : "[binary]";
           const now = Date.now();
+          const result = resultPreview(event.result.content);
           const updatedMessages = state.messages.map((m) => {
             if (m.kind === "tool_call" && m.id === event.call.id) {
               return {
@@ -285,9 +351,25 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             }
             return m;
           });
+          const updatedCards = state.toolCards.map((card) => {
+            if (card.id !== event.call.id) return card;
+            return {
+              ...card,
+              status: event.result.isError ? "error" : "done",
+              preview: result || undefined,
+              durationMs: card.startedAt ? Math.max(0, now - card.startedAt) : undefined,
+            } satisfies ToolCardState;
+          });
+          const updatedSteps = state.steps.map((step) =>
+            step.id === event.call.id
+              ? { ...step, status: event.result.isError ? ("error" as const) : ("done" as const) }
+              : step,
+          );
           return {
             ...state,
             messages: updatedMessages,
+            steps: updatedSteps,
+            toolCards: updatedCards,
             status: event.result.isError ? `${event.call.name} 失败` : `${event.call.name} 完成`,
           };
         }

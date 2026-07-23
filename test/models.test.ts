@@ -120,7 +120,9 @@ describe("model selection", () => {
     assert.equal(custom?.id, "company-model-v1");
     assert.deepEqual(custom?.capabilities.input, ["text", "image"]);
     assert.equal(custom?.contextWindow, 64000);
-    it("searchModels returns all models for an empty query", () => {
+  });
+
+  it("searchModels returns all models for an empty query", () => {
       const all = getAllModels();
       assert.equal(searchModels("").length, all.length);
       assert.equal(searchModels("   ").length, all.length);
@@ -129,7 +131,7 @@ describe("model selection", () => {
     it("searchModels finds models by exact substring in id", () => {
       const results = searchModels("deepseek-v4");
       assert.ok(results.length >= 2);
-      assert.ok(results.every((m) => m.id.includes("deepseek-v4")));
+      assert.ok(results.every((m) => m.id.toLowerCase().includes("deepseek-v4")));
     });
   
     it("searchModels finds models by provider substring", () => {
@@ -166,6 +168,5 @@ describe("model selection", () => {
         (`${m.provider}/${m.id} ${m.name}`).toLowerCase().includes("flash") &&
         (`${m.provider}/${m.id} ${m.name}`).toLowerCase().includes("deepseek"),
       ));
-    });
   });
 });

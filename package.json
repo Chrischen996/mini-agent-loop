@@ -68,6 +68,7 @@
     "@modelcontextprotocol/sdk": "1.25.2",
     "@opentelemetry/api": "1.9.0",
     "@smithy/node-http-handler": "4.7.3",
+    "@smithy/types": "4.16.1",
     "docx": "^9.5.1",
     "express": "^5.2.1",
     "http-proxy-agent": "7.0.2",

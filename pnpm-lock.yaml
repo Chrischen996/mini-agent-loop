@@ -29,6 +29,9 @@ importers:
       '@smithy/node-http-handler':
         specifier: 4.7.3
         version: 4.7.3
+      '@smithy/types':
+        specifier: 4.16.1
+        version: 4.16.1
       docx:
         specifier: ^9.5.1
         version: 9.7.1

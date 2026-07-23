@@ -271,6 +271,9 @@ function scoreTerm(term: string, field: string): number {
   if (field === term) return 4;
   if (field.startsWith(term)) return 3;
   if (field.includes(term)) return 2;
+  // Structured terms are model-id fragments; keep them strict instead of
+  // matching an unrelated provider through fuzzy distance.
+  if (/[\-\/_\.]/.test(term)) return 0;
   // Allow ~1 edit per 2-3 chars: catches transpositions like 'agens'→'agnes'
   const threshold = Math.max(1, Math.floor(term.length / 2.5));
   if (levenshtein(term, field) <= threshold) return 1;
