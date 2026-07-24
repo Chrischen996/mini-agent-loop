@@ -1,0 +1,15 @@
+{
+  "all": true,
+  "src": ["src"],
+  "exclude": [
+    "src/pi-ai/**",
+    "src/tui/**",
+    "src/providers/**",
+    "dist/**",
+    "test/**",
+    "web/**",
+    "node_modules/**"
+  ],
+  "reporter": ["text", "lcov"],
+  "report-dir": "coverage"
+}

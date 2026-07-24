@@ -15,8 +15,8 @@ import { contentAsString, imagePart, textPart } from "./content.ts";
 import { DocumentStore } from "./documents.ts";
 import { SessionStore } from "./session-store.ts";
 import { PermissionManager } from "./permissions.ts";
-import { isAbortError, loadLlmConfigFromEnv, type ChatFn, type LlmConfig } from "./llm.ts";
-import { resolveModel } from "./models.ts";
+import { isAbortError, loadLlmConfigFromEnv, switchLlmModel, type ChatFn, type LlmConfig } from "./llm/index.ts";
+import { getAvailableModels, resolveModel, searchModels } from "./models.ts";
 import { getActiveProfile, loadProfileStore } from "./profile-store.ts";
 import {
   createAgentHistory,
@@ -37,6 +37,7 @@ import { resolveToolProvider, type Tool, type ToolProvider } from "./tools/types
 import type { AgentMessage, ContentPart } from "./types.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
 import type { McpServerStatus } from "./mcp/types.ts";
+import { createSubagentTool, defaultProfiles, type SubagentProfile } from "./subagent/index.ts";
 import {
   listWorkspaceDirectory,
   validateReferencedPaths,
@@ -54,6 +55,10 @@ type Session = {
   messages: AgentMessage[];
   createdAt: number;
   busy: boolean;
+  /** Per-session model identifier (e.g. "openai/gpt-4o-mini"). */
+  modelId?: string;
+  /** Per-session LLM config, overrides the server default when set. */
+  llmOverride?: LlmConfig;
 };
 
 export type AgentServerOptions = {
@@ -85,6 +90,10 @@ export type AgentServerOptions = {
   deepWikiEnabled?: boolean;
   mcpTools?: ToolProvider;
   mcpStatuses?: McpServerStatus[] | (() => McpServerStatus[]);
+  /** Pre-defined subagent profiles. When non-empty the `subagent` tool is registered. */
+  subagentProfiles?: SubagentProfile[];
+  /** Enable the subagent tool even without explicit profiles. Default: false. */
+  subagentEnabled?: boolean;
 };
 
 function safeMessage(message: AgentMessage): Record<string, unknown> {
@@ -191,6 +200,31 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         maxRetries: event.maxRetries,
         delayMs: event.delayMs,
         errorMessage: event.errorMessage.slice(0, 200),
+      };
+    case "subagent_start":
+      return {
+        type: "subagent_start",
+        id: event.id,
+        task: event.task.slice(0, 500),
+        profile: event.profile,
+        depth: event.depth,
+      };
+    case "subagent_event":
+      return {
+        type: "subagent_event",
+        id: event.id,
+        depth: event.depth,
+        inner: safeEvent(event.inner),
+      };
+    case "subagent_end":
+      return {
+        type: "subagent_end",
+        id: event.id,
+        success: event.success,
+        depth: event.depth,
+        turns: event.turns,
+        totalTokens: event.totalTokens,
+        resultPreview: event.result.slice(0, 300),
       };
   }
 }
@@ -398,12 +432,28 @@ export function createAgentServer(options: AgentServerOptions): Express {
   const sessionStore = new SessionStore(path.join(dataRoot, "sessions"));
   const restorePromise = sessionStore.loadAll().then((restored) => {
     return Promise.all([...restored.values()].map(async (persisted) => {
-      sessions.set(persisted.id, {
+      const session: Session = {
         id: persisted.id,
         messages: persisted.messages,
         createdAt: persisted.createdAt,
         busy: false,
-      });
+        modelId: persisted.modelId,
+      };
+      // Restore per-session LLM config from persisted modelId
+      if (persisted.modelId) {
+        try {
+          session.llmOverride = switchLlmModel(
+            options.llm,
+            persisted.modelId,
+            {},
+            options.relayRegistry,
+          );
+        } catch {
+          // Model no longer available — fall back to server default
+          session.modelId = undefined;
+        }
+      }
+      sessions.set(persisted.id, session);
       await documentStore.restoreSession(persisted.id);
     }));
   });
@@ -471,6 +521,68 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
   });
 
+  // ── Model discovery & per-session switching ─────────────────────────────────
+
+  app.get("/api/models", (request, response) => {
+    const query = String(request.query.q ?? "").trim();
+    const available = getAvailableModels();
+    const models = query ? searchModels(query, available) : available;
+    response.json({
+      models: models.map((model) => ({
+        id: model.id,
+        name: model.name,
+        provider: model.provider,
+        qualifiedId: `${model.provider}/${model.id}`,
+        capabilities: model.capabilities,
+        contextWindow: model.contextWindow,
+        maxTokens: model.maxTokens,
+        reasoning: model.reasoning,
+      })),
+      defaultModel: options.llm.model,
+    });
+  });
+
+  app.put("/api/sessions/:id/model", (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    if (session.busy) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
+    const modelId = String(request.body?.model ?? "").trim();
+    if (!modelId) {
+      response.status(400).json({ error: "model is required" });
+      return;
+    }
+    try {
+      const newLlm = switchLlmModel(options.llm, modelId, {}, options.relayRegistry);
+      session.modelId = `${newLlm.provider}/${newLlm.model}`;
+      session.llmOverride = newLlm;
+      // Persist the model switch
+      void sessionStore.save({
+        id: session.id,
+        createdAt: session.createdAt,
+        modelId: session.modelId,
+        messages: session.messages,
+      });
+      const resolved = resolveModel(newLlm.model, newLlm.baseUrl);
+      response.json({
+        model: newLlm.model,
+        qualifiedId: session.modelId,
+        provider: newLlm.provider,
+        capabilities: newLlm.capabilities,
+        contextWindow: resolved.contextWindow,
+        maxTokens: newLlm.maxTokens,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      response.status(400).json({ error: message });
+    }
+  });
+
   app.post("/api/sessions", async (_request, response) => {
     const id = randomUUID();
     const session: Session = {
@@ -491,9 +603,15 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(404).json({ error: "Session not found" });
       return;
     }
+    const effectiveLlm = session.llmOverride ?? options.llm;
+    const resolved = resolveModel(effectiveLlm.model, effectiveLlm.baseUrl);
     response.json({
       id: session.id,
       busy: session.busy,
+      modelId: session.modelId,
+      model: effectiveLlm.model,
+      contextWindow: resolved.contextWindow,
+      capabilities: effectiveLlm.capabilities,
       messages: session.messages
         .filter((message) => message.role !== "system")
         .map(safeMessage),
@@ -621,12 +739,31 @@ export function createAgentServer(options: AgentServerOptions): Express {
           String(request.params.id),
           operationScope,
         ) as Tool;
+        // Use per-session model if set, otherwise fall back to server default
+        const effectiveLlm = session.llmOverride ?? options.llm;
+        // Build the tool set, optionally including the subagent tool
+        const baseToolProvider: ToolProvider = () => [...resolveToolProvider(tools), documentTool];
+        const enableSubagent = options.subagentEnabled || (options.subagentProfiles && options.subagentProfiles.length > 0);
+        const sessionTools: ToolProvider = enableSubagent
+          ? () => {
+              const base = resolveToolProvider(baseToolProvider);
+              const subagentTool = createSubagentTool({
+                parentLlm: effectiveLlm,
+                parentTools: base,
+                profiles: options.subagentProfiles ?? defaultProfiles,
+                preprocessors: options.preprocessors ?? [],
+                signal: abortController.signal,
+                onSubagentEvent: (subEvent) => send(safeEvent(subEvent)),
+              });
+              return [...base, subagentTool as Tool];
+            }
+          : baseToolProvider;
         session.messages = await runAgentTurn(
           session.messages,
           input.modelPrompt,
           {
-            llm: options.llm,
-            tools: () => [...resolveToolProvider(tools), documentTool],
+            llm: effectiveLlm,
+            tools: sessionTools,
             preprocessors: options.preprocessors ?? [],
             chat: options.chat,
             userContent,
@@ -721,6 +858,8 @@ async function startServer(): Promise<void> {
       mcpTools: () => mcpRuntime.snapshot(),
       mcpStatuses: () => mcpRuntime.statuses(),
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+      subagentEnabled: process.env.MINI_AGENT_SUBAGENT !== "0",
+      subagentProfiles: defaultProfiles,
     });
   } catch (error) {
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);

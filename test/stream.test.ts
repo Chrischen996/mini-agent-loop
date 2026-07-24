@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { makeLlmConfig, streamChat } from "../src/llm.ts";
+import { makeLlmConfig, streamChat } from "../src/llm/index.ts";
 import type { AgentMessage } from "../src/types.ts";
 
 function sseResponse(chunks: string[]): Response {

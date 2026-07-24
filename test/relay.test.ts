@@ -9,7 +9,7 @@ import {
   type RelayEntry,
   type RelayRegistry,
 } from "../src/relay.ts";
-import { makeLlmConfig } from "../src/llm.ts";
+import { makeLlmConfig } from "../src/llm/index.ts";
 
 // ─── fixtures ─────────────────────────────────────────────────────────────────
 

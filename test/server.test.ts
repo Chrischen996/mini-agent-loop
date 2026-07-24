@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import request from "supertest";
 import { contentAsString } from "../src/content.ts";
-import { makeLlmConfig } from "../src/llm.ts";
+import { makeLlmConfig } from "../src/llm/index.ts";
 import { createAgentServer } from "../src/server.ts";
 import type { Tool } from "../src/tools/types.ts";
 import type { AgentMessage, AssistantMessage } from "../src/types.ts";

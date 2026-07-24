@@ -9,7 +9,7 @@ import {
   makeLlmConfig,
   prepareMessagesForModel,
   toOpenAIMessages,
-} from "../src/llm.ts";
+} from "../src/llm/index.ts";
 import { runAgentLoop } from "../src/loop.ts";
 import { resolveModel } from "../src/models.ts";
 import {

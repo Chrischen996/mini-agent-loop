@@ -1,6 +1,7 @@
 // Simplified Claude Code-style TUI state
 
 import type { LoopEvent } from "../loop.ts";
+import type { SubagentEvent } from "../subagent/types.ts";
 
 export type MessageRole = "user" | "assistant" | "tool";
 
@@ -34,10 +35,17 @@ export type TimelineEvent = {
   detail?: string;
 };
 
+export type SubagentInnerEvent = {
+  type: string;
+  label: string;
+  detail?: string;
+};
+
 export type ChatMessage =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string; reasoning?: string }
   | { kind: "tool_call"; id: string; name: string; args: string; rawArgs: Record<string, unknown>; status: ToolState; result?: string; durationMs?: number; startedAt: number }
+  | { kind: "subagent_call"; id: string; task: string; profile?: string; depth: number; status: ToolState; result?: string; turns?: number; totalTokens?: number; innerEvents: SubagentInnerEvent[]; toolCallCount: number; startedAt: number; durationMs?: number; expanded: boolean }
   | { kind: "error"; text: string };
 
 export type TuiState = {
@@ -68,7 +76,9 @@ export type TuiAction =
   | { type: "TOGGLE_THINKING_MODE" }
   | { type: "TOGGLE_MESSAGE_THINKING"; index?: number }
   | { type: "SET_FOCUSED_MESSAGE"; index: number }
-  | { type: "FOCUS_NEXT_REASONING"; direction: 1 | -1 };
+  | { type: "FOCUS_NEXT_REASONING"; direction: 1 | -1 }
+  | { type: "SUBAGENT_EVENT"; event: SubagentEvent }
+  | { type: "TOGGLE_SUBAGENT_EXPAND"; id: string };
 
 function shortPreview(s: string, max = 200): string {
   const oneLine = s.replace(/\s+/g, " ").trim();
@@ -303,6 +313,92 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         default:
           return state;
       }
+    }
+
+    case "SUBAGENT_EVENT": {
+      const evt = action.event;
+      switch (evt.type) {
+        case "subagent_start": {
+          const card: ChatMessage = {
+            kind: "subagent_call",
+            id: evt.id,
+            task: evt.task,
+            profile: evt.profile,
+            depth: evt.depth,
+            status: "running",
+            innerEvents: [],
+            toolCallCount: 0,
+            startedAt: Date.now(),
+            expanded: false,
+          };
+          return {
+            ...state,
+            messages: [...state.messages, card],
+            status: `子代理 (depth ${evt.depth})...`,
+          };
+        }
+        case "subagent_event": {
+          const inner = evt.inner;
+          const label =
+            inner.type === "tool_start" ? `▶ ${inner.call.name}`
+            : inner.type === "tool_end" ? `${inner.result.isError ? "✗" : "✓"} ${inner.call.name}`
+            : inner.type === "assistant" ? "💬 assistant"
+            : inner.type === "error" ? `✗ ${inner.message}`
+            : inner.type;
+          const detail =
+            inner.type === "tool_start" ? shortPreview(JSON.stringify(inner.call.arguments), 80)
+            : inner.type === "tool_end" ? shortPreview(typeof inner.result.content === "string" ? inner.result.content : "[complex]", 80)
+            : undefined;
+          const isToolEnd = inner.type === "tool_end";
+          return {
+            ...state,
+            messages: state.messages.map((m) => {
+              if (m.kind === "subagent_call" && m.id === evt.id) {
+                return {
+                  ...m,
+                  innerEvents: [...m.innerEvents, { type: inner.type, label, detail }],
+                  toolCallCount: m.toolCallCount + (isToolEnd ? 1 : 0),
+                };
+              }
+              return m;
+            }),
+          };
+        }
+        case "subagent_end": {
+          const now = Date.now();
+          return {
+            ...state,
+            messages: state.messages.map((m) => {
+              if (m.kind === "subagent_call" && m.id === evt.id) {
+                return {
+                  ...m,
+                  status: evt.success ? "done" as const : "error" as const,
+                  result: evt.result,
+                  turns: evt.turns,
+                  totalTokens: evt.totalTokens || undefined,
+                  durationMs: now - m.startedAt,
+                };
+              }
+              return m;
+            }),
+            status: evt.success ? "子代理完成" : "子代理失败",
+          };
+        }
+        default:
+          return state;
+      }
+    }
+
+    case "TOGGLE_SUBAGENT_EXPAND": {
+      return {
+        ...state,
+        messages: state.messages.map((m) => {
+          if (m.kind === "subagent_call" && m.id === action.id) {
+            return { ...m, expanded: !m.expanded };
+          }
+          return m;
+        }),
+      };
     }
   }
 }

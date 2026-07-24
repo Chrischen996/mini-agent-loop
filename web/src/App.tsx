@@ -12,12 +12,14 @@ import {
   LoaderCircle,
   MessageSquarePlus,
   RotateCcw,
+  Search,
   Send,
   Square,
   Settings2,
   User,
   Wrench,
   X,
+  Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent } from "react";
 import Markdown from "react-markdown";
@@ -133,6 +135,17 @@ type TreeNode = {
   children?: TreeNode[];
   error?: string;
   truncated?: boolean;
+};
+
+type ModelInfo = {
+  id: string;
+  name: string;
+  provider: string;
+  qualifiedId: string;
+  capabilities: { input: string[]; tools: boolean };
+  contextWindow: number;
+  maxTokens: number;
+  reasoning: boolean;
 };
 
 const ACCEPTED_IMAGE_TYPES = new Set([
@@ -479,8 +492,16 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [retryDraft, setRetryDraft] = useState<Draft | null>(null);
   const [pendingQueue, setPendingQueue] = useState<Draft[]>([]);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [modelSearch, setModelSearch] = useState("");
+  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [activeModel, setActiveModel] = useState<string | null>(null);
+  const [activeContextWindow, setActiveContextWindow] = useState<number>(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const documentInputRef = useRef<HTMLInputElement>(null);
+  const modelPickerRef = useRef<HTMLDivElement>(null);
+  const modelSearchRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const objectUrls = useRef(new Set<string>());
   const activeTurnIdRef = useRef<string | null>(null);
@@ -1103,6 +1124,78 @@ export default function App() {
     void sendMessage(retryDraft, true);
   };
 
+  // ── Model picker logic ─────────────────────────────────────────────────────
+
+  const displayModel = activeModel || config?.model || "-";
+  const displayContextWindow = activeContextWindow || contextWindow;
+
+  const openModelPicker = async () => {
+    if (busy) return;
+    setModelPickerOpen(true);
+    setModelSearch("");
+    setModelsLoading(true);
+    try {
+      const response = await fetch("/api/models");
+      if (!response.ok) throw new Error(await readError(response));
+      const data = (await response.json()) as { models: ModelInfo[]; defaultModel: string };
+      setAvailableModels(data.models);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setModelsLoading(false);
+      setTimeout(() => modelSearchRef.current?.focus(), 50);
+    }
+  };
+
+  const switchModel = async (model: ModelInfo) => {
+    if (!sessionId || busy) return;
+    setModelPickerOpen(false);
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/model`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: model.qualifiedId }),
+      });
+      if (!response.ok) throw new Error(await readError(response));
+      const data = (await response.json()) as {
+        model: string;
+        qualifiedId: string;
+        contextWindow: number;
+      };
+      setActiveModel(data.model);
+      setActiveContextWindow(data.contextWindow);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  // Close model picker when clicking outside
+  useEffect(() => {
+    if (!modelPickerOpen) return;
+    const handler = (event: MouseEvent) => {
+      if (modelPickerRef.current && !modelPickerRef.current.contains(event.target as Node)) {
+        setModelPickerOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [modelPickerOpen]);
+
+  // Reset activeModel when session resets
+  useEffect(() => {
+    setActiveModel(null);
+    setActiveContextWindow(0);
+  }, [sessionId]);
+
+  const filteredModels = useMemo(() => {
+    if (!modelSearch.trim()) return availableModels;
+    const terms = modelSearch.toLowerCase().split(/\s+/);
+    return availableModels.filter((model) => {
+      const hay = `${model.provider}/${model.id} ${model.name}`.toLowerCase();
+      return terms.every((term) => hay.includes(term));
+    });
+  }, [availableModels, modelSearch]);
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -1483,12 +1576,80 @@ export default function App() {
               </button>
             </div>
           </div>
-          <div className="context-meter" title="模型与当前会话估算上下文（非精确计费）">
-            <span>{config?.model ?? "-"}</span>
-            <span>
-              ~{formatTokenCount(usedTokens)}
-              {contextWindow > 0 ? ` / ${formatTokenCount(contextWindow)}` : ""}
-            </span>
+          <div className="model-picker-wrapper" ref={modelPickerRef}>
+            <button
+              type="button"
+              className={`context-meter clickable${modelPickerOpen ? " open" : ""}`}
+              onClick={() => modelPickerOpen ? setModelPickerOpen(false) : void openModelPicker()}
+              disabled={busy}
+              title="点击切换模型"
+            >
+              <span className="model-name">
+                <Zap size={12} />
+                {displayModel}
+              </span>
+              <span>
+                ~{formatTokenCount(usedTokens)}
+                {displayContextWindow > 0 ? ` / ${formatTokenCount(displayContextWindow)}` : ""}
+              </span>
+              <ChevronDown size={13} className={modelPickerOpen ? "flip" : ""} />
+            </button>
+            {modelPickerOpen && (
+              <div className="model-picker-dropdown">
+                <div className="model-picker-search">
+                  <Search size={14} />
+                  <input
+                    ref={modelSearchRef}
+                    type="text"
+                    value={modelSearch}
+                    onChange={(event) => setModelSearch(event.target.value)}
+                    placeholder="搜索模型…"
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setModelPickerOpen(false);
+                      if (event.key === "Enter" && filteredModels.length > 0) {
+                        void switchModel(filteredModels[0]!);
+                      }
+                    }}
+                  />
+                </div>
+                <div className="model-picker-list">
+                  {modelsLoading && (
+                    <div className="model-picker-status">
+                      <LoaderCircle className="spin" size={14} />
+                      加载模型列表…
+                    </div>
+                  )}
+                  {!modelsLoading && filteredModels.length === 0 && (
+                    <div className="model-picker-status">
+                      {modelSearch ? "没有匹配的模型" : "没有可用的模型"}
+                    </div>
+                  )}
+                  {!modelsLoading && filteredModels.map((model) => {
+                    const isActive = model.id === displayModel || model.qualifiedId === displayModel;
+                    return (
+                      <button
+                        type="button"
+                        key={model.qualifiedId}
+                        className={`model-picker-item${isActive ? " active" : ""}`}
+                        onClick={() => void switchModel(model)}
+                        title={`${model.qualifiedId} · ${formatTokenCount(model.contextWindow)} context`}
+                      >
+                        <span className="model-picker-item-name">
+                          <strong>{model.id}</strong>
+                          <small>{model.provider}</small>
+                        </span>
+                        <span className="model-picker-item-meta">
+                          {model.reasoning && <span className="model-tag">推理</span>}
+                          {model.capabilities.input.includes("image") && <span className="model-tag">视觉</span>}
+                          <span>{formatTokenCount(model.contextWindow)}</span>
+                        </span>
+                        {isActive && <Check size={14} />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </main>

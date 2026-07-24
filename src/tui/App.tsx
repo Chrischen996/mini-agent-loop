@@ -19,7 +19,8 @@ import {
   runAgentTurn,
   type LoopEvent,
 } from "../loop.ts";
-import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm.ts";
+import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
+import { adaptHistoryForModel } from "../message-adapter.ts";
 import { findExactModelReferenceMatch, getAllModels, resolveModel, searchModels, type ModelRef } from "../models.ts";
 import {
   activateProfile,
@@ -34,9 +35,54 @@ import {
   loadVisionConfigFromEnv,
 } from "../preprocessors/index.ts";
 import { createAllTools, createTools } from "../tools/index.ts";
-import { resolveToolProvider, type ToolProvider } from "../tools/types.ts";
+import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
 import type { AgentMessage, MessageContent } from "../types.ts";
 import { createMcpApprovalGate, mcpAutoApproveFromEnv } from "../mcp/approval.ts";
+import { createSubagentTool } from "../subagent/index.ts";
+import type { SubagentEvent, SubagentProfile } from "../subagent/types.ts";
+
+const DEFAULT_SUBAGENT_PROFILES: SubagentProfile[] = [
+  {
+    name: "researcher",
+    description: "Reads, searches, and analyzes files to gather information and answer questions",
+    systemPrompt: [
+      "You are a research assistant. Your job is to gather information from the workspace.",
+      "Read files, search for patterns, and list directories to find relevant information.",
+      "Summarize your findings clearly and concisely. Include file paths and line numbers when citing code.",
+      "Do not modify any files. Only read and analyze.",
+    ].join("\n"),
+    allowedTools: ["read", "grep", "find", "ls", "bash", "codebase_open", "codebase_search", "codebase_read"],
+    maxTurns: 8,
+  },
+  {
+    name: "coder",
+    description: "Writes, edits, and creates code files based on specifications",
+    systemPrompt: [
+      "You are a coding assistant. Write clean, well-structured code.",
+      "Read existing files first to understand the codebase style and conventions.",
+      "Use `edit` for small changes and `write` for new files or complete rewrites.",
+      "Always verify your changes compile or pass basic sanity checks when possible.",
+    ].join("\n"),
+    allowedTools: ["read", "write", "edit", "bash", "grep", "find", "ls"],
+    maxTurns: 10,
+  },
+  {
+    name: "reviewer",
+    description: "Reviews code quality, finds bugs, and suggests improvements",
+    systemPrompt: [
+      "You are a code reviewer. Analyze the given code for:",
+      "- Bugs and logic errors",
+      "- Code style and consistency issues",
+      "- Performance concerns",
+      "- Security vulnerabilities",
+      "- Missing error handling",
+      "Provide specific, actionable feedback with file paths and line numbers.",
+      "Do not modify any files. Only read and analyze.",
+    ].join("\n"),
+    allowedTools: ["read", "grep", "find", "ls"],
+    maxTurns: 6,
+  },
+];
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 
@@ -186,6 +232,23 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const vision = loadVisionConfigFromEnv();
   const allToolsRef = useRef<ToolProvider>(allTools ?? createAllTools(cwd));
   const agentToolsRef = useRef<ToolProvider>(agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
+
+  // Create the subagent tool — dispatches SubagentEvents to the TUI reducer
+  const subagentToolRef = useRef<Tool | null>(null);
+  const getSubagentTool = useCallback((): Tool => {
+    if (!subagentToolRef.current) {
+      subagentToolRef.current = createSubagentTool({
+        parentLlm: llm,
+        parentTools: agentToolsRef.current,
+        profiles: DEFAULT_SUBAGENT_PROFILES,
+        preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+        onSubagentEvent: (event: SubagentEvent) => {
+          dispatch({ type: "SUBAGENT_EVENT", event });
+        },
+      }) as Tool;
+    }
+    return subagentToolRef.current;
+  }, [llm, vision]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
   const [input, setInput] = useState("");
@@ -371,11 +434,21 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   const commitModelSetup = useCallback(async (setup: ModelSetupState, apiKey: string) => {
     try {
-      setLlm((current) => switchLlmModel(current, setup.model, {
+      const newLlmConfig = switchLlmModel(llm, setup.model, {
         baseUrl: setup.baseUrl,
         apiKey,
-      }));
+      });
+      setLlm(newLlmConfig);
       dispatch({ type: "MODEL_CHANGED", modelName: setup.model.id });
+
+      // Adapt existing conversation history for the new model's capabilities
+      if (historyRef.current.length > 1) {
+        historyRef.current = adaptHistoryForModel(historyRef.current, {
+          targetCapabilities: newLlmConfig.capabilities,
+          sourceCapabilities: llm.capabilities,
+        });
+      }
+
       setModelSetup(undefined);
       setAcMode(null);
       setInput("");
@@ -592,9 +665,17 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         try {
           const updated = await activateProfile(selected.name);
           setProfileStore(updated);
+          const previousLlm = llm;
           const newLlm = loadLlmConfigFromEnv();
           setLlm(newLlm);
           dispatch({ type: "MODEL_CHANGED", modelName: newLlm.model });
+          // Adapt existing conversation history for the new model's capabilities
+          if (historyRef.current.length > 1) {
+            historyRef.current = adaptHistoryForModel(historyRef.current, {
+              targetCapabilities: newLlm.capabilities,
+              sourceCapabilities: previousLlm.capabilities,
+            });
+          }
         } catch { /* non-fatal */ }
       }
       setInput("");
@@ -683,44 +764,19 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     setInput("");
     dispatch({ type: "USER_MESSAGE", text: trimmed });
     abortRef.current = new AbortController();
-    try {
-      const userContent = await resolveAtRefs(trimmed);
-      historyRef.current = await runAgentTurn(historyRef.current, trimmed, {
-        llm, tools: agentToolsRef.current,
-        preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
-        signal: abortRef.current.signal,
-        userContent,
-        authorizeTool: createMcpApprovalGate({
-          allow: mcpAutoApproveFromEnv(),
-          approvalHint: "Restart with MINI_AGENT_MCP_AUTO_APPROVE=1 to approve MCP calls in the TUI.",
-        }),
-        onEvent: (event: LoopEvent) => {
-          // Throttle assistant_delta to reduce flicker
-          if (event.type === "assistant_delta") {
-            deltaBufferRef.current.text += event.text;
-            deltaBufferRef.current.kind = event.kind;
-            if (!deltaTimerRef.current) {
-              deltaTimerRef.current = setTimeout(() => {
-                const buffered = deltaBufferRef.current;
-                if (buffered.text) {
-                  dispatch({
-                    type: "LOOP_EVENT",
-                    event: { type: "assistant_delta", text: buffered.text, kind: buffered.kind },
-                  });
-                  deltaBufferRef.current = { text: "", kind: "answer" };
-                }
-                deltaTimerRef.current = null;
-              }, 50);
-            }
-            return;
-          }
-          // Flush any pending delta buffer before dispatching a non-delta event.
-          // This prevents a race where the final `assistant` event arrives before
-          // the 50ms throttle timer fires, causing streamingText to be empty and
-          // the assistant message to be silently dropped by the reducer.
-          if (deltaTimerRef.current) {
-            clearTimeout(deltaTimerRef.current);
-            deltaTimerRef.current = null;
+
+    const MAX_AUTO_CONTINUES = 5;
+    let autoContinueCount = 0;
+    let currentUserText = trimmed;
+    let currentUserContent = await resolveAtRefs(trimmed);
+
+    const onLoopEvent = (event: LoopEvent) => {
+      // Throttle assistant_delta to reduce flicker
+      if (event.type === "assistant_delta") {
+        deltaBufferRef.current.text += event.text;
+        deltaBufferRef.current.kind = event.kind;
+        if (!deltaTimerRef.current) {
+          deltaTimerRef.current = setTimeout(() => {
             const buffered = deltaBufferRef.current;
             if (buffered.text) {
               dispatch({
@@ -729,19 +785,70 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               });
               deltaBufferRef.current = { text: "", kind: "answer" };
             }
-          }
-          // All other events dispatch immediately
-          dispatch({ type: "LOOP_EVENT", event });
-        },
-      });
-    } catch (err) {
-      if (err instanceof MaxTurnsExceededError) {
-        historyRef.current = err.messages;
+            deltaTimerRef.current = null;
+          }, 50);
+        }
         return;
       }
-      const errMsg = err instanceof Error ? err.message : String(err);
-      dispatch({ type: "LOOP_EVENT", event: { type: "error", message: errMsg } });
-      dispatch({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
+      // Flush any pending delta buffer before dispatching a non-delta event.
+      if (deltaTimerRef.current) {
+        clearTimeout(deltaTimerRef.current);
+        deltaTimerRef.current = null;
+        const buffered = deltaBufferRef.current;
+        if (buffered.text) {
+          dispatch({
+            type: "LOOP_EVENT",
+            event: { type: "assistant_delta", text: buffered.text, kind: buffered.kind },
+          });
+          deltaBufferRef.current = { text: "", kind: "answer" };
+        }
+      }
+      // All other events dispatch immediately
+      dispatch({ type: "LOOP_EVENT", event });
+    };
+
+    // Auto-continue loop: re-invoke runAgentTurn when maxTurns is exceeded
+    while (true) {
+      try {
+        historyRef.current = await runAgentTurn(historyRef.current, currentUserText, {
+          llm, tools: () => [...resolveToolProvider(agentToolsRef.current), getSubagentTool()],
+          preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+          signal: abortRef.current.signal,
+          userContent: currentUserContent,
+          authorizeTool: createMcpApprovalGate({
+            allow: mcpAutoApproveFromEnv(),
+            approvalHint: "Restart with MINI_AGENT_MCP_AUTO_APPROVE=1 to approve MCP calls in the TUI.",
+          }),
+          onEvent: onLoopEvent,
+        });
+        break; // Normal completion — exit the auto-continue loop
+      } catch (err) {
+        if (err instanceof MaxTurnsExceededError) {
+          historyRef.current = err.messages;
+          autoContinueCount++;
+          if (autoContinueCount >= MAX_AUTO_CONTINUES || abortRef.current.signal.aborted) {
+            // Hit safety cap or aborted — stop auto-continuing
+            dispatch({ type: "LOOP_EVENT", event: { type: "error", message: `已达到自动续跑上限 (${MAX_AUTO_CONTINUES} 次)` } });
+            dispatch({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
+            break;
+          }
+          // Auto-continue: send "继续" as next user message
+          currentUserText = "继续完成之前的工作";
+          currentUserContent = currentUserText;
+          dispatch({ type: "LOOP_EVENT", event: {
+            type: "context_compacted",
+            beforeTokens: 0,
+            afterTokens: 0,
+            reason: `自动续跑 (${autoContinueCount}/${MAX_AUTO_CONTINUES})`,
+          }});
+          continue;
+        }
+        // Other errors — report and stop
+        const errMsg = err instanceof Error ? err.message : String(err);
+        dispatch({ type: "LOOP_EVENT", event: { type: "error", message: errMsg } });
+        dispatch({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
+        break;
+      }
     }
   }, [state.busy, acMode, modelSetup, pendingProfileSetup, profileListState, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup, openProfileList]);
 

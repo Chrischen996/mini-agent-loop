@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claude-Like TUI Preview</title>
+    <style>
+        :root {
+            --bg-color: #1e1e2e;       /* 深邃背景 */
+            --surface-color: #2d2d3f;  /* 卡片/输入框背景 */
+            --text-primary: #ffffff;
+            --text-secondary: #a1a1aa;
+            --accent-color: #8b5cf6;   /* Anthropic 紫 */
+            --user-msg-bg: #3f3f56;
+            --code-bg: #12121b;
+            --border-radius: 8px;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* --- 顶部 Header --- */
+        header {
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 24px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            background: rgba(30, 30, 46, 0.95);
+            backdrop-filter: blur(10px);
+            z-index: 10;
+        }
+
+        .header-title {
+            font-weight: 600;
+            font-size: 1.1rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-badge {
+            font-size: 0.75rem;
+            padding: 2px 8px;
+            border-radius: 12px;
+            background: rgba(139, 92, 246, 0.15);
+            color: var(--accent-color);
+            border: 1px solid rgba(139, 92, 246, 0.3);
+        }
+
+        /* --- 聊天区域 Chat Stream --- */
+        #chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+            scroll-behavior: smooth;
+        }
+
+        /* 自定义滚动条 */
+        #chat-container::-webkit-scrollbar { width: 6px; }
+        #chat-container::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+
+        .message {
+            max-width: 800px;
+            margin: 0 auto;
+            line-height: 1.6;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* 用户消息样式 */
+        .message.user {
+            align-self: flex-end; /* 靠右 */
+            text-align: right;
+        }
+        
+        .message.user .content {
+            background-color: var(--user-msg-bg);
+            padding: 12px 16px;
+            border-radius: 12px 12px 0 12px;
+            display: inline-block;
+            text-align: left;
+        }
+
+        /* AI 消息样式 */
+        .message.ai {
+            align-self: flex-start; /* 靠左 */
+            width: 100%;
+        }
+
+        .message.ai .content {
+            color: var(--text-primary);
+        }
+
+        /* 加载动画 */
+        .typing-indicator {
+            display: inline-flex;
+            gap: 4px;
+            padding: 10px 0;
+        }
+        .dot {
+            width: 6px;
+            height: 6px;
+            background: var(--accent-color);
+            border-radius: 50%;
+            animation: bounce 1.4s infinite ease-in-out both;
+        }
+        .dot:nth-child(1) { animation-delay: -0.32s; }
+        .dot:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+
+        /* --- Markdown 样式模拟 --- */
+        h1, h2, h3 { margin-top: 1em; margin-bottom: 0.5em; color: #fff; }
+        p { margin-bottom: 1em; }
+        ul { margin-left: 20px; margin-bottom: 1em; }
+        strong { color: var(--accent-color); }
+        
+        pre {
+            background: var(--code-bg);
+            padding: 16px;
+            border-radius: var(--border-radius);
+            overflow-x: auto;
+            margin-bottom: 1em;
+            border-left: 3px solid var(--accent-color);
+            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+        
+        code {
+            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+            background: rgba(255,255,255,0.1);
+            padding: 2px 4px;
+            border-radius: 4px;
+            color: #e5e5e5;
+        }
+        
+        pre code {
+            background: transparent;
+            padding: 0;
+        }
+
+        /* --- 底部输入区 --- */
+        footer {
+            padding: 24px;
+            background: linear-gradient(to top, var(--bg-color) 80%, transparent);
+            display: flex;
+            justify-content: center;
+        }
+
+        .input-wrapper {
+            width: 100%;
+            max-width: 800px;
+            position: relative;
+            background: var(--surface-color);
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.1);
+            transition: border-color 0.2s, box-shadow 0.2s;
+            display: flex;
+            align-items: flex-end;
+            padding: 8px;
+        }
+
+        .input-wrapper:focus-within {
+            border-color: var(--accent-color);
+            box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.2);
+        }
+
+        textarea {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: white;
+            resize: none;
+            padding: 10px;
+            font-family: inherit;
+            outline: none;
+            max-height: 150px;
+            min-height: 44px;
+        }
+
+        .send-btn {
+            background: var(--accent-color);
+            color: white;
+            border: none;
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 2px;
+            transition: opacity 0.2s;
+        }
+
+        .send-btn:hover { opacity: 0.9; }
+        .send-btn svg { width: 18px; height: 18px; fill: currentColor; }
+
+    </style>
+</head>
+<body>
+
+    <!-- 顶部 -->
+    <header>
+        <div class="header-title">
+            <span>Claude-Like TUI</span>
+            <span class="status-badge">v1.0.0</span>
+        </div>
+        <div style="font-size: 0.85rem; color: var(--text-secondary);">
+            <span id="token-count">0 tokens</span>
+        </div>
+    </header>
+
+    <!-- 聊天内容 -->
+    <div id="chat-container">
+        <!-- 欢迎语 -->
+        <div class="message ai">
+            <div class="content">
+                你好！我是基于 <strong>Textual</strong> 风格设计的 TUI 助手。<br><br>
+                我可以帮你：
+                <ul>
+                    <li>生成 Python 代码</li>
+                    <li>解释复杂的概念</li>
+                    <li>调试终端报错</li>
+                </ul>
+                请在下方输入框尝试提问。
+            </div>
+        </div>
+    </div>
+
+    <!-- 底部输入 -->
+    <footer>
+        <div class="input-wrapper">
+            <textarea id="user-input" placeholder="Ask anything..." rows="1"></textarea>
+            <button class="send-btn" onclick="sendMessage()">
+                <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path></svg>
+            </button>
+        </div>
+    </footer>
+
+    <script>
+        const chatContainer = document.getElementById('chat-container');
+        const userInput = document.getElementById('user-input');
+        let isProcessing = false;
+
+        // 简单的 Markdown 转 HTML 函数
+        function simpleMarkdown(text) {
+            // 代码块处理 ```python ... ```
+            text = text.replace(/```(\w+)?\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+            // 行内代码
+            text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+            // 加粗
+            text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            // 换行
+            text = text.replace(/\n/g, '<br>');
+            return text;
+        }
+
+        // 自动调整输入框高度
+        userInput.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
+            if(this.value === '') this.style.height = 'auto';
+        });
+
+        // 监听回车发送
+        userInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        async function sendMessage() {
+            const text = userInput.value.trim();
+            if (!text || isProcessing) return;
+
+            // 1. 添加用户消息
+            appendMessage('user', text);
+            userInput.value = '';
+            userInput.style.height = 'auto';
+            
+            // 2. 显示加载状态
+            isProcessing = true;
+            const loaderId = 'loader-' + Date.now();
+            const loaderDiv = document.createElement('div');
+            loaderDiv.className = 'message ai';
+            loaderDiv.id = loaderId;
+            loaderDiv.innerHTML = `<div class="typing-indicator"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
+            chatContainer.appendChild(loaderDiv);
+            scrollToBottom();
+
+            // 3. 模拟 AI 思考延迟
+            await new Promise(r => setTimeout(r, 1000));
+
+            // 4. 移除加载，准备流式输出
+            document.getElementById(loaderId).remove();
+            
+            // 模拟回复内容
+            const replyContent = `这是一个模拟的回复。
+
+这里展示了 **Markdown** 的支持能力。
+
+比如代码块：
+\`\`\`python
+def hello():
+    print("Hello, Terminal!")
+\`\`\`
+
+如果你需要更复杂的交互，可以告诉我。`;
+
+            // 5. 创建 AI 消息容器并开始打字机效果
+            const aiMsgDiv = document.createElement('div');
+            aiMsgDiv.className = 'message ai';
+            chatContainer.appendChild(aiMsgDiv);
+
+            // 流式打印逻辑
+            let i = 0;
+            const typeWriter = () => {
+                if (i < replyContent.length) {
+                    // 每次取一部分字符，模拟网络流式传输
+                    const chunk = replyContent.substring(0, i + 3); 
+                    aiMsgDiv.innerHTML = simpleMarkdown(chunk);
+                    i += 3;
+                    scrollToBottom();
+                    setTimeout(typeWriter, 30); // 打字速度
+                } else {
+                    isProcessing = false;
+                }
+            };
+            typeWriter();
+        }
+
+        function appendMessage(sender, text) {
+            const div = document.createElement('div');
+            div.className = `message ${sender}`;
+            div.innerHTML = `<div class="content">${simpleMarkdown(text)}</div>`;
+            chatContainer.appendChild(div);
+            scrollToBottom();
+        }
+
+        function scrollToBottom() {
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+    </script>
+</body>
+</html>

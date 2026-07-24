@@ -35,6 +35,7 @@
     "build:package": "tsc -p tsconfig.publish.json && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
     "prepack": "npm run build:package",
     "test": "tsx --test test/*.test.ts",
+    "test:coverage": "c8 tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit && tsc -p web/tsconfig.json --noEmit"
   },
   "engines": {
@@ -52,6 +53,7 @@
     "@types/react-dom": "^18.3.1",
     "@types/supertest": "^7.2.1",
     "@vitejs/plugin-react": "^4.7.0",
+    "c8": "^12.0.0",
     "concurrently": "^9.2.4",
     "supertest": "^7.2.2",
     "tsx": "^4.23.1",

@@ -10,7 +10,7 @@ import {
   runAgentTurn,
 } from "../src/loop.ts";
 import { contentAsString } from "../src/content.ts";
-import { makeLlmConfig } from "../src/llm.ts";
+import { makeLlmConfig } from "../src/llm/index.ts";
 import { createDefaultTools, createReadTool } from "../src/tools/index.ts";
 import type { Tool } from "../src/tools/types.ts";
 import {
@@ -383,6 +383,64 @@ describe("runAgentTurn", () => {
     });
 
     assert.deepEqual(seen, [["refresh"], ["refreshed"]]);
+  });
+
+  it("executes multiple tool calls in parallel when parallelToolExecution is true", async () => {
+    const executionOrder: string[] = [];
+    const slowTool: Tool = {
+      name: "slow",
+      description: "a slow tool",
+      parameters: { type: "object", properties: { id: { type: "string" } } },
+      execute: async (args) => {
+        executionOrder.push(`start:${args.id}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        executionOrder.push(`end:${args.id}`);
+        return { content: `done:${args.id}` };
+      },
+    };
+
+    let callCount = 0;
+    const chat = async (): Promise<import("../src/types.ts").AssistantMessage> => {
+      callCount += 1;
+      if (callCount === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            { id: "c1", name: "slow", arguments: { id: "A" } },
+            { id: "c2", name: "slow", arguments: { id: "B" } },
+          ],
+        };
+      }
+      return { role: "assistant", content: "parallel done" };
+    };
+
+    const messages = await runAgentTurn(createAgentHistory(), "go parallel", {
+      llm: dummyLlm,
+      tools: [slowTool],
+      chat,
+      parallelToolExecution: true,
+    });
+
+    // Both tools should have started before either finished (parallel)
+    const startA = executionOrder.indexOf("start:A");
+    const startB = executionOrder.indexOf("start:B");
+    const endA = executionOrder.indexOf("end:A");
+    const endB = executionOrder.indexOf("end:B");
+    assert.ok(startA < endA, "A starts before ending");
+    assert.ok(startB < endB, "B starts before ending");
+    // In parallel, both starts happen before both ends
+    assert.ok(startA < endB && startB < endA, "tools run concurrently");
+
+    // Results are in original call order
+    const toolMsgs = messages.filter((m) => m.role === "tool");
+    assert.equal(toolMsgs.length, 2);
+    if (toolMsgs[0]?.role === "tool" && toolMsgs[1]?.role === "tool") {
+      assert.equal(toolMsgs[0].toolCallId, "c1");
+      assert.equal(toolMsgs[1].toolCallId, "c2");
+    }
+
+    assert.equal(messages.at(-1)?.content, "parallel done");
   });
 
   it("preserves history without repeating the system message", async () => {

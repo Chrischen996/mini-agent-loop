@@ -2,11 +2,13 @@ import React from "react";
 import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import type { ChatMessage, ThinkingDisplayMode } from "../state.ts";
+import { SubagentCard } from "./SubagentCard.tsx";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-const THINKING_SUMMARY_LINES = 1;
+const THINKING_SUMMARY_LINES = 3;
 const THINKING_AUTO_COLLAPSE_LINES = 15;
+const THINKING_MAX_FULL_LINES = 30;
 
 function str(v: unknown): string {
   return typeof v === "string" ? v : "";
@@ -42,6 +44,26 @@ function estimateTokens(text: string): number {
 function formatTokenCount(tokens: number): string {
   if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k tokens`;
   return `${tokens} tokens`;
+}
+
+function formatCharCount(chars: number): string {
+  if (chars >= 1000) return `${(chars / 1000).toFixed(1)}k chars`;
+  return `${chars} chars`;
+}
+
+/**
+ * Format thinking content with basic code-block highlighting.
+ * Lines inside ``` fences get a different color to stand out.
+ */
+function formatThinkingLines(text: string, maxLines: number): { lines: string[]; truncated: number } {
+  const allLines = text.split("\n");
+  const visible = allLines.slice(0, maxLines);
+  const truncated = Math.max(0, allLines.length - maxLines);
+  return { lines: visible, truncated };
+}
+
+function isCodeFenceLine(line: string): boolean {
+  return line.trimStart().startsWith("```");
 }
 
 // ─── ThinkingBlock ───────────────────────────────────────────────────────────
@@ -95,33 +117,63 @@ export function ThinkingBlock({
   const badgeBg = focused ? "cyan" : isStreaming ? "yellow" : "magenta";
   const badgeFg = "black";
   const badgeLabel = isStreaming ? " THINKING… " : showFull ? " THINK " : " THINK ▸ ";
+  const charCount = content.length;
+  const streamInfo = isStreaming ? ` · ${formatCharCount(charCount)} streaming` : "";
   const actionHint = !isStreaming
     ? (showFull
       ? (focused ? "Alt+T collapse" : "Alt+T")
       : (focused ? "Alt+T expand" : "Alt+T"))
-    : "streaming";
+    : `${formatCharCount(charCount)}`;
+
+  // Render body content based on mode
+  const renderThinkingLines = (textContent: string, maxLines: number) => {
+    const { lines: visibleLines, truncated } = formatThinkingLines(textContent, maxLines);
+    let inCodeBlock = false;
+    return (
+      <>
+        {visibleLines.map((line, i) => {
+          if (isCodeFenceLine(line)) {
+            inCodeBlock = !inCodeBlock;
+            return <Text key={i} color="magenta" dimColor>{line}</Text>;
+          }
+          if (inCodeBlock) {
+            return <Text key={i} color="gray">{line}</Text>;
+          }
+          return <Text key={i} color="white" dimColor wrap="wrap">{line}</Text>;
+        })}
+        {truncated > 0 && (
+          <Text color="magenta" dimColor>
+            ··· {truncated} more lines{streamInfo}
+          </Text>
+        )}
+      </>
+    );
+  };
 
   const body = !showFull
     ? (() => {
-        const preview = lines.slice(0, THINKING_SUMMARY_LINES).join("\n");
+        const preview = lines.slice(0, THINKING_SUMMARY_LINES);
         const remaining = Math.max(0, lines.length - THINKING_SUMMARY_LINES);
         return (
           <>
-            <Text color="white" dimColor wrap="wrap">{preview}</Text>
+            {preview.map((line, i) => (
+              <Text key={i} color="white" dimColor wrap="wrap">{line}</Text>
+            ))}
             {remaining > 0 && (
               <Text color="magenta" dimColor>
-                ··· {remaining} more lines{isStreaming ? " · live" : ""}
+                ··· {remaining} more lines{streamInfo}
               </Text>
             )}
           </>
         );
       })()
-    : <Text color="white" dimColor wrap="wrap">{content}</Text>;
+    : renderThinkingLines(content, THINKING_MAX_FULL_LINES);
 
   return (
     <Box
       flexDirection="column"
       marginY={0}
+      marginBottom={1}
       paddingX={1}
       borderStyle="round"
       borderColor={frameColor}
@@ -145,7 +197,7 @@ export function ThinkingBlock({
           {actionHint}
         </Text>
       </Box>
-      {/* Divider-ish spacing + body */}
+      {/* Body with visual separation */}
       <Box flexDirection="column" marginTop={0}>
         {body}
       </Box>
@@ -425,6 +477,9 @@ export function MessageFeed({
         }
         if (msg.kind === "tool_call") {
           return <ToolCallRow key={msg.id} msg={msg} />;
+        }
+        if (msg.kind === "subagent_call") {
+          return <SubagentCard key={msg.id} msg={msg} />;
         }
         if (msg.kind === "error") {
           return (

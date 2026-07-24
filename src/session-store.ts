@@ -7,12 +7,14 @@ type SessionCreatedEvent = {
   type: "session_created";
   sessionId: string;
   createdAt: number;
+  modelId?: string;
 };
 
 type SessionSnapshotEvent = {
   type: "session_snapshot";
   sessionId: string;
   createdAt: number;
+  modelId?: string;
   messages: AgentMessage[];
 };
 
@@ -21,6 +23,7 @@ type SessionEvent = SessionCreatedEvent | SessionSnapshotEvent;
 export type PersistedSession = {
   id: string;
   createdAt: number;
+  modelId?: string;
   messages: AgentMessage[];
 };
 
@@ -33,13 +36,27 @@ function isSessionEvent(value: unknown): value is SessionEvent {
   );
 }
 
+export type SessionStoreOptions = {
+  /** Maximum number of sessions to retain. Default: 100. */
+  maxSessions?: number;
+  /** Session time-to-live in milliseconds. Default: 7 days (604_800_000). */
+  sessionTtlMs?: number;
+};
+
+const DEFAULT_MAX_SESSIONS = 100;
+const DEFAULT_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1_000; // 7 days
+
 export class SessionStore {
   private readonly root: string;
+  private readonly maxSessions: number;
+  private readonly sessionTtlMs: number;
 
-  constructor(dataDir?: string) {
+  constructor(dataDir?: string, options: SessionStoreOptions = {}) {
     this.root = path.resolve(
       dataDir ?? process.env.AGENT_DATA_DIR ?? path.join(os.homedir(), ".mini-agent", "sessions"),
     );
+    this.maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
+    this.sessionTtlMs = options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
   }
 
   async initialize(): Promise<void> {
@@ -76,12 +93,14 @@ export class SessionStore {
             current ??= {
               id: parsed.sessionId,
               createdAt: parsed.createdAt,
+              modelId: parsed.modelId,
               messages: [],
             };
           } else if (Array.isArray(parsed.messages)) {
             current = {
               id: parsed.sessionId,
               createdAt: parsed.createdAt,
+              modelId: parsed.modelId ?? current?.modelId,
               messages: parsed.messages,
             };
           }
@@ -91,7 +110,41 @@ export class SessionStore {
       }
       if (current) sessions.set(current.id, current);
     }
+    // Evict expired and excess sessions on load
+    await this.evict(sessions);
     return sessions;
+  }
+
+  /**
+   * Remove sessions that exceed TTL or the max session count.
+   * Deletes evicted sessions from disk and mutates the provided map.
+   */
+  async evict(sessions: Map<string, PersistedSession>): Promise<string[]> {
+    const evictedIds: string[] = [];
+    const now = Date.now();
+
+    // 1. Remove sessions older than TTL
+    for (const [id, session] of sessions) {
+      if (now - session.createdAt > this.sessionTtlMs) {
+        evictedIds.push(id);
+        sessions.delete(id);
+      }
+    }
+
+    // 2. Enforce maxSessions by removing oldest first
+    if (sessions.size > this.maxSessions) {
+      const sorted = [...sessions.entries()]
+        .sort((a, b) => a[1].createdAt - b[1].createdAt);
+      const excess = sorted.slice(0, sessions.size - this.maxSessions);
+      for (const [id] of excess) {
+        evictedIds.push(id);
+        sessions.delete(id);
+      }
+    }
+
+    // 3. Remove evicted sessions from disk in parallel
+    await Promise.all(evictedIds.map((id) => this.remove(id).catch(() => {})));
+    return evictedIds;
   }
 
   async create(session: PersistedSession): Promise<void> {
@@ -99,6 +152,7 @@ export class SessionStore {
       type: "session_created",
       sessionId: session.id,
       createdAt: session.createdAt,
+      modelId: session.modelId,
     });
     await this.save(session);
   }
@@ -108,6 +162,7 @@ export class SessionStore {
       type: "session_snapshot",
       sessionId: session.id,
       createdAt: session.createdAt,
+      modelId: session.modelId,
       messages: session.messages,
     });
   }

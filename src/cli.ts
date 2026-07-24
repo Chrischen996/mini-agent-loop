@@ -3,7 +3,7 @@
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { imagePart, textPart } from "./content.ts";
-import { loadLlmConfigFromEnv } from "./llm.ts";
+import { loadLlmConfigFromEnv } from "./llm/index.ts";
 import { MaxTurnsExceededError, previewContent, runAgentLoop, type LoopEvent } from "./loop.ts";
 import {
   createVisionPreprocessor,
@@ -13,6 +13,8 @@ import { createTools, type ToolName } from "./tools/index.ts";
 import { createMcpApprovalGate } from "./mcp/approval.ts";
 import { createMcpRuntimeFromEnv } from "./mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
+import { createSubagentTool, defaultProfiles } from "./subagent/index.ts";
+import { resolveToolProvider, type Tool } from "./tools/types.ts";
 import type { ContentPart, MessageContent } from "./types.ts";
 
 const IMAGE_EXT: Record<string, string> = {
@@ -54,6 +56,23 @@ function logEvent(event: LoopEvent): void {
     case "done":
       console.error(`[done] messages=${event.messages.length}`);
       break;
+    case "subagent_start":
+      console.error(`[subagent_start] id=${event.id} depth=${event.depth} task=${event.task.slice(0, 80)}${event.profile ? ` profile=${event.profile}` : ""}`);
+      break;
+    case "subagent_event":
+      // Show inner events with indentation based on depth
+      if (event.inner.type === "assistant_delta") {
+        process.stderr.write(event.inner.text);
+      } else if (event.inner.type === "tool_start") {
+        console.error(`${'  '.repeat(event.depth)}[sub:tool_start] ${event.inner.call.name}`);
+      } else if (event.inner.type === "tool_end") {
+        const subPreview = previewContent(event.inner.result.content, 60);
+        console.error(`${'  '.repeat(event.depth)}[sub:tool_end] ${event.inner.call.name} preview=${subPreview}`);
+      }
+      break;
+    case "subagent_end":
+      console.error(`[subagent_end] id=${event.id} depth=${event.depth} success=${event.success} turns=${event.turns} tokens=${event.totalTokens}`);
+      break;
   }
 }
 
@@ -77,7 +96,7 @@ export function parseCliArgs(argv: string[]): {
   let tools: ToolName[] | undefined;
   let excludeTools: ToolName[] | undefined;
   let allowMcpTools = false;
-  const validTools = new Set<ToolName>(["read", "bash", "edit", "write", "grep", "find", "ls", "codebase_open", "codebase_search", "codebase_read", "codebase_explain"]);
+  const validTools = new Set<ToolName>(["read", "bash", "edit", "write", "grep", "find", "ls", "codebase_open", "codebase_search", "codebase_read", "codebase_explain", "subagent"]);
   const parseToolList = (value: string, flag: string): ToolName[] => {
     const names = value.split(",").map((name) => name.trim()).filter(Boolean);
     for (const name of names) {
@@ -221,6 +240,21 @@ async function main(): Promise<void> {
   }
   console.error(`[deepwiki] enabled=${codebaseRuntime.deepWikiEnabled}`);
 
+  // ── Add subagent tool if enabled ────────────────────────────────────────────
+  const enableSubagent = process.env.MINI_AGENT_SUBAGENT !== "0";
+  if (enableSubagent) {
+    const baseTools = resolveToolProvider(tools);
+    const subagentTool = createSubagentTool({
+      parentLlm: llm,
+      parentTools: baseTools,
+      profiles: defaultProfiles,
+      preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+      onSubagentEvent: (subEvent) => logEvent(subEvent),
+    });
+    const enrichedTools = [...baseTools, subagentTool as Tool];
+    tools = () => enrichedTools;
+  }
+
   let messages;
   try {
     messages = await runAgentLoop(prompt || "Please analyze the attached image(s).", {
@@ -254,7 +288,15 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error(err instanceof Error ? err.message : err);
-  process.exit(1);
-});
+// Only run when this module is the entry point (not when imported by tests)
+const isEntryPoint =
+  process.argv[1] &&
+  import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/")) ||
+  import.meta.url === `file://${process.argv[1]}`;
+
+if (isEntryPoint) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? err.message : err);
+    process.exit(1);
+  });
+}

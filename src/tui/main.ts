@@ -1,6 +1,6 @@
 import process from "node:process";
 import { contentAsString } from "../content.ts";
-import { loadLlmConfigFromEnv } from "../llm.ts";
+import { loadLlmConfigFromEnv } from "../llm/index.ts";
 import {
   createAgentHistory,
   MaxTurnsExceededError,

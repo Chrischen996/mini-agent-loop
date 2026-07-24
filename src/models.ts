@@ -1,6 +1,7 @@
 
 import { builtinModels } from "./pi-ai/providers/all.ts";
 import type { Api, Model as PiModel } from "./pi-ai/types.ts";
+import type { ToolCallFormat } from "./hermes/types.ts";
 
 export type ModelCapabilities = {
   input: Array<"text" | "image">;
@@ -19,6 +20,13 @@ export type ModelRef = {
   contextWindow: number;
   maxTokens: number;
   reasoning: boolean;
+  /**
+   * The wire format used for tool calling.
+   *
+   * - `"openai"` (default) — standard OpenAI Chat Completions `tool_calls`
+   * - `"hermes"` — Hermes XML `<tool_call>` blocks in assistant text
+   */
+  toolCallFormat?: ToolCallFormat;
   thinkingLevelMap?: Record<string, string | null>;
   cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
   compat?: Record<string, unknown>;

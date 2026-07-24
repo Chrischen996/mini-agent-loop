@@ -5,7 +5,7 @@ import {
   loadLlmConfigFromEnv,
   makeLlmConfig,
   prepareMessagesForModel,
-} from "../src/llm.ts";
+} from "../src/llm/index.ts";
 import type { AgentMessage } from "../src/types.ts";
 
 const visionLlm = makeLlmConfig({

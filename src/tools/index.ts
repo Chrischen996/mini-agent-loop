@@ -41,7 +41,7 @@ export {
   createSearchTool,
 } from "./workspace-tools.ts";
 
-export type ToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls" | "codebase_open" | "codebase_search" | "codebase_read" | "codebase_explain";
+export type ToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls" | "codebase_open" | "codebase_search" | "codebase_read" | "codebase_explain" | "subagent";
 
 export type ToolSelection = {
   tools?: ToolName[];

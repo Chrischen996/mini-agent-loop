@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { makeLlmConfig } from "../src/llm.ts";
+import { makeLlmConfig } from "../src/llm/index.ts";
 import { runAgentTurn } from "../src/loop.ts";
 import type { AssistantMessage } from "../src/types.ts";
 

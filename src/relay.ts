@@ -23,7 +23,7 @@
  * ```
  */
 
-import type { LlmConfig } from "./llm.ts";
+import type { LlmConfig } from "./llm/index.ts";
 
 // ─── types ───────────────────────────────────────────────────────────────────
 

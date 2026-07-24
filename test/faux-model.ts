@@ -1,4 +1,4 @@
-import type { ChatFn } from "../src/llm.ts";
+import type { ChatFn } from "../src/llm/index.ts";
 import type { AgentMessage, AssistantMessage } from "../src/types.ts";
 import type { Tool } from "../src/tools/types.ts";
 
