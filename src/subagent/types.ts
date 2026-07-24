@@ -91,6 +91,44 @@ export type SubagentArgs = {
   tools?: string[];
   /** Ad-hoc max turns (overrides profile default). */
   maxTurns?: number;
+  /**
+   * Model identifier for this subagent (e.g. "openai/gpt-4o-mini").
+   * When set, overrides both profile.llm and parent LLM config.
+   */
+  model?: string;
+  /**
+   * Context string shared from the parent agent.
+   * Prepended to the subagent's system prompt as background knowledge.
+   */
+  sharedContext?: string;
+};
+
+// ─── Parallel subagent batch arguments ───────────────────────────────────────
+
+/**
+ * A single task within a parallel batch.
+ */
+export type SubagentBatchTask = {
+  /** Unique label for this task within the batch. */
+  label: string;
+  /** The task / prompt for this subagent. */
+  task: string;
+  /** Profile name to use. */
+  profile?: string;
+  /** Model override for this specific task. */
+  model?: string;
+  /** Max turns override. */
+  maxTurns?: number;
+  /** Shared context for this task. */
+  sharedContext?: string;
+};
+
+/**
+ * Arguments for the `subagent_batch` tool — runs multiple subagents in parallel.
+ */
+export type SubagentBatchArgs = {
+  /** Array of tasks to run in parallel. */
+  tasks: SubagentBatchTask[];
 };
 
 // ─── Subagent-specific events ────────────────────────────────────────────────

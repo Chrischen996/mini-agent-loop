@@ -37,7 +37,7 @@ import { resolveToolProvider, type Tool, type ToolProvider } from "./tools/types
 import type { AgentMessage, ContentPart } from "./types.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
 import type { McpServerStatus } from "./mcp/types.ts";
-import { createSubagentTool, defaultProfiles, type SubagentProfile } from "./subagent/index.ts";
+import { createSubagentTool, createSubagentBatchTool, defaultProfiles, type SubagentProfile } from "./subagent/index.ts";
 import {
   listWorkspaceDirectory,
   validateReferencedPaths,
@@ -583,6 +583,69 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
   });
 
+  // ── Subagent profile hot-update API ────────────────────────────────────────
+
+  app.get("/api/subagent/profiles", (_request, response) => {
+    const profiles = options.subagentProfiles ?? defaultProfiles;
+    response.json({
+      profiles: profiles.map((p) => ({
+        name: p.name,
+        description: p.description,
+        allowedTools: p.allowedTools,
+        maxTurns: p.maxTurns,
+        timeout: p.timeout,
+        hasCustomLlm: Boolean(p.llm),
+      })),
+    });
+  });
+
+  app.put("/api/subagent/profiles/:name", (request, response) => {
+    const name = request.params.name;
+    const body = request.body as Partial<SubagentProfile> | undefined;
+    if (!body || typeof body.description !== "string" || typeof body.systemPrompt !== "string") {
+      response.status(400).json({ error: "description and systemPrompt are required" });
+      return;
+    }
+    const profiles = options.subagentProfiles ?? defaultProfiles;
+    const existing = profiles.findIndex((p) => p.name === name);
+    const newProfile: SubagentProfile = {
+      name,
+      description: body.description,
+      systemPrompt: body.systemPrompt,
+      allowedTools: Array.isArray(body.allowedTools) ? body.allowedTools : undefined,
+      maxTurns: typeof body.maxTurns === "number" ? body.maxTurns : undefined,
+      timeout: typeof body.timeout === "number" ? body.timeout : undefined,
+    };
+    if (existing >= 0) {
+      profiles[existing] = newProfile;
+    } else {
+      profiles.push(newProfile);
+    }
+    // Update the options reference so new sessions pick up the change
+    options.subagentProfiles = profiles;
+    response.json({
+      name: newProfile.name,
+      description: newProfile.description,
+      allowedTools: newProfile.allowedTools,
+      maxTurns: newProfile.maxTurns,
+    });
+  });
+
+  app.delete("/api/subagent/profiles/:name", (_request, response) => {
+    const name = _request.params.name;
+    const profiles = options.subagentProfiles ?? defaultProfiles;
+    const index = profiles.findIndex((p) => p.name === name);
+    if (index < 0) {
+      response.status(404).json({ error: `Profile "${name}" not found` });
+      return;
+    }
+    profiles.splice(index, 1);
+    options.subagentProfiles = profiles;
+    response.status(204).end();
+  });
+
+  // ── Sessions ────────────────────────────────────────────────────────────────
+
   app.post("/api/sessions", async (_request, response) => {
     const id = randomUUID();
     const session: Session = {
@@ -747,15 +810,19 @@ export function createAgentServer(options: AgentServerOptions): Express {
         const sessionTools: ToolProvider = enableSubagent
           ? () => {
               const base = resolveToolProvider(baseToolProvider);
-              const subagentTool = createSubagentTool({
+              const subagentOpts = {
                 parentLlm: effectiveLlm,
                 parentTools: base,
                 profiles: options.subagentProfiles ?? defaultProfiles,
                 preprocessors: options.preprocessors ?? [],
                 signal: abortController.signal,
-                onSubagentEvent: (subEvent) => send(safeEvent(subEvent)),
-              });
-              return [...base, subagentTool as Tool];
+                onSubagentEvent: (subEvent: import("./subagent/types.ts").SubagentEvent) => send(safeEvent(subEvent)),
+              };
+              return [
+                ...base,
+                createSubagentTool(subagentOpts) as Tool,
+                createSubagentBatchTool(subagentOpts) as Tool,
+              ];
             }
           : baseToolProvider;
         session.messages = await runAgentTurn(

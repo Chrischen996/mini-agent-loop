@@ -38,51 +38,8 @@ import { createAllTools, createTools } from "../tools/index.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
 import type { AgentMessage, MessageContent } from "../types.ts";
 import { createMcpApprovalGate, mcpAutoApproveFromEnv } from "../mcp/approval.ts";
-import { createSubagentTool } from "../subagent/index.ts";
-import type { SubagentEvent, SubagentProfile } from "../subagent/types.ts";
-
-const DEFAULT_SUBAGENT_PROFILES: SubagentProfile[] = [
-  {
-    name: "researcher",
-    description: "Reads, searches, and analyzes files to gather information and answer questions",
-    systemPrompt: [
-      "You are a research assistant. Your job is to gather information from the workspace.",
-      "Read files, search for patterns, and list directories to find relevant information.",
-      "Summarize your findings clearly and concisely. Include file paths and line numbers when citing code.",
-      "Do not modify any files. Only read and analyze.",
-    ].join("\n"),
-    allowedTools: ["read", "grep", "find", "ls", "bash", "codebase_open", "codebase_search", "codebase_read"],
-    maxTurns: 8,
-  },
-  {
-    name: "coder",
-    description: "Writes, edits, and creates code files based on specifications",
-    systemPrompt: [
-      "You are a coding assistant. Write clean, well-structured code.",
-      "Read existing files first to understand the codebase style and conventions.",
-      "Use `edit` for small changes and `write` for new files or complete rewrites.",
-      "Always verify your changes compile or pass basic sanity checks when possible.",
-    ].join("\n"),
-    allowedTools: ["read", "write", "edit", "bash", "grep", "find", "ls"],
-    maxTurns: 10,
-  },
-  {
-    name: "reviewer",
-    description: "Reviews code quality, finds bugs, and suggests improvements",
-    systemPrompt: [
-      "You are a code reviewer. Analyze the given code for:",
-      "- Bugs and logic errors",
-      "- Code style and consistency issues",
-      "- Performance concerns",
-      "- Security vulnerabilities",
-      "- Missing error handling",
-      "Provide specific, actionable feedback with file paths and line numbers.",
-      "Do not modify any files. Only read and analyze.",
-    ].join("\n"),
-    allowedTools: ["read", "grep", "find", "ls"],
-    maxTurns: 6,
-  },
-];
+import { createSubagentTool, createSubagentBatchTool, defaultProfiles } from "../subagent/index.ts";
+import type { SubagentEvent } from "../subagent/types.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 
@@ -234,20 +191,24 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const agentToolsRef = useRef<ToolProvider>(agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
 
   // Create the subagent tool — dispatches SubagentEvents to the TUI reducer
-  const subagentToolRef = useRef<Tool | null>(null);
-  const getSubagentTool = useCallback((): Tool => {
-    if (!subagentToolRef.current) {
-      subagentToolRef.current = createSubagentTool({
+  const subagentToolsRef = useRef<Tool[]>([]);
+  const getSubagentTools = useCallback((): Tool[] => {
+    if (subagentToolsRef.current.length === 0) {
+      const sharedOptions = {
         parentLlm: llm,
         parentTools: agentToolsRef.current,
-        profiles: DEFAULT_SUBAGENT_PROFILES,
+        profiles: defaultProfiles,
         preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
         onSubagentEvent: (event: SubagentEvent) => {
           dispatch({ type: "SUBAGENT_EVENT", event });
         },
-      }) as Tool;
+      };
+      subagentToolsRef.current = [
+        createSubagentTool(sharedOptions) as Tool,
+        createSubagentBatchTool(sharedOptions) as Tool,
+      ];
     }
-    return subagentToolRef.current;
+    return subagentToolsRef.current;
   }, [llm, vision]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
@@ -811,7 +772,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     while (true) {
       try {
         historyRef.current = await runAgentTurn(historyRef.current, currentUserText, {
-          llm, tools: () => [...resolveToolProvider(agentToolsRef.current), getSubagentTool()],
+          llm, tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools()],
           preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
           signal: abortRef.current.signal,
           userContent: currentUserContent,

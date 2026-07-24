@@ -31,7 +31,7 @@
  * ```
  */
 
-export { createSubagentTool } from "./tool.ts";
+export { createSubagentTool, createSubagentBatchTool } from "./tool.ts";
 
 export {
   defaultProfiles,
@@ -42,6 +42,8 @@ export {
 
 export type {
   SubagentArgs,
+  SubagentBatchArgs,
+  SubagentBatchTask,
   SubagentEvent,
   SubagentProfile,
   SubagentToolOptions,
