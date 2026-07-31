@@ -5,6 +5,7 @@ import type { WorkflowStep } from "../state.ts";
 type WorkflowPanelProps = {
   steps: WorkflowStep[];
   touchedFiles: string[];
+  width?: number;
 };
 
 function stepIcon(status: WorkflowStep["status"]): { icon: string; color: string } {
@@ -20,9 +21,9 @@ function stepIcon(status: WorkflowStep["status"]): { icon: string; color: string
   }
 }
 
-export function WorkflowPanel({ steps, touchedFiles }: WorkflowPanelProps): React.ReactElement {
+export function WorkflowPanel({ steps, touchedFiles, width = 28 }: WorkflowPanelProps): React.ReactElement {
   return (
-    <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1} width={28}>
+    <Box flexDirection="column" borderStyle="single" borderColor="cyan" paddingX={1} width={width}>
       <Box gap={1}>
         <Text color="yellow">📋</Text>
         <Text bold>工作流</Text>
@@ -37,6 +38,7 @@ export function WorkflowPanel({ steps, touchedFiles }: WorkflowPanelProps): Reac
               <Box key={step.id} gap={1}>
                 <Text color={color as Parameters<typeof Text>[0]["color"]}>{icon}</Text>
                 <Text
+                  wrap="truncate-end"
                   color={step.status === "running" ? "white" : step.status === "done" ? "green" : "gray"}
                 >
                   {step.label}
@@ -52,7 +54,7 @@ export function WorkflowPanel({ steps, touchedFiles }: WorkflowPanelProps): Reac
           {touchedFiles.slice(-6).map((f) => (
             <Box key={f} gap={1}>
               <Text color="cyan">●</Text>
-              <Text dimColor>{f.length > 20 ? `…${f.slice(-18)}` : f}</Text>
+              <Text dimColor wrap="truncate-end">{f.length > 20 ? `…${f.slice(-18)}` : f}</Text>
             </Box>
           ))}
         </Box>

@@ -10,8 +10,8 @@ type HeaderProps = {
 
 export function Header({ modelName, busy, turnCount }: HeaderProps): React.ReactElement {
   return (
-    <Box borderStyle="single" borderColor="cyan" paddingX={1} justifyContent="space-between">
-      <Box gap={1}>
+    <Box borderStyle="single" borderColor="cyan" paddingX={1} justifyContent="space-between" gap={2}>
+      <Box gap={1} flexGrow={1} flexShrink={1}>
         <Text color="cyan" bold>
           Hermes Agent
         </Text>
@@ -26,9 +26,9 @@ export function Header({ modelName, busy, turnCount }: HeaderProps): React.React
         )}
         {!busy && <Text color="green">● 就绪</Text>}
       </Box>
-      <Box gap={2}>
+      <Box gap={2} flexShrink={1}>
         <Text dimColor>轮次: {turnCount}</Text>
-        <Text color="cyan">{modelName}</Text>
+        <Text color="cyan" wrap="truncate-end">{modelName}</Text>
       </Box>
     </Box>
   );

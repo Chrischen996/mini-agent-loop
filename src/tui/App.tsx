@@ -4,6 +4,11 @@ import TextInput from "ink-text-input";
 import { readdir, stat } from "node:fs/promises";
 import * as nodePath from "node:path";
 import { MessageFeed } from "./components/MessageFeed.tsx";
+import { GoalPanel } from "./components/GoalPanel.tsx";
+import { Header } from "./components/Header.tsx";
+import { StatusBar } from "./components/StatusBar.tsx";
+import { TaskPanel } from "./components/TaskPanel.tsx";
+import { WorkflowPanel } from "./components/WorkflowPanel.tsx";
 import {
   FileAutocomplete,
   CommandPalette,
@@ -37,6 +42,7 @@ import {
 import { createAllTools, createTools } from "../tools/index.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
 import type { AgentMessage, MessageContent } from "../types.ts";
+import type { ChatMessage } from "./state.ts";
 import { createMcpApprovalGate, mcpAutoApproveFromEnv } from "../mcp/approval.ts";
 import { createSubagentTool, createSubagentBatchTool, defaultProfiles } from "../subagent/index.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
@@ -179,6 +185,14 @@ function parseAtRefs(input: string): string[] {
   return matches ? matches.map((m) => m.slice(1)) : [];
 }
 
+function lastAssistantText(messages: ChatMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.kind === "assistant" && message.text.trim()) return message.text;
+  }
+  return "";
+}
+
 // ─── main app ────────────────────────────────────────────────────────────────
 
 export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement {
@@ -227,6 +241,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   // Buffer deltas and flush every 50ms instead of dispatching each token immediately.
   const deltaBufferRef = useRef<{ text: string; kind: "reasoning" | "answer" }>({ text: "", kind: "answer" });
   const deltaTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const turnCount = state.messages.filter((message) => message.kind === "user").length;
+  const lastResponse = lastAssistantText(state.messages);
+  const showSidebar = termWidth >= 100;
+  const sidebarWidth = Math.min(36, Math.max(30, Math.floor(termWidth * 0.32)));
 
   // Cleanup delta timer on unmount
   useEffect(() => {
@@ -816,25 +835,46 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   // ── render ────────────────────────────────────────────────────────────────
 
   return (
-    <Box flexDirection="column">
-      <Box paddingX={1} gap={2}>
-        <Text color="cyan" bold>mini-agent</Text>
-        <Text dimColor>[/help] [Ctrl+C]</Text>
+    <Box flexDirection="column" width={termWidth}>
+      <Header modelName={state.modelName} busy={state.busy} turnCount={turnCount} />
+
+      <Box flexDirection={showSidebar ? "row" : "column"} flexGrow={1}>
+        <Box
+          flexDirection="column"
+          flexGrow={1}
+          flexShrink={1}
+          flexBasis={0}
+          minWidth={showSidebar ? Math.max(48, termWidth - sidebarWidth - 2) : undefined}
+        >
+          <MessageFeed
+            messages={state.messages}
+            streamingText={state.streamingText}
+            streamingReasoning={state.streamingReasoning}
+            thinkingMode={state.thinkingMode}
+            expandedThinking={state.expandedThinking}
+            focusedMessageIndex={state.focusedMessageIndex}
+            busy={state.busy}
+            status={state.status}
+          />
+        </Box>
+
+        {showSidebar && (
+          <Box flexDirection="column" width={sidebarWidth} flexShrink={0} gap={1}>
+            <GoalPanel
+              goal={state.goal}
+              steps={state.steps}
+              streamingText={state.streamingText}
+              lastResponse={lastResponse}
+            />
+            <WorkflowPanel
+              steps={state.steps}
+              touchedFiles={state.touchedFiles}
+              width={sidebarWidth}
+            />
+            <TaskPanel toolCards={state.toolCards} status={state.status} />
+          </Box>
+        )}
       </Box>
-      <Text dimColor>{"─".repeat(termWidth)}</Text>
-
-      <MessageFeed
-        messages={state.messages}
-        streamingText={state.streamingText}
-        streamingReasoning={state.streamingReasoning}
-        thinkingMode={state.thinkingMode}
-        expandedThinking={state.expandedThinking}
-        focusedMessageIndex={state.focusedMessageIndex}
-        busy={state.busy}
-        status={state.status}
-      />
-
-      <Text dimColor>{"─".repeat(termWidth)}</Text>
 
       {/* Command palette */}
       {acMode === "command" && (
@@ -928,8 +968,15 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             )
           }
         </Box>
-        <Text dimColor>[think:{state.thinkingMode}] [Ctrl+T/Alt+T]  {state.modelName} · {state.contextTokens > 0 ? `${formatContextWindow(state.contextTokens)} / ` : ""}{formatContextWindow(llm.contextWindow)}</Text>
+        <Text dimColor wrap="truncate-end">[think:{state.thinkingMode}] [Ctrl+T/Alt+T]  {state.modelName} · {state.contextTokens > 0 ? `${formatContextWindow(state.contextTokens)} / ` : ""}{formatContextWindow(llm.contextWindow)}</Text>
       </Box>
+      <StatusBar
+        modelName={state.modelName}
+        tokenEstimate={state.usedTokens || state.contextTokens}
+        cwd={cwd}
+        busy={state.busy}
+        width={termWidth}
+      />
     </Box>
   );
 }
