@@ -4,11 +4,8 @@ import TextInput from "ink-text-input";
 import { readdir, stat } from "node:fs/promises";
 import * as nodePath from "node:path";
 import { MessageFeed } from "./components/MessageFeed.tsx";
-import { GoalPanel } from "./components/GoalPanel.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
-import { TaskPanel } from "./components/TaskPanel.tsx";
-import { WorkflowPanel } from "./components/WorkflowPanel.tsx";
 import {
   FileAutocomplete,
   CommandPalette,
@@ -199,6 +196,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const { exit } = useApp();
   const { stdout } = useStdout();
   const termWidth = stdout?.columns ?? 80;
+  const termHeight = stdout?.rows ?? 24;
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const vision = loadVisionConfigFromEnv();
   const allToolsRef = useRef<ToolProvider>(allTools ?? createAllTools(cwd));
@@ -859,19 +857,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         </Box>
 
         {showSidebar && (
-          <Box flexDirection="column" width={sidebarWidth} flexShrink={0} gap={1}>
-            <GoalPanel
-              goal={state.goal}
-              steps={state.steps}
-              streamingText={state.streamingText}
-              lastResponse={lastResponse}
-            />
-            <WorkflowPanel
-              steps={state.steps}
-              touchedFiles={state.touchedFiles}
-              width={sidebarWidth}
-            />
-            <TaskPanel toolCards={state.toolCards} status={state.status} />
+          <Box flexDirection="column" width={sidebarWidth} flexShrink={0} gap={0} height={termHeight - 6}>
+            {/* 工作流、工具活动、目标已移除 */}
           </Box>
         )}
       </Box>

@@ -892,23 +892,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
 
   // ── Static asset serving (web UI) ────────────────────────────────────────
   // Note: The web/ directory has been removed; this block is disabled.
-  /*
   // ── Static asset serving (web UI) ────────────────────────────────────────
   // Note: The web/ directory has been removed per user request.
-  /*
-  const webRoot = path.join(PACKAGE_ROOT, "web", "dist");
-  if (options.serveWeb !== false && existsSync(webRoot)) {
-    app.use(express.static(webRoot));
-    app.use((request, response, next) => {
-      if (request.path.startsWith("/api/")) {
-        next();
-        return;
-      }
-      response.sendFile(path.join(webRoot, "index.html"));
-    });
-  }
-  */
-  */
 
   app.use((request, response) => {
     response.status(404).json({ error: "Not found", path: request.path });

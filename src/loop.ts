@@ -527,7 +527,7 @@ export async function runAgentTurn(
     try {
       if (useInjectedChat) {
         // Injected chat (tests) stays non-streaming for deterministic offline coverage.
-        assistant = await chat(currentLlm, messages, turnTools);
+        assistant = await completeChat(currentLlm, messages, turnTools);
       } else {
         assistant = {
           role: "assistant",
