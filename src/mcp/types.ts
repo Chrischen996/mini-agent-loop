@@ -1,12 +1,10 @@
 import type { JsonSchema, ToolAnnotations } from "../tools/types.ts";
 
-export type McpStdioServerConfig = {
+export type McpTransport = "stdio" | "http";
+
+/** Fields shared by every MCP server regardless of transport. */
+export type McpServerCommon = {
   id: string;
-  transport: "stdio";
-  command: string;
-  args: string[];
-  cwd: string;
-  env?: Record<string, string>;
   enabled: boolean;
   required: boolean;
   includeTools?: string[];
@@ -20,16 +18,32 @@ export type McpStdioServerConfig = {
   maxResultBytes: number;
 };
 
+export type McpStdioServerConfig = McpServerCommon & {
+  transport: "stdio";
+  command: string;
+  args: string[];
+  cwd: string;
+  env?: Record<string, string>;
+};
+
+export type McpHttpServerConfig = McpServerCommon & {
+  transport: "http";
+  url: string;
+  headers?: Record<string, string>;
+};
+
+export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig;
+
 export type LoadedMcpConfig = {
   path: string;
-  servers: McpStdioServerConfig[];
+  servers: McpServerConfig[];
 };
 
 export type McpServerState = "disabled" | "connecting" | "reconnecting" | "ready" | "error" | "closed";
 
 export type McpServerStatus = {
   id: string;
-  transport: "stdio";
+  transport: McpTransport;
   required: boolean;
   state: McpServerState;
   toolCount: number;
@@ -37,6 +51,7 @@ export type McpServerStatus = {
   error?: string;
   warning?: string;
 };
+
 
 export type McpToolDefinition = {
   name: string;
@@ -73,6 +88,6 @@ export type McpClientConnection = {
 };
 
 export type McpClientFactory = (
-  config: McpStdioServerConfig,
+  config: McpServerConfig,
   signal?: AbortSignal,
 ) => Promise<McpClientConnection>;

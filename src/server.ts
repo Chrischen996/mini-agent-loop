@@ -38,10 +38,20 @@ import type { AgentMessage, ContentPart } from "./types.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
 import type { McpServerStatus } from "./mcp/types.ts";
 import { createSubagentTool, createSubagentBatchTool, defaultProfiles, type SubagentProfile } from "./subagent/index.ts";
+import { createSubagentTool, createSubagentBatchTool, defaultProfiles, type SubagentProfile } from "./subagent/index.ts";
+import { createSubagentTool, createSubagentBatchTool, defaultProfiles, type SubagentProfile } from "./subagent/index.ts";
 import {
   listWorkspaceDirectory,
   validateReferencedPaths,
 } from "./workspace.ts";
+import {
+  parseThinkingIntensityCommand,
+  buildIntenseLlm,
+  intensityToDisplay,
+  type ThinkingIntensity,
+} from "./think-intensity.ts";
+import { type AgentMessage, type AssistantMessage, type ToolResultMessage } from "./types.ts";
+import { type NextTurnUpdate } from "./loop.ts";
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 5;
@@ -880,6 +890,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
     },
   );
 
+  // ── Static asset serving (web UI) ────────────────────────────────────────
+  // Note: The web/ directory has been removed; this block is disabled.
+  /*
   const webRoot = path.join(PACKAGE_ROOT, "web", "dist");
   if (options.serveWeb !== false && existsSync(webRoot)) {
     app.use(express.static(webRoot));
@@ -891,6 +904,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.sendFile(path.join(webRoot, "index.html"));
     });
   }
+  */
 
   app.use((request, response) => {
     response.status(404).json({ error: "Not found", path: request.path });
@@ -914,6 +928,36 @@ async function startServer(): Promise<void> {
     await codebaseRuntime.close();
     throw error;
   });
+
+  // ─ Thought-intensity-aware prepareNextTurn wrapper ────────────────────────
+  const wrappedPrepareNextTurn = async (context: {
+    turn: number;
+    currentLlm: LlmConfig;
+    assistantMessage: AssistantMessage;
+    toolResults: ToolResultMessage[];
+    messages: AgentMessage[],
+  }) => {
+    // Check the latest user message for /think:<level> command
+    const lastUserMsg = context.messages
+      .reverse()
+      .find((m) => m.role === "user");
+
+    if (lastUserMsg) {
+      const content = typeof lastUserMsg.content === "string"
+        ? lastUserMsg.content
+        : contentAsString(lastUserMsg.content);
+      const intensity = parseThinkingIntensityCommand(content);
+
+      if (intensity) {
+        const newLlm = buildIntenseLlm(context.currentLlm, intensity);
+        console.log(`[Thought intensity switched] ${context.currentLlm.model} → ${newLlm.model} (${intensityToDisplay(intensity)})`);
+        return { llm: newLlm };
+      }
+    }
+
+    return undefined;  // No update from this layer
+  };
+
   let app: Express;
   try {
     app = createAgentServer({
@@ -927,6 +971,7 @@ async function startServer(): Promise<void> {
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
       subagentEnabled: process.env.MINI_AGENT_SUBAGENT !== "0",
       subagentProfiles: defaultProfiles,
+      prepareNextTurn: wrappedPrepareNextTurn,  // ─ thought-intensity support ─
     });
   } catch (error) {
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
