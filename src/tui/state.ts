@@ -12,6 +12,10 @@ export type ThinkingDisplayMode = "hidden" | "summary" | "full";
 
 export const THINKING_MODE_ORDER: ThinkingDisplayMode[] = ["hidden", "summary", "full"];
 
+export type PermissionMode = "plan" | "auto" | "bypass";
+
+export const PERMISSION_MODE_ORDER: PermissionMode[] = ["auto", "plan", "bypass"];
+
 export type ToolCardState = {
   id: string;
   name: string;
@@ -20,6 +24,13 @@ export type ToolCardState = {
   status: ToolState;
   startedAt?: number;
   durationMs?: number;
+};
+
+export type PendingPermissionState = {
+  requestId: string;
+  sessionId: string;
+  tool: string;
+  risk: "safe" | "medium" | "high";
 };
 
 export type WorkflowStep = {
@@ -68,6 +79,10 @@ export type TuiState = {
   contextTokens: number;
   /** Global default for how thinking blocks are shown. */
   thinkingMode: ThinkingDisplayMode;
+  /** Currently active permission mode. */
+  permissionMode: PermissionMode;
+  /** Pending permission request shown to the user while execution waits. */
+  pendingPermission?: PendingPermissionState;
   /**
    * Message indices whose thinking is force-expanded (overrides summary).
    * Stored as a sorted unique array for stable React updates.
@@ -83,6 +98,8 @@ export type TuiAction =
   | { type: "MODEL_CHANGED"; modelName: string }
   | { type: "RESET" }
   | { type: "TOGGLE_THINKING_MODE" }
+  | { type: "TOGGLE_PERMISSION_MODE" }
+  | { type: "CLEAR_PENDING_PERMISSION" }
   | { type: "TOGGLE_MESSAGE_THINKING"; index?: number }
   | { type: "SET_FOCUSED_MESSAGE"; index: number }
   | { type: "FOCUS_NEXT_REASONING"; direction: 1 | -1 }
@@ -147,6 +164,8 @@ export function createInitialState(modelName: string): TuiState {
     usedTokens: 0,
     contextTokens: 0,
     thinkingMode: "summary",
+    permissionMode: "auto",
+    pendingPermission: undefined,
     expandedThinking: [],
     focusedMessageIndex: -1,
   };
@@ -179,10 +198,18 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...createInitialState(state.modelName),
         thinkingMode: state.thinkingMode,
+        permissionMode: state.permissionMode,
       };
 
     case "MODEL_CHANGED":
       return { ...state, modelName: action.modelName, status: "就绪", usedTokens: 0, contextTokens: 0 };
+
+    case "CLEAR_PENDING_PERMISSION":
+      return {
+        ...state,
+        pendingPermission: undefined,
+        status: state.pendingPermission ? `正在执行 ${state.pendingPermission.tool}...` : state.status,
+      };
 
     case "TOGGLE_THINKING_MODE": {
       const current = THINKING_MODE_ORDER.indexOf(state.thinkingMode);
@@ -195,6 +222,17 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           next === "hidden" ? "思考过程: 隐藏"
             : next === "summary" ? "思考过程: 摘要"
               : "思考过程: 完整",
+      };
+    }
+
+    case "TOGGLE_PERMISSION_MODE": {
+      const current = PERMISSION_MODE_ORDER.indexOf(state.permissionMode);
+      const next = PERMISSION_MODE_ORDER[(current + 1) % PERMISSION_MODE_ORDER.length] ?? "auto";
+      const modeLabel = next === "plan" ? "计划" : next === "auto" ? "自动" : "绕过";
+      return {
+        ...state,
+        permissionMode: next,
+        status: `权限模式: ${modeLabel}`,
       };
     }
 
@@ -279,6 +317,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         case "error":
           return {
             ...state,
+            busy: false,
             messages: [...state.messages, { kind: "error", text: event.message }],
             streamingText: "",
             streamingReasoning: "",
@@ -370,9 +409,24 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             messages: updatedMessages,
             steps: updatedSteps,
             toolCards: updatedCards,
+            pendingPermission: state.pendingPermission?.requestId === event.call.id
+              ? undefined
+              : state.pendingPermission,
             status: event.result.isError ? `${event.call.name} 失败` : `${event.call.name} 完成`,
           };
         }
+
+        case "permission_required":
+          return {
+            ...state,
+            pendingPermission: {
+              requestId: event.request.id,
+              sessionId: event.request.sessionId,
+              tool: event.request.tool,
+              risk: event.request.risk,
+            },
+            status: `等待权限确认: ${event.request.tool} (${event.request.risk}) [A 允许 / D 拒绝]`,
+          };
 
         case "aborted":
           return {
@@ -380,6 +434,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             busy: false,
             streamingText: "",
             streamingReasoning: "",
+            pendingPermission: undefined,
             status: "已中止",
           };
 
@@ -389,6 +444,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             busy: false,
             streamingText: "",
             streamingReasoning: "",
+            pendingPermission: undefined,
             status: "就绪",
           };
 

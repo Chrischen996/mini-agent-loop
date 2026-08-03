@@ -47,4 +47,53 @@ describe("TUI sidebar state", () => {
     assert.deepEqual(state.touchedFiles, []);
     assert.deepEqual(state.toolCards, []);
   });
+
+  it("cycles permission mode with TOGGLE_PERMISSION_MODE", () => {
+    let state = createInitialState("test-model");
+    // Default is auto
+    assert.equal(state.permissionMode, "auto");
+
+    // Toggle to plan
+    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
+    assert.equal(state.permissionMode, "plan");
+    assert.equal(state.status, "权限模式: 计划");
+
+    // Toggle to bypass
+    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
+    assert.equal(state.permissionMode, "bypass");
+    assert.equal(state.status, "权限模式: 绕过");
+
+    // Toggle back to auto
+    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
+    assert.equal(state.permissionMode, "auto");
+    assert.equal(state.status, "权限模式: 自动");
+  });
+
+  it("preserves permission mode on RESET", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
+    assert.equal(state.permissionMode, "plan");
+
+    state = tuiReducer(state, { type: "RESET" });
+    // Reset preserves permission mode
+    assert.equal(state.permissionMode, "plan");
+  });
+
+  it("resets busy state when an error occurs", () => {
+    let state = createInitialState("test-model");
+    // Start a turn (sets busy to true)
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Do work" });
+    assert.equal(state.busy, true);
+
+    // Simulate an error event
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "error", message: "API key missing" },
+    });
+
+    // After error, busy should be reset to false so input is enabled again
+    assert.equal(state.busy, false);
+    assert.equal(state.status, "请求失败");
+    assert.equal(state.messages[state.messages.length - 1]?.kind, "error");
+  });
 });
