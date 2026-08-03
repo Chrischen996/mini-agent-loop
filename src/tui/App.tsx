@@ -1,4 +1,4 @@
-import React, { useReducer, useState, useCallback, useRef, useEffect } from "react";
+import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { Box, Text, useApp, useInput, useStdout, type Key } from "ink";
 import TextInput from "ink-text-input";
 import { readdir, stat } from "node:fs/promises";
@@ -6,6 +6,7 @@ import * as nodePath from "node:path";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
+import { resolvePendingPermissionDecision } from "./pending-permission.ts";
 import {
   FileAutocomplete,
   CommandPalette,
@@ -43,6 +44,7 @@ import type { ChatMessage } from "./state.ts";
 import { createMcpApprovalGate, mcpAutoApproveFromEnv } from "../mcp/approval.ts";
 import { createSubagentTool, createSubagentBatchTool, defaultProfiles } from "../subagent/index.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
+import { PermissionManager, type PermissionDecision } from "../permissions.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 
@@ -227,6 +229,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const [input, setInput] = useState("");
   const historyRef = useRef<AgentMessage[]>(createAgentHistory());
   const abortRef = useRef<AbortController>(new AbortController());
+  const permissionManagerRef = useRef<PermissionManager | null>(null);
   // Profile state
   const [pendingProfileSetup, setPendingProfileSetup] = useState<{ model: ModelRef; baseUrl: string; apiKey: string } | null>(null);
   const [profileListState, setProfileListState] = useState<ProfileListState | null>(null);
@@ -244,6 +247,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const lastResponse = lastAssistantText(state.messages);
   const showSidebar = termWidth >= 100;
   const sidebarWidth = Math.min(36, Math.max(30, Math.floor(termWidth * 0.32)));
+  const permissionSessionId = "tui_session";
+  const mcpApproval = useMemo(
+    () => createMcpApprovalGate({
+      allow: mcpAutoApproveFromEnv(),
+      approvalHint: "Restart with MINI_AGENT_MCP_AUTO_APPROVE=1 to approve MCP calls in the TUI.",
+    }),
+    [],
+  );
 
   // Cleanup delta timer on unmount
   useEffect(() => {
@@ -291,6 +302,27 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     setPendingProfileSetup(null);
     setProfileListState(null);
   }, []);
+
+  const authorizeTool = useCallback(async (tool: Tool, args: Record<string, unknown>, signal?: AbortSignal) => {
+    const permissionManager =
+      permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager(state.permissionMode));
+    permissionManager.setMode(state.permissionMode);
+    await mcpApproval(tool, args, signal);
+    await permissionManager.authorize(permissionSessionId, tool, args, signal, (request) => {
+      dispatch({ type: "LOOP_EVENT", event: { type: "permission_required", request } });
+    });
+  }, [dispatch, mcpApproval, state.permissionMode]);
+
+  const resolvePendingPermission = useCallback((decision: PermissionDecision) => {
+    const pending = state.pendingPermission;
+    const permissionManager = permissionManagerRef.current;
+    if (!pending || !permissionManager) return false;
+    const resolved = permissionManager.resolve(pending.sessionId, pending.requestId, decision);
+    if (resolved) {
+      dispatch({ type: "CLEAR_PENDING_PERMISSION" });
+    }
+    return resolved;
+  }, [dispatch, state.pendingPermission]);
 
   // Load profile store on mount
   useEffect(() => {
@@ -487,6 +519,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   useInput((_ch: string, key: Key) => {
     if (key.ctrl && (_ch === "c" || _ch === "C")) { abortRef.current.abort(); exit(); return; }
+    if (state.pendingPermission) {
+      const decision = resolvePendingPermissionDecision(_ch, key);
+      if (decision) {
+        resolvePendingPermission(decision);
+        return;
+      }
+      return;
+    }
 
     // Ctrl+T: cycle global thinking mode (hidden → summary → full)
     // Some terminals report ctrl+t as input="t" + key.ctrl, others as a control char.
@@ -508,6 +548,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     }
     if (!acMode && key.meta && key.downArrow) {
       dispatch({ type: "FOCUS_NEXT_REASONING", direction: 1 });
+      return;
+    }
+    // Shift+Tab: cycle permission mode (plan → auto → bypass → plan)
+    if (!acMode && key.shift && key.tab) {
+      suppressInputEchoRef.current = true;
+      dispatch({ type: "TOGGLE_PERMISSION_MODE" });
       return;
     }
 
@@ -587,12 +633,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     }
     dispatch({ type: "LOOP_EVENT", event: { type: "tool_start", call: fakeCall } });
     try {
+      await authorizeTool(tool, args, undefined);
       const result = await tool.execute(args, undefined);
       dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: fakeCall, result } });
     } catch (err) {
       dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: fakeCall, result: { content: err instanceof Error ? err.message : String(err), isError: true } } });
     }
-  }, []);
+  }, [authorizeTool]);
 
   // ── @file resolver ────────────────────────────────────────────────────────
 
@@ -793,10 +840,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
           signal: abortRef.current.signal,
           userContent: currentUserContent,
-          authorizeTool: createMcpApprovalGate({
-            allow: mcpAutoApproveFromEnv(),
-            approvalHint: "Restart with MINI_AGENT_MCP_AUTO_APPROVE=1 to approve MCP calls in the TUI.",
-          }),
+          authorizeTool,
           onEvent: onLoopEvent,
         });
         break; // Normal completion — exit the auto-continue loop
@@ -828,7 +872,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         break;
       }
     }
-  }, [state.busy, acMode, modelSetup, pendingProfileSetup, profileListState, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup, openProfileList]);
+  }, [state.busy, acMode, modelSetup, pendingProfileSetup, profileListState, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup, openProfileList, authorizeTool]);
 
   // ── render ────────────────────────────────────────────────────────────────
 
@@ -962,6 +1006,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         tokenEstimate={state.usedTokens || state.contextTokens}
         cwd={cwd}
         busy={state.busy}
+        permissionMode={state.permissionMode}
         width={termWidth}
       />
     </Box>

@@ -84,6 +84,28 @@ describe("parseCliArgs", () => {
   it("returns empty prompt for no arguments", () => {
     const result = parseCliArgs([]);
     assert.equal(result.prompt, "");
+    assert.equal(result.mode, "auto"); // default mode
+  });
+
+  it("parses --mode flag", () => {
+    const result = parseCliArgs(["--mode", "plan", "do something"]);
+    assert.equal(result.mode, "plan");
+    assert.equal(result.prompt, "do something");
+  });
+
+  it("parses --mode= syntax", () => {
+    const result = parseCliArgs(["--mode=bypass", "do something"]);
+    assert.equal(result.mode, "bypass");
+  });
+
+  it("defaults to auto mode when not specified", () => {
+    const result = parseCliArgs(["hello world"]);
+    assert.equal(result.mode, "auto");
+  });
+
+  it("throws for invalid mode", () => {
+    assert.throws(() => parseCliArgs(["--mode", "invalid"]), /Invalid mode/);
+    assert.throws(() => parseCliArgs(["--mode"]), /--mode requires an argument/);
   });
 });
 
@@ -98,5 +120,6 @@ describe("CLI smoke test", () => {
     assert.equal(result.tools, undefined);
     assert.equal(result.excludeTools, undefined);
     assert.equal(result.allowMcpTools, false);
+    assert.equal(result.mode, "auto");
   });
 });

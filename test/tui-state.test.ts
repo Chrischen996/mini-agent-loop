@@ -79,6 +79,35 @@ describe("TUI sidebar state", () => {
     assert.equal(state.permissionMode, "plan");
   });
 
+  it("tracks and clears pending permission requests", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "permission_required",
+        request: {
+          id: "perm-1",
+          sessionId: "tui_session",
+          tool: "write",
+          arguments: { path: "src/app.tsx" },
+          risk: "high",
+        },
+      },
+    });
+
+    assert.deepEqual(state.pendingPermission, {
+      requestId: "perm-1",
+      sessionId: "tui_session",
+      tool: "write",
+      risk: "high",
+    });
+    assert.equal(state.status, "等待权限确认: write (high) [Enter 拒绝 / A 允许 / D 拒绝]");
+
+    state = tuiReducer(state, { type: "CLEAR_PENDING_PERMISSION" });
+    assert.equal(state.pendingPermission, undefined);
+    assert.equal(state.status, "正在执行 write...");
+  });
+
   it("resets busy state when an error occurs", () => {
     let state = createInitialState("test-model");
     // Start a turn (sets busy to true)

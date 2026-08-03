@@ -16,6 +16,7 @@ import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
 import { createSubagentTool, defaultProfiles } from "./subagent/index.ts";
 import { resolveToolProvider, type Tool } from "./tools/types.ts";
 import type { ContentPart, MessageContent } from "./types.ts";
+import { PermissionManager, type PermissionMode } from "./permissions.ts";
 
 const IMAGE_EXT: Record<string, string> = {
   ".png": "image/png",
@@ -90,12 +91,14 @@ export function parseCliArgs(argv: string[]): {
   tools?: ToolName[];
   excludeTools?: ToolName[];
   allowMcpTools: boolean;
+  mode: PermissionMode;
 } {
   const imagePaths: string[] = [];
   const rest: string[] = [];
   let tools: ToolName[] | undefined;
   let excludeTools: ToolName[] | undefined;
   let allowMcpTools = false;
+  let mode: PermissionMode = "auto";
   const validTools = new Set<ToolName>(["read", "bash", "edit", "write", "grep", "find", "ls", "codebase_open", "codebase_search", "codebase_read", "codebase_explain", "subagent"]);
   const parseToolList = (value: string, flag: string): ToolName[] => {
     const names = value.split(",").map((name) => name.trim()).filter(Boolean);
@@ -118,6 +121,26 @@ export function parseCliArgs(argv: string[]): {
     }
     if (arg === "--allow-mcp-tools") {
       allowMcpTools = true;
+      continue;
+    }
+    if (arg === "--mode") {
+      const next = argv[i + 1];
+      if (!next || next.startsWith("--")) {
+        throw new Error("--mode requires an argument: plan, auto, or bypass");
+      }
+      if (!['plan', 'auto', 'bypass'].includes(next)) {
+        throw new Error("Invalid mode: use 'plan', 'auto', or 'bypass'");
+      }
+      mode = next as PermissionMode;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--mode=")) {
+      const value = arg.slice("--mode=".length);
+      if (!['plan', 'auto', 'bypass'].includes(value)) {
+        throw new Error("Invalid mode: use 'plan', 'auto', or 'bypass'");
+      }
+      mode = value as PermissionMode;
       continue;
     }
     if (arg.startsWith("--image=")) {
@@ -146,7 +169,7 @@ export function parseCliArgs(argv: string[]): {
     rest.push(arg);
   }
 
-  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools, allowMcpTools };
+  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools, allowMcpTools, mode };
 }
 
 async function loadImagePart(
@@ -188,7 +211,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { prompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools } = parsed;
+  const { prompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools, mode } = parsed;
   if (!prompt && imagePaths.length === 0) {
     console.error(
       'Usage: npx tsx src/cli.ts "<prompt>" [--image path.png]...',
@@ -256,16 +279,20 @@ async function main(): Promise<void> {
   }
 
   let messages;
+  const permissionManager = new PermissionManager(mode);
+  console.error(`[config] mode=${mode}`);
   try {
     messages = await runAgentLoop(prompt || "Please analyze the attached image(s).", {
       llm,
       tools,
       userContent,
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
-      authorizeTool: createMcpApprovalGate({
-        allow: allowMcpTools,
-        approvalHint: "Rerun with --allow-mcp-tools to approve remote MCP calls for this invocation.",
-      }),
+      permissionMode: mode,
+      authorizeTool: async (tool, args, signal) => {
+        await permissionManager.authorize("cli_session", tool, args, signal, (request) => {
+          console.error(`[permission] tool=${request.tool} risk=${request.risk} request_id=${request.id}`);
+        });
+      },
       onEvent: logEvent,
     });
   } catch (error) {

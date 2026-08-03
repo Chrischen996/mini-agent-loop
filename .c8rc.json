@@ -7,7 +7,6 @@
     "src/providers/**",
     "dist/**",
     "test/**",
-    "web/**",
     "node_modules/**"
   ],
   "reporter": ["text", "lcov"],

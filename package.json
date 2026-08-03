@@ -27,16 +27,15 @@
     "tui": "tsx src/tui/ink-main.tsx",
     "tui:legacy": "tsx src/tui/main.ts",
     "tui:ink": "tsx src/tui/ink-main.tsx",
-    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web\"",
+    "dev": "tsx watch src/server.ts",
     "dev:server": "tsx watch src/server.ts",
-    "dev:web": "vite --config web/vite.config.ts",
     "serve": "tsx src/server.ts",
-    "build": "npm run typecheck && vite build --config web/vite.config.ts",
+    "build": "npm run typecheck",
     "build:package": "tsc -p tsconfig.publish.json && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
     "prepack": "npm run build:package",
     "test": "tsx --test test/*.test.ts",
     "test:coverage": "c8 tsx --test test/*.test.ts",
-    "typecheck": "tsc --noEmit && tsc -p web/tsconfig.json --noEmit"
+    "typecheck": "tsc --noEmit"
   },
   "engines": {
     "node": ">=22.19.0"
@@ -52,13 +51,10 @@
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.1",
     "@types/supertest": "^7.2.1",
-    "@vitejs/plugin-react": "^4.7.0",
     "c8": "^12.0.0",
-    "concurrently": "^9.2.4",
     "supertest": "^7.2.2",
     "tsx": "^4.23.1",
-    "typescript": "^5.8.2",
-    "vite": "^6.4.3"
+    "typescript": "^5.8.2"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.91.1",
@@ -76,7 +72,6 @@
     "ink": "^5.2.0",
     "ink-spinner": "^5.0.0",
     "ink-text-input": "^6.0.0",
-    "lucide-react": "^0.469.0",
     "mammoth": "^1.8.0",
     "multer": "^2.2.0",
     "openai": "6.26.0",
@@ -85,8 +80,6 @@
     "pdf-parse": "^1.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-markdown": "^10.1.0",
-    "rehype-sanitize": "^6.0.0",
     "typebox": "1.1.38"
   }
 }

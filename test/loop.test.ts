@@ -8,6 +8,7 @@ import {
   MaxTurnsExceededError,
   runAgentLoop,
   runAgentTurn,
+  buildSystemPrompt,
 } from "../src/loop.ts";
 import { contentAsString } from "../src/content.ts";
 import { makeLlmConfig } from "../src/llm/index.ts";
@@ -469,6 +470,81 @@ describe("runAgentTurn", () => {
     if (second.at(-1)?.role === "assistant") {
       assert.equal(second.at(-1)?.content, "turn 2");
     }
+  });
+
+  it("injects plan mode notice into system message during runAgentTurn", async () => {
+    const chat = async () => ({ role: "assistant" as const, content: "ok" });
+    const history = createAgentHistory("custom system", "plan");
+    const messages = await runAgentTurn(history, "write a file", {
+      llm: dummyLlm,
+      tools: [],
+      chat,
+      permissionMode: "plan",
+    });
+    const systemMsg = messages.find((m) => m.role === "system");
+    assert.ok(systemMsg);
+    assert.ok(typeof systemMsg.content === "string");
+    assert.ok((systemMsg.content as string).includes("计划模式"));
+    assert.ok((systemMsg.content as string).includes("无权限改代码"));
+    assert.ok((systemMsg.content as string).includes("custom system"));
+  });
+
+  it("does not inject plan mode notice in auto mode", async () => {
+    const chat = async () => ({ role: "assistant" as const, content: "ok" });
+    const history = createAgentHistory("custom system", "auto");
+    const messages = await runAgentTurn(history, "write a file", {
+      llm: dummyLlm,
+      tools: [],
+      chat,
+      permissionMode: "auto",
+    });
+    const systemMsg = messages.find((m) => m.role === "system");
+    assert.ok(systemMsg);
+    assert.ok(typeof systemMsg.content === "string");
+    assert.ok(!(systemMsg.content as string).includes("计划模式"));
+  });
+
+  it("does not duplicate plan mode notice on subsequent turns", async () => {
+    const chat = async (
+      _config: typeof dummyLlm,
+      messages: import("../src/types.ts").AgentMessage[],
+    ): Promise<import("../src/types.ts").AssistantMessage> => {
+      const users = messages.filter((message) => message.role === "user").length;
+      return { role: "assistant", content: `turn ${users}` };
+    };
+    // Start with a custom system prompt (no permission mode awareness section)
+    const first = await runAgentTurn(createAgentHistory("custom system"), "first", {
+      llm: dummyLlm,
+      tools: [],
+      chat,
+      permissionMode: "plan",
+    });
+    const second = await runAgentTurn(first, "second", {
+      llm: dummyLlm,
+      tools: [],
+      chat,
+      permissionMode: "plan",
+    });
+
+    const systemMsgs = second.filter((m) => m.role === "system");
+    assert.equal(systemMsgs.length, 1);
+    // Should have the original custom system content plus the injected notice
+    const content = systemMsgs[0]!.content as string;
+    assert.ok(content.includes("custom system"));
+    assert.ok(content.includes("计划模式"));
+    assert.ok(content.includes("无权限改代码"));
+    // The explicit "no permission to edit code" sentence should only appear once.
+    const noticeCount = content.match(/我当前处于计划模式，无权限改代码。/g)?.length ?? 0;
+    assert.equal(noticeCount, 1);
+  });
+
+  it("buildSystemPrompt includes Permission Mode Awareness section", () => {
+    const prompt = buildSystemPrompt("plan");
+    assert.ok(prompt.includes("Permission Mode Awareness"));
+    assert.ok(prompt.includes("plan mode"));
+    assert.ok(prompt.includes("auto mode"));
+    assert.ok(prompt.includes("bypass mode"));
+    assert.ok(prompt.includes("无权限改代码"));
   });
 });
 

@@ -22,8 +22,7 @@ describe("agent server", () => {
       llm,
       tools: [],
       chat: async () => ({ role: "assistant", content: "ok" }),
-      serveWeb: false,
-      deepWikiEnabled: true,
+            deepWikiEnabled: true,
     });
     const config = await request(app).get("/api/config");
     assert.deepEqual((config.body as { deepWiki: unknown }).deepWiki, { enabled: true });
@@ -43,8 +42,7 @@ describe("agent server", () => {
       llm,
       tools: [],
       chat,
-      serveWeb: false,
-      mcpStatuses: () => [{
+            mcpStatuses: () => [{
         id: "fixture",
         transport: "stdio",
         required: false,
@@ -115,8 +113,7 @@ describe("agent server", () => {
         role: "assistant",
         content: tools.map((tool) => tool.name).join(","),
       }),
-      serveWeb: false,
-    });
+          });
     const created = await request(app).post("/api/sessions");
     const sessionId = (created.body as { id: string }).id;
     const first = await request(app)
@@ -135,14 +132,14 @@ describe("agent server", () => {
     const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-session-persist-"));
     try {
       const chat = async () => ({ role: "assistant" as const, content: "persisted reply" });
-      const firstApp = createAgentServer({ llm, tools: [], chat, dataDir, serveWeb: false });
+      const firstApp = createAgentServer({ llm, tools: [], chat, dataDir });
       const created = await request(firstApp).post("/api/sessions");
       const sessionId = (created.body as { id: string }).id;
       await request(firstApp)
         .post(`/api/sessions/${sessionId}/messages`)
         .field("prompt", "remember this");
 
-      const secondApp = createAgentServer({ llm, tools: [], chat, dataDir, serveWeb: false });
+      const secondApp = createAgentServer({ llm, tools: [], chat, dataDir });
       const restored = await request(secondApp).get(`/api/sessions/${sessionId}`);
       assert.equal(restored.status, 200);
       assert.match(restored.text, /remember this/);
@@ -157,8 +154,7 @@ describe("agent server", () => {
       llm,
       tools: [],
       chat: async () => ({ role: "assistant", content: "unused" }),
-      serveWeb: false,
-    });
+          });
     const created = await request(app).post("/api/sessions");
     const sessionId = (created.body as { id: string }).id;
     const response = await request(app)
@@ -182,8 +178,7 @@ describe("agent server", () => {
         tools: [],
         chat: async () => ({ role: "assistant", content: "unused" }),
         workspace,
-        serveWeb: false,
-      });
+              });
 
       const rootList = await request(app).get("/api/workspace/list");
       assert.equal(rootList.status, 200);
@@ -231,8 +226,7 @@ describe("agent server", () => {
           return { role: "assistant", content: "ok" };
         },
         workspace,
-        serveWeb: false,
-      });
+              });
 
       const created = await request(app).post("/api/sessions");
       const sessionId = (created.body as { id: string }).id;
@@ -270,8 +264,7 @@ describe("agent server", () => {
         seenPrompt = user && user.role === "user" ? contentAsString(user.content) : "";
         return { role: "assistant", content: "document received" };
       },
-      serveWeb: false,
-    });
+          });
     const created = await request(app).post("/api/sessions");
     const sessionId = (created.body as { id: string }).id;
     const document = path.resolve("node_modules/mammoth/test/test-data/single-paragraph.docx");
@@ -312,8 +305,7 @@ describe("agent server", () => {
         }
         return { role: "assistant", content: "已生成下载文件" };
       },
-      serveWeb: false,
-    });
+          });
     const created = await request(app).post("/api/sessions");
     const sessionId = (created.body as { id: string }).id;
     const document = path.resolve("node_modules/mammoth/test/test-data/single-paragraph.docx");
@@ -344,8 +336,7 @@ describe("agent server", () => {
         tools: [],
         chat: async () => ({ role: "assistant", content: "unused" }),
         workspace,
-        serveWeb: false,
-      });
+              });
       const created = await request(app).post("/api/sessions");
       const sessionId = (created.body as { id: string }).id;
       const response = await request(app)

@@ -445,11 +445,6 @@ mini-agent/
     loop.test.ts
     vision.test.ts
     server.test.ts
-  web/
-    src/
-      App.tsx
-      styles.css
-    vite.config.ts
   README.md
 ```
 

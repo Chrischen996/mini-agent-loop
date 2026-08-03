@@ -34,11 +34,9 @@ import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
 import type { CodebaseSemanticProvider } from "./codebase/deepwiki-provider.ts";
 import { createDocumentEditTool } from "./tools/document-edit.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "./tools/types.ts";
-import type { AgentMessage, ContentPart } from "./types.ts";
+import type { AgentMessage, AssistantMessage, ContentPart, ToolResultMessage } from "./types.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
 import type { McpServerStatus } from "./mcp/types.ts";
-import { createSubagentTool, createSubagentBatchTool, defaultProfiles, type SubagentProfile } from "./subagent/index.ts";
-import { createSubagentTool, createSubagentBatchTool, defaultProfiles, type SubagentProfile } from "./subagent/index.ts";
 import { createSubagentTool, createSubagentBatchTool, defaultProfiles, type SubagentProfile } from "./subagent/index.ts";
 import {
   listWorkspaceDirectory,
@@ -50,7 +48,6 @@ import {
   intensityToDisplay,
   type ThinkingIntensity,
 } from "./think-intensity.ts";
-import { type AgentMessage, type AssistantMessage, type ToolResultMessage } from "./types.ts";
 import { type NextTurnUpdate } from "./loop.ts";
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
@@ -78,7 +75,6 @@ export type AgentServerOptions = {
   chat?: ChatFn;
   workspace?: string;
   dataDir?: string;
-  serveWeb?: boolean;
   /**
    * Called after each inner turn (assistant response + tool results).
    * Return a {@link import("./loop.ts").NextTurnUpdate} to switch models or
@@ -104,6 +100,8 @@ export type AgentServerOptions = {
   subagentProfiles?: SubagentProfile[];
   /** Enable the subagent tool even without explicit profiles. Default: false. */
   subagentEnabled?: boolean;
+  /** Initial permission mode. Default: "auto". */
+  permissionMode?: import("./permissions.ts").PermissionMode;
 };
 
 function safeMessage(message: AgentMessage): Record<string, unknown> {
@@ -438,7 +436,11 @@ export function createAgentServer(options: AgentServerOptions): Express {
     );
   }
   const documentStore = new DocumentStore(path.join(dataRoot, "documents"));
-  const permissionManager = new PermissionManager();
+  const permissionManager = new PermissionManager(options.permissionMode ?? "auto");
+  // Add audit logging callback
+  permissionManager.onPermissionEvent = (event) => {
+    console.error(`[permission] ${event.type} tool=${event.request.tool} risk=${event.request.risk} session=${event.request.sessionId}`);
+  };
   const sessionStore = new SessionStore(path.join(dataRoot, "sessions"));
   const restorePromise = sessionStore.loadAll().then((restored) => {
     return Promise.all([...restored.values()].map(async (persisted) => {
@@ -476,6 +478,23 @@ export function createAgentServer(options: AgentServerOptions): Express {
   app.use(express.json());
   app.use((_request, _response, next) => {
     void restorePromise.then(() => next()).catch(next);
+  });
+
+  // ── Permission mode API ─────────────────────────────────────────────────────
+
+  app.get("/api/permission-mode", (_request, response) => {
+    response.json({ mode: permissionManager.getMode() });
+  });
+
+  app.put("/api/permission-mode", (request, response) => {
+    const mode = request.body?.mode;
+    const validModes = ["plan", "auto", "bypass"] as const;
+    if (!validModes.includes(mode)) {
+      response.status(400).json({ error: "mode must be one of: plan, auto, bypass" });
+      return;
+    }
+    permissionManager.setMode(mode);
+    response.json({ mode });
   });
 
   app.get("/api/health", (_request, response) => response.json({ ok: true }));
@@ -660,7 +679,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     const id = randomUUID();
     const session: Session = {
       id,
-      messages: createAgentHistory(),
+      messages: createAgentHistory(undefined, options.permissionMode ?? "auto"),
       createdAt: Date.now(),
       busy: false,
     };
@@ -746,6 +765,31 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     response.status(204).end();
+  });
+
+  // ── Permission mode for specific session ────────────────────────────────────
+
+  app.get("/api/sessions/:id/permission-mode", (request, response) => {
+    if (!sessions.has(request.params.id)) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    response.json({ mode: permissionManager.getMode() });
+  });
+
+  app.put("/api/sessions/:id/permission-mode", (request, response) => {
+    if (!sessions.has(request.params.id)) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const mode = request.body?.mode;
+    const validModes = ["plan", "auto", "bypass"] as const;
+    if (!validModes.includes(mode)) {
+      response.status(400).json({ error: "mode must be one of: plan, auto, bypass" });
+      return;
+    }
+    permissionManager.setMode(mode);
+    response.json({ mode });
   });
 
   app.post(
@@ -845,6 +889,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
             chat: options.chat,
             userContent,
             signal: abortController.signal,
+            permissionMode: permissionManager.getMode(),
             prepareNextTurn: options.prepareNextTurn,
             authorizeTool: options.chat
               ? undefined
@@ -889,11 +934,6 @@ export function createAgentServer(options: AgentServerOptions): Express {
       }
     },
   );
-
-  // ── Static asset serving (web UI) ────────────────────────────────────────
-  // Note: The web/ directory has been removed; this block is disabled.
-  // ── Static asset serving (web UI) ────────────────────────────────────────
-  // Note: The web/ directory has been removed per user request.
 
   app.use((request, response) => {
     response.status(404).json({ error: "Not found", path: request.path });

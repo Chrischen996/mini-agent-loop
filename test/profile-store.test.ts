@@ -410,7 +410,7 @@ describe("loadLlmConfigFromEnv — active profile takes precedence", () => {
     }, true, storePath);
 
     // Dynamically import so it picks up the updated store
-    const { loadLlmConfigFromEnv } = await import("../src/llm.ts?t=" + Date.now());
+    const { loadLlmConfigFromEnv } = await import("../src/llm/index.ts?t=" + Date.now());
     const config = loadLlmConfigFromEnv();
     assert.equal(config.model, "gpt-4o-mini");
     assert.equal(config.baseUrl, "https://gateway.example/v1");

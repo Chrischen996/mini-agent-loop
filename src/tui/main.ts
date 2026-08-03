@@ -16,6 +16,7 @@ import type { AgentMessage } from "../types.ts";
 import { createMcpApprovalGate, mcpAutoApproveFromEnv } from "../mcp/approval.ts";
 import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
+import { PermissionManager, type PermissionMode } from "../permissions.ts";
 
 type ToolView = {
   id: string;
@@ -32,6 +33,11 @@ type TuiState = {
   input: string;
   pendingUser?: string;
   status: string;
+  permissionMode: PermissionMode;
+  /** Stores the current pending permission request for keyboard resolution. */
+  pendingPermissionRequestId?: string;
+  /** Stores the current session ID for permission resolution. */
+  pendingPermissionSessionId?: string;
 };
 
 const ANSI = {
@@ -118,7 +124,7 @@ function handleEvent(state: TuiState, event: LoopEvent): void {
       break;
     }
     case "permission_required":
-      state.status = `等待权限确认: ${event.request.tool}`;
+      state.status = `等待权限确认: ${event.request.tool} (${event.request.risk})`;
       break;
     case "aborted":
       state.streamingText = "";
@@ -141,13 +147,21 @@ async function main(): Promise<void> {
   const llm = loadLlmConfigFromEnv();
   const vision = loadVisionConfigFromEnv();
   const state: TuiState = {
-    history: createAgentHistory(),
+    history: createAgentHistory(undefined, "auto"),
     streamingText: "",
     tools: [],
     busy: false,
     input: "",
     pendingUser: undefined,
     status: "就绪",
+    permissionMode: "auto" as PermissionMode,
+  };
+  const permissionManager = new PermissionManager(state.permissionMode);
+  // Set up audit logging
+  permissionManager.onPermissionEvent = (event) => {
+    if (event.type === "request") {
+      console.error(`[permission] ${event.type} tool=${event.request.tool} risk=${event.request.risk} id=${event.request.id}`);
+    }
   };
   const abortController = new AbortController();
   const codebaseRuntime = createCodebaseRuntimeFromEnv();
@@ -195,7 +209,7 @@ async function main(): Promise<void> {
     if (!text || state.busy) return;
     if (text === "/exit" || text === "/quit") return quit();
     if (text === "/clear") {
-      state.history = createAgentHistory();
+      state.history = createAgentHistory(undefined, state.permissionMode);
       state.tools = [];
       state.status = "已清空会话";
       render(state);
@@ -209,15 +223,30 @@ async function main(): Promise<void> {
     state.status = "请求模型中...";
     render(state);
     try {
+      // Wrap permission manager with MCP approval gate
+      const mcpApproval = createMcpApprovalGate({
+        allow: mcpAutoApproveFromEnv(),
+        approvalHint: "Restart with MINI_AGENT_MCP_AUTO_APPROVE=1 to approve MCP calls in the TUI.",
+      });
+
       state.history = await runAgentTurn(state.history, text, {
         llm,
         tools,
         preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
         signal: abortController.signal,
-        authorizeTool: createMcpApprovalGate({
-          allow: mcpAutoApproveFromEnv(),
-          approvalHint: "Restart with MINI_AGENT_MCP_AUTO_APPROVE=1 to approve MCP calls in the TUI.",
-        }),
+        permissionMode: state.permissionMode,
+        authorizeTool: async (tool, args, signal) => {
+          // First check MCP approval
+          await mcpApproval(tool, args, signal);
+          // Then check permission manager
+          await permissionManager.authorize("tui_session", tool, args, signal, (request) => {
+            // Store pending permission for keyboard resolution
+            state.pendingPermissionRequestId = request.id;
+            state.pendingPermissionSessionId = "tui_session";
+            state.status = `等待权限确认: ${request.tool} (${request.risk}) [按 A 允许 / D 拒绝]`;
+            render(state);
+          });
+        },
         onEvent: (event) => {
           handleEvent(state, event);
           render(state);
@@ -245,6 +274,15 @@ async function main(): Promise<void> {
     for (const char of chunk) {
       if (char === "\u0003") return quit();
       if (char === "\r" || char === "\n") {
+        // If there's a pending permission, deny it
+        if (state.pendingPermissionRequestId && state.pendingPermissionSessionId) {
+          permissionManager.resolve(state.pendingPermissionSessionId, state.pendingPermissionRequestId, "deny");
+          state.pendingPermissionRequestId = undefined;
+          state.pendingPermissionSessionId = undefined;
+          state.status = "权限已拒绝";
+          render(state);
+          return;
+        }
         void submit(state.input);
         continue;
       }
@@ -254,6 +292,18 @@ async function main(): Promise<void> {
         continue;
       }
       if (char >= " " && char !== "\u007f") {
+        // Handle permission resolution: 'a' = allow, 'd' = deny
+        if (state.pendingPermissionRequestId && state.pendingPermissionSessionId) {
+          const decision = char === "a" || char === "A" ? "allow" as const : char === "d" || char === "D" ? "deny" as const : null;
+          if (decision) {
+            permissionManager.resolve(state.pendingPermissionSessionId, state.pendingPermissionRequestId, decision);
+            state.pendingPermissionRequestId = undefined;
+            state.pendingPermissionSessionId = undefined;
+            state.status = decision === "allow" ? "权限已批准" : "权限已拒绝";
+            render(state);
+            return;
+          }
+        }
         state.input += char;
         render(state);
       }
