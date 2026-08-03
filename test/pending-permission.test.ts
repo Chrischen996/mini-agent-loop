@@ -5,6 +5,7 @@ import type { Key } from "ink";
 
 describe("pending permission input", () => {
   it("treats Enter as deny and A/D as explicit choices", () => {
+    assert.equal(resolvePendingPermissionDecision("", { escape: true } as Key), "deny");
     assert.equal(resolvePendingPermissionDecision("", { return: true } as Key), "deny");
     assert.equal(resolvePendingPermissionDecision("a", { return: false } as Key), "allow");
     assert.equal(resolvePendingPermissionDecision("A", { return: false } as Key), "allow");

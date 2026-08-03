@@ -117,6 +117,13 @@ export type LoopEvent =
     }
   | SubagentEvent;
 
+/** Mode-specific suffix appended to the system prompt. */
+const MODE_SUFFIX: Record<PermissionMode, string> = {
+  plan: "\n\n---\n\n**当前权限模式：计划模式 (plan)**\n我当前处于计划模式，无权限改代码。\n在此模式下，写入操作（write, edit 等）和危险的 bash 命令会被拦截；像 find / grep / head / ls 这样的只读 shell 命令可以直接执行。\n请先输出执行计划，等待用户确认后我再执行。",
+  auto: "",
+  bypass: "",
+};
+
 export function buildSystemPrompt(mode?: PermissionMode): string {
   const base = [
     "You are a local file assistant that can read and write workspace files.",
@@ -152,7 +159,7 @@ export function buildSystemPrompt(mode?: PermissionMode): string {
   "You may receive images in the user message or from the read tool.",
   "",
   "### Permission Mode Awareness",
-  "- If you are in **plan mode** (permission mode = plan): you must clearly say \"我当前处于计划模式，无权限改代码。\" before giving any solution. You CANNOT execute write operations (write, edit, bash with side effects). Instead, you must OUTPUT A CLEAR PLAN first, describing what you would do. The user will review and approve your plan before execution.",
+  "- If you are in **plan mode** (permission mode = plan): you must clearly say \"我当前处于计划模式，无权限改代码。\" before giving any solution. You CANNOT execute write operations. Read-only shell commands such as `find`, `grep`, `head`, and `ls` may run directly, but dangerous shell commands must be blocked. Instead, you must OUTPUT A CLEAR PLAN first, describing what you would do. The user will review and approve your plan before execution.",
   "- If you are in **auto mode**: You can execute tools directly, but write operations may require user approval.",
   "- If you are in **bypass mode**: All operations are allowed without approval.",
   "- When a tool call is blocked due to permission, you should adapt your approach and inform the user about the mode constraint.",
@@ -186,7 +193,8 @@ export function buildSystemPrompt(mode?: PermissionMode): string {
   "- Use --- to separate major topics",
   "- Keep paragraphs concise (2-3 sentences max)",
 ];
-  return base.join("\n");
+  const modeSuffix = mode !== undefined ? (MODE_SUFFIX[mode] ?? "") : "";
+  return base.join("\n") + modeSuffix;
 }
 
 const MAX_EMPTY_ASSISTANT_RESPONSES = 2;
@@ -322,13 +330,13 @@ export async function runAgentTurn(
   );
   const messages: AgentMessage[] = [...compactHistory(history, currentContext), ...initialBatch];
 
-  // Inject permission mode notification if needed
+  // Inject permission mode notification for custom system prompts
   if (permissionMode === "plan" && messages[0]?.role === "system") {
     const currentSystem = messages[0].content;
-    if (typeof currentSystem === "string" && !currentSystem.includes("Permission Mode Awareness") && !currentSystem.includes("计划模式")) {
+    if (typeof currentSystem === "string" && !currentSystem.includes("计划模式")) {
       messages[0] = {
         ...messages[0],
-        content: currentSystem + "\n\n---\n\n**当前权限模式：计划模式 (plan)**\n我当前处于计划模式，无权限改代码。\n在此模式下，所有写入操作（write, edit, bash 等）都会被拦截。\n请先输出执行计划，等待用户确认后我再执行。",
+        content: currentSystem + MODE_SUFFIX.plan,
       };
     }
   }

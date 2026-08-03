@@ -9,6 +9,7 @@ import type { PermissionDecision } from "../permissions.ts";
  * choices exposed in the status hint.
  */
 export function resolvePendingPermissionDecision(ch: string, key: Key): PermissionDecision | null {
+  if (key.escape) return "deny";
   if (key.return) return "deny";
   if (ch === "a" || ch === "A") return "allow";
   if (ch === "d" || ch === "D") return "deny";

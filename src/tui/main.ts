@@ -243,7 +243,7 @@ async function main(): Promise<void> {
             // Store pending permission for keyboard resolution
             state.pendingPermissionRequestId = request.id;
             state.pendingPermissionSessionId = "tui_session";
-            state.status = `等待权限确认: ${request.tool} (${request.risk}) [按 A 允许 / D 拒绝]`;
+            state.status = `等待权限确认: ${request.tool} (${request.risk}) [按 A 允许 / D 拒绝 / Enter 拒绝 / Esc 取消]`;
             render(state);
           });
         },
@@ -273,12 +273,22 @@ async function main(): Promise<void> {
   process.stdin.on("data", (chunk: string) => {
     for (const char of chunk) {
       if (char === "\u0003") return quit();
-      if (char === "\r" || char === "\n") {
-        // If there's a pending permission, deny it
+      if (char === "\u001b") {
         if (state.pendingPermissionRequestId && state.pendingPermissionSessionId) {
           permissionManager.resolve(state.pendingPermissionSessionId, state.pendingPermissionRequestId, "deny");
           state.pendingPermissionRequestId = undefined;
           state.pendingPermissionSessionId = undefined;
+          state.status = "权限已取消";
+          render(state);
+        }
+        continue;
+      }
+      if (char === "\r" || char === "\n") {
+        // If there's a pending permission, deny it
+        if (state.pendingPermissionRequestId && state.pendingPermissionSessionId) {
+          permissionManager.resolve(state.pendingPermissionSessionId, state.pendingPermissionRequestId, "deny");
+        state.pendingPermissionRequestId = undefined;
+        state.pendingPermissionSessionId = undefined;
           state.status = "权限已拒绝";
           render(state);
           return;
@@ -303,6 +313,8 @@ async function main(): Promise<void> {
             render(state);
             return;
           }
+          render(state);
+          return;
         }
         state.input += char;
         render(state);

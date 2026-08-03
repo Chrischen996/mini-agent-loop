@@ -89,7 +89,7 @@ describe("PermissionManager", () => {
   });
 
   describe("Permission Modes", () => {
-    it("plan mode: blocks all write tools and bash", async () => {
+    it("plan mode: blocks write tools, allows read-only bash, and blocks dangerous bash", async () => {
       const manager = new PermissionManager("plan");
       const writeToolMock = { ...writeTool, name: "write" };
       const bashToolMock = { ...writeTool, name: "bash" };
@@ -105,15 +105,37 @@ describe("PermissionManager", () => {
       manager.resolve("session", writeRequestId, "deny");
       await assert.rejects(writePending, /Permission denied/);
 
-      // Bash should request permission
+      // Read-only bash should auto-allow in plan mode
+      await manager.authorize("session", bashToolMock, { command: "find . -type f | head -50" }, undefined, () => {
+        throw new Error("read-only bash should auto-allow in plan mode");
+      });
+
+      // Read-only bash should not be blocked by dangerous-looking search terms
+      await manager.authorize("session", bashToolMock, { command: "grep rm README.md" }, undefined, () => {
+        throw new Error("grep with a dangerous-looking search term should still auto-allow in plan mode");
+      });
+
+      // Dangerous bash should still request permission
       let bashRequestId = "";
-      const bashPending = manager.authorize("session", bashToolMock, { command: "ls -la" }, undefined, (request) => {
+      const bashPending = manager.authorize("session", bashToolMock, { command: "rm -rf /" }, undefined, (request) => {
         bashRequestId = request.id;
+        assert.equal(request.risk, "high");
       });
       await new Promise((resolve) => setImmediate(resolve));
       assert.ok(bashRequestId);
       manager.resolve("session", bashRequestId, "deny");
       await assert.rejects(bashPending, /Permission denied/);
+
+      // Shell wrappers should still catch dangerous inner commands
+      let wrappedRequestId = "";
+      const wrappedPending = manager.authorize("session", bashToolMock, { command: "bash -c 'rm -rf /'" }, undefined, (request) => {
+        wrappedRequestId = request.id;
+        assert.equal(request.risk, "high");
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.ok(wrappedRequestId);
+      manager.resolve("session", wrappedRequestId, "deny");
+      await assert.rejects(wrappedPending, /Permission denied/);
 
       // Read should auto-allow
       await manager.authorize("session", readToolMock, { path: "test.txt" }, undefined, () => {

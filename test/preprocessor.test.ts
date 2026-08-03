@@ -289,6 +289,8 @@ describe("vision configuration and transport", () => {
       process.env.VISION_API_KEY = "key";
       delete process.env.VISION_BASE_URL;
       delete process.env.VISION_MODEL;
+      delete process.env.VISION_PROVIDER;
+      delete process.env.ZHIPU_API_KEY;
       assert.throws(loadVisionConfigFromEnv, /Incomplete vision configuration/);
 
       delete process.env.VISION_API_KEY;

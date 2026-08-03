@@ -101,7 +101,7 @@ describe("TUI sidebar state", () => {
       tool: "write",
       risk: "high",
     });
-    assert.equal(state.status, "等待权限确认: write (high) [Enter 拒绝 / A 允许 / D 拒绝]");
+    assert.equal(state.status, "等待权限确认: write (high)");
 
     state = tuiReducer(state, { type: "CLEAR_PENDING_PERMISSION" });
     assert.equal(state.pendingPermission, undefined);

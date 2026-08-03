@@ -173,7 +173,7 @@ export function ThinkingBlock({
     <Box
       flexDirection="column"
       marginY={0}
-      marginBottom={1}
+      marginBottom={0}
       paddingX={1}
       borderStyle="round"
       borderColor={frameColor}

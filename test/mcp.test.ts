@@ -10,6 +10,7 @@ import { createMcpToolName, createMcpTools, mcpResultToToolResult } from "../src
 import { McpRuntime, mergeToolSets } from "../src/mcp/runtime.ts";
 import type {
   McpClientConnection,
+  McpClientFactory,
   McpStdioServerConfig,
   McpToolDefinition,
 } from "../src/mcp/types.ts";
@@ -91,8 +92,9 @@ describe("MCP config", () => {
       }), "utf8");
       const loaded = await loadMcpConfig(file, root, { DEMO_TOKEN: "secret" });
       assert.equal(loaded.servers.length, 1);
-      assert.deepEqual(loaded.servers[0]?.env, { TOKEN: "secret", MODE: "test" });
-      assert.equal(loaded.servers[0]?.cwd, root);
+      const loadedServer = loaded.servers[0]!;
+      assert.deepEqual((loadedServer as McpStdioServerConfig).env, { TOKEN: "secret", MODE: "test" });
+      assert.equal((loadedServer as McpStdioServerConfig).cwd, root);
       assert.deepEqual(loaded.servers[0]?.includeTools, ["echo"]);
       assert.equal(loaded.servers[0]?.reconnect, true);
       assert.equal(loaded.servers[0]?.reconnectDelayMs, 250);
@@ -472,8 +474,8 @@ describe("MCP runtime", () => {
   });
 
   it("degrades optional servers and fails required servers", async () => {
-    const failingFactory = async (config: { env?: Record<string, string> }): Promise<McpClientConnection> => {
-      throw new Error(`offline ${config.env?.TOKEN ?? ""}`.trim());
+    const failingFactory: McpClientFactory = async (config) => {
+      throw new Error(`offline ${"env" in config ? config.env?.TOKEN ?? "" : ""}`.trim());
     };
     const optional = await McpRuntime.create({
       path: "inline",
@@ -495,7 +497,7 @@ describe("MCP runtime", () => {
         maxSchemaBytes: 100,
         maxResultBytes: 100,
       }],
-    }, { clientFactory: failingFactory });
+    }, { clientFactory: failingFactory as McpClientFactory });
     assert.equal(optional.statuses()[0]?.state, "error");
     assert.equal(optional.statuses()[0]?.error, "offline [REDACTED]");
     assert.deepEqual(optional.snapshot(), []);
@@ -518,7 +520,7 @@ describe("MCP runtime", () => {
         maxSchemaBytes: 100,
         maxResultBytes: 100,
       }],
-    }, { clientFactory: failingFactory }), /Required MCP server required failed: offline/);
+    }, { clientFactory: failingFactory as McpClientFactory }), /Required MCP server required failed: offline/);
   });
 
   it("detects collisions when local and dynamic tool sets are merged", () => {

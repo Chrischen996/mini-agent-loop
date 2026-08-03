@@ -184,21 +184,12 @@ function parseAtRefs(input: string): string[] {
   return matches ? matches.map((m) => m.slice(1)) : [];
 }
 
-function lastAssistantText(messages: ChatMessage[]): string {
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const message = messages[index];
-    if (message?.kind === "assistant" && message.text.trim()) return message.text;
-  }
-  return "";
-}
-
 // ─── main app ────────────────────────────────────────────────────────────────
 
 export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const termWidth = stdout?.columns ?? 80;
-  const termHeight = stdout?.rows ?? 24;
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const vision = loadVisionConfigFromEnv();
   const allToolsRef = useRef<ToolProvider>(allTools ?? createAllTools(cwd));
@@ -226,6 +217,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   }, [llm, vision]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
+  const promptQueueRef = useRef<string[]>([]);
+  const [queuedCount, setQueuedCount] = useState(0);
   const [input, setInput] = useState("");
   const historyRef = useRef<AgentMessage[]>(createAgentHistory());
   const abortRef = useRef<AbortController>(new AbortController());
@@ -244,9 +237,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const deltaTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const turnCount = state.messages.filter((message) => message.kind === "user").length;
-  const lastResponse = lastAssistantText(state.messages);
-  const showSidebar = termWidth >= 100;
-  const sidebarWidth = Math.min(36, Math.max(30, Math.floor(termWidth * 0.32)));
   const permissionSessionId = "tui_session";
   const mcpApproval = useMemo(
     () => createMcpApprovalGate({
@@ -664,7 +654,15 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const handleSubmit = useCallback(async (text: string) => {
     const trimmed = text.trim();
     const allowEmptyApiKey = acMode === "model-setup" && modelSetup?.field === "apiKey";
-    if ((!trimmed && !allowEmptyApiKey) || state.busy) return;
+    if (!trimmed && !allowEmptyApiKey) return;
+    if (state.busy) {
+      if (trimmed) {
+        promptQueueRef.current.push(trimmed);
+        setQueuedCount(promptQueueRef.current.length);
+        setInput("");
+      }
+      return;
+    }
 
     // Profile name step: save the new/updated profile
     if (acMode === "profile-name" && pendingProfileSetup) {
@@ -874,37 +872,31 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     }
   }, [state.busy, acMode, modelSetup, pendingProfileSetup, profileListState, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup, openProfileList, authorizeTool]);
 
+  // Start the next queued prompt only after the current turn has emitted done/error/aborted.
+  useEffect(() => {
+    if (state.busy || promptQueueRef.current.length === 0) return;
+    const next = promptQueueRef.current.shift();
+    setQueuedCount(promptQueueRef.current.length);
+    if (next) void handleSubmit(next);
+  }, [state.busy, handleSubmit]);
+
   // ── render ────────────────────────────────────────────────────────────────
 
   return (
     <Box flexDirection="column" width={termWidth}>
-      <Header modelName={state.modelName} busy={state.busy} turnCount={turnCount} />
+      <Header modelName={state.modelName} turnCount={turnCount} />
 
-      <Box flexDirection={showSidebar ? "row" : "column"} flexGrow={1}>
-        <Box
-          flexDirection="column"
-          flexGrow={1}
-          flexShrink={1}
-          flexBasis={0}
-          minWidth={showSidebar ? Math.max(48, termWidth - sidebarWidth - 2) : undefined}
-        >
-          <MessageFeed
-            messages={state.messages}
-            streamingText={state.streamingText}
-            streamingReasoning={state.streamingReasoning}
-            thinkingMode={state.thinkingMode}
-            expandedThinking={state.expandedThinking}
-            focusedMessageIndex={state.focusedMessageIndex}
-            busy={state.busy}
-            status={state.status}
-          />
-        </Box>
-
-        {showSidebar && (
-          <Box flexDirection="column" width={sidebarWidth} flexShrink={0} gap={0} height={termHeight - 6}>
-            {/* 工作流、工具活动、目标已移除 */}
-          </Box>
-        )}
+      <Box flexDirection="column" flexGrow={1}>
+        <MessageFeed
+          messages={state.messages}
+          streamingText={state.streamingText}
+          streamingReasoning={state.streamingReasoning}
+          thinkingMode={state.thinkingMode}
+          expandedThinking={state.expandedThinking}
+          focusedMessageIndex={state.focusedMessageIndex}
+          busy={state.busy}
+          status={state.status}
+        />
       </Box>
 
       {/* Command palette */}
@@ -971,33 +963,29 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
       {/* Input row */}
       <Box paddingX={1} gap={1}>
-        <Text color="green" bold>{state.busy ? "…" : ">"}</Text>
-        <Box flexGrow={1}>
-          {state.busy
-            ? <Text dimColor>等待中...</Text>
-            : (
-              <TextInput
-                value={input}
-                onChange={setInputSafe}
-                mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
-                onSubmit={(val) => {
-                  if ((acMode === "model" || acMode === "model-picker") && modelCandidates[acIndex]) {
-                    selectModel(modelCandidates[acIndex]!);
-                  } else {
-                    void handleSubmit(val);
-                  }
-                }}
-                placeholder={
-                  acMode === "model-picker" ? "搜索模型"
-                    : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "输入 Base URL"
-                      : acMode === "model-setup" ? "输入 API Key，可留空使用环境变量"
-                        : acMode === "profile-name" ? "输入配置文件名称（例如 coding-fast）"
-                          : acMode === "profile-list" ? "↑↓ 选择配置文件，Enter 激活"
-                            : "输入消息，/ 命令，或 @文件 引用"
-                }
-              />
-            )
-          }
+        <Text color="green" bold>{">"}</Text>
+        <Box flexGrow={1} minWidth={0}>
+          <TextInput
+            value={input}
+            onChange={setInputSafe}
+            mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
+            onSubmit={(val) => {
+              if ((acMode === "model" || acMode === "model-picker") && modelCandidates[acIndex]) {
+                selectModel(modelCandidates[acIndex]!);
+              } else {
+                void handleSubmit(val);
+              }
+            }}
+            placeholder={
+              acMode === "model-picker" ? "搜索模型"
+                : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "输入 Base URL"
+                  : acMode === "model-setup" ? "输入 API Key，可留空使用环境变量"
+                    : acMode === "profile-name" ? "输入配置文件名称（例如 coding-fast）"
+                      : acMode === "profile-list" ? "↑↓ 选择配置文件，Enter 激活"
+                        : "输入消息，/ 命令，或 @文件 引用"
+            }
+          />
+          {state.busy && queuedCount > 0 && <Text color="yellow">队列 {queuedCount}</Text>}
         </Box>
         <Text dimColor wrap="truncate-end">[think:{state.thinkingMode}] [Ctrl+T/Alt+T]  {state.modelName} · {state.contextTokens > 0 ? `${formatContextWindow(state.contextTokens)} / ` : ""}{formatContextWindow(llm.contextWindow)}</Text>
       </Box>
@@ -1006,6 +994,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         tokenEstimate={state.usedTokens || state.contextTokens}
         cwd={cwd}
         busy={state.busy}
+        queuedCount={queuedCount}
         permissionMode={state.permissionMode}
         width={termWidth}
       />

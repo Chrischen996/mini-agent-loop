@@ -422,7 +422,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               tool: event.request.tool,
               risk: event.request.risk,
             },
-            status: `等待权限确认: ${event.request.tool} (${event.request.risk}) [Enter 拒绝 / A 允许 / D 拒绝]`,
+            status: `等待权限确认: ${event.request.tool} (${event.request.risk})`,
           };
 
         case "aborted":

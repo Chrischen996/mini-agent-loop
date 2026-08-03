@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { writeFileSync, unlinkSync } from "node:fs";
+import os from "node:os";
 import { imagePart, messagesHaveImages, textPart } from "../src/content.ts";
 import {
   loadLlmConfigFromEnv,
@@ -88,15 +90,44 @@ describe("LLM environment config", () => {
     const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
 
     try {
+      // Clear all possible API keys to ensure proper test isolation
+      const keysToClear = [
+        "AGNES_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+        "ZHIPU_API_KEY", "DASHSCOPE_API_KEY", "GEMINI_API_KEY",
+        "MOONSHOT_API_KEY", "XAI_API_KEY", "MISTRAL_API_KEY",
+        "GROQ_API_KEY", "OPENROUTER_API_KEY", "SILICONFLOW_API_KEY",
+        "MINI_AGENT_PROFILE",
+        "MINI_AGENT_MODEL_CONFIG",
+      ] as const;
+      const previousKeys = Object.fromEntries(
+        keysToClear.map((k) => [k, process.env[k]])
+      );
+      for (const k of keysToClear) delete process.env[k];
+      
+      // Point to an empty profile store to avoid reading user's ~/.mini-agent/models.json
+      const tmpConfig = JSON.stringify({ version: 1, profiles: {} });
+      const tmpPath = os.tmpdir() + '/mini-agent-test-models.json';
+      writeFileSync(tmpPath, tmpConfig);
+      process.env.MINI_AGENT_MODEL_CONFIG = tmpPath;
+
       process.env.OPENAI_API_KEY = "openai-key";
       process.env.DEEPSEEK_API_KEY = "deepseek-key";
       delete process.env.OPENAI_BASE_URL;
 
-      process.env.OPENAI_MODEL = "deepseek-v4-flash";
       assert.equal(loadLlmConfigFromEnv().apiKey, "deepseek-key");
 
       process.env.OPENAI_MODEL = "gpt-4o-mini";
       assert.equal(loadLlmConfigFromEnv().apiKey, "openai-key");
+      
+      // Cleanup
+      unlinkSync(tmpPath);
+      
+      // Restore keys
+      for (const k of keysToClear) {
+        const val = previousKeys[k];
+        if (val === undefined) delete process.env[k];
+        else process.env[k] = val;
+      }
     } finally {
       for (const name of names) {
         const value = previous[name];

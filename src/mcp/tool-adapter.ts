@@ -5,6 +5,7 @@ import type {
   McpCallResult,
   McpClientConnection,
   McpContentBlock,
+  McpServerConfig,
   McpStdioServerConfig,
   McpToolDefinition,
 } from "./types.ts";
@@ -95,7 +96,7 @@ export function mcpResultToToolResult(
 }
 
 export function createMcpTools(
-  config: McpStdioServerConfig,
+  config: McpServerConfig,
   client: McpClientConnection,
   definitions: McpToolDefinition[],
   usedNames: Set<string>,

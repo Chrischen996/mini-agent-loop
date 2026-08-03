@@ -6,6 +6,7 @@ import type {
   LoadedMcpConfig,
   McpClientConnection,
   McpClientFactory,
+  McpServerConfig,
   McpServerStatus,
   McpStdioServerConfig,
   McpToolDefinition,
@@ -34,7 +35,7 @@ export function mergeToolSets(...sets: Tool[][]): Tool[] {
 }
 
 type ServerRuntime = {
-  config: McpStdioServerConfig;
+  config: McpServerConfig;
   status: McpServerStatus;
   client?: McpClientConnection;
   definitions: McpToolDefinition[];
@@ -79,7 +80,7 @@ export class McpRuntime {
     loaded: LoadedMcpConfig | undefined,
     options: { signal?: AbortSignal; clientFactory?: McpClientFactory } = {},
   ): Promise<McpRuntime> {
-    const runtime = new McpRuntime(loaded?.path, options.clientFactory ?? createStdioMcpClient);
+    const runtime = new McpRuntime(loaded?.path, options.clientFactory ?? (createStdioMcpClient as McpClientFactory));
     if (!loaded) return runtime;
 
     for (const config of loaded.servers) {
@@ -107,7 +108,8 @@ export class McpRuntime {
     return runtime;
   }
 
-  private secrets(config: McpStdioServerConfig): string[] {
+  private secrets(config: McpServerConfig): string[] {
+    if (config.transport !== "stdio") return [];
     return [config.command, config.cwd, ...config.args, ...Object.values(config.env ?? {})];
   }
 
