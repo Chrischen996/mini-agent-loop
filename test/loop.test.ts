@@ -542,6 +542,7 @@ describe("runAgentTurn", () => {
     const prompt = buildSystemPrompt("plan");
     assert.ok(prompt.includes("Permission Mode Awareness"));
     assert.ok(prompt.includes("plan mode"));
+    assert.ok(prompt.includes("manual mode"));
     assert.ok(prompt.includes("auto mode"));
     assert.ok(prompt.includes("bypass mode"));
     assert.ok(prompt.includes("无权限改代码"));

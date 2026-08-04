@@ -1,24 +1,13 @@
 import React from "react";
 import { Box, Text } from "ink";
+import { TUI_COLORS as C } from "../theme.ts";
 
-type HeaderProps = {
-  modelName: string;
-  turnCount: number;
-};
-
-export function Header({ modelName, turnCount }: HeaderProps): React.ReactElement {
+export function Header(): React.ReactElement {
   return (
-    <Box borderStyle="single" borderColor="cyan" paddingX={1} justifyContent="space-between" gap={2}>
-      <Box gap={1} flexGrow={1} flexShrink={1}>
-        <Text color="cyan" bold>
-          Hermes Agent
-        </Text>
-        <Text dimColor>TUI</Text>
-      </Box>
-      <Box gap={2} flexShrink={1}>
-        <Text dimColor>轮次: {turnCount}</Text>
-        <Text color="cyan" wrap="truncate-end">{modelName}</Text>
-      </Box>
+    <Box borderStyle="single" borderColor={C.border} paddingX={1}>
+      <Text color={C.primary} bold>
+        Hermes Agent
+      </Text>
     </Box>
   );
 }

@@ -1,5 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
+import { TUI_COLORS as C } from "../theme.ts";
 
 // ─── Command palette ─────────────────────────────────────────────────────────
 
@@ -35,10 +36,10 @@ export function CommandPalette({ filter, selectedIndex, candidates }: CommandPal
       <Text dimColor>── 命令 /{filter} ──────────────</Text>
       {candidates.map((cmd, i) => (
         <Box key={cmd.name} gap={2}>
-          <Text color={i === selectedIndex ? "cyan" : undefined}>
+          <Text color={i === selectedIndex ? C.selection : undefined}>
             {i === selectedIndex ? "▶" : " "}
           </Text>
-          <Text color={i === selectedIndex ? "white" : "gray"} bold={i === selectedIndex}>
+          <Text color={i === selectedIndex ? C.assistant : C.muted} bold={i === selectedIndex}>
             {cmd.usage}
           </Text>
           <Text dimColor>{cmd.description}</Text>
@@ -65,11 +66,11 @@ export function FileAutocomplete({ candidates, selectedIndex, prefix }: FileAuto
       <Text dimColor>── 文件 {prefix} ──────────────</Text>
       {candidates.slice(0, 8).map((candidate, i) => (
         <Box key={candidate} gap={1}>
-          <Text color={i === selectedIndex ? "cyan" : undefined}>
+          <Text color={i === selectedIndex ? C.selection : undefined}>
             {i === selectedIndex ? "▶" : " "}
           </Text>
           <Text
-            color={i === selectedIndex ? "white" : "gray"}
+            color={i === selectedIndex ? C.assistant : C.muted}
             bold={i === selectedIndex}
           >
             {candidate}
@@ -105,13 +106,13 @@ export function ModelPicker({ candidates, contextWindows, selectedIndex, query, 
   return (
     <Box flexDirection="column" paddingX={2}>
       <Text dimColor>── 模型 {query || "全部"} ──────────────</Text>
-      {visible.length === 0 && <Text color="yellow">没有匹配的模型</Text>}
+      {visible.length === 0 && <Text color={C.running}>没有匹配的模型</Text>}
       {visible.map((model, i) => {
         const index = start + i;
         return (
         <Box key={model} gap={1}>
-          <Text color={index === selectedIndex ? "cyan" : undefined}>{index === selectedIndex ? "▶" : " "}</Text>
-          <Text color={index === selectedIndex ? "white" : "gray"} bold={index === selectedIndex}>
+          <Text color={index === selectedIndex ? C.selection : undefined}>{index === selectedIndex ? "▶" : " "}</Text>
+          <Text color={index === selectedIndex ? C.assistant : C.muted} bold={index === selectedIndex}>
             {model === current ? "✓ " : "  "}{model}
           </Text>
           <Text dimColor>{formatContextWindow(contextWindows[model] ?? 0)} context</Text>

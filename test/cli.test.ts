@@ -98,6 +98,11 @@ describe("parseCliArgs", () => {
     assert.equal(result.mode, "bypass");
   });
 
+  it("parses --mode=manual", () => {
+    const result = parseCliArgs(["--mode=manual", "do something"]);
+    assert.equal(result.mode, "manual");
+  });
+
   it("defaults to auto mode when not specified", () => {
     const result = parseCliArgs(["hello world"]);
     assert.equal(result.mode, "auto");

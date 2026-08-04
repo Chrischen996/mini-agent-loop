@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { contentAsString } from "./content.ts";
 import {
   compactHistory,
@@ -17,6 +18,10 @@ import {
 } from "./llm/index.ts";
 import { resolveModel } from "./models.ts";
 import type { MessagePreprocessor } from "./preprocessors/index.ts";
+import {
+  decideAutoSubagent,
+  type AutoSubagentOptions,
+} from "./subagent/auto.ts";
 import { resolveToolProvider, type Tool, type ToolProvider, type ToolResult } from "./tools/types.ts";
 import type { SubagentEvent } from "./subagent/types.ts";
 import type {
@@ -54,11 +59,16 @@ export type TurnContext = {
   messages: AgentMessage[];
 };
 
-export type PermissionMode = "plan" | "auto" | "bypass";
+export type PermissionMode = "plan" | "manual" | "auto" | "bypass";
 
 export type AgentLoopOptions = {
   llm: LlmConfig;
   tools: ToolProvider;
+  /**
+   * Optional code-level preflight delegation. Disabled by default so normal
+   * requests still rely on the model's own tool choice.
+   */
+  autoSubagent?: AutoSubagentOptions;
   systemPrompt?: string;
   /** Hard stop for runaway loops. Default: 30 */
   maxTurns?: number;
@@ -119,7 +129,8 @@ export type LoopEvent =
 
 /** Mode-specific suffix appended to the system prompt. */
 const MODE_SUFFIX: Record<PermissionMode, string> = {
-  plan: "\n\n---\n\n**当前权限模式：计划模式 (plan)**\n我当前处于计划模式，无权限改代码。\n在此模式下，写入操作（write, edit 等）和危险的 bash 命令会被拦截；像 find / grep / head / ls 这样的只读 shell 命令可以直接执行。\n请先输出执行计划，等待用户确认后我再执行。",
+  plan: "\n\n---\n\n**当前权限模式：计划模式 (plan)**\n我当前处于计划模式，无权限改代码。\n在此模式下，写入操作（write, edit 等）和危险的 bash 命令会被直接拒绝；像 find / grep / head / ls 这样的只读 shell 命令可以直接执行。\n请先输出执行计划，不要尝试直接改文件。用户确认后请切换到 manual/auto/bypass 再执行。",
+  manual: "\n\n---\n\n**当前权限模式：手动模式 (manual)**\n每个工具调用都需要用户明确批准后才会执行。\n请在调用工具前说明意图，并等待用户确认。",
   auto: "",
   bypass: "",
 };
@@ -160,6 +171,7 @@ export function buildSystemPrompt(mode?: PermissionMode): string {
   "",
   "### Permission Mode Awareness",
   "- If you are in **plan mode** (permission mode = plan): you must clearly say \"我当前处于计划模式，无权限改代码。\" before giving any solution. You CANNOT execute write operations. Read-only shell commands such as `find`, `grep`, `head`, and `ls` may run directly, but dangerous shell commands must be blocked. Instead, you must OUTPUT A CLEAR PLAN first, describing what you would do. The user will review and approve your plan before execution.",
+  "- If you are in **manual mode**: Every tool call requires explicit user approval before execution. Always describe intent before calling tools.",
   "- If you are in **auto mode**: You can execute tools directly, but write operations may require user approval.",
   "- If you are in **bypass mode**: All operations are allowed without approval.",
   "- When a tool call is blocked due to permission, you should adapt your approach and inform the user about the mode constraint.",
@@ -342,6 +354,7 @@ export async function runAgentTurn(
   }
   let overflowRetries = 0;
   let emptyAssistantResponses = 0;
+  let autoSubagentAttempted = false;
 
   const prepareNextTurn = async (
     turn: number,
@@ -563,6 +576,81 @@ export async function runAgentTurn(
       return messages;
     }
     const turnTools = resolveToolProvider(tools);
+
+    // Optional deterministic preflight. This happens once before the first
+    // model request and is intentionally not passed into nested subagent loops.
+    if (turn === 1 && !autoSubagentAttempted) {
+      autoSubagentAttempted = true;
+      const autoPolicy = options.autoSubagent;
+      const subagentTool = turnTools.find((tool) => tool.name === "subagent");
+      if (autoPolicy?.enabled && subagentTool) {
+        const decision = decideAutoSubagent(userText, autoPolicy);
+        if (decision.shouldDelegate && !signal?.aborted) {
+          const properties = subagentTool.parameters.properties;
+          const supportsProfile = Boolean(
+            properties &&
+            typeof properties === "object" &&
+            Object.prototype.hasOwnProperty.call(properties, "profile"),
+          );
+          const call: ToolCall = {
+            id: `auto_subagent_${randomUUID()}`,
+            name: "subagent",
+            arguments: {
+              task: userText,
+              ...(supportsProfile ? { profile: decision.profile } : {}),
+              ...(autoPolicy.model ? { model: autoPolicy.model } : {}),
+              ...(autoPolicy.maxTurns ? { maxTurns: autoPolicy.maxTurns } : {}),
+            },
+          };
+          const assistant: AssistantMessage = {
+            role: "assistant",
+            content: "",
+            toolCalls: [call],
+          };
+          messages.push(assistant);
+          onEvent?.({ type: "assistant", message: assistant });
+          onEvent?.({ type: "tool_start", call });
+
+          let result: ToolResult;
+          let wasAborted = false;
+          try {
+            const args = validateToolArgs(subagentTool, call.arguments);
+            await authorizeTool?.(subagentTool, args, signal);
+            result = await subagentTool.execute(args, signal);
+          } catch (error) {
+            wasAborted = isAbortError(error) || Boolean(signal?.aborted);
+            result = isAbortError(error)
+              ? { content: "已停止", isError: true }
+              : {
+                  content: error instanceof Error ? error.message : String(error),
+                  isError: true,
+                };
+          }
+
+          const toolMessage: ToolResultMessage = {
+            role: "tool",
+            toolCallId: call.id,
+            name: call.name,
+            content: result.content,
+            isError: result.isError,
+          };
+          const processedToolMessages = (await applyPreprocessors(
+            [toolMessage],
+            preprocessors,
+            preprocessContext,
+          )) as ToolResultMessage[];
+          messages.push(...processedToolMessages);
+          onEvent?.({ type: "tool_end", call, result });
+
+          if (wasAborted || signal?.aborted) {
+            onEvent?.({ type: "aborted", messages });
+            return messages;
+          }
+          await prepareNextTurn(1, assistant, processedToolMessages);
+        }
+      }
+    }
+
     const preparedMessages = compactForModel(messages, currentLlm, turnTools, currentContext, onEvent, "token budget");
     if (preparedMessages !== messages) {
       messages.splice(0, messages.length, ...preparedMessages);

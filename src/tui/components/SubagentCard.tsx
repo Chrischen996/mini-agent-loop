@@ -2,6 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import type { ChatMessage, SubagentInnerEvent } from "../state.ts";
+import { TUI_COLORS as C } from "../theme.ts";
 
 type SubagentCallMessage = Extract<ChatMessage, { kind: "subagent_call" }>;
 
@@ -37,7 +38,7 @@ function InnerEventRow({ event }: { event: SubagentInnerEvent }): React.ReactEle
 export function SubagentCard({ msg }: SubagentCardProps): React.ReactElement {
   const isRunning = msg.status === "running";
   const isError = msg.status === "error";
-  const borderColor = isError ? "red" : isRunning ? "yellow" : "green";
+  const borderColor = isError ? C.error : isRunning ? C.running : C.success;
 
   const depthLabel = msg.depth > 1 ? ` (depth ${msg.depth})` : "";
   const profileLabel = msg.profile ? ` [${msg.profile}]` : "";
@@ -54,15 +55,15 @@ export function SubagentCard({ msg }: SubagentCardProps): React.ReactElement {
       <Box gap={1} justifyContent="space-between">
         <Box gap={1}>
           {isRunning ? (
-            <Text color="yellow">
+            <Text color={C.running}>
               <Spinner type="dots" />
             </Text>
           ) : (
-            <Text color={isError ? "red" : "green"}>
+            <Text color={isError ? C.error : C.success}>
               {isError ? "✗" : "✓"}
             </Text>
           )}
-          <Text bold color={isRunning ? "yellow" : isError ? "red" : "green"}>
+          <Text bold color={isRunning ? C.running : isError ? C.error : C.success}>
             Sub-Agent{depthLabel}{profileLabel}
           </Text>
         </Box>
@@ -84,7 +85,7 @@ export function SubagentCard({ msg }: SubagentCardProps): React.ReactElement {
 
       {/* Task description */}
       <Box marginLeft={2}>
-        <Text color="white" wrap="wrap">
+        <Text color={C.assistant} wrap="wrap">
           &quot;{msg.task}&quot;
         </Text>
       </Box>
@@ -92,7 +93,7 @@ export function SubagentCard({ msg }: SubagentCardProps): React.ReactElement {
       {/* Live status: show latest inner event during running */}
       {isRunning && msg.innerEvents.length > 0 && !msg.expanded && (
         <Box marginLeft={2} marginTop={0} gap={1}>
-          <Text color="yellow" dimColor>
+          <Text color={C.running} dimColor>
             ↳ {msg.innerEvents[msg.innerEvents.length - 1]!.label}
           </Text>
         </Box>
@@ -117,7 +118,7 @@ export function SubagentCard({ msg }: SubagentCardProps): React.ReactElement {
           ))}
           {isRunning && (
             <Box gap={1}>
-              <Text color="yellow"><Spinner type="dots" /></Text>
+              <Text color={C.running}><Spinner type="dots" /></Text>
               <Text dimColor>waiting for next event...</Text>
             </Box>
           )}

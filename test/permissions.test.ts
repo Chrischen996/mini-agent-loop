@@ -89,21 +89,27 @@ describe("PermissionManager", () => {
   });
 
   describe("Permission Modes", () => {
-    it("plan mode: blocks write tools, allows read-only bash, and blocks dangerous bash", async () => {
+    it("plan mode: hard-denies write tools, allows read-only bash, and hard-denies dangerous bash", async () => {
       const manager = new PermissionManager("plan");
       const writeToolMock = { ...writeTool, name: "write" };
       const bashToolMock = { ...writeTool, name: "bash" };
       const readToolMock = { ...writeTool, name: "read" };
 
-      // Write should request permission
-      let writeRequestId = "";
-      const writePending = manager.authorize("session", writeToolMock, { path: "test.txt", content: "hello" }, undefined, (request) => {
-        writeRequestId = request.id;
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.ok(writeRequestId);
-      manager.resolve("session", writeRequestId, "deny");
-      await assert.rejects(writePending, /Permission denied/);
+      // Write is analysis-only: hard-deny without opening an approval prompt
+      const writeEvents: Array<{ type: string; id: string }> = [];
+      manager.onPermissionEvent = (event) => {
+        writeEvents.push({ type: event.type, id: event.request.id });
+      };
+      await assert.rejects(
+        manager.authorize("session", writeToolMock, { path: "test.txt", content: "hello" }, undefined, () => {
+          throw new Error("plan mode must not open interactive approval");
+        }),
+        /Permission denied.*plan mode/,
+      );
+      assert.equal(writeEvents.length, 2);
+      assert.equal(writeEvents[0]?.type, "request");
+      assert.equal(writeEvents[1]?.type, "deny");
+      assert.equal(manager.resolve("session", writeEvents[0]!.id, "allow"), false);
 
       // Read-only bash should auto-allow in plan mode
       await manager.authorize("session", bashToolMock, { command: "find . -type f | head -50" }, undefined, () => {
@@ -115,27 +121,35 @@ describe("PermissionManager", () => {
         throw new Error("grep with a dangerous-looking search term should still auto-allow in plan mode");
       });
 
-      // Dangerous bash should still request permission
-      let bashRequestId = "";
-      const bashPending = manager.authorize("session", bashToolMock, { command: "rm -rf /" }, undefined, (request) => {
-        bashRequestId = request.id;
-        assert.equal(request.risk, "high");
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.ok(bashRequestId);
-      manager.resolve("session", bashRequestId, "deny");
-      await assert.rejects(bashPending, /Permission denied/);
+      // Dangerous bash is hard-denied in plan mode
+      const bashEvents: Array<{ type: string; risk: string }> = [];
+      manager.onPermissionEvent = (event) => {
+        bashEvents.push({ type: event.type, risk: event.request.risk });
+      };
+      await assert.rejects(
+        manager.authorize("session", bashToolMock, { command: "rm -rf /" }, undefined, () => {
+          throw new Error("plan mode must not open interactive approval");
+        }),
+        /Permission denied.*plan mode/,
+      );
+      assert.equal(bashEvents[0]?.type, "request");
+      assert.equal(bashEvents[0]?.risk, "high");
+      assert.equal(bashEvents[1]?.type, "deny");
 
       // Shell wrappers should still catch dangerous inner commands
-      let wrappedRequestId = "";
-      const wrappedPending = manager.authorize("session", bashToolMock, { command: "bash -c 'rm -rf /'" }, undefined, (request) => {
-        wrappedRequestId = request.id;
-        assert.equal(request.risk, "high");
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.ok(wrappedRequestId);
-      manager.resolve("session", wrappedRequestId, "deny");
-      await assert.rejects(wrappedPending, /Permission denied/);
+      const wrappedEvents: Array<{ type: string; risk: string }> = [];
+      manager.onPermissionEvent = (event) => {
+        wrappedEvents.push({ type: event.type, risk: event.request.risk });
+      };
+      await assert.rejects(
+        manager.authorize("session", bashToolMock, { command: "bash -c 'rm -rf /'" }, undefined, () => {
+          throw new Error("plan mode must not open interactive approval");
+        }),
+        /Permission denied.*plan mode/,
+      );
+      assert.equal(wrappedEvents[0]?.type, "request");
+      assert.equal(wrappedEvents[0]?.risk, "high");
+      assert.equal(wrappedEvents[1]?.type, "deny");
 
       // Read should auto-allow
       await manager.authorize("session", readToolMock, { path: "test.txt" }, undefined, () => {
@@ -157,6 +171,43 @@ describe("PermissionManager", () => {
       await manager.authorize("session", bashToolMock, { command: "rm -rf /" }, undefined, () => {
         throw new Error("bash should auto-allow in bypass mode");
       });
+    });
+
+    it("manual mode: requires approval for every tool including read", async () => {
+      const manager = new PermissionManager("manual");
+      const readToolMock = { ...writeTool, name: "read" };
+      const writeToolMock = { ...writeTool, name: "write" };
+      const bashToolMock = { ...writeTool, name: "bash" };
+
+      let readRequestId = "";
+      const readPending = manager.authorize("session", readToolMock, { path: "test.txt" }, undefined, (request) => {
+        readRequestId = request.id;
+        assert.equal(request.risk, "medium");
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.ok(readRequestId);
+      manager.resolve("session", readRequestId, "allow");
+      await readPending;
+
+      let writeRequestId = "";
+      const writePending = manager.authorize("session", writeToolMock, { path: "test.txt", content: "hello" }, undefined, (request) => {
+        writeRequestId = request.id;
+        assert.equal(request.risk, "medium");
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.ok(writeRequestId);
+      manager.resolve("session", writeRequestId, "deny");
+      await assert.rejects(writePending, /Permission denied/);
+
+      let bashRequestId = "";
+      const bashPending = manager.authorize("session", bashToolMock, { command: "echo hello" }, undefined, (request) => {
+        bashRequestId = request.id;
+        assert.equal(request.risk, "medium");
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.ok(bashRequestId);
+      manager.resolve("session", bashRequestId, "allow");
+      await bashPending;
     });
 
     it("auto mode: allows read-only tools automatically", async () => {
@@ -218,13 +269,13 @@ describe("PermissionManager", () => {
       const manager = new PermissionManager("plan");
       const writeToolMock = { ...writeTool, name: "write" };
 
-      // In plan mode, should request permission
-      let planRequestId = "";
-      const planPending = manager.authorize("session", writeToolMock, { path: "test.txt", content: "hello" }, undefined, (request) => {
-        planRequestId = request.id;
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.ok(planRequestId);
+      // In plan mode, writes are hard-denied
+      await assert.rejects(
+        manager.authorize("session", writeToolMock, { path: "test.txt", content: "hello" }, undefined, () => {
+          throw new Error("plan mode must not open interactive approval");
+        }),
+        /Permission denied.*plan mode/,
+      );
 
       // Switch to bypass mode
       manager.setMode("bypass");
@@ -279,21 +330,22 @@ describe("PermissionManager", () => {
       assert.equal(events[0]?.type, "allow");
       assert.equal(events[0]?.tool, "write");
 
-      // Test plan mode - should trigger request event
+      // Test plan mode - should trigger request + deny events and hard-fail
       const planManager = new PermissionManager("plan");
       const planEvents: Array<{ type: string; tool: string; id: string }> = [];
       planManager.onPermissionEvent = (event) => {
         planEvents.push({ type: event.type, tool: event.request.tool, id: event.request.id });
       };
-      const pending = planManager.authorize("session", writeTool, { path: "test.txt" }, undefined, (request) => {
-        // noop
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.equal(planEvents.length, 1);
+      await assert.rejects(
+        planManager.authorize("session", writeTool, { path: "test.txt" }, undefined, () => {
+          // noop
+        }),
+        /Permission denied.*plan mode/,
+      );
+      assert.equal(planEvents.length, 2);
       assert.equal(planEvents[0]?.type, "request");
       assert.equal(planEvents[0]?.tool, "write");
-      planManager.resolve("session", planEvents[0]!.id, "deny");
-      await assert.rejects(pending, /Permission denied/);
+      assert.equal(planEvents[1]?.type, "deny");
     });
   });
 });

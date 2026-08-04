@@ -17,6 +17,7 @@ import { createMcpApprovalGate, mcpAutoApproveFromEnv } from "../mcp/approval.ts
 import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
 import { PermissionManager, type PermissionMode } from "../permissions.ts";
+import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 
 type ToolView = {
   id: string;
@@ -146,6 +147,7 @@ async function main(): Promise<void> {
   const cwd = process.cwd();
   const llm = loadLlmConfigFromEnv();
   const vision = loadVisionConfigFromEnv();
+  const autoSubagent = loadAutoSubagentOptionsFromEnv();
   const state: TuiState = {
     history: createAgentHistory(undefined, "auto"),
     streamingText: "",
@@ -232,6 +234,7 @@ async function main(): Promise<void> {
       state.history = await runAgentTurn(state.history, text, {
         llm,
         tools,
+        autoSubagent,
         preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
         signal: abortController.signal,
         permissionMode: state.permissionMode,

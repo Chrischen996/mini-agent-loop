@@ -50,20 +50,25 @@ describe("TUI sidebar state", () => {
 
   it("cycles permission mode with TOGGLE_PERMISSION_MODE", () => {
     let state = createInitialState("test-model");
-    // Default is auto
+    // Default is auto; order is plan -> manual -> auto -> bypass
     assert.equal(state.permissionMode, "auto");
 
-    // Toggle to plan
-    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
-    assert.equal(state.permissionMode, "plan");
-    assert.equal(state.status, "权限模式: 计划");
-
-    // Toggle to bypass
+    // auto -> bypass
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "bypass");
     assert.equal(state.status, "权限模式: 绕过");
 
-    // Toggle back to auto
+    // bypass -> plan
+    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
+    assert.equal(state.permissionMode, "plan");
+    assert.equal(state.status, "权限模式: 计划");
+
+    // plan -> manual
+    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
+    assert.equal(state.permissionMode, "manual");
+    assert.equal(state.status, "权限模式: 手动");
+
+    // manual -> auto
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "auto");
     assert.equal(state.status, "权限模式: 自动");
@@ -71,12 +76,13 @@ describe("TUI sidebar state", () => {
 
   it("preserves permission mode on RESET", () => {
     let state = createInitialState("test-model");
+    // auto -> bypass
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
-    assert.equal(state.permissionMode, "plan");
+    assert.equal(state.permissionMode, "bypass");
 
     state = tuiReducer(state, { type: "RESET" });
     // Reset preserves permission mode
-    assert.equal(state.permissionMode, "plan");
+    assert.equal(state.permissionMode, "bypass");
   });
 
   it("tracks and clears pending permission requests", () => {
@@ -101,7 +107,7 @@ describe("TUI sidebar state", () => {
       tool: "write",
       risk: "high",
     });
-    assert.equal(state.status, "等待权限确认: write (high)");
+    assert.match(state.status, /等待权限确认: write \(high\).*A 允许.*D 拒绝/);
 
     state = tuiReducer(state, { type: "CLEAR_PENDING_PERMISSION" });
     assert.equal(state.pendingPermission, undefined);
@@ -124,5 +130,24 @@ describe("TUI sidebar state", () => {
     assert.equal(state.busy, false);
     assert.equal(state.status, "请求失败");
     assert.equal(state.messages[state.messages.length - 1]?.kind, "error");
+  });
+
+  it("keeps the turn busy across an automatic max-turn continuation", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Continue the task" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "max_turns", maxTurns: 30, messages: [] },
+    });
+
+    assert.equal(state.busy, true);
+    assert.match(state.status, /准备续跑/);
+
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "reasoning", text: "next run" },
+    });
+    assert.equal(state.busy, true);
+    assert.equal(state.streamingReasoning, "next run");
   });
 });

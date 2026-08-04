@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
+import { TUI_COLORS as C } from "../theme.ts";
 
 type InputBoxProps = {
   value: string;
@@ -12,7 +13,7 @@ type InputBoxProps = {
 export function InputBox({ value, busy, onChange, onSubmit }: InputBoxProps): React.ReactElement {
   return (
     <Box gap={1} paddingX={1}>
-      <Text color="green" bold>
+      <Text color={C.user} bold>
         {busy ? "…" : ">"}
       </Text>
       {busy ? (

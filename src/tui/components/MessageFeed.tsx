@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import type { ChatMessage, ThinkingDisplayMode } from "../state.ts";
 import { SubagentCard } from "./SubagentCard.tsx";
+import { TUI_COLORS as C } from "../theme.ts";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -113,9 +114,9 @@ export function ThinkingBlock({
 
   // Distinctive panel: magenta frame + status badge.
   // Streaming = yellow energy; focused = cyan highlight; idle = magenta signature.
-  const frameColor = focused ? "cyan" : isStreaming ? "yellow" : "magenta";
-  const badgeBg = focused ? "cyan" : isStreaming ? "yellow" : "magenta";
-  const badgeFg = "black";
+  const frameColor = focused ? C.selection : isStreaming ? C.running : C.thinking;
+  const badgeBg = focused ? C.selection : isStreaming ? C.running : C.thinking;
+  const badgeFg = C.badgeText;
   const badgeLabel = isStreaming ? " THINKING… " : showFull ? " THINK " : " THINK ▸ ";
   const charCount = content.length;
   const streamInfo = isStreaming ? ` · ${formatCharCount(charCount)} streaming` : "";
@@ -134,15 +135,15 @@ export function ThinkingBlock({
         {visibleLines.map((line, i) => {
           if (isCodeFenceLine(line)) {
             inCodeBlock = !inCodeBlock;
-            return <Text key={i} color="magenta" dimColor>{line}</Text>;
+            return <Text key={i} color={C.thinking} dimColor>{line}</Text>;
           }
           if (inCodeBlock) {
-            return <Text key={i} color="gray">{line}</Text>;
+            return <Text key={i} color={C.muted}>{line}</Text>;
           }
-          return <Text key={i} color="white" dimColor wrap="wrap">{line}</Text>;
+          return <Text key={i} color={C.assistant} dimColor wrap="wrap">{line}</Text>;
         })}
         {truncated > 0 && (
-          <Text color="magenta" dimColor>
+          <Text color={C.thinking} dimColor>
             ··· {truncated} more lines{streamInfo}
           </Text>
         )}
@@ -157,10 +158,10 @@ export function ThinkingBlock({
         return (
           <>
             {preview.map((line, i) => (
-              <Text key={i} color="white" dimColor wrap="wrap">{line}</Text>
+              <Text key={i} color={C.assistant} dimColor wrap="wrap">{line}</Text>
             ))}
             {remaining > 0 && (
-              <Text color="magenta" dimColor>
+              <Text color={C.thinking} dimColor>
                 ··· {remaining} more lines{streamInfo}
               </Text>
             )}
@@ -188,12 +189,12 @@ export function ThinkingBlock({
             {formatTokenCount(tokenCount)}
           </Text>
           {isStreaming && (
-            <Text color="yellow">
+            <Text color={C.running}>
               <Spinner type="dots" />
             </Text>
           )}
         </Box>
-        <Text color={frameColor} dimColor>
+          <Text color={frameColor} dimColor>
           {actionHint}
         </Text>
       </Box>
@@ -217,10 +218,10 @@ function ReadView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> })
   return (
     <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
-        {isRunning ? <Text color="yellow"><Spinner type="dots" /></Text>
-          : <Text color={isError ? "red" : "green"}>{isError ? "✗" : "✓"}</Text>}
+        {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
+          : <Text color={isError ? C.error : C.success}>{isError ? "✗" : "✓"}</Text>}
         <Text dimColor>read</Text>
-        <Text color="cyan">{path}</Text>
+        <Text color={C.info}>{path}</Text>
         {msg.durationMs !== undefined && <Text dimColor>({msg.durationMs}ms)</Text>}
       </Box>
       {!isRunning && lines.length > 0 && (
@@ -244,16 +245,16 @@ function BashView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> })
   return (
     <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
-        {isRunning ? <Text color="yellow"><Spinner type="dots" /></Text>
-          : <Text color={isError ? "red" : "green"}>{isError ? "✗" : "✓"}</Text>}
+        {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
+          : <Text color={isError ? C.error : C.success}>{isError ? "✗" : "✓"}</Text>}
         <Text dimColor>$</Text>
-        <Text color="white" bold>{cmd}</Text>
+        <Text color={C.assistant} bold>{cmd}</Text>
         {msg.durationMs !== undefined && <Text dimColor>({msg.durationMs}ms)</Text>}
       </Box>
       {!isRunning && outputLines.length > 0 && (
         <Box flexDirection="column" marginLeft={2}>
           {outputLines.map((line, i) => (
-            <Text key={i} color={isError ? "red" : "white"} dimColor wrap="truncate-end">{line}</Text>
+            <Text key={i} color={isError ? C.error : C.assistant} dimColor wrap="truncate-end">{line}</Text>
           ))}
         </Box>
       )}
@@ -275,10 +276,10 @@ function FileWriteView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" 
   return (
     <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
-        {isRunning ? <Text color="yellow"><Spinner type="dots" /></Text>
-          : <Text color={isError ? "red" : "green"}>{isError ? "✗" : "✓"}</Text>}
+        {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
+          : <Text color={isError ? C.error : C.success}>{isError ? "✗" : "✓"}</Text>}
         <Text dimColor>{isEdit ? "edit" : "write"}</Text>
-        <Text color="cyan">{path}</Text>
+        <Text color={C.info}>{path}</Text>
         {msg.durationMs !== undefined && <Text dimColor>({msg.durationMs}ms)</Text>}
       </Box>
       {!isRunning && previewSrc.length > 0 && (
@@ -290,7 +291,7 @@ function FileWriteView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" 
       )}
       {!isRunning && msg.result && (
         <Box marginLeft={2}>
-          <Text color={isError ? "red" : "green"} dimColor>{msg.result}</Text>
+          <Text color={isError ? C.error : C.success} dimColor>{msg.result}</Text>
         </Box>
       )}
     </Box>
@@ -312,12 +313,12 @@ function GrepView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> })
   return (
     <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
-        {isRunning ? <Text color="yellow"><Spinner type="dots" /></Text>
-          : <Text color={isError ? "red" : "green"}>{isError ? "✗" : "✓"}</Text>}
+        {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
+          : <Text color={isError ? C.error : C.success}>{isError ? "✗" : "✓"}</Text>}
         <Text dimColor>grep</Text>
-        <Text color="yellow">{pattern}</Text>
+        <Text color={C.running}>{pattern}</Text>
         <Text dimColor>in</Text>
-        <Text color="cyan">{searchPath}</Text>
+        <Text color={C.info}>{searchPath}</Text>
         {!isRunning && !isError && <Text dimColor>({matchCount} lines)</Text>}
         {msg.durationMs !== undefined && <Text dimColor>({msg.durationMs}ms)</Text>}
       </Box>
@@ -342,10 +343,10 @@ function FileListView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }
   return (
     <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
-        {isRunning ? <Text color="yellow"><Spinner type="dots" /></Text>
-          : <Text color={isError ? "red" : "green"}>{isError ? "✗" : "✓"}</Text>}
+        {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
+          : <Text color={isError ? C.error : C.success}>{isError ? "✗" : "✓"}</Text>}
         <Text dimColor>{msg.name}</Text>
-        <Text color="cyan">{path}/</Text>
+        <Text color={C.info}>{path}/</Text>
         {msg.durationMs !== undefined && <Text dimColor>({msg.durationMs}ms)</Text>}
       </Box>
       {!isRunning && items.length > 0 && (
@@ -368,9 +369,9 @@ function GenericView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }>
   return (
     <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
-        {isRunning ? <Text color="yellow"><Spinner type="dots" /></Text>
-          : <Text color={isError ? "red" : "green"}>{isError ? "✗" : "✓"}</Text>}
-        <Text color={isRunning ? "yellow" : isError ? "red" : "green"} bold>{msg.name}</Text>
+        {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
+          : <Text color={isError ? C.error : C.success}>{isError ? "✗" : "✓"}</Text>}
+        <Text color={isRunning ? C.running : isError ? C.error : C.success} bold>{msg.name}</Text>
         {msg.durationMs !== undefined && <Text dimColor>({msg.durationMs}ms)</Text>}
       </Box>
       {msg.args && (
@@ -381,7 +382,7 @@ function GenericView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }>
       {!isRunning && resultLines.length > 0 && (
         <Box flexDirection="column" marginLeft={2}>
           {resultLines.map((line, i) => (
-            <Text key={i} color={isError ? "red" : "white"} dimColor wrap="truncate-end">{line}</Text>
+            <Text key={i} color={isError ? C.error : C.assistant} dimColor wrap="truncate-end">{line}</Text>
           ))}
         </Box>
       )}
@@ -454,8 +455,8 @@ export function MessageFeed({
         if (msg.kind === "user") {
           return (
             <Box key={absoluteIndex} marginBottom={0} gap={1}>
-              <Text color="green" bold>{">"}</Text>
-              <Text color="white">{msg.text}</Text>
+              <Text color={C.user} bold>{">"}</Text>
+              <Text color={C.assistant}>{msg.text}</Text>
             </Box>
           );
         }
@@ -471,7 +472,7 @@ export function MessageFeed({
                   focused={focusedMessageIndex === absoluteIndex}
                 />
               )}
-              {formattedText && <Text color="cyan" wrap="wrap">{formattedText}</Text>}
+              {formattedText && <Text color={C.assistant} wrap="wrap">{formattedText}</Text>}
             </Box>
           );
         }
@@ -484,7 +485,7 @@ export function MessageFeed({
         if (msg.kind === "error") {
           return (
             <Box key={absoluteIndex} marginBottom={0}>
-              <Text color="red">✗ {msg.text}</Text>
+              <Text color={C.error}>✗ {msg.text}</Text>
             </Box>
           );
         }
@@ -495,7 +496,7 @@ export function MessageFeed({
       {streamingReasoning ? (
         <ThinkingBlock
           content={streamingReasoning}
-          isStreaming
+          isStreaming={busy}
           mode={effectiveMode}
         />
       ) : null}
@@ -503,14 +504,14 @@ export function MessageFeed({
       {/* Live streaming answer text */}
       {streamingText ? (
         <Box marginBottom={0} flexDirection="column">
-          <Text color="cyan" wrap="wrap">{streamingText}</Text>
+          <Text color={C.assistant} wrap="wrap">{streamingText}</Text>
         </Box>
       ) : null}
 
-      {busy && !streamingText && !streamingReasoning ? (
+      {busy ? (
         <Box marginBottom={0} gap={1}>
-          <Text color="yellow"><Spinner type="dots" /></Text>
-          <Text dimColor>{status}</Text>
+          <Text color={C.running}><Spinner type="dots" /></Text>
+          <Text color={C.running} dimColor>{status}</Text>
         </Box>
       ) : null}
     </Box>

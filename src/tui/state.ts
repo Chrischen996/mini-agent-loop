@@ -12,9 +12,9 @@ export type ThinkingDisplayMode = "hidden" | "summary" | "full";
 
 export const THINKING_MODE_ORDER: ThinkingDisplayMode[] = ["hidden", "summary", "full"];
 
-export type PermissionMode = "plan" | "auto" | "bypass";
+export type PermissionMode = "plan" | "manual" | "auto" | "bypass";
 
-export const PERMISSION_MODE_ORDER: PermissionMode[] = ["auto", "plan", "bypass"];
+export const PERMISSION_MODE_ORDER: PermissionMode[] = ["plan", "manual", "auto", "bypass"];
 
 export type ToolCardState = {
   id: string;
@@ -228,7 +228,10 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     case "TOGGLE_PERMISSION_MODE": {
       const current = PERMISSION_MODE_ORDER.indexOf(state.permissionMode);
       const next = PERMISSION_MODE_ORDER[(current + 1) % PERMISSION_MODE_ORDER.length] ?? "auto";
-      const modeLabel = next === "plan" ? "计划" : next === "auto" ? "自动" : "绕过";
+      const modeLabel =
+        next === "plan" ? "计划" :
+        next === "manual" ? "手动" :
+        next === "auto" ? "自动" : "绕过";
       return {
         ...state,
         permissionMode: next,
@@ -308,7 +311,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             messages: newMessages,
             streamingText: "",
             streamingReasoning: "",
-            status: hasTools ? "执行工具..." : "就绪",
+            status: hasTools ? "执行工具..." : "整理回复...",
             usedTokens,
             contextTokens,
           };
@@ -321,16 +324,16 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             messages: [...state.messages, { kind: "error", text: event.message }],
             streamingText: "",
             streamingReasoning: "",
+            pendingPermission: undefined,
             status: "请求失败",
           };
 
         case "max_turns":
           return {
             ...state,
-            busy: false,
             streamingText: "",
             streamingReasoning: "",
-            status: `已达到最大执行轮数 (${event.maxTurns})，本轮已停止`,
+            status: `已达到最大执行轮数 (${event.maxTurns})，准备续跑...`,
           };
 
         case "context_compacted":
@@ -422,7 +425,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               tool: event.request.tool,
               risk: event.request.risk,
             },
-            status: `等待权限确认: ${event.request.tool} (${event.request.risk})`,
+            status: `等待权限确认: ${event.request.tool} (${event.request.risk}) [A 允许 / D 拒绝 / Enter 拒绝 / Esc 取消]`,
           };
 
         case "aborted":

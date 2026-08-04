@@ -17,6 +17,25 @@ const llm = makeLlmConfig({
 });
 
 describe("agent server", () => {
+  it("does not expose Web permission APIs", async () => {
+    const app = createAgentServer({
+      llm,
+      tools: [],
+      chat: async () => ({ role: "assistant", content: "ok" }),
+    });
+    const globalMode = await request(app).get("/api/permission-mode");
+    assert.equal(globalMode.status, 404);
+
+    const created = await request(app).post("/api/sessions");
+    const sessionId = (created.body as { id: string }).id;
+    const sessionMode = await request(app).get(`/api/sessions/${sessionId}/permission-mode`);
+    assert.equal(sessionMode.status, 404);
+    const decision = await request(app)
+      .post(`/api/sessions/${sessionId}/permissions/request-id`)
+      .send({ decision: "allow" });
+    assert.equal(decision.status, 404);
+  });
+
   it("reports only whether DeepWiki is enabled", async () => {
     const app = createAgentServer({
       llm,

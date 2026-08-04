@@ -13,7 +13,11 @@ import { createTools, type ToolName } from "./tools/index.ts";
 import { createMcpApprovalGate } from "./mcp/approval.ts";
 import { createMcpRuntimeFromEnv } from "./mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
-import { createSubagentTool, defaultProfiles } from "./subagent/index.ts";
+import {
+  createSubagentTool,
+  defaultProfiles,
+  loadAutoSubagentOptionsFromEnv,
+} from "./subagent/index.ts";
 import { resolveToolProvider, type Tool } from "./tools/types.ts";
 import type { ContentPart, MessageContent } from "./types.ts";
 import { PermissionManager, type PermissionMode } from "./permissions.ts";
@@ -126,10 +130,10 @@ export function parseCliArgs(argv: string[]): {
     if (arg === "--mode") {
       const next = argv[i + 1];
       if (!next || next.startsWith("--")) {
-        throw new Error("--mode requires an argument: plan, auto, or bypass");
+        throw new Error("--mode requires an argument: plan, manual, auto, or bypass");
       }
-      if (!['plan', 'auto', 'bypass'].includes(next)) {
-        throw new Error("Invalid mode: use 'plan', 'auto', or 'bypass'");
+      if (!['plan', 'manual', 'auto', 'bypass'].includes(next)) {
+        throw new Error("Invalid mode: use 'plan', 'manual', 'auto', or 'bypass'");
       }
       mode = next as PermissionMode;
       i += 1;
@@ -137,8 +141,8 @@ export function parseCliArgs(argv: string[]): {
     }
     if (arg.startsWith("--mode=")) {
       const value = arg.slice("--mode=".length);
-      if (!['plan', 'auto', 'bypass'].includes(value)) {
-        throw new Error("Invalid mode: use 'plan', 'auto', or 'bypass'");
+      if (!['plan', 'manual', 'auto', 'bypass'].includes(value)) {
+        throw new Error("Invalid mode: use 'plan', 'manual', 'auto', or 'bypass'");
       }
       mode = value as PermissionMode;
       continue;
@@ -285,12 +289,23 @@ async function main(): Promise<void> {
     messages = await runAgentLoop(prompt || "Please analyze the attached image(s).", {
       llm,
       tools,
+      autoSubagent: loadAutoSubagentOptionsFromEnv(),
       userContent,
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
       permissionMode: mode,
       authorizeTool: async (tool, args, signal) => {
         await permissionManager.authorize("cli_session", tool, args, signal, (request) => {
-          console.error(`[permission] tool=${request.tool} risk=${request.risk} request_id=${request.id}`);
+          console.error(
+            `[permission] mode=${mode} tool=${request.tool} risk=${request.risk} request_id=${request.id}`,
+          );
+          if (mode === "manual" || mode === "auto") {
+            // Non-interactive CLI cannot prompt. Deny immediately so the loop
+            // surfaces a tool error instead of hanging forever.
+            permissionManager.resolve("cli_session", request.id, "deny");
+            console.error(
+              `[permission] denied in non-interactive CLI; use TUI/Web or --mode=bypass for unattended runs`,
+            );
+          }
         });
       },
       onEvent: logEvent,

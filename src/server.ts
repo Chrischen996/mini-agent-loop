@@ -14,7 +14,6 @@ import { documentTextPart, MAX_ATTACHMENT_BYTES } from "./attachments.ts";
 import { contentAsString, imagePart, textPart } from "./content.ts";
 import { DocumentStore } from "./documents.ts";
 import { SessionStore } from "./session-store.ts";
-import { PermissionManager } from "./permissions.ts";
 import { isAbortError, loadLlmConfigFromEnv, switchLlmModel, type ChatFn, type LlmConfig } from "./llm/index.ts";
 import { getAvailableModels, resolveModel, searchModels } from "./models.ts";
 import { getActiveProfile, loadProfileStore } from "./profile-store.ts";
@@ -37,7 +36,14 @@ import { resolveToolProvider, type Tool, type ToolProvider } from "./tools/types
 import type { AgentMessage, AssistantMessage, ContentPart, ToolResultMessage } from "./types.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
 import type { McpServerStatus } from "./mcp/types.ts";
-import { createSubagentTool, createSubagentBatchTool, defaultProfiles, type SubagentProfile } from "./subagent/index.ts";
+import {
+  createSubagentTool,
+  createSubagentBatchTool,
+  defaultProfiles,
+  loadAutoSubagentOptionsFromEnv,
+  type AutoSubagentOptions,
+  type SubagentProfile,
+} from "./subagent/index.ts";
 import {
   listWorkspaceDirectory,
   validateReferencedPaths,
@@ -100,8 +106,8 @@ export type AgentServerOptions = {
   subagentProfiles?: SubagentProfile[];
   /** Enable the subagent tool even without explicit profiles. Default: false. */
   subagentEnabled?: boolean;
-  /** Initial permission mode. Default: "auto". */
-  permissionMode?: import("./permissions.ts").PermissionMode;
+  /** Optional code-level preflight delegation. Disabled unless enabled. */
+  autoSubagent?: AutoSubagentOptions;
 };
 
 function safeMessage(message: AgentMessage): Record<string, unknown> {
@@ -436,11 +442,6 @@ export function createAgentServer(options: AgentServerOptions): Express {
     );
   }
   const documentStore = new DocumentStore(path.join(dataRoot, "documents"));
-  const permissionManager = new PermissionManager(options.permissionMode ?? "auto");
-  // Add audit logging callback
-  permissionManager.onPermissionEvent = (event) => {
-    console.error(`[permission] ${event.type} tool=${event.request.tool} risk=${event.request.risk} session=${event.request.sessionId}`);
-  };
   const sessionStore = new SessionStore(path.join(dataRoot, "sessions"));
   const restorePromise = sessionStore.loadAll().then((restored) => {
     return Promise.all([...restored.values()].map(async (persisted) => {
@@ -478,23 +479,6 @@ export function createAgentServer(options: AgentServerOptions): Express {
   app.use(express.json());
   app.use((_request, _response, next) => {
     void restorePromise.then(() => next()).catch(next);
-  });
-
-  // ── Permission mode API ─────────────────────────────────────────────────────
-
-  app.get("/api/permission-mode", (_request, response) => {
-    response.json({ mode: permissionManager.getMode() });
-  });
-
-  app.put("/api/permission-mode", (request, response) => {
-    const mode = request.body?.mode;
-    const validModes = ["plan", "auto", "bypass"] as const;
-    if (!validModes.includes(mode)) {
-      response.status(400).json({ error: "mode must be one of: plan, auto, bypass" });
-      return;
-    }
-    permissionManager.setMode(mode);
-    response.json({ mode });
   });
 
   app.get("/api/health", (_request, response) => response.json({ ok: true }));
@@ -679,7 +663,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     const id = randomUUID();
     const session: Session = {
       id,
-      messages: createAgentHistory(undefined, options.permissionMode ?? "auto"),
+      messages: createAgentHistory(undefined, "bypass"),
       createdAt: Date.now(),
       busy: false,
     };
@@ -721,7 +705,6 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     sessions.delete(request.params.id);
-    permissionManager.rejectSession(request.params.id);
     await sessionStore.remove(request.params.id);
     void documentStore.removeSession(request.params.id);
     response.status(204).end();
@@ -748,48 +731,6 @@ export function createAgentServer(options: AgentServerOptions): Express {
     } catch (error) {
       response.status(404).json({ error: error instanceof Error ? error.message : String(error) });
     }
-  });
-
-  app.post("/api/sessions/:id/permissions/:requestId", (request, response) => {
-    if (!sessions.has(request.params.id)) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const decision = request.body?.decision;
-    if (decision !== "allow" && decision !== "deny") {
-      response.status(400).json({ error: "decision must be allow or deny" });
-      return;
-    }
-    if (!permissionManager.resolve(request.params.id, request.params.requestId, decision)) {
-      response.status(404).json({ error: "Permission request not found" });
-      return;
-    }
-    response.status(204).end();
-  });
-
-  // ── Permission mode for specific session ────────────────────────────────────
-
-  app.get("/api/sessions/:id/permission-mode", (request, response) => {
-    if (!sessions.has(request.params.id)) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    response.json({ mode: permissionManager.getMode() });
-  });
-
-  app.put("/api/sessions/:id/permission-mode", (request, response) => {
-    if (!sessions.has(request.params.id)) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const mode = request.body?.mode;
-    const validModes = ["plan", "auto", "bypass"] as const;
-    if (!validModes.includes(mode)) {
-      response.status(400).json({ error: "mode must be one of: plan, auto, bypass" });
-      return;
-    }
-    permissionManager.setMode(mode);
-    response.json({ mode });
   });
 
   app.post(
@@ -885,22 +826,12 @@ export function createAgentServer(options: AgentServerOptions): Express {
           {
             llm: effectiveLlm,
             tools: sessionTools,
+            autoSubagent: options.autoSubagent,
             preprocessors: options.preprocessors ?? [],
             chat: options.chat,
             userContent,
             signal: abortController.signal,
-            permissionMode: permissionManager.getMode(),
             prepareNextTurn: options.prepareNextTurn,
-            authorizeTool: options.chat
-              ? undefined
-              : (tool, args, signal) =>
-                  permissionManager.authorize(
-                    String(request.params.id),
-                    tool,
-                    args,
-                    signal,
-                    (permission) => send(safeEvent({ type: "permission_required", request: permission })),
-                  ),
             onEvent: (event) => {
               send(safeEvent(event));
               if (event.type === "tool_end" && event.result.files) {
@@ -1000,6 +931,7 @@ async function startServer(): Promise<void> {
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
       subagentEnabled: process.env.MINI_AGENT_SUBAGENT !== "0",
       subagentProfiles: defaultProfiles,
+      autoSubagent: loadAutoSubagentOptionsFromEnv(),
       prepareNextTurn: wrappedPrepareNextTurn,  // ─ thought-intensity support ─
     });
   } catch (error) {

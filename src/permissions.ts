@@ -12,7 +12,13 @@ export type PermissionRequest = {
   source?: ToolSource;
 };
 
-export type PermissionMode = "plan" | "auto" | "bypass";
+export type PermissionMode = "plan" | "manual" | "auto" | "bypass";
+
+export const PERMISSION_MODES: readonly PermissionMode[] = ["plan", "manual", "auto", "bypass"] as const;
+
+export function isPermissionMode(value: unknown): value is PermissionMode {
+  return typeof value === "string" && (PERMISSION_MODES as readonly string[]).includes(value);
+}
 
 type Pending = {
   request: PermissionRequest;
@@ -255,7 +261,7 @@ export function getRiskLevel(
   args: Record<string, unknown>,
   mode: PermissionMode,
 ): "safe" | "medium" | "high" {
-  // Plan mode: all write operations are considered risky
+  // Plan mode: analysis only. Writes and dangerous shell stay high risk.
   if (mode === "plan") {
     if (tool.name === "bash") {
       const command = typeof args.command === "string" ? args.command : "";
@@ -265,16 +271,29 @@ export function getRiskLevel(
     return "safe";
   }
 
-  // Bypass mode: skip user approval but still respect path sandbox
+  // Bypass mode: skip user approval but still respect path sandbox.
   // The actual path validation happens in tool implementations (read.ts, write.ts, etc.)
   // This function only determines if user approval is needed.
   if (mode === "bypass") return "safe";
 
-  // Auto mode: smart risk assessment
-  // MCP tools are marked high by default, but can be configured as trusted
+  // Manual mode: every tool call requires an explicit decision.
+  if (mode === "manual") {
+    if (tool.source?.kind === "mcp") return "high";
+    if (tool.name === "bash") {
+      const cmd = typeof args.command === "string" ? args.command : "";
+      return isDangerousBashCommand(cmd) ? "high" : "medium";
+    }
+    if (tool.name === "delete" || tool.name === "document_edit") return "high";
+    if (WRITE_TOOLS.has(tool.name)) return "medium";
+    if (AUTO_ALLOWED.has(tool.name)) return "medium";
+    return "medium";
+  }
+
+  // Auto mode: smart risk assessment.
+  // MCP tools are marked high by default, but can be configured as trusted.
   if (tool.source?.kind === "mcp") {
     // Check if this MCP tool has a trusted designation via annotations
-    const isTrusted = (tool.annotations as any)?.['x-trusted'] === true;
+    const isTrusted = (tool.annotations as any)?.["x-trusted"] === true;
     return isTrusted ? "medium" : "high";
   }
   if (tool.name === "bash") {
@@ -344,13 +363,23 @@ export class PermissionManager {
     signal: AbortSignal | undefined,
     onRequest: (request: PermissionRequest) => void,
   ): Promise<void> {
-    // Bypass mode: auto-allow everything
+    // Bypass mode: auto-allow everything.
     if (this.mode === "bypass") {
-      this.onPermissionEvent?.({ type: "allow", request: { id: `perm_${randomUUID()}`, sessionId, tool: tool.name, arguments: args, risk: "safe", source: tool.source } });
+      this.onPermissionEvent?.({
+        type: "allow",
+        request: {
+          id: `perm_${randomUUID()}`,
+          sessionId,
+          tool: tool.name,
+          arguments: args,
+          risk: "safe",
+          source: tool.source,
+        },
+      });
       return;
     }
 
-    // Plan mode: only block write tools and dangerous shell commands
+    // Plan mode: analysis only. Never execute writes or dangerous shell.
     if (this.mode === "plan") {
       if (tool.name === "bash") {
         const command = typeof args.command === "string" ? args.command : "";
@@ -359,7 +388,6 @@ export class PermissionManager {
         return;
       }
 
-      if (signal?.aborted) throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
       const request: PermissionRequest = {
         id: `perm_${randomUUID()}`,
         sessionId,
@@ -368,22 +396,29 @@ export class PermissionManager {
         risk: "high",
         source: tool.source,
       };
+      // Plan is analysis-only: audit the blocked call, but never open an
+      // interactive approval prompt that could be "allowed" into execution.
       this.onPermissionEvent?.({ type: "request", request });
-      return await new Promise<void>((resolve, reject) => {
-        this.pending.set(request.id, { request, key: this.key(sessionId, tool, args), resolve, reject });
-        const abort = () => {
-          this.pending.delete(request.id);
-          reject(Object.assign(new Error("Operation aborted"), { name: "AbortError" }));
-        };
-        signal?.addEventListener("abort", abort, { once: true });
-        onRequest(request);
-      });
+      this.onPermissionEvent?.({ type: "deny", request });
+      throw new Error(
+        `Permission denied for tool: ${tool.name} (plan mode is analysis-only; switch to manual/auto/bypass to execute)`,
+      );
     }
 
-    // Auto mode: check risk level
+    // Manual and auto both use risk assessment, but manual never auto-allows.
     const risk = getRiskLevel(tool, args, this.mode);
-    if (risk === "safe" && AUTO_ALLOWED.has(tool.name)) {
-      this.onPermissionEvent?.({ type: "allow", request: { id: `perm_${randomUUID()}`, sessionId, tool: tool.name, arguments: args, risk: "safe", source: tool.source } });
+    if (this.mode === "auto" && risk === "safe" && AUTO_ALLOWED.has(tool.name) && tool.source?.kind !== "mcp") {
+      this.onPermissionEvent?.({
+        type: "allow",
+        request: {
+          id: `perm_${randomUUID()}`,
+          sessionId,
+          tool: tool.name,
+          arguments: args,
+          risk: "safe",
+          source: tool.source,
+        },
+      });
       return;
     }
     if (signal?.aborted) throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });

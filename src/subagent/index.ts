@@ -34,6 +34,11 @@
 export { createSubagentTool, createSubagentBatchTool } from "./tool.ts";
 
 export {
+  decideAutoSubagent,
+  loadAutoSubagentOptionsFromEnv,
+} from "./auto.ts";
+
+export {
   defaultProfiles,
   researcherProfile,
   coderProfile,
@@ -48,3 +53,8 @@ export type {
   SubagentProfile,
   SubagentToolOptions,
 } from "./types.ts";
+
+export type {
+  AutoSubagentDecision,
+  AutoSubagentOptions,
+} from "./auto.ts";

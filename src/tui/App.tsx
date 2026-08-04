@@ -42,9 +42,16 @@ import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/type
 import type { AgentMessage, MessageContent } from "../types.ts";
 import type { ChatMessage } from "./state.ts";
 import { createMcpApprovalGate, mcpAutoApproveFromEnv } from "../mcp/approval.ts";
-import { createSubagentTool, createSubagentBatchTool, defaultProfiles } from "../subagent/index.ts";
+import {
+  createSubagentTool,
+  createSubagentBatchTool,
+  defaultProfiles,
+  loadAutoSubagentOptionsFromEnv,
+} from "../subagent/index.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
 import { PermissionManager, type PermissionDecision } from "../permissions.ts";
+import { TurnEventBuffer } from "./stream-buffer.ts";
+import { TUI_COLORS as C } from "./theme.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 
@@ -192,6 +199,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const termWidth = stdout?.columns ?? 80;
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const vision = loadVisionConfigFromEnv();
+  const autoSubagent = useMemo(() => loadAutoSubagentOptionsFromEnv(), []);
   const allToolsRef = useRef<ToolProvider>(allTools ?? createAllTools(cwd));
   const agentToolsRef = useRef<ToolProvider>(agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
 
@@ -223,6 +231,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const historyRef = useRef<AgentMessage[]>(createAgentHistory());
   const abortRef = useRef<AbortController>(new AbortController());
   const permissionManagerRef = useRef<PermissionManager | null>(null);
+  const pendingPermissionRef = useRef(false);
+  pendingPermissionRef.current = Boolean(state.pendingPermission);
   // Profile state
   const [pendingProfileSetup, setPendingProfileSetup] = useState<{ model: ModelRef; baseUrl: string; apiKey: string } | null>(null);
   const [profileListState, setProfileListState] = useState<ProfileListState | null>(null);
@@ -231,10 +241,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   // it may append "t" (or a control char). Swallow that one onChange tick.
   const suppressInputEchoRef = useRef(false);
 
-  // Throttle assistant_delta events to reduce TUI flicker during streaming.
-  // Buffer deltas and flush every 50ms instead of dispatching each token immediately.
-  const deltaBufferRef = useRef<{ text: string; kind: "reasoning" | "answer" }>({ text: "", kind: "answer" });
-  const deltaTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Buffer deltas per turn so a late provider callback cannot update a newer
+  // prompt after the current run has already ended.
+  const streamBufferRef = useRef<TurnEventBuffer | null>(null);
+  if (!streamBufferRef.current) {
+    streamBufferRef.current = new TurnEventBuffer((event) => {
+      dispatch({ type: "LOOP_EVENT", event });
+    });
+  }
 
   const turnCount = state.messages.filter((message) => message.kind === "user").length;
   const permissionSessionId = "tui_session";
@@ -246,17 +260,15 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     [],
   );
 
-  // Cleanup delta timer on unmount
+  // Cleanup buffered stream output on unmount.
   useEffect(() => {
     return () => {
-      if (deltaTimerRef.current) {
-        clearTimeout(deltaTimerRef.current);
-        deltaTimerRef.current = null;
-      }
+      streamBufferRef.current?.dispose();
     };
   }, []);
 
   const setInputSafe = useCallback((value: string) => {
+    if (pendingPermissionRef.current) return;
     if (suppressInputEchoRef.current) {
       suppressInputEchoRef.current = false;
       return;
@@ -510,6 +522,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   useInput((_ch: string, key: Key) => {
     if (key.ctrl && (_ch === "c" || _ch === "C")) { abortRef.current.abort(); exit(); return; }
     if (state.pendingPermission) {
+      pendingPermissionRef.current = true;
       const decision = resolvePendingPermissionDecision(_ch, key);
       if (decision) {
         resolvePendingPermission(decision);
@@ -517,6 +530,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       }
       return;
     }
+    pendingPermissionRef.current = false;
 
     // Ctrl+T: cycle global thinking mode (hidden → summary → full)
     // Some terminals report ctrl+t as input="t" + key.ctrl, others as a control char.
@@ -540,7 +554,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       dispatch({ type: "FOCUS_NEXT_REASONING", direction: 1 });
       return;
     }
-    // Shift+Tab: cycle permission mode (plan → auto → bypass → plan)
+    // Shift+Tab: cycle permission mode (plan → manual → auto → bypass → plan)
     if (!acMode && key.shift && key.tab) {
       suppressInputEchoRef.current = true;
       dispatch({ type: "TOGGLE_PERMISSION_MODE" });
@@ -788,46 +802,15 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     dispatch({ type: "USER_MESSAGE", text: trimmed });
     abortRef.current = new AbortController();
 
+    const streamBuffer = streamBufferRef.current!;
+    const runId = streamBuffer.start();
     const MAX_AUTO_CONTINUES = 5;
     let autoContinueCount = 0;
     let currentUserText = trimmed;
     let currentUserContent = await resolveAtRefs(trimmed);
 
     const onLoopEvent = (event: LoopEvent) => {
-      // Throttle assistant_delta to reduce flicker
-      if (event.type === "assistant_delta") {
-        deltaBufferRef.current.text += event.text;
-        deltaBufferRef.current.kind = event.kind;
-        if (!deltaTimerRef.current) {
-          deltaTimerRef.current = setTimeout(() => {
-            const buffered = deltaBufferRef.current;
-            if (buffered.text) {
-              dispatch({
-                type: "LOOP_EVENT",
-                event: { type: "assistant_delta", text: buffered.text, kind: buffered.kind },
-              });
-              deltaBufferRef.current = { text: "", kind: "answer" };
-            }
-            deltaTimerRef.current = null;
-          }, 50);
-        }
-        return;
-      }
-      // Flush any pending delta buffer before dispatching a non-delta event.
-      if (deltaTimerRef.current) {
-        clearTimeout(deltaTimerRef.current);
-        deltaTimerRef.current = null;
-        const buffered = deltaBufferRef.current;
-        if (buffered.text) {
-          dispatch({
-            type: "LOOP_EVENT",
-            event: { type: "assistant_delta", text: buffered.text, kind: buffered.kind },
-          });
-          deltaBufferRef.current = { text: "", kind: "answer" };
-        }
-      }
-      // All other events dispatch immediately
-      dispatch({ type: "LOOP_EVENT", event });
+      streamBuffer.handle(runId, event);
     };
 
     // Auto-continue loop: re-invoke runAgentTurn when maxTurns is exceeded
@@ -835,12 +818,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       try {
         historyRef.current = await runAgentTurn(historyRef.current, currentUserText, {
           llm, tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools()],
+          autoSubagent,
           preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
           signal: abortRef.current.signal,
           userContent: currentUserContent,
           authorizeTool,
           onEvent: onLoopEvent,
         });
+        streamBuffer.finish(runId);
         break; // Normal completion — exit the auto-continue loop
       } catch (err) {
         if (err instanceof MaxTurnsExceededError) {
@@ -848,8 +833,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           autoContinueCount++;
           if (autoContinueCount >= MAX_AUTO_CONTINUES || abortRef.current.signal.aborted) {
             // Hit safety cap or aborted — stop auto-continuing
+            streamBuffer.finish(runId);
             dispatch({ type: "LOOP_EVENT", event: { type: "error", message: `已达到自动续跑上限 (${MAX_AUTO_CONTINUES} 次)` } });
-            dispatch({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
             break;
           }
           // Auto-continue: send "继续" as next user message
@@ -865,8 +850,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         }
         // Other errors — report and stop
         const errMsg = err instanceof Error ? err.message : String(err);
+        streamBuffer.finish(runId);
         dispatch({ type: "LOOP_EVENT", event: { type: "error", message: errMsg } });
-        dispatch({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
         break;
       }
     }
@@ -884,7 +869,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   return (
     <Box flexDirection="column" width={termWidth}>
-      <Header modelName={state.modelName} turnCount={turnCount} />
+      <Header />
 
       <Box flexDirection="column" flexGrow={1}>
         <MessageFeed
@@ -929,18 +914,18 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
       {acMode === "model-setup" && modelSetup && (
         <Box flexDirection="column" paddingX={2}>
-          <Text color="cyan" bold>── 配置模型 ──</Text>
+          <Text color={C.primary} bold>── 配置模型 ──</Text>
           <Text>模型: {modelSetup.model.provider}/{modelSetup.model.id}</Text>
           <Text dimColor>Base URL: {modelSetup.field === "baseUrl" ? "正在编辑" : modelSetup.baseUrl}</Text>
           <Text dimColor>API Key: {modelSetup.field === "apiKey" ? "正在编辑" : "已设置"}</Text>
-          {modelSetup.error && <Text color="red">{modelSetup.error}</Text>}
+          {modelSetup.error && <Text color={C.error}>{modelSetup.error}</Text>}
           <Text dimColor>Enter 确认当前字段，Esc 取消</Text>
         </Box>
       )}
 
       {acMode === "profile-name" && pendingProfileSetup && (
         <Box flexDirection="column" paddingX={2}>
-          <Text color="cyan" bold>── 保存配置文件 ──</Text>
+          <Text color={C.primary} bold>── 保存配置文件 ──</Text>
           <Text>模型: {pendingProfileSetup.model.provider}/{pendingProfileSetup.model.id}</Text>
           <Text dimColor>输入配置文件名称（Enter 保存，Esc 跳过）:</Text>
         </Box>
@@ -948,10 +933,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
       {acMode === "profile-list" && profileListState && (
         <Box flexDirection="column" paddingX={2}>
-          <Text color="cyan" bold>── 配置文件列表 ──</Text>
+          <Text color={C.primary} bold>── 配置文件列表 ──</Text>
           {profileListState.profiles.length === 0 && <Text dimColor>无已保存的配置文件</Text>}
           {profileListState.profiles.map((p, i) => (
-            <Text key={p.name} color={i === profileListState.selectedIndex ? "green" : undefined}>
+            <Text key={p.name} color={i === profileListState.selectedIndex ? C.selection : undefined}>
               {i === profileListState.selectedIndex ? "▶ " : "  "}
               {p.active ? "✓ " : "  "}
               {p.name} ({p.model}) — {p.baseUrl}
@@ -963,7 +948,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
       {/* Input row */}
       <Box paddingX={1} gap={1}>
-        <Text color="green" bold>{">"}</Text>
+        <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : ">"}</Text>
         <Box flexGrow={1} minWidth={0}>
           <TextInput
             value={input}
@@ -977,15 +962,16 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               }
             }}
             placeholder={
-              acMode === "model-picker" ? "搜索模型"
-                : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "输入 Base URL"
-                  : acMode === "model-setup" ? "输入 API Key，可留空使用环境变量"
-                    : acMode === "profile-name" ? "输入配置文件名称（例如 coding-fast）"
-                      : acMode === "profile-list" ? "↑↓ 选择配置文件，Enter 激活"
-                        : "输入消息，/ 命令，或 @文件 引用"
+              state.busy ? "运行中，可输入消息并排队"
+                : acMode === "model-picker" ? "搜索模型"
+                  : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "输入 Base URL"
+                    : acMode === "model-setup" ? "输入 API Key，可留空使用环境变量"
+                      : acMode === "profile-name" ? "输入配置文件名称（例如 coding-fast）"
+                        : acMode === "profile-list" ? "↑↓ 选择配置文件，Enter 激活"
+                          : "输入消息，/ 命令，或 @文件 引用"
             }
           />
-          {state.busy && queuedCount > 0 && <Text color="yellow">队列 {queuedCount}</Text>}
+          {state.busy && queuedCount > 0 && <Text color={C.running}>队列 {queuedCount}</Text>}
         </Box>
         <Text dimColor wrap="truncate-end">[think:{state.thinkingMode}] [Ctrl+T/Alt+T]  {state.modelName} · {state.contextTokens > 0 ? `${formatContextWindow(state.contextTokens)} / ` : ""}{formatContextWindow(llm.contextWindow)}</Text>
       </Box>
@@ -994,6 +980,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         tokenEstimate={state.usedTokens || state.contextTokens}
         cwd={cwd}
         busy={state.busy}
+        status={state.status}
         queuedCount={queuedCount}
         permissionMode={state.permissionMode}
         width={termWidth}

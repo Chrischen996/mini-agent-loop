@@ -78,10 +78,35 @@ npm install
 | `DEEPWIKI_MAX_RESULT_BYTES` | no | `102400` |
 | `MINI_AGENT_MCP_CONFIG` | no | — |
 | `MINI_AGENT_MCP_AUTO_APPROVE` | no | `0` |
+| `MINI_AGENT_SUBAGENT` | no | `1` in CLI/server, TUI always on |
+| `MINI_AGENT_AUTO_SUBAGENT` | no | `0` (opt-in preflight) |
+| `MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE` | no | `3` |
+| `MINI_AGENT_AUTO_SUBAGENT_PROFILE` | no | `researcher` |
+| `MINI_AGENT_AUTO_SUBAGENT_MODEL` | no | parent model |
+| `MINI_AGENT_AUTO_SUBAGENT_MAX_TURNS` | no | profile/default |
 
 \* Real runs need at least one supported provider key.
 `/model` only lists
 models whose declared key is configured.
+
+### Optional automatic subagent preflight
+
+The normal flow lets the model decide whether to emit a `subagent` tool call.
+For a deterministic code-level preflight, opt in with:
+
+```bash
+export MINI_AGENT_AUTO_SUBAGENT=1
+export MINI_AGENT_AUTO_SUBAGENT_PROFILE=researcher  # optional
+```
+
+The loop scores the initial request using explainable signals such as prompt
+length, multi-step language, code/workspace context, and investigation terms.
+When the score reaches `MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE`, it runs one
+subagent preflight before the parent model call, then returns the result to the
+parent context. The option is not propagated into nested subagents, so this
+does not recursively trigger automatic preflights. Leave the flag unset to
+keep the existing LLM-only delegation behavior.
+
 The vision variables are optional. For the generic provider, the three
 `VISION_API_KEY`, `VISION_BASE_URL`, and `VISION_MODEL` values must be set
 together. When configured, images sent to a text-only main model are analyzed
@@ -354,10 +379,9 @@ npm start -- --allow-mcp-tools "使用已配置的远端工具查询数据"
 MINI_AGENT_MCP_AUTO_APPROVE=1 npm run tui
 ```
 
-The Web GUI uses its existing per-call permission prompt instead of automatic
-approval. MCP tools are exposed to models with names such as
-`mcp__local-search__search`; remote annotations are display hints only and do
-not bypass approval. `/api/config` returns only sanitized server status
+The Web API does not expose a permission approval flow. MCP tools are exposed
+to models with names such as `mcp__local-search__search`; remote annotations
+are display hints only. `/api/config` returns only sanitized server status
 metadata, never commands, arguments, or environment values.
 When a server advertises and sends `tools/list_changed`, the agent refreshes
 the complete paginated catalog. The next inner model turn receives the updated
@@ -384,7 +408,14 @@ POST   /api/sessions/:id/messages  multipart(prompt, referencedPaths, images) ->
 
 The Ink terminal client uses the same Agent Core and tool registry as the CLI
 and Web GUI. It supports streaming output, tool activity, file completion, and
-the local `/model` selector:
+the local `/model` selector. Permission modes are cycled with `Shift+Tab`:
+
+| Mode | Executes tools? | Asks user? | Typical use |
+| --- | --- | --- | --- |
+| `plan` | Read-only only; writes/dangerous shell hard-denied | No approval path | Risk analysis / planning |
+| `manual` | Yes, after explicit approval | Every tool call | Enterprise / high-control |
+| `auto` | Safe tools auto-run; others need approval | Risky tools only | Daily development |
+| `bypass` | Yes | Never | CI / fully trusted runs |
 
 ```bash
 npm run tui
@@ -393,6 +424,9 @@ npm run tui
 Use `/model`, `/clear`, `/quit`, or `Ctrl+C` inside the terminal client. `/model`
 also accepts `--base-url`, `--api-key-env`, and temporary `--api-key` overrides. The
 previous dependency-free ANSI client remains available as `npm run tui:legacy`.
+CLI one-shot runs accept `--mode plan|manual|auto|bypass`. Non-interactive CLI
+cannot prompt, so `manual`/`auto` approval requests are denied immediately;
+use the TUI or `--mode=bypass` for unattended execution.
 
 ## Test (offline)
 
@@ -416,6 +450,7 @@ Coverage includes:
 - pluggable message preprocessing
 - batched vision analysis before text-only model calls
 - vision failure prevents an unsupported model from guessing
+- permission modes (`plan` / `manual` / `auto` / `bypass`)
 
 ## Layout
 
