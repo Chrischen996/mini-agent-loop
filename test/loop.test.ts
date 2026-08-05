@@ -14,6 +14,7 @@ import { contentAsString } from "../src/content.ts";
 import { makeLlmConfig } from "../src/llm/index.ts";
 import { createDefaultTools, createReadTool } from "../src/tools/index.ts";
 import type { Tool } from "../src/tools/types.ts";
+import { PermissionManager } from "../src/permissions.ts";
 import {
   createFauxChat,
   createInfiniteToolFauxChat,
@@ -169,6 +170,32 @@ describe("runAgentLoop", () => {
 });
 
 describe("runAgentTurn", () => {
+  it("applies a leading thinking command before the first model call and cleans the prompt", async () => {
+    let capturedConfig: typeof dummyLlm | undefined;
+    let capturedMessages: import("../src/types.ts").AgentMessage[] | undefined;
+    const reasoningLlm = makeLlmConfig({
+      apiKey: "test",
+      baseUrl: "http://localhost/v1",
+      model: "faux",
+      reasoning: true,
+      thinkingLevel: "medium",
+    });
+
+    const messages = await runAgentTurn(createAgentHistory(), "/think:high inspect this", {
+      llm: reasoningLlm,
+      tools: [],
+      chat: async (config, inputMessages) => {
+        capturedConfig = config;
+        capturedMessages = inputMessages;
+        return { role: "assistant", content: "done" };
+      },
+    });
+
+    assert.equal(capturedConfig?.thinkingLevel, "high");
+    assert.equal(capturedMessages?.find((message) => message.role === "user")?.content, "inspect this");
+    assert.equal(messages.find((message) => message.role === "user")?.content, "inspect this");
+  });
+
   it("retries a reasoning-only assistant response before completing", async () => {
     let calls = 0;
     const messages = await runAgentTurn(createAgentHistory(), "continue", {
@@ -546,6 +573,65 @@ describe("runAgentTurn", () => {
     assert.ok(prompt.includes("auto mode"));
     assert.ok(prompt.includes("bypass mode"));
     assert.ok(prompt.includes("无权限改代码"));
+    for (const mode of ["plan", "manual", "auto", "bypass"]) {
+      assert.ok(buildSystemPrompt(mode as "plan" | "manual" | "auto" | "bypass").includes(`mode=${mode}`));
+    }
+  });
+
+  it("uses one permission snapshot for the prompt and tools across a mode switch", async () => {
+    const manager = new PermissionManager("auto");
+    let releaseModel: (() => void) | undefined;
+    let toolExecutions = 0;
+    let firstSystemPrompt = "";
+    const writeTool: Tool = {
+      name: "write",
+      description: "write",
+      parameters: { type: "object" },
+      execute: async () => {
+        toolExecutions += 1;
+        return { content: "should not run" };
+      },
+    };
+    const firstTurn = manager.beginTurn("loop-switch", () => {});
+    const firstRun = runAgentTurn(createAgentHistory(undefined, "auto"), "make a change", {
+      llm: dummyLlm,
+      tools: [writeTool],
+      permissionTurn: firstTurn,
+      chat: async (_config, messages) => {
+        const system = messages.find((message) => message.role === "system");
+        firstSystemPrompt = system && typeof system.content === "string" ? system.content : "";
+        await new Promise<void>((resolve) => { releaseModel = resolve; });
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "stale-write", name: "write", arguments: {} }],
+        };
+      },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.match(firstSystemPrompt, /mode=auto/);
+    manager.setMode("bypass");
+    releaseModel?.();
+    const aborted = await firstRun;
+    assert.equal(toolExecutions, 0);
+    assert.equal(aborted.some((message) => message.role === "tool"), false);
+    firstTurn.close();
+
+    let nextSystemPrompt = "";
+    const nextTurn = manager.beginTurn("loop-switch", () => {});
+    await runAgentTurn(aborted, "continue", {
+      llm: dummyLlm,
+      tools: [writeTool],
+      permissionTurn: nextTurn,
+      chat: async (_config, messages) => {
+        const system = messages.find((message) => message.role === "system");
+        nextSystemPrompt = system && typeof system.content === "string" ? system.content : "";
+        return { role: "assistant", content: "done" };
+      },
+    });
+    assert.match(nextSystemPrompt, /mode=bypass/);
+    assert.doesNotMatch(nextSystemPrompt, /mode=auto/);
+    nextTurn.close();
   });
 });
 

@@ -11,6 +11,8 @@ import type { LoopEvent } from "../loop.ts";
 import type { ChatFn, LlmConfig } from "../llm/index.ts";
 import type { ToolProvider } from "../tools/types.ts";
 import type { MessagePreprocessor } from "../preprocessors/index.ts";
+import type { PermissionMode, PermissionTurnContext } from "../permissions.ts";
+import type { Tool } from "../tools/types.ts";
 
 // ─── Subagent configuration ─────────────────────────────────────────────────
 
@@ -73,6 +75,16 @@ export type SubagentToolOptions = {
   onSubagentEvent?: (event: SubagentEvent) => void;
   /** Inject a faux chat function for offline tests. */
   chat?: ChatFn;
+  /** Permission mode inherited from the parent execution path. */
+  permissionMode?: PermissionMode;
+  /** Shared immutable permission snapshot for the current parent turn. */
+  permissionTurn?: PermissionTurnContext;
+  /** Resolve the current parent turn while the tool is reused across turns. */
+  getPermissionTurn?: () => PermissionTurnContext | undefined;
+  /** @deprecated Use permissionTurn/getPermissionTurn. */
+  getPermissionMode?: () => PermissionMode;
+  /** @deprecated Use permissionTurn/getPermissionTurn. */
+  authorizeTool?: (tool: Tool, args: Record<string, unknown>, signal?: AbortSignal) => Promise<void>;
 };
 
 // ─── Tool call arguments (what the LLM sends) ───────────────────────────────

@@ -1,6 +1,5 @@
 import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { Box, Text, useApp, useInput, useStdout, type Key } from "ink";
-import TextInput from "ink-text-input";
 import { readdir, stat } from "node:fs/promises";
 import * as nodePath from "node:path";
 import { MessageFeed } from "./components/MessageFeed.tsx";
@@ -10,7 +9,6 @@ import { resolvePendingPermissionDecision } from "./pending-permission.ts";
 import {
   FileAutocomplete,
   CommandPalette,
-  formatContextWindow,
   ModelPicker,
   SLASH_COMMANDS,
   type CommandDef,
@@ -23,6 +21,11 @@ import {
   type LoopEvent,
 } from "../loop.ts";
 import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
+import {
+  cycleThinkingLevel,
+  thinkingLevelToDisplay,
+  withThinkingLevel,
+} from "../think-intensity.ts";
 import { adaptHistoryForModel } from "../message-adapter.ts";
 import { findExactModelReferenceMatch, getAllModels, resolveModel, searchModels, type ModelRef } from "../models.ts";
 import {
@@ -40,8 +43,8 @@ import {
 import { createAllTools, createTools } from "../tools/index.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
 import type { AgentMessage, MessageContent } from "../types.ts";
+import type { ImageAttachment } from "./state.ts";
 import type { ChatMessage } from "./state.ts";
-import { createMcpApprovalGate, mcpAutoApproveFromEnv } from "../mcp/approval.ts";
 import {
   createSubagentTool,
   createSubagentBatchTool,
@@ -49,11 +52,26 @@ import {
   loadAutoSubagentOptionsFromEnv,
 } from "../subagent/index.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
-import { PermissionManager, type PermissionDecision } from "../permissions.ts";
+import {
+  PERMISSION_MODES,
+  PermissionManager,
+  PermissionModeChangedError,
+  type PermissionDecision,
+  type PermissionMode,
+  type PermissionTurnContext,
+} from "../permissions.ts";
 import { TurnEventBuffer } from "./stream-buffer.ts";
 import { TUI_COLORS as C } from "./theme.ts";
+import { PasteAwareTextInput } from "./components/PasteAwareTextInput.tsx";
+import {
+  imageAttachmentToPart,
+  loadImageAttachment,
+  MAX_TUI_IMAGES,
+  readClipboardImage,
+} from "./image-attachments.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
+const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
 
 function modelChoices(query = "", models = getAllModels()): {
   references: string[];
@@ -198,6 +216,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const { stdout } = useStdout();
   const termWidth = stdout?.columns ?? 80;
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
+  const llmRef = useRef(llm);
+  llmRef.current = llm;
   const vision = loadVisionConfigFromEnv();
   const autoSubagent = useMemo(() => loadAutoSubagentOptionsFromEnv(), []);
   const allToolsRef = useRef<ToolProvider>(allTools ?? createAllTools(cwd));
@@ -205,32 +225,38 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   // Create the subagent tool — dispatches SubagentEvents to the TUI reducer
   const subagentToolsRef = useRef<Tool[]>([]);
-  const getSubagentTools = useCallback((): Tool[] => {
-    if (subagentToolsRef.current.length === 0) {
+  const subagentLlmRef = useRef<LlmConfig | null>(null);
+  const getSubagentTools = useCallback((parentLlm = llm): Tool[] => {
+    if (subagentToolsRef.current.length === 0 || subagentLlmRef.current !== parentLlm) {
       const sharedOptions = {
-        parentLlm: llm,
+        parentLlm,
         parentTools: agentToolsRef.current,
         profiles: defaultProfiles,
         preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
         onSubagentEvent: (event: SubagentEvent) => {
           dispatch({ type: "SUBAGENT_EVENT", event });
         },
+        getPermissionTurn: () => permissionTurnRef.current ?? undefined,
       };
       subagentToolsRef.current = [
         createSubagentTool(sharedOptions) as Tool,
         createSubagentBatchTool(sharedOptions) as Tool,
       ];
+      subagentLlmRef.current = parentLlm;
     }
     return subagentToolsRef.current;
   }, [llm, vision]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
+  const pendingImagesRef = useRef<ImageAttachment[]>([]);
+  pendingImagesRef.current = state.pendingImages;
   const promptQueueRef = useRef<string[]>([]);
   const [queuedCount, setQueuedCount] = useState(0);
   const [input, setInput] = useState("");
-  const historyRef = useRef<AgentMessage[]>(createAgentHistory());
+  const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "auto"));
   const abortRef = useRef<AbortController>(new AbortController());
   const permissionManagerRef = useRef<PermissionManager | null>(null);
+  const permissionTurnRef = useRef<PermissionTurnContext | null>(null);
   const pendingPermissionRef = useRef(false);
   pendingPermissionRef.current = Boolean(state.pendingPermission);
   // Profile state
@@ -252,13 +278,32 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   const turnCount = state.messages.filter((message) => message.kind === "user").length;
   const permissionSessionId = "tui_session";
-  const mcpApproval = useMemo(
-    () => createMcpApprovalGate({
-      allow: mcpAutoApproveFromEnv(),
-      approvalHint: "Restart with MINI_AGENT_MCP_AUTO_APPROVE=1 to approve MCP calls in the TUI.",
-    }),
-    [],
-  );
+
+  const getPermissionManager = useCallback(() => {
+    return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("auto"));
+  }, []);
+
+  const addPendingImage = useCallback((image: ImageAttachment): boolean => {
+    const current = pendingImagesRef.current;
+    if (current.some((item) => item.path === image.path)) return true;
+    if (current.length >= MAX_TUI_IMAGES) {
+      dispatch({ type: "ATTACHMENT_ERROR", message: `最多可同时添加 ${MAX_TUI_IMAGES} 张图片` });
+      return false;
+    }
+    pendingImagesRef.current = [...current, image];
+    dispatch({ type: "ADD_PENDING_IMAGE", image });
+    return true;
+  }, []);
+
+  const handlePasteImage = useCallback(async (): Promise<boolean> => {
+    try {
+      return addPendingImage(await readClipboardImage());
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      dispatch({ type: "ATTACHMENT_ERROR", message: `无法粘贴图片: ${detail}` });
+      return false;
+    }
+  }, [addPendingImage]);
 
   // Cleanup buffered stream output on unmount.
   useEffect(() => {
@@ -304,16 +349,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     setPendingProfileSetup(null);
     setProfileListState(null);
   }, []);
-
-  const authorizeTool = useCallback(async (tool: Tool, args: Record<string, unknown>, signal?: AbortSignal) => {
-    const permissionManager =
-      permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager(state.permissionMode));
-    permissionManager.setMode(state.permissionMode);
-    await mcpApproval(tool, args, signal);
-    await permissionManager.authorize(permissionSessionId, tool, args, signal, (request) => {
-      dispatch({ type: "LOOP_EVENT", event: { type: "permission_required", request } });
-    });
-  }, [dispatch, mcpApproval, state.permissionMode]);
 
   const resolvePendingPermission = useCallback((decision: PermissionDecision) => {
     const pending = state.pendingPermission;
@@ -474,6 +509,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           model: `${setup.model.provider}/${setup.model.id}`,
           baseUrl: setup.baseUrl,
           apiKey,
+          thinkingLevel: newLlmConfig.thinkingLevel,
         });
         setProfileStore(updated);
       } catch { /* non-fatal: model is already switched in memory */ }
@@ -517,10 +553,35 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     startModelSetup(match.model, overrides);
   }, [startModelSetup]);
 
+  // Match Codex's direct effort controls: the active model stays fixed and
+  // only the next supported reasoning level is applied for subsequent turns.
+  const adjustThinkingLevel = useCallback((direction: "increase" | "decrease", wrap = false) => {
+    if (state.busy || state.pendingPermission) return;
+    const current = llmRef.current;
+    const nextLevel = cycleThinkingLevel(current, direction, { wrap });
+    const next = withThinkingLevel(current, nextLevel);
+    llmRef.current = next;
+    setLlm(next);
+    dispatch({ type: "SET_STATUS", status: `思考强度: ${thinkingLevelToDisplay(nextLevel)}` });
+  }, [state.busy, state.pendingPermission]);
+
   // ── keyboard handler ─────────────────────────────────────────────────────
 
   useInput((_ch: string, key: Key) => {
     if (key.ctrl && (_ch === "c" || _ch === "C")) { abortRef.current.abort(); exit(); return; }
+
+    // Commit the runtime mode first. This also rejects pending approvals and
+    // aborts the active turn before the UI state is updated.
+    if (!acMode && key.shift && key.tab) {
+      suppressInputEchoRef.current = true;
+      const permissionManager = getPermissionManager();
+      const current = PERMISSION_MODES.indexOf(permissionManager.getMode());
+      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "auto";
+      permissionManager.setMode(next);
+      dispatch({ type: "SET_PERMISSION_MODE", mode: next });
+      return;
+    }
+
     if (state.pendingPermission) {
       pendingPermissionRef.current = true;
       const decision = resolvePendingPermissionDecision(_ch, key);
@@ -531,6 +592,32 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
     pendingPermissionRef.current = false;
+
+    // Codex-compatible effort shortcuts:
+    // Shift+↑/↓ and Alt+./, change one level without touching the prompt.
+    if (!acMode && !state.busy && key.shift && key.upArrow) {
+      suppressInputEchoRef.current = true;
+      adjustThinkingLevel("increase");
+      return;
+    }
+    if (!acMode && !state.busy && key.shift && key.downArrow) {
+      suppressInputEchoRef.current = true;
+      adjustThinkingLevel("decrease");
+      return;
+    }
+    if (!acMode && !state.busy && key.meta && (_ch === "." || _ch === ",") && !key.ctrl) {
+      suppressInputEchoRef.current = true;
+      adjustThinkingLevel(_ch === "." ? "increase" : "decrease");
+      return;
+    }
+
+    // Ctrl+R is the quick path: cycle through all levels supported by the
+    // active model, wrapping from the last level back to the first.
+    if (!acMode && !state.busy && key.ctrl && (_ch === "r" || _ch === "R" || _ch === "\u0012")) {
+      suppressInputEchoRef.current = true;
+      adjustThinkingLevel("increase", true);
+      return;
+    }
 
     // Ctrl+T: cycle global thinking mode (hidden → summary → full)
     // Some terminals report ctrl+t as input="t" + key.ctrl, others as a control char.
@@ -554,13 +641,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       dispatch({ type: "FOCUS_NEXT_REASONING", direction: 1 });
       return;
     }
-    // Shift+Tab: cycle permission mode (plan → manual → auto → bypass → plan)
-    if (!acMode && key.shift && key.tab) {
-      suppressInputEchoRef.current = true;
-      dispatch({ type: "TOGGLE_PERMISSION_MODE" });
-      return;
-    }
-
     if (acMode === "profile-name") {
       if (key.escape) {
         // User skipped saving — just clear
@@ -636,18 +716,25 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
     dispatch({ type: "LOOP_EVENT", event: { type: "tool_start", call: fakeCall } });
+    const permissionManager = getPermissionManager();
+    const permissionTurn = permissionManager.beginTurn(
+      permissionSessionId,
+      (request) => dispatch({ type: "LOOP_EVENT", event: { type: "permission_required", request } }),
+      abortRef.current.signal,
+    );
     try {
-      await authorizeTool(tool, args, undefined);
-      const result = await tool.execute(args, undefined);
+      const result = await permissionTurn.execute(tool, args);
       dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: fakeCall, result } });
     } catch (err) {
       dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: fakeCall, result: { content: err instanceof Error ? err.message : String(err), isError: true } } });
+    } finally {
+      permissionTurn.close();
     }
-  }, [authorizeTool]);
+  }, [getPermissionManager]);
 
   // ── @file resolver ────────────────────────────────────────────────────────
 
-  const resolveAtRefs = useCallback(async (text: string): Promise<MessageContent> => {
+  const resolveAtRefs = useCallback(async (text: string, permissionTurn: PermissionTurnContext): Promise<MessageContent> => {
     const paths = parseAtRefs(text);
     if (paths.length === 0) return text;
     const readTool = resolveToolProvider(allToolsRef.current).find((t) => t.name === "read");
@@ -655,10 +742,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const parts: MessageContent = [{ type: "text", text }];
     for (const p of paths) {
       try {
-        const result = await readTool.execute({ path: p }, undefined);
+        const result = await permissionTurn.execute(readTool, { path: p });
         const content = typeof result.content === "string" ? result.content : "";
         parts.push({ type: "text", text: `\n\n[File: ${p}]\n\`\`\`\n${content}\n\`\`\`` });
-      } catch { /* skip */ }
+      } catch (error) {
+        if (error instanceof PermissionModeChangedError || permissionTurn.signal.aborted) throw error;
+        /* Keep unresolved references out of the model prompt. */
+      }
     }
     return parts;
   }, []);
@@ -668,7 +758,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const handleSubmit = useCallback(async (text: string) => {
     const trimmed = text.trim();
     const allowEmptyApiKey = acMode === "model-setup" && modelSetup?.field === "apiKey";
-    if (!trimmed && !allowEmptyApiKey) return;
+    const hasPendingImages = pendingImagesRef.current.length > 0;
+    if (!trimmed && !allowEmptyApiKey && !hasPendingImages) return;
     if (state.busy) {
       if (trimmed) {
         promptQueueRef.current.push(trimmed);
@@ -686,6 +777,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           model: `${pendingProfileSetup.model.provider}/${pendingProfileSetup.model.id}`,
           baseUrl: pendingProfileSetup.baseUrl,
           apiKey: pendingProfileSetup.apiKey,
+          thinkingLevel: llm.thinkingLevel,
         });
         setProfileStore(updated);
       } catch { /* non-fatal */ }
@@ -735,8 +827,35 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
     if (trimmed === "/exit" || trimmed === "/quit") { exit(); return; }
     if (trimmed === "/clear") {
-      historyRef.current = createAgentHistory();
+      historyRef.current = createAgentHistory(undefined, getPermissionManager().getMode());
+      pendingImagesRef.current = [];
       dispatch({ type: "RESET" });
+      setInput("");
+      return;
+    }
+
+    if (/^\/paste-image$/i.test(trimmed)) {
+      setInput("");
+      await handlePasteImage();
+      return;
+    }
+
+    // /image <path> - add pending image
+    const imageMatch = trimmed.match(/^\/image\s+(.+)$/i);
+    if (imageMatch) {
+      const imagePath = imageMatch[1]!.trim();
+      if (imagePath.toLowerCase() === "clear") {
+        pendingImagesRef.current = [];
+        dispatch({ type: "CLEAR_PENDING_IMAGES" });
+        setInput("");
+        return;
+      }
+      try {
+        addPendingImage(await loadImageAttachment(imagePath, cwd));
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        dispatch({ type: "ATTACHMENT_ERROR", message: `无法添加图片: ${detail}` });
+      }
       setInput("");
       return;
     }
@@ -797,65 +916,131 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
 
-    // Normal LLM message
+    const pendingImgs = [...pendingImagesRef.current];
+    if (!trimmed && pendingImgs.length === 0) {
+      setInput("");
+      return;
+    }
+    const prompt = trimmed || DEFAULT_IMAGE_PROMPT;
+    const turnLlm = llm;
+    let imageParts: import("../types.ts").ImagePart[];
+    try {
+      imageParts = await Promise.all(pendingImgs.map(imageAttachmentToPart));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      dispatch({ type: "ATTACHMENT_ERROR", message: `无法读取待发送图片: ${detail}` });
+      return;
+    }
+
     setInput("");
-    dispatch({ type: "USER_MESSAGE", text: trimmed });
+    pendingImagesRef.current = [];
+    if (pendingImgs.length > 0) dispatch({ type: "CLEAR_PENDING_IMAGES" });
     abortRef.current = new AbortController();
+    const permissionManager = getPermissionManager();
+    const permissionTurn = permissionManager.beginTurn(
+      permissionSessionId,
+      (request) => dispatch({ type: "LOOP_EVENT", event: { type: "permission_required", request } }),
+      abortRef.current.signal,
+    );
+    permissionTurnRef.current = permissionTurn;
+    dispatch({ type: "USER_MESSAGE", text: prompt, images: pendingImgs });
 
     const streamBuffer = streamBufferRef.current!;
     const runId = streamBuffer.start();
     const MAX_AUTO_CONTINUES = 5;
     let autoContinueCount = 0;
-    let currentUserText = trimmed;
-    let currentUserContent = await resolveAtRefs(trimmed);
+    let currentUserText = prompt;
 
     const onLoopEvent = (event: LoopEvent) => {
       streamBuffer.handle(runId, event);
     };
 
-    // Auto-continue loop: re-invoke runAgentTurn when maxTurns is exceeded
-    while (true) {
-      try {
-        historyRef.current = await runAgentTurn(historyRef.current, currentUserText, {
-          llm, tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools()],
-          autoSubagent,
-          preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
-          signal: abortRef.current.signal,
-          userContent: currentUserContent,
-          authorizeTool,
-          onEvent: onLoopEvent,
-        });
-        streamBuffer.finish(runId);
-        break; // Normal completion — exit the auto-continue loop
-      } catch (err) {
-        if (err instanceof MaxTurnsExceededError) {
-          historyRef.current = err.messages;
-          autoContinueCount++;
-          if (autoContinueCount >= MAX_AUTO_CONTINUES || abortRef.current.signal.aborted) {
-            // Hit safety cap or aborted — stop auto-continuing
-            streamBuffer.finish(runId);
-            dispatch({ type: "LOOP_EVENT", event: { type: "error", message: `已达到自动续跑上限 (${MAX_AUTO_CONTINUES} 次)` } });
-            break;
-          }
-          // Auto-continue: send "继续" as next user message
-          currentUserText = "继续完成之前的工作";
-          currentUserContent = currentUserText;
-          dispatch({ type: "LOOP_EVENT", event: {
-            type: "context_compacted",
-            beforeTokens: 0,
-            afterTokens: 0,
-            reason: `自动续跑 (${autoContinueCount}/${MAX_AUTO_CONTINUES})`,
-          }});
-          continue;
-        }
-        // Other errors — report and stop
-        const errMsg = err instanceof Error ? err.message : String(err);
-        streamBuffer.finish(runId);
-        dispatch({ type: "LOOP_EVENT", event: { type: "error", message: errMsg } });
-        break;
+    try {
+      let currentUserContent = await resolveAtRefs(prompt, permissionTurn);
+      if (imageParts.length > 0) {
+        const contentParts = typeof currentUserContent === "string"
+          ? [{ type: "text" as const, text: currentUserContent }]
+          : currentUserContent;
+        currentUserContent = [...contentParts, ...imageParts];
       }
+
+      // Auto-continue loop: re-invoke runAgentTurn when maxTurns is exceeded.
+      while (true) {
+        try {
+          historyRef.current = await runAgentTurn(historyRef.current, currentUserText, {
+            llm: turnLlm,
+            tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools(turnLlm)],
+            autoSubagent,
+            preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+            signal: abortRef.current.signal,
+            userContent: currentUserContent,
+            permissionTurn,
+            onEvent: onLoopEvent,
+          });
+          streamBuffer.finish(runId);
+          break;
+        } catch (err) {
+          if (err instanceof MaxTurnsExceededError) {
+            historyRef.current = err.messages;
+            autoContinueCount++;
+            if (autoContinueCount >= MAX_AUTO_CONTINUES || permissionTurn.signal.aborted) {
+              streamBuffer.finish(runId);
+              if (permissionTurn.signal.aborted) {
+                const reason = permissionTurn.signal.reason;
+                dispatch({
+                  type: "LOOP_EVENT",
+                  event: reason instanceof PermissionModeChangedError
+                    ? {
+                        type: "aborted",
+                        messages: historyRef.current,
+                        reason: "permission_mode_changed",
+                        previousMode: reason.previousMode,
+                        permissionMode: reason.mode,
+                      }
+                    : { type: "aborted", messages: historyRef.current },
+                });
+              } else {
+                dispatch({ type: "LOOP_EVENT", event: { type: "error", message: `已达到自动续跑上限 (${MAX_AUTO_CONTINUES} 次)` } });
+              }
+              break;
+            }
+            currentUserText = "继续完成之前的工作";
+            currentUserContent = currentUserText;
+            dispatch({ type: "LOOP_EVENT", event: {
+              type: "context_compacted",
+              beforeTokens: 0,
+              afterTokens: 0,
+              reason: `自动续跑 (${autoContinueCount}/${MAX_AUTO_CONTINUES})`,
+            }});
+            continue;
+          }
+          throw err;
+        }
+      }
+    } catch (err) {
+      streamBuffer.finish(runId);
+      if (err instanceof PermissionModeChangedError || permissionTurn.signal.aborted) {
+        const reason = permissionTurn.signal.reason;
+        dispatch({
+          type: "LOOP_EVENT",
+          event: reason instanceof PermissionModeChangedError
+            ? {
+                type: "aborted",
+                messages: historyRef.current,
+                reason: "permission_mode_changed",
+                previousMode: reason.previousMode,
+                permissionMode: reason.mode,
+              }
+            : { type: "aborted", messages: historyRef.current },
+        });
+      } else {
+        dispatch({ type: "LOOP_EVENT", event: { type: "error", message: err instanceof Error ? err.message : String(err) } });
+      }
+    } finally {
+      if (permissionTurnRef.current === permissionTurn) permissionTurnRef.current = null;
+      permissionTurn.close();
     }
-  }, [state.busy, acMode, modelSetup, pendingProfileSetup, profileListState, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup, openProfileList, authorizeTool]);
+  }, [state.busy, acMode, modelSetup, pendingProfileSetup, profileListState, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup, openProfileList, getPermissionManager, addPendingImage, handlePasteImage, cwd]);
 
   // Start the next queued prompt only after the current turn has emitted done/error/aborted.
   useEffect(() => {
@@ -947,12 +1132,23 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       )}
 
       {/* Input row */}
+      {state.pendingImages.length > 0 && (
+        <Box paddingX={1} gap={1}>
+          {state.pendingImages.map((img, idx) => (
+            <Text key={idx} color={C.user}>
+              🖼️ {img.path.split("/").pop()}
+            </Text>
+          ))}
+        </Box>
+      )}
       <Box paddingX={1} gap={1}>
         <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : ">"}</Text>
         <Box flexGrow={1} minWidth={0}>
-          <TextInput
+          <PasteAwareTextInput
             value={input}
             onChange={setInputSafe}
+            onPasteImage={handlePasteImage}
+            pasteEnabled={!state.pendingPermission}
             mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
             onSubmit={(val) => {
               if ((acMode === "model" || acMode === "model-picker") && modelCandidates[acIndex]) {
@@ -973,17 +1169,17 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           />
           {state.busy && queuedCount > 0 && <Text color={C.running}>队列 {queuedCount}</Text>}
         </Box>
-        <Text dimColor wrap="truncate-end">[think:{state.thinkingMode}] [Ctrl+T/Alt+T]  {state.modelName} · {state.contextTokens > 0 ? `${formatContextWindow(state.contextTokens)} / ` : ""}{formatContextWindow(llm.contextWindow)}</Text>
       </Box>
       <StatusBar
         modelName={state.modelName}
         tokenEstimate={state.usedTokens || state.contextTokens}
+        contextWindow={llm.contextWindow}
         cwd={cwd}
         busy={state.busy}
         status={state.status}
         queuedCount={queuedCount}
         permissionMode={state.permissionMode}
-        width={termWidth}
+        thinkingLevel={llm.thinkingLevel ?? (llm.reasoning ? "medium" : "off")}
       />
     </Box>
   );

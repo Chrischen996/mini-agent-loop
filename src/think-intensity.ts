@@ -1,94 +1,164 @@
-// src/think-intensity.ts — Thinking intensity configuration and command parsing
+// Provider-neutral thinking level configuration and interactive level controls.
 
 import type { LlmConfig } from "./llm/config.ts";
-import { getAvailableModels, resolveModel, type ModelRef } from "./models.ts";
+import type { ModelThinkingLevel } from "./pi-ai/types.ts";
 
 export type ThinkingIntensity = "low" | "med" | "high" | "xhigh";
 
-/** 
- * Think intensity profile: maps a level to partial LlmConfig fields.
- * The actual merge with provider/keys/baseUrl happens at runtime.
- */
-const INTENSITY_MAP: Record<ThinkingIntensity, Omit<LlmConfig, "apiKey" | "baseUrl" | "provider"> & { model: string }> = {
-  low: {
-    model: "gpt-4o-mini",
-        contextWindow: 128000,
-    maxTokens: 4096,
-    capabilities: { input: ["text", "image"], tools: true },
-    imagePolicy: "placeholder",
-    toolCallFormat: "openai",
-    reasoning: false,
-  },
-  med: {
-    model: "gpt-4o",
-        contextWindow: 128000,
-    maxTokens: 8192,
-    capabilities: { input: ["text", "image"], tools: true },
-    imagePolicy: "placeholder",
-    toolCallFormat: "openai",
-    reasoning: true,
-  },
-  high: {
-    model: "claude-3-5-sonnet-20250226",
-        contextWindow: 200000,
-    maxTokens: 32768,
-    capabilities: { input: ["text", "image"], tools: true },
-    imagePolicy: "placeholder",
-    toolCallFormat: "openai",
-    reasoning: true,
-  },
-  xhigh: {
-    model: "claude-3-opus-20250226",
-        contextWindow: 200000,
-    maxTokens: 65536,
-    capabilities: { input: ["text", "image"], tools: true },
-    imagePolicy: "placeholder",
-    toolCallFormat: "openai",
-    reasoning: true,
-  },
+/** The default user-facing intensity when no explicit setting is present. */
+export const DEFAULT_THINKING_INTENSITY: ThinkingIntensity = "med";
+
+export const THINKING_INTENSITY_TO_MODEL_LEVEL: Readonly<Record<ThinkingIntensity, ModelThinkingLevel>> = {
+  low: "low",
+  med: "medium",
+  high: "high",
+  xhigh: "xhigh",
 };
 
-/**
- * Parse a user message for thinking intensity commands.
- * Recognizes: /think:low, /think:med, /think:high, /think:xhigh
- * Also accepts shorthand: :low, :med, etc. when prefixed with slash.
- * Returns the intensity if matched, otherwise null.
- */
-export function parseThinkingIntensityCommand(userMessage: string): ThinkingIntensity | null {
-  const lower = userMessage.toLowerCase();
+/** Only a leading, standalone command changes the request. */
+const THINKING_COMMAND_RE = /^\s*\/think:(low|med|high|xhigh)(?=$|\s)/i;
 
-  // Check for /think:X pattern first (explicit)
-  if (lower.includes("/think:xhigh")) return "xhigh" as ThinkingIntensity;
-  if (lower.includes("/think:high")) return "high" as ThinkingIntensity;
-  if (lower.includes(":mid") || lower.includes("/think:med")) return "med" as ThinkingIntensity;
-  if (lower.includes("/think:low")) return "low" as ThinkingIntensity;
+export type ThinkingIntensityPrompt = {
+  intensity: ThinkingIntensity | null;
+  prompt: string;
+};
 
-  // Shorthand patterns after slash or colon
-  if (lower.match(/\b:t:xhigh\b/)) return "xhigh" as ThinkingIntensity;
-  if (lower.match(/\b:t:high\b/)) return "high" as ThinkingIntensity;
-  if (lower.match(/\b:t:med\b/) || lower.match(/\b:m:med\b/)) return "med" as ThinkingIntensity;
-  if (lower.match(/\b:t:low\b/)) return "low" as ThinkingIntensity;
-
-  return null;
+function normalizeIntensity(value: unknown): ThinkingIntensity | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return isValidIntensity(normalized) ? normalized : null;
 }
 
-/**
- * Build a new LlmConfig by merging the base config with intensity overrides.
- * Only the fields defined in INTENSITY_MAP are replaced; apiKey, provider,
- * baseUrl, and other runtime-sensitive fields are preserved from the base.
- */
-export function buildIntenseLlm(base: LlmConfig, intensity: ThinkingIntensity): LlmConfig {
-  const override = INTENSITY_MAP[intensity] as Partial<LlmConfig>;
-  // Merge: keep base's provider/apiKey/BaseUrl, replace intensity-specific fields
+function findThinkingCommand(userMessage: string): RegExpMatchArray | null {
+  return userMessage.match(THINKING_COMMAND_RE);
+}
+
+/** Parse a leading standalone `/think:<level>` command. */
+export function parseThinkingIntensityCommand(userMessage: string): ThinkingIntensity | null {
+  return normalizeIntensity(findThinkingCommand(userMessage)?.[1]);
+}
+
+/** Remove a leading thinking command while preserving the actual user prompt. */
+export function stripThinkingIntensityCommands(userMessage: string): string {
+  return userMessage.replace(THINKING_COMMAND_RE, "").trim();
+}
+
+export const parseThinkingIntensity = parseThinkingIntensityCommand;
+export const stripThinkingIntensityCommand = stripThinkingIntensityCommands;
+export const cleanThinkingPrompt = stripThinkingIntensityCommands;
+
+/** Parse and clean a prompt in one operation. */
+export function parseThinkingIntensityPrompt(userMessage: string): ThinkingIntensityPrompt {
+  const intensity = parseThinkingIntensityCommand(userMessage);
   return {
-    ...base,
-    ...override,
+    intensity,
+    prompt: stripThinkingIntensityCommands(userMessage),
   };
 }
 
+export const parseThinkingIntensityInput = parseThinkingIntensityPrompt;
+
+export function intensityToModelThinkingLevel(intensity: ThinkingIntensity): ModelThinkingLevel {
+  return THINKING_INTENSITY_TO_MODEL_LEVEL[intensity];
+}
+
+export const thinkingIntensityToModelLevel = intensityToModelThinkingLevel;
+export const mapThinkingIntensityToModelLevel = intensityToModelThinkingLevel;
+
+/** Return a model level that can actually be used by the current model. */
+export function normalizeThinkingLevelForModel(
+  reasoning: boolean,
+  level: ModelThinkingLevel,
+): ModelThinkingLevel {
+  return reasoning ? level : "off";
+}
+
+export type ThinkingLlmConfig = LlmConfig & { thinkingLevel: ModelThinkingLevel };
+
 /**
- * Get the display name for an intensity level.
+ * Stable UI order used by the direct effort shortcuts. Provider/model catalogs
+ * can narrow this list through `thinkingLevelMap`.
  */
+export const THINKING_LEVEL_ORDER: readonly ModelThinkingLevel[] = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+function modelSupportsLevel(
+  config: Pick<LlmConfig, "reasoning" | "piModel">,
+  level: ModelThinkingLevel,
+): boolean {
+  if (!config.reasoning) return level === "off";
+  const levelMap = config.piModel?.thinkingLevelMap;
+  if (!levelMap) return level !== "off";
+  return Object.prototype.hasOwnProperty.call(levelMap, level);
+}
+
+/** Return the effort levels that can be selected for the active model. */
+export function getThinkingLevelChoices(
+  config: Pick<LlmConfig, "reasoning" | "piModel">,
+): ModelThinkingLevel[] {
+  if (!config.reasoning) return ["off"];
+  const mapped = THINKING_LEVEL_ORDER.filter((level) => modelSupportsLevel(config, level));
+  return mapped.length > 0 ? [...mapped] : ["medium"];
+}
+
+/** Move one effort step without changing provider or model. */
+export function cycleThinkingLevel(
+  config: Pick<LlmConfig, "reasoning" | "piModel" | "thinkingLevel">,
+  direction: "increase" | "decrease",
+  options: { wrap?: boolean } = {},
+): ModelThinkingLevel {
+  const choices = getThinkingLevelChoices(config);
+  if (choices.length <= 1) return choices[0] ?? "off";
+
+  const current = config.thinkingLevel ?? (config.reasoning ? "medium" : "off");
+  const index = choices.indexOf(current);
+  if (index < 0) return direction === "increase" ? choices[0]! : choices.at(-1)!;
+  const nextIndex = options.wrap
+    ? (index + (direction === "increase" ? 1 : -1) + choices.length) % choices.length
+    : direction === "increase"
+      ? Math.min(choices.length - 1, index + 1)
+      : Math.max(0, index - 1);
+  return choices[nextIndex]!;
+}
+
+export function thinkingLevelToDisplay(level: ModelThinkingLevel): string {
+  const labels: Record<ModelThinkingLevel, string> = {
+    off: "关闭",
+    minimal: "最小",
+    low: "低",
+    medium: "中",
+    high: "高",
+    xhigh: "极高",
+    max: "最大",
+  };
+  return labels[level];
+}
+
+/** Apply an intensity to the current model without changing provider/model. */
+export function buildIntenseLlm(base: LlmConfig, intensity: ThinkingIntensity): ThinkingLlmConfig {
+  return {
+    ...base,
+    thinkingLevel: normalizeThinkingLevelForModel(
+      base.reasoning,
+      intensityToModelThinkingLevel(intensity),
+    ),
+  };
+}
+
+/** Apply a provider-neutral level to the current model without model switching. */
+export function withThinkingLevel(base: LlmConfig, level: ModelThinkingLevel): ThinkingLlmConfig {
+  return {
+    ...base,
+    thinkingLevel: normalizeThinkingLevelForModel(base.reasoning, level),
+  };
+}
+
 export function intensityToDisplay(intensity: ThinkingIntensity): string {
   const map: Record<ThinkingIntensity, string> = {
     low: "轻量 (Low)",
@@ -96,28 +166,26 @@ export function intensityToDisplay(intensity: ThinkingIntensity): string {
     high: "深度 (High)",
     xhigh: "极致 (X-High)",
   };
-  return map[intensity] || intensity;
+  return map[intensity];
 }
 
-/**
- * Get all available intensities supported.
- */
 export function getIntensities(): ThinkingIntensity[] {
-  return Object.keys(INTENSITY_MAP).filter((k): k is ThinkingIntensity => ["low", "med", "high", "xhigh"].includes(k as any)) as ThinkingIntensity[];
+  return ["low", "med", "high", "xhigh"];
 }
 
-/**
- * Check if a given string is a valid intensity level.
- */
 export function isValidIntensity(test: unknown): test is ThinkingIntensity {
-  return ["low", "med", "high", "xhigh"].includes(test as string);
+  return test === "low" || test === "med" || test === "high" || test === "xhigh";
 }
 
-/**
- * Default intensity on server start (matching current env config).
- */
-export function getDefaultIntensity(): ThinkingIntensity {
-  const def = process.env.DEFAULT_THINKING_INTENSITY;
-  if (def && isValidIntensity(def)) return def;
-  return "med"; // default balance
+/** Resolve the default intensity from the legacy environment variable. */
+export function getDefaultIntensity(env: NodeJS.ProcessEnv = process.env): ThinkingIntensity {
+  const raw = env.DEFAULT_THINKING_INTENSITY?.trim().toLowerCase();
+  if (raw === "medium") return "med";
+  return normalizeIntensity(raw) ?? DEFAULT_THINKING_INTENSITY;
 }
+
+export function getDefaultThinkingLevel(env: NodeJS.ProcessEnv = process.env): ModelThinkingLevel {
+  return intensityToModelThinkingLevel(getDefaultIntensity(env));
+}
+
+export const getDefaultModelThinkingLevel = getDefaultThinkingLevel;

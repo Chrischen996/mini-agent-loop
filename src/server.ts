@@ -13,7 +13,7 @@ import multer from "multer";
 import { documentTextPart, MAX_ATTACHMENT_BYTES } from "./attachments.ts";
 import { contentAsString, imagePart, textPart } from "./content.ts";
 import { DocumentStore } from "./documents.ts";
-import { SessionStore } from "./session-store.ts";
+import { SessionStore, type PersistedSession } from "./session-store.ts";
 import { isAbortError, loadLlmConfigFromEnv, switchLlmModel, type ChatFn, type LlmConfig } from "./llm/index.ts";
 import { getAvailableModels, resolveModel, searchModels } from "./models.ts";
 import { getActiveProfile, loadProfileStore } from "./profile-store.ts";
@@ -33,7 +33,7 @@ import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
 import type { CodebaseSemanticProvider } from "./codebase/deepwiki-provider.ts";
 import { createDocumentEditTool } from "./tools/document-edit.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "./tools/types.ts";
-import type { AgentMessage, AssistantMessage, ContentPart, ToolResultMessage } from "./types.ts";
+import type { AgentMessage, ContentPart } from "./types.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
 import type { McpServerStatus } from "./mcp/types.ts";
 import {
@@ -49,12 +49,12 @@ import {
   validateReferencedPaths,
 } from "./workspace.ts";
 import {
-  parseThinkingIntensityCommand,
-  buildIntenseLlm,
-  intensityToDisplay,
-  type ThinkingIntensity,
+  intensityToModelThinkingLevel,
+  parseThinkingIntensityPrompt,
+  withThinkingLevel,
 } from "./think-intensity.ts";
-import { type NextTurnUpdate } from "./loop.ts";
+import type { ModelThinkingLevel } from "./pi-ai/types.ts";
+import { PermissionManager, isPermissionMode, type PermissionDecision, type PermissionMode } from "./permissions.ts";
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 5;
@@ -72,6 +72,9 @@ type Session = {
   modelId?: string;
   /** Per-session LLM config, overrides the server default when set. */
   llmOverride?: LlmConfig;
+  /** Persisted per-session thinking level, if changed by /think. */
+  thinkingLevel?: ModelThinkingLevel;
+  permissionManager: PermissionManager;
 };
 
 export type AgentServerOptions = {
@@ -108,6 +111,8 @@ export type AgentServerOptions = {
   subagentEnabled?: boolean;
   /** Optional code-level preflight delegation. Disabled unless enabled. */
   autoSubagent?: AutoSubagentOptions;
+  /** Default permission mode for new and restored Web sessions. */
+  permissionMode?: PermissionMode;
 };
 
 function safeMessage(message: AgentMessage): Record<string, unknown> {
@@ -196,6 +201,11 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         type: "aborted",
         message: "已停止生成",
         messageCount: event.messages.length,
+        ...(event.reason ? {
+          reason: event.reason,
+          previousMode: event.previousMode,
+          permissionMode: event.permissionMode,
+        } : {}),
       };
     case "done":
       return { type: "done", messageCount: event.messages.length };
@@ -329,8 +339,9 @@ export function buildModelPrompt(input: {
   prompt: string;
   referencedPaths: string[];
   hasImages: boolean;
-}): { displayPrompt: string; modelPrompt: string } {
-  const text = input.prompt.trim();
+}): { displayPrompt: string; modelPrompt: string; thinkingLevel: ModelThinkingLevel | null } {
+  const thinking = parseThinkingIntensityPrompt(input.prompt.trim());
+  const text = thinking.prompt;
   const refs = input.referencedPaths;
 
   let displayPrompt = text;
@@ -350,7 +361,13 @@ export function buildModelPrompt(input: {
     ? `${base}\n\n${formatReferencedBlock(refs)}`
     : base;
 
-  return { displayPrompt, modelPrompt };
+  return {
+    displayPrompt,
+    modelPrompt,
+    thinkingLevel: thinking.intensity
+      ? intensityToModelThinkingLevel(thinking.intensity)
+      : null,
+  };
 }
 
 async function parseMessageRequest(
@@ -361,6 +378,7 @@ async function parseMessageRequest(
 ): Promise<{
   displayPrompt: string;
   modelPrompt: string;
+  thinkingLevel: ModelThinkingLevel | null;
   images: ContentPart[];
   imageNames: string[];
   documents: ContentPart[];
@@ -400,7 +418,12 @@ async function parseMessageRequest(
   const rawRefs = parseReferencedPathsField(request.body?.referencedPaths);
   const referencedPaths = await validateReferencedPaths(workspace, rawRefs);
 
-  if (!prompt && images.length === 0 && documents.length === 0 && referencedPaths.length === 0) {
+  if (
+    !parseThinkingIntensityPrompt(prompt).prompt &&
+    images.length === 0 &&
+    documents.length === 0 &&
+    referencedPaths.length === 0
+  ) {
     throw new Error("A prompt, image, document, or referenced path is required");
   }
 
@@ -413,6 +436,7 @@ async function parseMessageRequest(
   return {
     displayPrompt: built.displayPrompt,
     modelPrompt: built.modelPrompt,
+    thinkingLevel: built.thinkingLevel,
     images,
     imageNames,
     documents,
@@ -424,6 +448,10 @@ async function parseMessageRequest(
 export function createAgentServer(options: AgentServerOptions): Express {
   const workspace = path.resolve(options.workspace ?? process.cwd());
   const sessions = new Map<string, Session>();
+  const envPermissionMode = process.env.MINI_AGENT_PERMISSION_MODE;
+  // All entry points use auto unless an explicit mode is configured.
+  const defaultPermissionMode: PermissionMode = options.permissionMode
+    ?? (isPermissionMode(envPermissionMode) ? envPermissionMode : "auto");
   const dataRoot = path.resolve(options.dataDir ?? path.join(os.homedir(), ".mini-agent"));
   const codebaseEnabled = options.codebaseEnabled ?? process.env.EXTERNAL_CODEBASE_ENABLED !== "0";
   const codebaseStore = options.codebaseStore ?? (codebaseEnabled ? createRepositoryStoreFromEnv(path.join(dataRoot, "codebases")) : undefined);
@@ -443,6 +471,15 @@ export function createAgentServer(options: AgentServerOptions): Express {
   }
   const documentStore = new DocumentStore(path.join(dataRoot, "documents"));
   const sessionStore = new SessionStore(path.join(dataRoot, "sessions"));
+  const persistedSession = (session: Session): PersistedSession => ({
+    id: session.id,
+    createdAt: session.createdAt,
+    modelId: session.modelId,
+    thinkingLevel: session.thinkingLevel,
+    permissionMode: session.permissionManager.getMode(),
+    messages: session.messages,
+  });
+  const saveSession = (session: Session): Promise<void> => sessionStore.save(persistedSession(session));
   const restorePromise = sessionStore.loadAll().then((restored) => {
     return Promise.all([...restored.values()].map(async (persisted) => {
       const session: Session = {
@@ -450,7 +487,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
         messages: persisted.messages,
         createdAt: persisted.createdAt,
         busy: false,
+        permissionManager: new PermissionManager(persisted.permissionMode ?? defaultPermissionMode),
         modelId: persisted.modelId,
+        thinkingLevel: persisted.thinkingLevel,
       };
       // Restore per-session LLM config from persisted modelId
       if (persisted.modelId) {
@@ -461,6 +500,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
             {},
             options.relayRegistry,
           );
+          if (persisted.thinkingLevel) {
+            session.llmOverride = withThinkingLevel(session.llmOverride, persisted.thinkingLevel);
+          }
         } catch {
           // Model no longer available — fall back to server default
           session.modelId = undefined;
@@ -499,6 +541,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       visionPreprocessor: options.preprocessors?.length ? "enabled" : "disabled",
       contextWindow: resolveModel(options.llm.model, options.llm.baseUrl).contextWindow,
       maxTokens: options.llm.maxTokens,
+      thinkingLevel: options.llm.thinkingLevel ?? (options.llm.reasoning ? "medium" : "off"),
       workspace: path.basename(workspace),
       workspaceLabel: path.basename(workspace),
       maxImages: MAX_IMAGES,
@@ -515,6 +558,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         enabled: mcpStatuses.some((status) => status.state === "ready"),
         servers: mcpStatuses,
       },
+      permissionMode: defaultPermissionMode,
       activeProfile: activeProfileName,
     });
   });
@@ -571,16 +615,17 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     try {
-      const newLlm = switchLlmModel(options.llm, modelId, {}, options.relayRegistry);
+      const newLlm = switchLlmModel(
+        session.llmOverride ?? options.llm,
+        modelId,
+        {},
+        options.relayRegistry,
+      );
       session.modelId = `${newLlm.provider}/${newLlm.model}`;
       session.llmOverride = newLlm;
+      session.thinkingLevel = newLlm.thinkingLevel;
       // Persist the model switch
-      void sessionStore.save({
-        id: session.id,
-        createdAt: session.createdAt,
-        modelId: session.modelId,
-        messages: session.messages,
-      });
+      void saveSession(session);
       const resolved = resolveModel(newLlm.model, newLlm.baseUrl);
       response.json({
         model: newLlm.model,
@@ -589,6 +634,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         capabilities: newLlm.capabilities,
         contextWindow: resolved.contextWindow,
         maxTokens: newLlm.maxTokens,
+        thinkingLevel: newLlm.thinkingLevel ?? (newLlm.reasoning ? "medium" : "off"),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -663,14 +709,68 @@ export function createAgentServer(options: AgentServerOptions): Express {
     const id = randomUUID();
     const session: Session = {
       id,
-      messages: createAgentHistory(undefined, "bypass"),
+      messages: createAgentHistory(undefined, defaultPermissionMode),
       createdAt: Date.now(),
       busy: false,
+      permissionManager: new PermissionManager(defaultPermissionMode),
     };
     sessions.set(id, session);
-    await sessionStore.create(session);
+    await sessionStore.create(persistedSession(session));
     void documentStore.createSession(id);
-    response.status(201).json({ id, createdAt: session.createdAt });
+    response.status(201).json({ id, createdAt: session.createdAt, permissionMode: session.permissionManager.getMode() });
+  });
+
+  app.get("/api/sessions/:id/permission-mode", (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    response.json({ mode: session.permissionManager.getMode() });
+  });
+
+  app.put("/api/sessions/:id/permission-mode", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const mode = request.body?.mode;
+    if (!isPermissionMode(mode)) {
+      response.status(400).json({ error: "mode must be plan, manual, auto, or bypass" });
+      return;
+    }
+    const change = session.permissionManager.setMode(mode);
+    await saveSession(session);
+    response.json({
+      mode: change.mode,
+      previousMode: change.previousMode,
+      changed: change.changed,
+      interrupted: change.interrupted,
+    });
+  });
+
+  app.post("/api/sessions/:id/permissions/:requestId", (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const decision = request.body?.decision;
+    if (decision !== "allow" && decision !== "deny") {
+      response.status(400).json({ error: "decision must be allow or deny" });
+      return;
+    }
+    const resolved = session.permissionManager.resolve(
+      session.id,
+      request.params.requestId,
+      decision as PermissionDecision,
+    );
+    if (!resolved) {
+      response.status(404).json({ error: "Permission request not found" });
+      return;
+    }
+    response.json({ resolved: true, decision });
   });
 
   app.get("/api/sessions/:id", (request, response) => {
@@ -685,7 +785,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
       id: session.id,
       busy: session.busy,
       modelId: session.modelId,
+      permissionMode: session.permissionManager.getMode(),
       model: effectiveLlm.model,
+      thinkingLevel: effectiveLlm.thinkingLevel ?? (effectiveLlm.reasoning ? "medium" : "off"),
       contextWindow: resolved.contextWindow,
       capabilities: effectiveLlm.capabilities,
       messages: session.messages
@@ -778,6 +880,11 @@ export function createAgentServer(options: AgentServerOptions): Express {
           response.write(`${JSON.stringify(payload)}\n`);
         }
       };
+      const permissionTurn = session.permissionManager.beginTurn(
+        session.id,
+        (request) => send(safeEvent({ type: "permission_required", request })),
+        abortController.signal,
+      );
       send({
         type: "user",
         content: input.displayPrompt,
@@ -797,8 +904,17 @@ export function createAgentServer(options: AgentServerOptions): Express {
           String(request.params.id),
           operationScope,
         ) as Tool;
-        // Use per-session model if set, otherwise fall back to server default
-        const effectiveLlm = session.llmOverride ?? options.llm;
+        // Use the per-session model and thinking level, otherwise fall back to
+        // the server default. A /think command is applied before the first
+        // model request and is retained for subsequent messages in this session.
+        const sessionLlm = session.llmOverride ?? options.llm;
+        const effectiveLlm = input.thinkingLevel
+          ? withThinkingLevel(sessionLlm, input.thinkingLevel)
+          : sessionLlm;
+        if (input.thinkingLevel) {
+          session.llmOverride = effectiveLlm;
+          session.thinkingLevel = effectiveLlm.thinkingLevel;
+        }
         // Build the tool set, optionally including the subagent tool
         const baseToolProvider: ToolProvider = () => [...resolveToolProvider(tools), documentTool];
         const enableSubagent = options.subagentEnabled || (options.subagentProfiles && options.subagentProfiles.length > 0);
@@ -812,6 +928,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
                 preprocessors: options.preprocessors ?? [],
                 signal: abortController.signal,
                 onSubagentEvent: (subEvent: import("./subagent/types.ts").SubagentEvent) => send(safeEvent(subEvent)),
+                permissionTurn,
               };
               return [
                 ...base,
@@ -831,6 +948,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
             chat: options.chat,
             userContent,
             signal: abortController.signal,
+            permissionTurn,
             prepareNextTurn: options.prepareNextTurn,
             onEvent: (event) => {
               send(safeEvent(event));
@@ -842,7 +960,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
             },
           },
         );
-        await sessionStore.save(session);
+        await saveSession(session);
       } catch (err) {
         const currentUserContent: ContentPart[] | string = userContent ?? input.modelPrompt;
         if (session.messages.length === 0 || session.messages[session.messages.length - 1]?.role !== "user") {
@@ -851,7 +969,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
             { role: "user", content: currentUserContent },
           ];
         }
-        await sessionStore.save(session);
+        await saveSession(session);
         if (isAbortError(err)) {
           send({ type: "aborted", message: "已停止生成" });
         } else {
@@ -859,6 +977,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
           send({ type: "error", message, retryable: isRetryableError(message) });
         }
       } finally {
+        permissionTurn.close();
         request.off("close", onClientClose);
         session.busy = false;
         if (!response.writableEnded) response.end();
@@ -889,35 +1008,6 @@ async function startServer(): Promise<void> {
     throw error;
   });
 
-  // ─ Thought-intensity-aware prepareNextTurn wrapper ────────────────────────
-  const wrappedPrepareNextTurn = async (context: {
-    turn: number;
-    currentLlm: LlmConfig;
-    assistantMessage: AssistantMessage;
-    toolResults: ToolResultMessage[];
-    messages: AgentMessage[],
-  }) => {
-    // Check the latest user message for /think:<level> command
-    const lastUserMsg = context.messages
-      .reverse()
-      .find((m) => m.role === "user");
-
-    if (lastUserMsg) {
-      const content = typeof lastUserMsg.content === "string"
-        ? lastUserMsg.content
-        : contentAsString(lastUserMsg.content);
-      const intensity = parseThinkingIntensityCommand(content);
-
-      if (intensity) {
-        const newLlm = buildIntenseLlm(context.currentLlm, intensity);
-        console.log(`[Thought intensity switched] ${context.currentLlm.model} → ${newLlm.model} (${intensityToDisplay(intensity)})`);
-        return { llm: newLlm };
-      }
-    }
-
-    return undefined;  // No update from this layer
-  };
-
   let app: Express;
   try {
     app = createAgentServer({
@@ -932,7 +1022,6 @@ async function startServer(): Promise<void> {
       subagentEnabled: process.env.MINI_AGENT_SUBAGENT !== "0",
       subagentProfiles: defaultProfiles,
       autoSubagent: loadAutoSubagentOptionsFromEnv(),
-      prepareNextTurn: wrappedPrepareNextTurn,  // ─ thought-intensity support ─
     });
   } catch (error) {
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);

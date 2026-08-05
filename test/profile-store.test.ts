@@ -158,6 +158,18 @@ describe("saveProfileStore + loadProfileStore — round-trip", () => {
     assert.ok("new" in loaded.profiles);
     assert.ok(!("old" in loaded.profiles));
   });
+
+  it("round-trips an optional thinking level", async () => {
+    const store = makeStore({
+      activeProfile: "reasoning",
+      profiles: {
+        reasoning: { ...SAMPLE_PROFILE, thinkingLevel: "high" },
+      },
+    });
+    await saveProfileStore(store, storePath);
+    const loaded = await loadProfileStore(storePath);
+    assert.equal(loaded.profiles.reasoning?.thinkingLevel, "high");
+  });
 });
 
 // ─── loadProfileStore — validation errors ─────────────────────────────────────

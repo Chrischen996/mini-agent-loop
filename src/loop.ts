@@ -5,7 +5,12 @@ import {
   estimateContextTokens,
   type ContextManagerOptions,
 } from "./context.ts";
-import type { PermissionRequest } from "./permissions.ts";
+import {
+  PermissionModeChangedError,
+  type PermissionMode,
+  type PermissionRequest,
+  type PermissionTurnContext,
+} from "./permissions.ts";
 import {
   completeChat,
   isAbortError,
@@ -17,6 +22,7 @@ import {
   type RetryableErrorType,
 } from "./llm/index.ts";
 import { resolveModel } from "./models.ts";
+import { buildIntenseLlm, parseThinkingIntensityPrompt } from "./think-intensity.ts";
 import type { MessagePreprocessor } from "./preprocessors/index.ts";
 import {
   decideAutoSubagent,
@@ -59,8 +65,6 @@ export type TurnContext = {
   messages: AgentMessage[];
 };
 
-export type PermissionMode = "plan" | "manual" | "auto" | "bypass";
-
 export type AgentLoopOptions = {
   llm: LlmConfig;
   tools: ToolProvider;
@@ -87,6 +91,8 @@ export type AgentLoopOptions = {
   /** Context compaction settings for long-running sessions. */
   context?: ContextManagerOptions;
   authorizeTool?: (tool: Tool, args: Record<string, unknown>, signal?: AbortSignal) => Promise<void>;
+  /** Immutable permission snapshot shared by the whole turn. */
+  permissionTurn?: PermissionTurnContext;
   prepareNextTurn?: (context: TurnContext) => NextTurnUpdate | void | Promise<NextTurnUpdate | void>;
   /**
    * When true, independent tool calls from a single assistant response
@@ -108,7 +114,13 @@ export type LoopEvent =
   | { type: "max_turns"; maxTurns: number; messages: AgentMessage[] }
   | { type: "tool_start"; call: ToolCall }
   | { type: "tool_end"; call: ToolCall; result: ToolResult }
-  | { type: "aborted"; messages: AgentMessage[] }
+  | {
+      type: "aborted";
+      messages: AgentMessage[];
+      reason?: "permission_mode_changed";
+      previousMode?: PermissionMode;
+      permissionMode?: PermissionMode;
+    }
   | { type: "permission_required"; request: PermissionRequest }
   | { type: "done"; messages: AgentMessage[] }
   | {
@@ -127,13 +139,60 @@ export type LoopEvent =
     }
   | SubagentEvent;
 
+const PERMISSION_MODE_MARKER = "\n\n---\n\n[MINI_AGENT_PERMISSION_MODE]\n";
+
 /** Mode-specific suffix appended to the system prompt. */
 const MODE_SUFFIX: Record<PermissionMode, string> = {
-  plan: "\n\n---\n\n**当前权限模式：计划模式 (plan)**\n我当前处于计划模式，无权限改代码。\n在此模式下，写入操作（write, edit 等）和危险的 bash 命令会被直接拒绝；像 find / grep / head / ls 这样的只读 shell 命令可以直接执行。\n请先输出执行计划，不要尝试直接改文件。用户确认后请切换到 manual/auto/bypass 再执行。",
-  manual: "\n\n---\n\n**当前权限模式：手动模式 (manual)**\n每个工具调用都需要用户明确批准后才会执行。\n请在调用工具前说明意图，并等待用户确认。",
-  auto: "",
-  bypass: "",
+  plan: "mode=plan\n**当前权限模式：计划模式 (plan)**\n我当前处于计划模式，无权限改代码。\n执行策略：只允许本地只读工具和只读 bash；写入、危险 bash、MCP 工具会被运行时硬拒绝。先输出计划，不要尝试修改文件。",
+  manual: "mode=manual\n**当前权限模式：手动模式 (manual)**\n执行策略：每一个工具调用都必须等待用户明确批准，包括 read、bash 和 MCP 工具。",
+  auto: "mode=auto\n**当前权限模式：自动模式 (auto)**\n执行策略：本地安全读取工具自动执行；bash、写入、危险操作和 MCP 工具需要用户批准。",
+  bypass: "mode=bypass\n**当前权限模式：绕过模式 (bypass)**\n执行策略：不显示审批并直接执行所有已注册工具，但工具自身的 workspace/path sandbox 仍然有效。",
 };
+
+function applyPermissionModePrompt(messages: AgentMessage[], mode: PermissionMode): void {
+  const system = messages[0];
+  if (!system || system.role !== "system" || typeof system.content !== "string") return;
+  const base = system.content.split(PERMISSION_MODE_MARKER, 1)[0]!.trimEnd();
+  system.content = `${base}${PERMISSION_MODE_MARKER}${MODE_SUFFIX[mode]}`;
+}
+
+function emitAborted(
+  onEvent: ((event: LoopEvent) => void) | undefined,
+  messages: AgentMessage[],
+  permissionTurn?: PermissionTurnContext,
+): void {
+  const reason = permissionTurn?.signal.reason;
+  if (reason instanceof PermissionModeChangedError) {
+    onEvent?.({
+      type: "aborted",
+      messages,
+      reason: "permission_mode_changed",
+      previousMode: reason.previousMode,
+      permissionMode: reason.mode,
+    });
+    return;
+  }
+  onEvent?.({ type: "aborted", messages });
+}
+
+function mergeLoopSignals(...signals: (AbortSignal | undefined)[]): {
+  signal?: AbortSignal;
+  cleanup: () => void;
+} {
+  const active = signals.filter((value): value is AbortSignal => Boolean(value));
+  if (active.length === 0) return { cleanup: () => {} };
+  if (active.length === 1) return { signal: active[0], cleanup: () => {} };
+  const controller = new AbortController();
+  const cleanups = active.map((signal) => {
+    const abort = () => {
+      if (!controller.signal.aborted) controller.abort(signal.reason);
+    };
+    if (signal.aborted) abort();
+    signal.addEventListener("abort", abort, { once: true });
+    return () => signal.removeEventListener("abort", abort);
+  });
+  return { signal: controller.signal, cleanup: () => cleanups.forEach((remove) => remove()) };
+}
 
 export function buildSystemPrompt(mode?: PermissionMode): string {
   const base = [
@@ -151,6 +210,10 @@ export function buildSystemPrompt(mode?: PermissionMode): string {
   "- `codebase_search` — search an opened external repository and return commit/file/line evidence.",
   "- `codebase_read` — read numbered source lines from an opened external repository.",
   "- `codebase_explain` — ask the optional DeepWiki semantic provider; it may be unavailable.",
+  "- `web_search` — search the web through the pi-web-access provider chain and return cited sources.",
+  "- `fetch_content` — fetch readable/raw web content or workspace-local media; use `get_search_content` for stored slices.",
+  "- `get_search_content` — retrieve bounded content or matching passages from a previous web access call.",
+  "- `source_check` — verify a claim against web sources and return structured passages.",
   "- `subagent` — spawn an independent sub-agent to handle a focused sub-task with its own context and tools.",
   "- `subagent_batch` — run multiple sub-agents in parallel. Each task executes concurrently and results are collected together.",
   "",
@@ -205,7 +268,9 @@ export function buildSystemPrompt(mode?: PermissionMode): string {
   "- Use --- to separate major topics",
   "- Keep paragraphs concise (2-3 sentences max)",
 ];
-  const modeSuffix = mode !== undefined ? (MODE_SUFFIX[mode] ?? "") : "";
+  const modeSuffix = mode !== undefined
+    ? `${PERMISSION_MODE_MARKER}${MODE_SUFFIX[mode] ?? ""}`
+    : "";
   return base.join("\n") + modeSuffix;
 }
 
@@ -291,12 +356,13 @@ export async function runAgentLoop(
   userText: string,
   options: AgentLoopOptions,
 ): Promise<AgentMessage[]> {
-  const { systemPrompt, permissionMode, ...turnOptions } = options;
-  const prompt = systemPrompt ?? buildSystemPrompt(permissionMode);
+  const { systemPrompt, permissionMode, permissionTurn, ...turnOptions } = options;
+  const activePermissionMode = permissionTurn?.mode ?? permissionMode;
+  const prompt = systemPrompt ?? buildSystemPrompt(activePermissionMode);
   return runAgentTurn(
-    createAgentHistory(prompt, permissionMode),
+    createAgentHistory(prompt, activePermissionMode),
     userText,
-    turnOptions,
+    { ...turnOptions, permissionMode: activePermissionMode, permissionTurn },
   );
 }
 
@@ -305,8 +371,24 @@ export async function runAgentTurn(
   userText: string,
   options: AgentTurnOptions,
 ): Promise<AgentMessage[]> {
+  const merged = mergeLoopSignals(options.permissionTurn?.signal, options.signal);
+  try {
+    return await runAgentTurnInternal(history, userText, {
+      ...options,
+      signal: merged.signal,
+    });
+  } finally {
+    merged.cleanup();
+  }
+}
+
+async function runAgentTurnInternal(
+  history: AgentMessage[],
+  userText: string,
+  options: AgentTurnOptions,
+): Promise<AgentMessage[]> {
   const {
-    llm: initialLlm,
+    llm: configuredLlm,
     tools,
     maxTurns = 30,
     chat: completeChat,
@@ -318,13 +400,26 @@ export async function runAgentTurn(
     authorizeTool,
     parallelToolExecution = false,
     permissionMode,
+    permissionTurn,
   } = options;
+  const parsedThinking = parseThinkingIntensityPrompt(userText);
+  const initialLlm = parsedThinking.intensity
+    ? buildIntenseLlm(configuredLlm, parsedThinking.intensity)
+    : configuredLlm;
+  const effectiveUserText = parsedThinking.prompt;
   const useInjectedChat = options.chat !== undefined;
+  const activePermissionMode = permissionTurn?.mode ?? permissionMode;
+  const activeSignal = signal ?? permissionTurn?.signal;
+  const executeTool = async (tool: Tool, args: Record<string, unknown>): Promise<ToolResult> => {
+    if (permissionTurn) return permissionTurn.execute(tool, args, activeSignal);
+    await authorizeTool?.(tool, args, signal);
+    return tool.execute(args, signal);
+  };
   let currentLlm = initialLlm;
   let currentContext = context;
 
   const preprocessContext = {
-    userPrompt: userText,
+    userPrompt: effectiveUserText,
     targetModel: {
       ...resolveModel(currentLlm.model, currentLlm.baseUrl),
       capabilities: currentLlm.capabilities,
@@ -334,7 +429,7 @@ export async function runAgentTurn(
     [
       {
         role: "user",
-        content: userContent ?? userText ?? "",
+        content: userContent ?? effectiveUserText ?? "",
       },
     ],
     preprocessors,
@@ -342,16 +437,8 @@ export async function runAgentTurn(
   );
   const messages: AgentMessage[] = [...compactHistory(history, currentContext), ...initialBatch];
 
-  // Inject permission mode notification for custom system prompts
-  if (permissionMode === "plan" && messages[0]?.role === "system") {
-    const currentSystem = messages[0].content;
-    if (typeof currentSystem === "string" && !currentSystem.includes("计划模式")) {
-      messages[0] = {
-        ...messages[0],
-        content: currentSystem + MODE_SUFFIX.plan,
-      };
-    }
-  }
+  // Keep the model's active mode synchronized when a session changes modes.
+  if (activePermissionMode !== undefined) applyPermissionModePrompt(messages, activePermissionMode);
   let overflowRetries = 0;
   let emptyAssistantResponses = 0;
   let autoSubagentAttempted = false;
@@ -399,6 +486,15 @@ export async function runAgentTurn(
     turn: number,
     usage?: StreamChatUsage,
   ): Promise<"done" | "continue" | "aborted"> {
+    try {
+      permissionTurn?.assertCurrent();
+    } catch (err) {
+      if (isAbortError(err)) {
+        emitAborted(onEvent, messages, permissionTurn);
+        return "aborted";
+      }
+      throw err;
+    }
     const calls = assistant.toolCalls ?? [];
 
     // ── No tool calls ──────────────────────────────────────────────
@@ -448,8 +544,7 @@ export async function runAgentTurn(
             return { call, result: { content: `Unknown tool: ${call.name}`, isError: true } };
           }
           const args = validateToolArgs(tool, call.arguments);
-          await authorizeTool?.(tool, args, signal);
-          const result = await tool.execute(args, signal);
+          const result = await executeTool(tool, args);
           return { call, result };
         }),
       );
@@ -487,7 +582,7 @@ export async function runAgentTurn(
 
       if (wasAborted) {
         messages.push(...toolMessages);
-        onEvent?.({ type: "aborted", messages });
+        emitAborted(onEvent, messages, permissionTurn);
         return "aborted";
       }
     } else {
@@ -497,9 +592,9 @@ export async function runAgentTurn(
       const completedToolIds = new Set<string>();
 
       for (const call of calls) {
-        if (signal?.aborted) {
+        if (activeSignal?.aborted) {
           appendStoppedToolResults(messages, calls, completedToolIds, onEvent);
-          onEvent?.({ type: "aborted", messages });
+          emitAborted(onEvent, messages, permissionTurn);
           return "aborted";
         }
         onEvent?.({ type: "tool_start", call });
@@ -521,8 +616,7 @@ export async function runAgentTurn(
           } else {
             try {
               const args = validateToolArgs(tool, call.arguments);
-              await authorizeTool?.(tool, args, signal);
-              result = await tool.execute(args, signal);
+              result = await executeTool(tool, args);
             } catch (err) {
               if (isAbortError(err)) {
                 result = { content: "已停止", isError: true };
@@ -537,7 +631,7 @@ export async function runAgentTurn(
                 onEvent?.({ type: "tool_end", call, result });
                 messages.push(...toolMessages);
                 appendStoppedToolResults(messages, calls, completedToolIds, onEvent);
-                onEvent?.({ type: "aborted", messages });
+                emitAborted(onEvent, messages, permissionTurn);
                 return "aborted";
               }
               result = {
@@ -560,20 +654,48 @@ export async function runAgentTurn(
       }
     }
 
-    const processedToolMessages = (await applyPreprocessors(
-      toolMessages,
-      preprocessors,
-      preprocessContext,
-    )) as ToolResultMessage[];
+    let processedToolMessages: ToolResultMessage[];
+    try {
+      permissionTurn?.assertCurrent();
+      processedToolMessages = (await applyPreprocessors(
+        toolMessages,
+        preprocessors,
+        preprocessContext,
+      )) as ToolResultMessage[];
+      permissionTurn?.assertCurrent();
+    } catch (err) {
+      if (!isAbortError(err)) throw err;
+      messages.push(...toolMessages);
+      emitAborted(onEvent, messages, permissionTurn);
+      return "aborted";
+    }
     messages.push(...processedToolMessages);
     await prepareNextTurn(turn, assistant, processedToolMessages);
+    try {
+      permissionTurn?.assertCurrent();
+    } catch (err) {
+      if (isAbortError(err)) {
+        emitAborted(onEvent, messages, permissionTurn);
+        return "aborted";
+      }
+      throw err;
+    }
     return "continue";
   }
 
   for (let turn = 1; turn <= maxTurns; turn++) {
-    if (signal?.aborted) {
-      onEvent?.({ type: "aborted", messages });
+    if (activeSignal?.aborted) {
+      emitAborted(onEvent, messages, permissionTurn);
       return messages;
+    }
+    try {
+      permissionTurn?.assertCurrent();
+    } catch (err) {
+      if (isAbortError(err)) {
+        emitAborted(onEvent, messages, permissionTurn);
+        return messages;
+      }
+      throw err;
     }
     const turnTools = resolveToolProvider(tools);
 
@@ -584,8 +706,8 @@ export async function runAgentTurn(
       const autoPolicy = options.autoSubagent;
       const subagentTool = turnTools.find((tool) => tool.name === "subagent");
       if (autoPolicy?.enabled && subagentTool) {
-        const decision = decideAutoSubagent(userText, autoPolicy);
-        if (decision.shouldDelegate && !signal?.aborted) {
+        const decision = decideAutoSubagent(effectiveUserText, autoPolicy);
+        if (decision.shouldDelegate && !activeSignal?.aborted) {
           const properties = subagentTool.parameters.properties;
           const supportsProfile = Boolean(
             properties &&
@@ -596,7 +718,7 @@ export async function runAgentTurn(
             id: `auto_subagent_${randomUUID()}`,
             name: "subagent",
             arguments: {
-              task: userText,
+              task: effectiveUserText,
               ...(supportsProfile ? { profile: decision.profile } : {}),
               ...(autoPolicy.model ? { model: autoPolicy.model } : {}),
               ...(autoPolicy.maxTurns ? { maxTurns: autoPolicy.maxTurns } : {}),
@@ -615,10 +737,9 @@ export async function runAgentTurn(
           let wasAborted = false;
           try {
             const args = validateToolArgs(subagentTool, call.arguments);
-            await authorizeTool?.(subagentTool, args, signal);
-            result = await subagentTool.execute(args, signal);
+            result = await executeTool(subagentTool, args);
           } catch (error) {
-            wasAborted = isAbortError(error) || Boolean(signal?.aborted);
+            wasAborted = isAbortError(error) || Boolean(activeSignal?.aborted);
             result = isAbortError(error)
               ? { content: "已停止", isError: true }
               : {
@@ -642,8 +763,8 @@ export async function runAgentTurn(
           messages.push(...processedToolMessages);
           onEvent?.({ type: "tool_end", call, result });
 
-          if (wasAborted || signal?.aborted) {
-            onEvent?.({ type: "aborted", messages });
+          if (wasAborted || activeSignal?.aborted) {
+            emitAborted(onEvent, messages, permissionTurn);
             return messages;
           }
           await prepareNextTurn(1, assistant, processedToolMessages);
@@ -660,7 +781,9 @@ export async function runAgentTurn(
     try {
       if (useInjectedChat) {
         // Injected chat (tests) stays non-streaming for deterministic offline coverage.
+        permissionTurn?.assertCurrent();
         assistant = await completeChat!(currentLlm, messages, turnTools);
+        permissionTurn?.assertCurrent();
       } else {
         assistant = {
           role: "assistant",
@@ -669,7 +792,7 @@ export async function runAgentTurn(
         let sawFinal = false;
         let streamed = "";
         try {
-          for await (const event of streamChat(currentLlm, messages, turnTools, signal)) {
+          for await (const event of streamChat(currentLlm, messages, turnTools, activeSignal)) {
             if (event.type === "text_delta") {
               if (event.kind === "answer") streamed += event.text;
               onEvent?.({ type: "assistant_delta", text: event.text, kind: event.kind });
@@ -686,7 +809,7 @@ export async function runAgentTurn(
               messages.push(assistant);
               onEvent?.({ type: "assistant", message: assistant });
             }
-            onEvent?.({ type: "aborted", messages });
+            emitAborted(onEvent, messages, permissionTurn);
             return messages;
           }
           throw err;
@@ -697,7 +820,7 @@ export async function runAgentTurn(
       }
     } catch (err) {
       if (isAbortError(err)) {
-        onEvent?.({ type: "aborted", messages });
+        emitAborted(onEvent, messages, permissionTurn);
         return messages;
       }
       const maxRetries = currentContext?.maxCompactionRetries ?? 1;
@@ -722,8 +845,18 @@ export async function runAgentTurn(
       throw err;
     }
 
-    // Shared post-processing for both streaming and injected-chat paths
-    const action = await handleAssistantResponse(assistant, turnTools, turn, lastUsage);
+    // Shared post-processing for both streaming and injected-chat paths.
+    let action: "done" | "continue" | "aborted";
+    try {
+      permissionTurn?.assertCurrent();
+      action = await handleAssistantResponse(assistant, turnTools, turn, lastUsage);
+    } catch (err) {
+      if (isAbortError(err)) {
+        emitAborted(onEvent, messages, permissionTurn);
+        return messages;
+      }
+      throw err;
+    }
     if (action === "done" || action === "aborted") return messages;
   }
 

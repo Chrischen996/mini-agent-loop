@@ -2,6 +2,9 @@
 
 import type { LoopEvent } from "../loop.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
+import { PERMISSION_MODES, type PermissionMode } from "../permissions.ts";
+
+export type { PermissionMode } from "../permissions.ts";
 
 export type MessageRole = "user" | "assistant" | "tool";
 
@@ -11,10 +14,6 @@ export type ToolState = "running" | "done" | "error";
 export type ThinkingDisplayMode = "hidden" | "summary" | "full";
 
 export const THINKING_MODE_ORDER: ThinkingDisplayMode[] = ["hidden", "summary", "full"];
-
-export type PermissionMode = "plan" | "manual" | "auto" | "bypass";
-
-export const PERMISSION_MODE_ORDER: PermissionMode[] = ["plan", "manual", "auto", "bypass"];
 
 export type ToolCardState = {
   id: string;
@@ -53,8 +52,15 @@ export type SubagentInnerEvent = {
   detail?: string;
 };
 
+export type ImageAttachment = {
+  path: string;
+  mimeType: string;
+  size?: number;
+  data?: string; // base64
+};
+
 export type ChatMessage =
-  | { kind: "user"; text: string }
+  | { kind: "user"; text: string; images?: ImageAttachment[] }
   | { kind: "assistant"; text: string; reasoning?: string }
   | { kind: "tool_call"; id: string; name: string; args: string; rawArgs: Record<string, unknown>; status: ToolState; result?: string; durationMs?: number; startedAt: number }
   | { kind: "subagent_call"; id: string; task: string; profile?: string; depth: number; status: ToolState; result?: string; turns?: number; totalTokens?: number; innerEvents: SubagentInnerEvent[]; toolCallCount: number; startedAt: number; durationMs?: number; expanded: boolean }
@@ -77,6 +83,8 @@ export type TuiState = {
   modelName: string;
   usedTokens: number;
   contextTokens: number;
+  /** Pending images attached via /image command. */
+  pendingImages: ImageAttachment[];
   /** Global default for how thinking blocks are shown. */
   thinkingMode: ThinkingDisplayMode;
   /** Currently active permission mode. */
@@ -93,18 +101,23 @@ export type TuiState = {
 };
 
 export type TuiAction =
-  | { type: "USER_MESSAGE"; text: string }
+  | { type: "USER_MESSAGE"; text: string; images?: ImageAttachment[] }
   | { type: "LOOP_EVENT"; event: LoopEvent }
   | { type: "MODEL_CHANGED"; modelName: string }
+  | { type: "SET_STATUS"; status: string }
   | { type: "RESET" }
   | { type: "TOGGLE_THINKING_MODE" }
   | { type: "TOGGLE_PERMISSION_MODE" }
+  | { type: "SET_PERMISSION_MODE"; mode: PermissionMode }
   | { type: "CLEAR_PENDING_PERMISSION" }
   | { type: "TOGGLE_MESSAGE_THINKING"; index?: number }
   | { type: "SET_FOCUSED_MESSAGE"; index: number }
   | { type: "FOCUS_NEXT_REASONING"; direction: 1 | -1 }
   | { type: "SUBAGENT_EVENT"; event: SubagentEvent }
-  | { type: "TOGGLE_SUBAGENT_EXPAND"; id: string };
+  | { type: "TOGGLE_SUBAGENT_EXPAND"; id: string }
+  | { type: "ADD_PENDING_IMAGE"; image: ImageAttachment }
+  | { type: "CLEAR_PENDING_IMAGES" }
+  | { type: "ATTACHMENT_ERROR"; message: string };
 
 function shortPreview(s: string, max = 200): string {
   const oneLine = s.replace(/\s+/g, " ").trim();
@@ -168,6 +181,7 @@ export function createInitialState(modelName: string): TuiState {
     pendingPermission: undefined,
     expandedThinking: [],
     focusedMessageIndex: -1,
+    pendingImages: [],
   };
 }
 
@@ -186,7 +200,11 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     case "USER_MESSAGE":
       return {
         ...state,
-        messages: [...state.messages, { kind: "user", text: action.text }],
+        messages: [...state.messages, {
+          kind: "user",
+          text: action.text,
+          ...(action.images?.length ? { images: action.images } : {}),
+        }],
         goal: state.goal || action.text,
         busy: true,
         status: "思考中...",
@@ -203,6 +221,9 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
 
     case "MODEL_CHANGED":
       return { ...state, modelName: action.modelName, status: "就绪", usedTokens: 0, contextTokens: 0 };
+
+    case "SET_STATUS":
+      return { ...state, status: action.status };
 
     case "CLEAR_PENDING_PERMISSION":
       return {
@@ -226,8 +247,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     }
 
     case "TOGGLE_PERMISSION_MODE": {
-      const current = PERMISSION_MODE_ORDER.indexOf(state.permissionMode);
-      const next = PERMISSION_MODE_ORDER[(current + 1) % PERMISSION_MODE_ORDER.length] ?? "auto";
+      const current = PERMISSION_MODES.indexOf(state.permissionMode);
+      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "auto";
       const modeLabel =
         next === "plan" ? "计划" :
         next === "manual" ? "手动" :
@@ -235,6 +256,19 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...state,
         permissionMode: next,
+        status: `权限模式: ${modeLabel}`,
+      };
+    }
+
+    case "SET_PERMISSION_MODE": {
+      const modeLabel =
+        action.mode === "plan" ? "计划" :
+        action.mode === "manual" ? "手动" :
+        action.mode === "auto" ? "自动" : "绕过";
+      return {
+        ...state,
+        permissionMode: action.mode,
+        pendingPermission: undefined,
         status: `权限模式: ${modeLabel}`,
       };
     }
@@ -538,5 +572,28 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         }),
       };
     }
+
+    case "ADD_PENDING_IMAGE": {
+      const exists = state.pendingImages.some((img) => img.path === action.image.path);
+      if (exists) return state;
+      return {
+        ...state,
+        pendingImages: [...state.pendingImages, action.image],
+        status: `已添加图片: ${action.image.path.split("/").pop() ?? action.image.path}`,
+      };
+    }
+
+    case "CLEAR_PENDING_IMAGES":
+      return { ...state, pendingImages: [] };
+
+    case "ATTACHMENT_ERROR":
+      return {
+        ...state,
+        messages: [...state.messages, { kind: "error", text: action.message }],
+        status: "图片添加失败",
+      };
+
+    default:
+      return state;
   }
 }

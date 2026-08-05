@@ -18,6 +18,7 @@ import type { Tool } from "./types.ts";
 import { createRepositoryStoreFromEnv, RepositoryStore } from "../codebase/repository-store.ts";
 import { createCodebaseTools } from "../codebase/tools.ts";
 import type { CodebaseSemanticProvider } from "../codebase/deepwiki-provider.ts";
+import { createWebAccessTools } from "../web-access/index.ts";
 
 export type { JsonSchema, Tool, ToolResult } from "./types.ts";
 export type { ReadArgs } from "./read.ts";
@@ -27,6 +28,7 @@ export { createBashTool } from "./bash.ts";
 export { createReadTool } from "./read.ts";
 export { createWriteTool } from "./write.ts";
 export { createDocumentEditTool } from "./document-edit.ts";
+export { createWebAccessTools } from "../web-access/index.ts";
 export {
   createCopyTool,
   createDeleteTool,
@@ -41,7 +43,18 @@ export {
   createSearchTool,
 } from "./workspace-tools.ts";
 
-export type ToolName = "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls" | "codebase_open" | "codebase_search" | "codebase_read" | "codebase_explain" | "subagent";
+export type ToolName =
+  | "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls"
+  | "codebase_open" | "codebase_search" | "codebase_read" | "codebase_explain"
+  | "web_search" | "fetch_content" | "get_search_content" | "source_check"
+  | "subagent";
+
+const WEB_ACCESS_TOOL_NAMES = new Set<ToolName>([
+  "web_search",
+  "fetch_content",
+  "get_search_content",
+  "source_check",
+]);
 
 export type ToolSelection = {
   tools?: ToolName[];
@@ -74,6 +87,7 @@ export function createTools(cwd: string, options: ToolSelection & {
   codebase?: boolean;
   codebaseStore?: RepositoryStore;
   codebaseProvider?: CodebaseSemanticProvider;
+  webAccess?: boolean;
 } = {}): Tool[] {
   const tools = createDefaultTools(cwd, options);
   const explicitSelection = options.tools;
@@ -84,6 +98,13 @@ export function createTools(cwd: string, options: ToolSelection & {
       options.codebaseStore ?? createRepositoryStoreFromEnv(),
       { semanticProvider: options.codebaseProvider },
     ).filter((tool) => selectedCodebase.includes(tool.name as ToolName) && !options.excludeTools?.includes(tool.name as ToolName)));
+  }
+  if (options.webAccess !== false) {
+    const selectedWeb = explicitSelection
+      ? explicitSelection.filter((name) => WEB_ACCESS_TOOL_NAMES.has(name))
+      : [...WEB_ACCESS_TOOL_NAMES];
+    tools.push(...createWebAccessTools(cwd).filter((tool) =>
+      selectedWeb.includes(tool.name as ToolName) && !options.excludeTools?.includes(tool.name as ToolName)));
   }
   return tools;
 }

@@ -9,6 +9,7 @@ import { contentAsString } from "../src/content.ts";
 import { makeLlmConfig, type ChatFn } from "../src/llm/index.ts";
 import type { Tool, ToolResult } from "../src/tools/types.ts";
 import type { AssistantMessage } from "../src/types.ts";
+import { PermissionManager } from "../src/permissions.ts";
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -832,6 +833,44 @@ describe("createSubagentTool", () => {
       assert.equal(final.role, "assistant");
       if (final.role === "assistant") {
         assert.ok(final.content.includes("Parent received"));
+      }
+    });
+
+    it("inherits the exact parent permission turn in nested tool execution", async () => {
+      const { runAgentLoop } = await import("../src/loop.ts");
+      const manager = new PermissionManager("manual");
+      const requests: string[] = [];
+      const permissionTurn = manager.beginTurn("subagent-parent", (request) => {
+        requests.push(request.tool);
+        manager.resolve("subagent-parent", request.id, "allow");
+      });
+      const subagentTool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [createEchoTool()],
+        chat: createToolThenAnswerChat("echo", { message: "nested" }, "nested done"),
+        permissionTurn,
+      });
+      let parentCalls = 0;
+      try {
+        const messages = await runAgentLoop("delegate nested work", {
+          llm: dummyLlm,
+          tools: [subagentTool as Tool],
+          permissionTurn,
+          chat: async () => {
+            parentCalls += 1;
+            return parentCalls === 1
+              ? {
+                  role: "assistant",
+                  content: "",
+                  toolCalls: [{ id: "parent-subagent", name: "subagent", arguments: { task: "echo nested" } }],
+                }
+              : { role: "assistant", content: "parent done" };
+          },
+        });
+        assert.equal(messages.at(-1)?.role, "assistant");
+        assert.deepEqual(requests, ["subagent", "echo"]);
+      } finally {
+        permissionTurn.close();
       }
     });
   });

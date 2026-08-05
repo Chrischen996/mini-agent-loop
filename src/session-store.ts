@@ -2,12 +2,16 @@ import { appendFile, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { AgentMessage } from "./types.ts";
+import type { PermissionMode } from "./permissions.ts";
+import type { ModelThinkingLevel } from "./pi-ai/types.ts";
 
 type SessionCreatedEvent = {
   type: "session_created";
   sessionId: string;
   createdAt: number;
   modelId?: string;
+  thinkingLevel?: ModelThinkingLevel;
+  permissionMode?: PermissionMode;
 };
 
 type SessionSnapshotEvent = {
@@ -15,6 +19,8 @@ type SessionSnapshotEvent = {
   sessionId: string;
   createdAt: number;
   modelId?: string;
+  thinkingLevel?: ModelThinkingLevel;
+  permissionMode?: PermissionMode;
   messages: AgentMessage[];
 };
 
@@ -24,6 +30,8 @@ export type PersistedSession = {
   id: string;
   createdAt: number;
   modelId?: string;
+  thinkingLevel?: ModelThinkingLevel;
+  permissionMode?: PermissionMode;
   messages: AgentMessage[];
 };
 
@@ -94,6 +102,8 @@ export class SessionStore {
               id: parsed.sessionId,
               createdAt: parsed.createdAt,
               modelId: parsed.modelId,
+              thinkingLevel: parsed.thinkingLevel,
+              permissionMode: parsed.permissionMode,
               messages: [],
             };
           } else if (Array.isArray(parsed.messages)) {
@@ -101,6 +111,8 @@ export class SessionStore {
               id: parsed.sessionId,
               createdAt: parsed.createdAt,
               modelId: parsed.modelId ?? current?.modelId,
+              thinkingLevel: parsed.thinkingLevel ?? current?.thinkingLevel,
+              permissionMode: parsed.permissionMode ?? current?.permissionMode,
               messages: parsed.messages,
             };
           }
@@ -153,6 +165,8 @@ export class SessionStore {
       sessionId: session.id,
       createdAt: session.createdAt,
       modelId: session.modelId,
+      thinkingLevel: session.thinkingLevel,
+      permissionMode: session.permissionMode,
     });
     await this.save(session);
   }
@@ -163,6 +177,8 @@ export class SessionStore {
       sessionId: session.id,
       createdAt: session.createdAt,
       modelId: session.modelId,
+      thinkingLevel: session.thinkingLevel,
+      permissionMode: session.permissionMode,
       messages: session.messages,
     });
   }

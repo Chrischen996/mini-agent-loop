@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { PermissionManager } from "../src/permissions.ts";
+import {
+  PermissionManager,
+  PermissionModeChangedError,
+  type PermissionMode,
+} from "../src/permissions.ts";
 import type { Tool } from "../src/tools/types.ts";
 
 const writeTool: Tool = {
@@ -47,6 +51,32 @@ describe("PermissionManager", () => {
     }
   });
 
+  it("treats pi-web-access reads as read-only open-world tools", async () => {
+    const webTool: Tool = {
+      ...writeTool,
+      name: "web_search",
+      source: { kind: "web", package: "pi-web-access" },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    };
+    await new PermissionManager("plan").authorize("session", webTool, { query: "test" }, undefined, () => {
+      throw new Error("plan web search should not request approval");
+    });
+    await new PermissionManager("auto").authorize("session", webTool, { query: "test" }, undefined, () => {
+      throw new Error("auto web search should not request approval");
+    });
+
+    const manual = new PermissionManager("manual");
+    let requestId = "";
+    const pending = manual.authorize("session", webTool, { query: "test" }, undefined, (request) => {
+      requestId = request.id;
+      assert.equal(request.risk, "medium");
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(requestId);
+    manual.resolve("session", requestId, "deny");
+    await assert.rejects(pending, /Permission denied/);
+  });
+
   it("keeps codebase_open behind a medium-risk approval", async () => {
     const manager = new PermissionManager();
     let requestId = "";
@@ -86,6 +116,17 @@ describe("PermissionManager", () => {
     assert.equal(seenRisk, "high");
     manager.resolve("session", requestId, "deny");
     await assert.rejects(pending, /Permission denied/);
+  });
+
+  it("bypass mode allows MCP tools through the shared policy", async () => {
+    const manager = new PermissionManager("bypass");
+    const remoteWrite: Tool = {
+      ...writeTool,
+      source: { kind: "mcp", serverId: "remote", toolName: "write" },
+    };
+    await manager.authorize("session", remoteWrite, {}, undefined, () => {
+      throw new Error("bypass mode must not request MCP approval");
+    });
   });
 
   describe("Permission Modes", () => {
@@ -286,6 +327,52 @@ describe("PermissionManager", () => {
       });
     });
 
+    it("does not reuse an approval after switching modes", async () => {
+      const manager = new PermissionManager("auto");
+      let requestId = "";
+      const args = { path: "same.txt", content: "hello" };
+      const first = manager.authorize("session", writeTool, args, undefined, (request) => {
+        requestId = request.id;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      manager.resolve("session", requestId, "allow");
+      await first;
+
+      manager.setMode("manual");
+      requestId = "";
+      const second = manager.authorize("session", writeTool, args, undefined, (request) => {
+        requestId = request.id;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.ok(requestId);
+      manager.resolve("session", requestId, "deny");
+      await assert.rejects(second, /Permission denied/);
+    });
+
+    it("does not reuse a local approval for an MCP tool with the same name and args", async () => {
+      const manager = new PermissionManager("auto");
+      const args = { path: "same.txt", content: "hello" };
+      let localRequestId = "";
+      const local = manager.authorize("source", writeTool, args, undefined, (request) => {
+        localRequestId = request.id;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      manager.resolve("source", localRequestId, "allow");
+      await local;
+
+      let remoteRequestId = "";
+      const remote = manager.authorize("source", {
+        ...writeTool,
+        source: { kind: "mcp", serverId: "remote", toolName: "write" },
+      }, args, undefined, (request) => {
+        remoteRequestId = request.id;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.ok(remoteRequestId);
+      manager.resolve("source", remoteRequestId, "deny");
+      await assert.rejects(remote, /Permission denied/);
+    });
+
     it("serializes and deserializes state correctly", async () => {
       const manager = new PermissionManager("auto");
       let requestId = "";
@@ -346,6 +433,139 @@ describe("PermissionManager", () => {
       assert.equal(planEvents[0]?.type, "request");
       assert.equal(planEvents[0]?.tool, "write");
       assert.equal(planEvents[1]?.type, "deny");
+    });
+
+    it("enforces the complete four-mode matrix through one turn context", async () => {
+      const makeTool = (kind: "read" | "write" | "bash" | "mcp"): Tool => {
+        if (kind === "bash") return { ...writeTool, name: "bash" };
+        if (kind === "mcp") {
+          return {
+            ...writeTool,
+            name: "read",
+            source: { kind: "mcp", serverId: "matrix", toolName: "read" },
+          };
+        }
+        return { ...writeTool, name: kind };
+      };
+
+      const matrix: Array<{ mode: PermissionMode; kind: "read" | "write" | "bash" | "mcp"; args: Record<string, unknown>; outcome: "allow" | "deny" }> = [
+        { mode: "plan", kind: "read", args: {}, outcome: "allow" },
+        { mode: "plan", kind: "write", args: {}, outcome: "deny" },
+        { mode: "plan", kind: "bash", args: { command: "printf ok" }, outcome: "allow" },
+        { mode: "plan", kind: "bash", args: { command: "rm -rf /tmp/x" }, outcome: "deny" },
+        { mode: "plan", kind: "mcp", args: {}, outcome: "deny" },
+        { mode: "manual", kind: "read", args: {}, outcome: "allow" },
+        { mode: "manual", kind: "write", args: {}, outcome: "allow" },
+        { mode: "manual", kind: "bash", args: { command: "printf ok" }, outcome: "allow" },
+        { mode: "manual", kind: "mcp", args: {}, outcome: "allow" },
+        { mode: "auto", kind: "read", args: {}, outcome: "allow" },
+        { mode: "auto", kind: "write", args: {}, outcome: "allow" },
+        { mode: "auto", kind: "bash", args: { command: "printf ok" }, outcome: "allow" },
+        { mode: "auto", kind: "mcp", args: {}, outcome: "allow" },
+        { mode: "bypass", kind: "read", args: {}, outcome: "allow" },
+        { mode: "bypass", kind: "write", args: {}, outcome: "allow" },
+        { mode: "bypass", kind: "bash", args: { command: "rm -rf /tmp/x" }, outcome: "allow" },
+        { mode: "bypass", kind: "mcp", args: {}, outcome: "allow" },
+      ];
+
+      for (const testCase of matrix) {
+        const manager = new PermissionManager(testCase.mode);
+        const tool = makeTool(testCase.kind);
+        let executions = 0;
+        const executable = { ...tool, execute: async () => { executions += 1; return { content: "ok" }; } };
+        let requestId = "";
+        const turn = manager.beginTurn("matrix", (request) => { requestId = request.id; });
+        const pending = turn.execute(executable, testCase.args);
+        const settled = pending.then(
+          () => ({ ok: true as const }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+        await new Promise((resolve) => setImmediate(resolve));
+        if (requestId) manager.resolve("matrix", requestId, testCase.outcome);
+
+        if (testCase.outcome === "allow") {
+          const result = await settled;
+          assert.equal(result.ok, true, `${testCase.mode}/${testCase.kind} should be allowed`);
+          assert.equal(executions, 1, `${testCase.mode}/${testCase.kind} should execute exactly once`);
+        } else {
+          const result = await settled;
+          assert.equal(result.ok, false, `${testCase.mode}/${testCase.kind} should be denied`);
+          assert.equal(executions, 0, `${testCase.mode}/${testCase.kind} must not execute`);
+        }
+        turn.close();
+      }
+    });
+
+    it("hard-denies Plan MCP calls without entering approval or executing", async () => {
+      const manager = new PermissionManager("plan");
+      const mcpTool: Tool = {
+        ...writeTool,
+        name: "bash",
+        source: { kind: "mcp", serverId: "plan-test", toolName: "search" },
+      };
+      let requestCount = 0;
+      let executionCount = 0;
+      const turn = manager.beginTurn("plan", () => { requestCount += 1; });
+      const pending = turn.execute({ ...mcpTool, execute: async () => { executionCount += 1; return { content: "bad" }; } }, { command: "printf ok" });
+      await assert.rejects(pending, /plan mode/);
+      assert.equal(requestCount, 0);
+      assert.equal(executionCount, 0);
+      turn.close();
+    });
+
+    it("cancels pending approval atomically and prevents the stale tool from starting", async () => {
+      const manager = new PermissionManager("auto");
+      let requestId = "";
+      let executions = 0;
+      const turn = manager.beginTurn("switch", (request) => { requestId = request.id; });
+      const pending = turn.execute({ ...writeTool, execute: async () => { executions += 1; return { content: "stale" }; } }, { path: "stale.txt" });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.ok(requestId);
+      const change = manager.setMode("bypass");
+      assert.deepEqual(change, {
+        changed: true,
+        previousMode: "auto",
+        mode: "bypass",
+        previousRevision: 0,
+        revision: 1,
+        interrupted: true,
+      });
+      await assert.rejects(pending, (error: unknown) => error instanceof PermissionModeChangedError);
+      assert.equal(executions, 0);
+      turn.close();
+    });
+
+    it("cancels an in-flight tool and rejects its late result after a mode switch", async () => {
+      const manager = new PermissionManager("auto");
+      let toolSignal: AbortSignal | undefined;
+      let release: (() => void) | undefined;
+      const turn = manager.beginTurn("in-flight", () => {});
+      const pending = turn.execute({
+        ...writeTool,
+        name: "read",
+        execute: async (_args, signal) => {
+          toolSignal = signal;
+          await new Promise<void>((resolve) => { release = resolve; });
+          return { content: "late" };
+        },
+      }, {});
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.ok(toolSignal);
+      manager.setMode("manual");
+      assert.equal(toolSignal?.aborted, true);
+      release?.();
+      await assert.rejects(pending, (error: unknown) => error instanceof PermissionModeChangedError);
+      turn.close();
+    });
+
+    it("does not interrupt an active turn when setting the same mode", async () => {
+      const manager = new PermissionManager("auto");
+      const turn = manager.beginTurn("same", () => {});
+      const change = manager.setMode("auto");
+      assert.equal(change.changed, false);
+      assert.equal(change.interrupted, false);
+      assert.equal(turn.signal.aborted, false);
+      turn.close();
     });
   });
 });
