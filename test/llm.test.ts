@@ -18,6 +18,29 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("completeChat wire protocol", () => {
+  it("passes the configured thinking level to an OpenAI-compatible reasoning model", async () => {
+    const originalFetch = globalThis.fetch;
+    let requestBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return jsonResponse({ choices: [{ message: { content: "done" } }] });
+    }) as typeof fetch;
+
+    try {
+      const reasoning = makeLlmConfig({
+        apiKey: "reasoning-key",
+        baseUrl: "https://gateway.example/v1",
+        model: "custom-reasoning",
+        reasoning: true,
+        thinkingLevel: "high",
+      });
+      await completeChat(reasoning, [{ role: "user", content: "plan" }]);
+      assert.equal(requestBody?.reasoning_effort, "high");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("uses Agnes AI's documented endpoint and thinking parameter", async () => {
     const originalFetch = globalThis.fetch;
     let requestUrl = "";

@@ -17,11 +17,12 @@ const llm = makeLlmConfig({
 });
 
 describe("agent server", () => {
-  it("does not expose Web permission APIs", async () => {
+  it("exposes session permission mode and approval APIs", async () => {
     const app = createAgentServer({
       llm,
       tools: [],
       chat: async () => ({ role: "assistant", content: "ok" }),
+      permissionMode: "auto",
     });
     const globalMode = await request(app).get("/api/permission-mode");
     assert.equal(globalMode.status, 404);
@@ -29,11 +30,126 @@ describe("agent server", () => {
     const created = await request(app).post("/api/sessions");
     const sessionId = (created.body as { id: string }).id;
     const sessionMode = await request(app).get(`/api/sessions/${sessionId}/permission-mode`);
-    assert.equal(sessionMode.status, 404);
+    assert.equal(sessionMode.status, 200);
+    assert.equal((sessionMode.body as { mode: string }).mode, "auto");
+    const changed = await request(app)
+      .put(`/api/sessions/${sessionId}/permission-mode`)
+      .send({ mode: "manual" });
+    assert.equal(changed.status, 200);
+    assert.equal((changed.body as { mode: string }).mode, "manual");
+    const invalid = await request(app)
+      .put(`/api/sessions/${sessionId}/permission-mode`)
+      .send({ mode: "unknown" });
+    assert.equal(invalid.status, 400);
     const decision = await request(app)
       .post(`/api/sessions/${sessionId}/permissions/request-id`)
       .send({ decision: "allow" });
     assert.equal(decision.status, 404);
+  });
+
+  it("atomically interrupts an active request and persists the new mode", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-permission-switch-"));
+    let releaseModel: (() => void) | undefined;
+    let modelCalls = 0;
+    let nextSystemPrompt = "";
+    let executions = 0;
+    const writeTool: Tool = {
+      name: "write",
+      description: "write",
+      parameters: { type: "object" },
+      execute: async () => {
+        executions += 1;
+        return { content: "written" };
+      },
+    };
+    const app = createAgentServer({
+      llm,
+      tools: [writeTool],
+      permissionMode: "auto",
+      dataDir,
+      chat: async (_config, messages) => {
+        modelCalls += 1;
+        const system = messages.find((message) => message.role === "system");
+        if (modelCalls === 2) {
+          nextSystemPrompt = system && typeof system.content === "string" ? system.content : "";
+        }
+        if (modelCalls === 1) {
+          await new Promise<void>((resolve) => { releaseModel = resolve; });
+          return {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: "stale-write", name: "write", arguments: {} }],
+          };
+        }
+        if (modelCalls === 2) {
+          return {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: "new-write", name: "write", arguments: {} }],
+          };
+        }
+        return { role: "assistant", content: "done" };
+      },
+    });
+
+    try {
+      const created = await request(app).post("/api/sessions");
+      const sessionId = (created.body as { id: string }).id;
+      const responsePromise = new Promise<{ status: number; text: string }>((resolve, reject) => {
+        request(app)
+          .post(`/api/sessions/${sessionId}/messages`)
+          .field("prompt", "write this")
+          .end((error, response) => {
+            if (error) reject(error);
+            else resolve({ status: response.status, text: response.text });
+          });
+      });
+
+      let busy = false;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const session = await request(app).get(`/api/sessions/${sessionId}`);
+        busy = Boolean((session.body as { busy?: boolean }).busy);
+        if (busy) break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      assert.equal(busy, true);
+
+      const changed = await request(app)
+        .put(`/api/sessions/${sessionId}/permission-mode`)
+        .send({ mode: "bypass" });
+      assert.equal(changed.status, 200);
+      assert.deepEqual(changed.body, {
+        mode: "bypass",
+        previousMode: "auto",
+        changed: true,
+        interrupted: true,
+      });
+      releaseModel?.();
+
+      const interrupted = await responsePromise;
+      assert.equal(interrupted.status, 200);
+      const interruptedEvents = interrupted.text.trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+      const aborted = interruptedEvents.find((event) => event.type === "aborted");
+      assert.equal(aborted?.reason, "permission_mode_changed");
+      assert.equal(aborted?.previousMode, "auto");
+      assert.equal(aborted?.permissionMode, "bypass");
+      assert.equal(executions, 0);
+
+      const next = await request(app)
+        .post(`/api/sessions/${sessionId}/messages`)
+        .field("prompt", "continue");
+      assert.equal(next.status, 200);
+      assert.match(nextSystemPrompt, /mode=bypass/);
+      assert.doesNotMatch(nextSystemPrompt, /mode=auto/);
+      assert.equal(executions, 1);
+
+      const restoredApp = createAgentServer({ llm, tools: [], chat: async () => ({ role: "assistant", content: "unused" }), dataDir });
+      const restored = await request(restoredApp).get(`/api/sessions/${sessionId}/permission-mode`);
+      assert.equal(restored.status, 200);
+      assert.equal((restored.body as { mode: string }).mode, "bypass");
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
   });
 
   it("reports only whether DeepWiki is enabled", async () => {
@@ -115,6 +231,44 @@ describe("agent server", () => {
       ["user", "assistant", "user", "assistant"],
     );
     assert.doesNotMatch(history.text, /must-not-leak/);
+  });
+
+  it("applies /think commands on the first request and removes them from session messages", async () => {
+    let capturedLevel: string | undefined;
+    let capturedUser: string | undefined;
+    const reasoningLlm = makeLlmConfig({
+      apiKey: "reasoning-key",
+      baseUrl: "http://localhost/v1",
+      model: "faux",
+      reasoning: true,
+      thinkingLevel: "medium",
+    });
+    const app = createAgentServer({
+      llm: reasoningLlm,
+      tools: [],
+      chat: async (config, messages) => {
+        capturedLevel = config.thinkingLevel;
+        const user = messages.find((message) => message.role === "user");
+        capturedUser = user && typeof user.content === "string" ? user.content : undefined;
+        return { role: "assistant", content: "done" };
+      },
+    });
+
+    const created = await request(app).post("/api/sessions");
+    const sessionId = (created.body as { id: string }).id;
+    const response = await request(app)
+      .post(`/api/sessions/${sessionId}/messages`)
+      .field("prompt", "/think:high inspect this");
+
+    assert.equal(response.status, 200);
+    assert.equal(capturedLevel, "high");
+    assert.equal(capturedUser, "inspect this");
+    assert.match(response.text, /"type":"user","content":"inspect this"/);
+
+    const history = await request(app).get(`/api/sessions/${sessionId}`);
+    const historyMessages = (history.body as { messages: Array<{ role: string; content: string }> }).messages;
+    assert.equal(historyMessages.find((message) => message.role === "user")?.content, "inspect this");
+    assert.doesNotMatch(history.text, /\/think:high/);
   });
 
   it("resolves a dynamic tool provider for each HTTP message", async () => {
@@ -302,6 +456,7 @@ describe("agent server", () => {
     const app = createAgentServer({
       llm,
       tools: [],
+      permissionMode: "bypass",
       chat: async (_config, messages) => {
         turn += 1;
         const user = messages.find((message) => message.role === "user");

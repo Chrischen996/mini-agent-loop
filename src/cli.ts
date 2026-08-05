@@ -10,7 +10,6 @@ import {
   loadVisionConfigFromEnv,
 } from "./preprocessors/index.ts";
 import { createTools, type ToolName } from "./tools/index.ts";
-import { createMcpApprovalGate } from "./mcp/approval.ts";
 import { createMcpRuntimeFromEnv } from "./mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
 import {
@@ -20,7 +19,14 @@ import {
 } from "./subagent/index.ts";
 import { resolveToolProvider, type Tool } from "./tools/types.ts";
 import type { ContentPart, MessageContent } from "./types.ts";
-import { PermissionManager, type PermissionMode } from "./permissions.ts";
+import { buildIntenseLlm, parseThinkingIntensityPrompt } from "./think-intensity.ts";
+import {
+  PermissionManager,
+  isPermissionMode,
+  type PermissionMode,
+  type PermissionRequest,
+  type PermissionTurnContext,
+} from "./permissions.ts";
 
 const IMAGE_EXT: Record<string, string> = {
   ".png": "image/png",
@@ -103,7 +109,12 @@ export function parseCliArgs(argv: string[]): {
   let excludeTools: ToolName[] | undefined;
   let allowMcpTools = false;
   let mode: PermissionMode = "auto";
-  const validTools = new Set<ToolName>(["read", "bash", "edit", "write", "grep", "find", "ls", "codebase_open", "codebase_search", "codebase_read", "codebase_explain", "subagent"]);
+  const validTools = new Set<ToolName>([
+    "read", "bash", "edit", "write", "grep", "find", "ls",
+    "codebase_open", "codebase_search", "codebase_read", "codebase_explain",
+    "web_search", "fetch_content", "get_search_content", "source_check",
+    "subagent",
+  ]);
   const parseToolList = (value: string, flag: string): ToolName[] => {
     const names = value.split(",").map((name) => name.trim()).filter(Boolean);
     for (const name of names) {
@@ -132,7 +143,7 @@ export function parseCliArgs(argv: string[]): {
       if (!next || next.startsWith("--")) {
         throw new Error("--mode requires an argument: plan, manual, auto, or bypass");
       }
-      if (!['plan', 'manual', 'auto', 'bypass'].includes(next)) {
+      if (!isPermissionMode(next)) {
         throw new Error("Invalid mode: use 'plan', 'manual', 'auto', or 'bypass'");
       }
       mode = next as PermissionMode;
@@ -141,7 +152,7 @@ export function parseCliArgs(argv: string[]): {
     }
     if (arg.startsWith("--mode=")) {
       const value = arg.slice("--mode=".length);
-      if (!['plan', 'manual', 'auto', 'bypass'].includes(value)) {
+      if (!isPermissionMode(value)) {
         throw new Error("Invalid mode: use 'plan', 'manual', 'auto', or 'bypass'");
       }
       mode = value as PermissionMode;
@@ -215,7 +226,9 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { prompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools, mode } = parsed;
+  const { prompt: rawPrompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools, mode } = parsed;
+  const thinking = parseThinkingIntensityPrompt(rawPrompt);
+  const prompt = thinking.prompt;
   if (!prompt && imagePaths.length === 0) {
     console.error(
       'Usage: npx tsx src/cli.ts "<prompt>" [--image path.png]...',
@@ -225,9 +238,12 @@ async function main(): Promise<void> {
 
   const cwd = process.cwd();
   const llm = loadLlmConfigFromEnv();
+  const requestLlm = thinking.intensity
+    ? buildIntenseLlm(llm, thinking.intensity)
+    : llm;
   const vision = loadVisionConfigFromEnv();
   console.error(
-    `[config] model=${llm.model} vision=${llm.capabilities.input.includes("image")} policy=${llm.imagePolicy} preprocessor=${vision?.model ?? "disabled"}`,
+    `[config] model=${requestLlm.model} thinking=${requestLlm.thinkingLevel ?? "off"} vision=${requestLlm.capabilities.input.includes("image")} policy=${requestLlm.imagePolicy} preprocessor=${vision?.model ?? "disabled"}`,
   );
 
   let userContent: MessageContent | undefined;
@@ -250,13 +266,17 @@ async function main(): Promise<void> {
   });
   let tools;
   try {
-    tools = mcpRuntime.toolProvider(createTools(cwd, {
+    const configuredTools = mcpRuntime.toolProvider(createTools(cwd, {
       tools: selectedTools,
       excludeTools,
       codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
       codebaseStore: codebaseRuntime.store,
       codebaseProvider: codebaseRuntime.semanticProvider,
     }));
+    tools = () => {
+      const available = resolveToolProvider(configuredTools);
+      return allowMcpTools ? available : available.filter((tool) => tool.source?.kind !== "mcp");
+    };
     tools();
   } catch (error) {
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
@@ -267,47 +287,49 @@ async function main(): Promise<void> {
   }
   console.error(`[deepwiki] enabled=${codebaseRuntime.deepWikiEnabled}`);
 
+  const permissionManager = new PermissionManager(mode);
+  let permissionTurn: PermissionTurnContext | undefined;
+  const onPermissionRequest = (request: PermissionRequest) => {
+      console.error(
+        `[permission] mode=${permissionTurn?.mode ?? mode} tool=${request.tool} risk=${request.risk} request_id=${request.id}`,
+      );
+      if (permissionTurn?.mode === "manual" || permissionTurn?.mode === "auto") {
+        // Non-interactive CLI cannot prompt. Deny immediately instead of hanging.
+        permissionManager.resolve("cli_session", request.id, "deny");
+        console.error(
+          `[permission] denied in non-interactive CLI; use TUI/Web or --mode=bypass for unattended runs`,
+        );
+      }
+  };
+
   // ── Add subagent tool if enabled ────────────────────────────────────────────
   const enableSubagent = process.env.MINI_AGENT_SUBAGENT !== "0";
   if (enableSubagent) {
     const baseTools = resolveToolProvider(tools);
     const subagentTool = createSubagentTool({
-      parentLlm: llm,
+      parentLlm: requestLlm,
       parentTools: baseTools,
       profiles: defaultProfiles,
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
       onSubagentEvent: (subEvent) => logEvent(subEvent),
+      getPermissionTurn: () => permissionTurn,
     });
     const enrichedTools = [...baseTools, subagentTool as Tool];
     tools = () => enrichedTools;
   }
 
   let messages;
-  const permissionManager = new PermissionManager(mode);
   console.error(`[config] mode=${mode}`);
+  const activePermissionTurn = permissionManager.beginTurn("cli_session", onPermissionRequest);
+  permissionTurn = activePermissionTurn;
   try {
     messages = await runAgentLoop(prompt || "Please analyze the attached image(s).", {
-      llm,
+      llm: requestLlm,
       tools,
       autoSubagent: loadAutoSubagentOptionsFromEnv(),
       userContent,
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
-      permissionMode: mode,
-      authorizeTool: async (tool, args, signal) => {
-        await permissionManager.authorize("cli_session", tool, args, signal, (request) => {
-          console.error(
-            `[permission] mode=${mode} tool=${request.tool} risk=${request.risk} request_id=${request.id}`,
-          );
-          if (mode === "manual" || mode === "auto") {
-            // Non-interactive CLI cannot prompt. Deny immediately so the loop
-            // surfaces a tool error instead of hanging forever.
-            permissionManager.resolve("cli_session", request.id, "deny");
-            console.error(
-              `[permission] denied in non-interactive CLI; use TUI/Web or --mode=bypass for unattended runs`,
-            );
-          }
-        });
-      },
+      permissionTurn: activePermissionTurn,
       onEvent: logEvent,
     });
   } catch (error) {
@@ -315,6 +337,7 @@ async function main(): Promise<void> {
     messages = error.messages;
     console.error(`[max_turns] reached limit ${error.maxTurns}; returning partial history`);
   } finally {
+    activePermissionTurn.close();
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
   }
 

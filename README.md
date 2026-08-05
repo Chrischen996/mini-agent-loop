@@ -77,7 +77,7 @@ npm install
 | `DEEPWIKI_TIMEOUT_MS` | no | `30000` |
 | `DEEPWIKI_MAX_RESULT_BYTES` | no | `102400` |
 | `MINI_AGENT_MCP_CONFIG` | no | — |
-| `MINI_AGENT_MCP_AUTO_APPROVE` | no | `0` |
+| `MINI_AGENT_PERMISSION_MODE` | no | `bypass` for Web server |
 | `MINI_AGENT_SUBAGENT` | no | `1` in CLI/server, TUI always on |
 | `MINI_AGENT_AUTO_SUBAGENT` | no | `0` (opt-in preflight) |
 | `MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE` | no | `3` |
@@ -372,17 +372,16 @@ reconnected with bounded exponential backoff by default. Set `reconnect` to
 ```bash
 export MINI_AGENT_MCP_CONFIG=/absolute/path/to/mcp.json
 
-# The one-shot CLI denies MCP calls unless this invocation opts in.
+# The one-shot CLI only registers MCP tools when this invocation opts in.
 npm start -- --allow-mcp-tools "使用已配置的远端工具查询数据"
-
-# Terminal clients use an explicit environment opt-in for this first release.
-MINI_AGENT_MCP_AUTO_APPROVE=1 npm run tui
 ```
 
-The Web API does not expose a permission approval flow. MCP tools are exposed
-to models with names such as `mcp__local-search__search`; remote annotations
-are display hints only. `/api/config` returns only sanitized server status
-metadata, never commands, arguments, or environment values.
+All clients use the same `PermissionManager` policy. In `bypass`, configured
+MCP tools run without an approval prompt. In `manual` and `auto`, MCP calls
+are approval requests; in `plan`, MCP calls are hard-denied because remote
+tool metadata cannot establish local read-only behavior. `/api/config` returns
+only sanitized server status metadata, never commands, arguments, or
+environment values.
 When a server advertises and sends `tools/list_changed`, the agent refreshes
 the complete paginated catalog. The next inner model turn receives the updated
 tool set without restarting the process. Changes to the MCP JSON configuration
@@ -400,6 +399,9 @@ GET    /api/config
 GET    /api/workspace/list?path=   lazy directory listing (workspace sandbox)
 POST   /api/sessions
 GET    /api/sessions/:id
+GET    /api/sessions/:id/permission-mode
+PUT    /api/sessions/:id/permission-mode  { mode: plan|manual|auto|bypass }
+POST   /api/sessions/:id/permissions/:requestId  { decision: allow|deny }
 DELETE /api/sessions/:id
 POST   /api/sessions/:id/messages  multipart(prompt, referencedPaths, images) -> NDJSON stream
 ```
@@ -412,10 +414,10 @@ the local `/model` selector. Permission modes are cycled with `Shift+Tab`:
 
 | Mode | Executes tools? | Asks user? | Typical use |
 | --- | --- | --- | --- |
-| `plan` | Read-only only; writes/dangerous shell hard-denied | No approval path | Risk analysis / planning |
+| `plan` | Local read-only only; writes/dangerous shell/MCP hard-denied | No approval path | Risk analysis / planning |
 | `manual` | Yes, after explicit approval | Every tool call | Enterprise / high-control |
-| `auto` | Safe tools auto-run; others need approval | Risky tools only | Daily development |
-| `bypass` | Yes | Never | CI / fully trusted runs |
+| `auto` | Safe local reads auto-run; others need approval | Risky tools and MCP | Daily development |
+| `bypass` | Yes, including MCP | Never | CI / fully trusted runs |
 
 ```bash
 npm run tui
@@ -427,6 +429,17 @@ previous dependency-free ANSI client remains available as `npm run tui:legacy`.
 CLI one-shot runs accept `--mode plan|manual|auto|bypass`. Non-interactive CLI
 cannot prompt, so `manual`/`auto` approval requests are denied immediately;
 use the TUI or `--mode=bypass` for unattended execution.
+
+Thinking strength is configured independently from model selection. In either
+TUI, press `Ctrl+R` to cycle through all levels supported by the active model;
+the status bar shows the new level immediately. Use `Shift+Up` / `Shift+Down`
+(or `Alt+.` / `Alt+,`) when you want one-step precision. `/model` remains
+responsible for changing the model, while these shortcuts only change the
+current session configuration and never rewrite the user prompt. The setting
+is provider-neutral: it does not automatically switch providers or models.
+The default is `medium` for reasoning-capable models and `off` otherwise;
+`DEFAULT_THINKING_INTENSITY=low|med|high|xhigh` overrides the startup default.
+Profiles may persist an optional `thinkingLevel`.
 
 ## Test (offline)
 

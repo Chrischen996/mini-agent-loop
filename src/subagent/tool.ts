@@ -29,6 +29,7 @@ import type {
   SubagentProfile,
   SubagentToolOptions,
 } from "./types.ts";
+import type { PermissionTurnContext } from "../permissions.ts";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -145,6 +146,11 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
     currentDepth = 0,
     onSubagentEvent,
     chat: injectedChat,
+    permissionMode,
+    permissionTurn,
+    getPermissionTurn,
+    getPermissionMode,
+    authorizeTool,
   } = options;
 
   // Build the parameter schema dynamically to include available profile names.
@@ -269,6 +275,11 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
           currentDepth: depth,
           onSubagentEvent,
           chat: injectedChat,
+          permissionMode,
+          permissionTurn,
+          getPermissionTurn,
+          getPermissionMode,
+          authorizeTool,
         });
         childTools.push(nestedSubagentTool as Tool);
       }
@@ -313,6 +324,9 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
           maxTurns,
           signal: merged.controller.signal,
           preprocessors,
+          permissionMode,
+          permissionTurn: getPermissionTurn?.() ?? permissionTurn,
+          authorizeTool,
           ...(injectedChat ? { chat: injectedChat } : {}),
           onEvent: (event: LoopEvent) => {
             // Accumulate token usage from assistant events

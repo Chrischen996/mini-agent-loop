@@ -12,7 +12,8 @@
  *     "my-profile": {
  *       "model": "openai/gpt-4o-mini",
  *       "baseUrl": "https://api.openai.com/v1",
- *       "apiKey": "sk-..."
+ *       "apiKey": "sk-...",
+ *       "thinkingLevel": "medium"
  *     }
  *   }
  * }
@@ -26,6 +27,7 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import type { ModelThinkingLevel } from "./pi-ai/types.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -33,6 +35,8 @@ export type ModelProfile = {
   model: string;
   baseUrl: string;
   apiKey: string;
+  /** Optional for backwards compatibility with existing profiles. */
+  thinkingLevel?: ModelThinkingLevel;
 };
 
 export type ModelProfileStore = {
@@ -77,10 +81,21 @@ function validateProfile(name: string, raw: unknown): ModelProfile {
   if (typeof p.apiKey !== "string") {
     throw new ProfileStoreValidationError(`Profile "${name}".apiKey must be a string`);
   }
+  const validThinkingLevels = new Set<ModelThinkingLevel>([
+    "off", "minimal", "low", "medium", "high", "xhigh", "max",
+  ]);
+  if (p.thinkingLevel !== undefined && !validThinkingLevels.has(p.thinkingLevel as ModelThinkingLevel)) {
+    throw new ProfileStoreValidationError(
+      `Profile "${name}".thinkingLevel must be one of off, minimal, low, medium, high, xhigh, or max`,
+    );
+  }
   return {
     model: p.model.trim(),
     baseUrl: normalizeUrl(p.baseUrl),
     apiKey: p.apiKey,
+    ...(p.thinkingLevel !== undefined
+      ? { thinkingLevel: p.thinkingLevel as ModelThinkingLevel }
+      : {}),
   };
 }
 

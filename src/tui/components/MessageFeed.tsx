@@ -454,9 +454,18 @@ export function MessageFeed({
         const absoluteIndex = startIndex + offset;
         if (msg.kind === "user") {
           return (
-            <Box key={absoluteIndex} marginBottom={0} gap={1}>
-              <Text color={C.user} bold>{">"}</Text>
-              <Text color={C.assistant}>{msg.text}</Text>
+            <Box key={absoluteIndex} marginBottom={0} gap={1} flexDirection="column">
+              <Box gap={1}>
+                <Text color={C.user} bold>{">"}</Text>
+                <Text color={C.assistant}>{msg.text}</Text>
+              </Box>
+              {msg.images?.length ? (
+                <Box marginLeft={2} gap={1}>
+                  {msg.images.map((image) => (
+                    <Text key={image.path} color={C.info}>[image: {image.path.split("/").pop()}]</Text>
+                  ))}
+                </Box>
+              ) : null}
             </Box>
           );
         }

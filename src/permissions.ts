@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Tool, ToolSource } from "./tools/types.ts";
+import type { Tool, ToolResult, ToolSource } from "./tools/types.ts";
 
 export type PermissionDecision = "allow" | "deny";
 export type PermissionRisk = "safe" | "medium" | "high";
@@ -20,12 +20,74 @@ export function isPermissionMode(value: unknown): value is PermissionMode {
   return typeof value === "string" && (PERMISSION_MODES as readonly string[]).includes(value);
 }
 
+export class PermissionModeChangedError extends Error {
+  readonly previousMode: PermissionMode;
+  readonly mode: PermissionMode;
+  readonly previousRevision: number;
+  readonly revision: number;
+
+  constructor(previousMode: PermissionMode, mode: PermissionMode, previousRevision: number, revision: number) {
+    super(`Permission mode changed from ${previousMode} to ${mode}`);
+    this.name = "AbortError";
+    this.previousMode = previousMode;
+    this.mode = mode;
+    this.previousRevision = previousRevision;
+    this.revision = revision;
+  }
+}
+
+export type PermissionModeChange = {
+  changed: boolean;
+  previousMode: PermissionMode;
+  mode: PermissionMode;
+  previousRevision: number;
+  revision: number;
+  interrupted: boolean;
+};
+
+export type PermissionTurnContext = {
+  readonly mode: PermissionMode;
+  readonly revision: number;
+  readonly signal: AbortSignal;
+  authorize(tool: Tool, args: Record<string, unknown>, signal?: AbortSignal): Promise<void>;
+  execute(tool: Tool, args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult>;
+  assertCurrent(): void;
+  close(): void;
+};
+
 type Pending = {
   request: PermissionRequest;
   key: string;
+  revision: number;
   resolve: () => void;
   reject: (error: Error) => void;
+  cleanup?: () => void;
 };
+
+type ActiveTurn = {
+  revision: number;
+  controller: AbortController;
+};
+
+function mergeAbortSignals(...signals: (AbortSignal | undefined)[]): {
+  signal: AbortSignal;
+  cleanup: () => void;
+} {
+  const active = signals.filter((signal): signal is AbortSignal => Boolean(signal));
+  if (active.length === 0) return { signal: new AbortController().signal, cleanup: () => {} };
+  if (active.length === 1) return { signal: active[0]!, cleanup: () => {} };
+
+  const controller = new AbortController();
+  const listeners = active.map((signal) => {
+    const abort = () => {
+      if (!controller.signal.aborted) controller.abort(signal.reason);
+    };
+    if (signal.aborted) abort();
+    signal.addEventListener("abort", abort, { once: true });
+    return () => signal.removeEventListener("abort", abort);
+  });
+  return { signal: controller.signal, cleanup: () => listeners.forEach((remove) => remove()) };
+}
 
 const AUTO_ALLOWED = new Set([
   "read",
@@ -37,6 +99,10 @@ const AUTO_ALLOWED = new Set([
   "codebase_search",
   "codebase_read",
   "codebase_explain",
+  "web_search",
+  "fetch_content",
+  "get_search_content",
+  "source_check",
 ]);
 
 const WRITE_TOOLS = new Set([
@@ -309,8 +375,10 @@ export function getRiskLevel(
 
 export class PermissionManager {
   private readonly pending = new Map<string, Pending>();
+  private readonly activeTurns = new Set<ActiveTurn>();
   private approved = new Set<string>();
   private mode: PermissionMode;
+  private revision = 0;
 
   /** Optional callback for permission audit logging. */
   onPermissionEvent?: (event: { type: "request" | "allow" | "deny"; request: PermissionRequest }) => void;
@@ -319,12 +387,116 @@ export class PermissionManager {
     this.mode = mode;
   }
 
-  setMode(mode: PermissionMode): void {
+  setMode(mode: PermissionMode): PermissionModeChange {
+    const previousMode = this.mode;
+    const previousRevision = this.revision;
+    if (this.mode === mode) {
+      return {
+        changed: false,
+        previousMode,
+        mode,
+        previousRevision,
+        revision: this.revision,
+        interrupted: false,
+      };
+    }
     this.mode = mode;
+    this.revision += 1;
+    // A decision made under one policy must never silently carry into another.
+    this.approved.clear();
+    const reason = new PermissionModeChangedError(previousMode, mode, previousRevision, this.revision);
+    let interrupted = false;
+    for (const [requestId, pending] of this.pending) {
+      this.pending.delete(requestId);
+      pending.cleanup?.();
+      pending.reject(reason);
+      interrupted = true;
+    }
+    for (const active of this.activeTurns) {
+      interrupted = true;
+      if (!active.controller.signal.aborted) active.controller.abort(reason);
+    }
+    return {
+      changed: true,
+      previousMode,
+      mode,
+      previousRevision,
+      revision: this.revision,
+      interrupted,
+    };
   }
 
   getMode(): PermissionMode {
     return this.mode;
+  }
+
+  getRevision(): number {
+    return this.revision;
+  }
+
+  beginTurn(
+    sessionId: string,
+    onRequest: (request: PermissionRequest) => void,
+    externalSignal?: AbortSignal,
+  ): PermissionTurnContext {
+    const mode = this.mode;
+    const revision = this.revision;
+    const controller = new AbortController();
+    const merged = mergeAbortSignals(controller.signal, externalSignal);
+    const active: ActiveTurn = { revision, controller };
+    this.activeTurns.add(active);
+    let closed = false;
+
+    const assertCurrent = () => {
+      if (this.revision !== revision || this.mode !== mode) {
+        throw new PermissionModeChangedError(mode, this.mode, revision, this.revision);
+      }
+      if (merged.signal.aborted) {
+        const reason = merged.signal.reason;
+        if (reason instanceof Error) throw reason;
+        throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
+      }
+    };
+
+    const authorize = async (tool: Tool, args: Record<string, unknown>, signal?: AbortSignal) => {
+      assertCurrent();
+      const combined = mergeAbortSignals(merged.signal, signal);
+      try {
+        await this.authorizeAtRevision(sessionId, mode, revision, tool, args, combined.signal, onRequest);
+        assertCurrent();
+      } finally {
+        combined.cleanup();
+      }
+    };
+
+    return {
+      mode,
+      revision,
+      signal: merged.signal,
+      authorize,
+      execute: async (tool, args, signal) => {
+        await authorize(tool, args, signal);
+        assertCurrent();
+        const combined = mergeAbortSignals(merged.signal, signal);
+        try {
+          assertCurrent();
+          const result = await tool.execute(args, combined.signal);
+          // A tool may ignore AbortSignal and finish after a mode switch. Do
+          // not let that stale result advance the old turn.
+          assertCurrent();
+          return result;
+        } finally {
+          combined.cleanup();
+        }
+      },
+      assertCurrent,
+      close: () => {
+        if (closed) return;
+        closed = true;
+        this.activeTurns.delete(active);
+        merged.cleanup();
+      },
+    };
   }
 
   /** Serialize state for persistence (mode + approved keys). */
@@ -335,16 +507,22 @@ export class PermissionManager {
   /** Deserialize state from JSON string. */
   deserialize(data: string): void {
     try {
-      const parsed = JSON.parse(data) as { mode: PermissionMode; approved: string[] };
-      this.mode = parsed.mode ?? "auto";
-      this.approved = new Set(parsed.approved ?? []);
+      const parsed = JSON.parse(data) as { mode: unknown; approved: unknown };
+      const nextMode = isPermissionMode(parsed.mode) ? parsed.mode : "auto";
+      if (nextMode !== this.mode) this.setMode(nextMode);
+      this.approved = new Set(
+        Array.isArray(parsed.approved)
+          ? parsed.approved.filter((value): value is string => typeof value === "string")
+          : [],
+      );
     } catch {
       // Ignore deserialization errors; fall back to defaults
     }
   }
 
   private key(sessionId: string, tool: Tool, args: Record<string, unknown>): string {
-    return `${sessionId}:${tool.name}:${this.stableStringify(args)}`;
+    const source = tool.source ? this.stableStringify(tool.source as Record<string, unknown>) : "local";
+    return `${sessionId}:${source}:${tool.name}:${this.stableStringify(args)}`;
   }
 
   /** Serialize args with sorted keys for stable approval key generation. */
@@ -363,8 +541,29 @@ export class PermissionManager {
     signal: AbortSignal | undefined,
     onRequest: (request: PermissionRequest) => void,
   ): Promise<void> {
+    const mode = this.mode;
+    const revision = this.revision;
+    await this.authorizeAtRevision(sessionId, mode, revision, tool, args, signal, onRequest);
+  }
+
+  private assertRevision(mode: PermissionMode, revision: number): void {
+    if (this.mode !== mode || this.revision !== revision) {
+      throw new PermissionModeChangedError(mode, this.mode, revision, this.revision);
+    }
+  }
+
+  private async authorizeAtRevision(
+    sessionId: string,
+    mode: PermissionMode,
+    revision: number,
+    tool: Tool,
+    args: Record<string, unknown>,
+    signal: AbortSignal | undefined,
+    onRequest: (request: PermissionRequest) => void,
+  ): Promise<void> {
+    this.assertRevision(mode, revision);
     // Bypass mode: auto-allow everything.
-    if (this.mode === "bypass") {
+    if (mode === "bypass") {
       this.onPermissionEvent?.({
         type: "allow",
         request: {
@@ -380,8 +579,11 @@ export class PermissionManager {
     }
 
     // Plan mode: analysis only. Never execute writes or dangerous shell.
-    if (this.mode === "plan") {
-      if (tool.name === "bash") {
+    if (mode === "plan") {
+      if (tool.source?.kind === "mcp") {
+        // MCP is always remote/untrusted, even when its advertised name is a
+        // local-looking tool such as `read` or `bash`.
+      } else if (tool.name === "bash") {
         const command = typeof args.command === "string" ? args.command : "";
         if (!isDangerousBashCommand(command)) return;
       } else if (!WRITE_TOOLS.has(tool.name)) {
@@ -406,8 +608,8 @@ export class PermissionManager {
     }
 
     // Manual and auto both use risk assessment, but manual never auto-allows.
-    const risk = getRiskLevel(tool, args, this.mode);
-    if (this.mode === "auto" && risk === "safe" && AUTO_ALLOWED.has(tool.name) && tool.source?.kind !== "mcp") {
+    const risk = getRiskLevel(tool, args, mode);
+    if (mode === "auto" && risk === "safe" && AUTO_ALLOWED.has(tool.name) && tool.source?.kind !== "mcp") {
       this.onPermissionEvent?.({
         type: "allow",
         request: {
@@ -423,7 +625,7 @@ export class PermissionManager {
     }
     if (signal?.aborted) throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
     const key = this.key(sessionId, tool, args);
-    if (this.approved.has(key)) return;
+    if (mode === "auto" && this.approved.has(key)) return;
     const request: PermissionRequest = {
       id: `perm_${randomUUID()}`,
       sessionId,
@@ -434,11 +636,14 @@ export class PermissionManager {
     };
     this.onPermissionEvent?.({ type: "request", request });
     return await new Promise<void>((resolve, reject) => {
-      this.pending.set(request.id, { request, key, resolve, reject });
       const abort = () => {
         this.pending.delete(request.id);
-        reject(Object.assign(new Error("Operation aborted"), { name: "AbortError" }));
+        cleanup();
+        const reason = signal?.reason;
+        reject(reason instanceof Error ? reason : Object.assign(new Error("Operation aborted"), { name: "AbortError" }));
       };
+      const cleanup = () => signal?.removeEventListener("abort", abort);
+      this.pending.set(request.id, { request, key, revision, resolve, reject, cleanup });
       signal?.addEventListener("abort", abort, { once: true });
       onRequest(request);
     });
@@ -447,9 +652,11 @@ export class PermissionManager {
   resolve(sessionId: string, requestId: string, decision: PermissionDecision): boolean {
     const pending = this.pending.get(requestId);
     if (!pending || pending.request.sessionId !== sessionId) return false;
+    if (pending.revision !== this.revision) return false;
     this.pending.delete(requestId);
+    pending.cleanup?.();
     if (decision === "allow") {
-      this.approved.add(pending.key);
+      if (this.mode === "auto") this.approved.add(pending.key);
       this.onPermissionEvent?.({ type: "allow", request: pending.request });
       pending.resolve();
     } else {

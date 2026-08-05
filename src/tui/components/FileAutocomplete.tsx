@@ -12,6 +12,8 @@ export type CommandDef = {
 
 export const SLASH_COMMANDS: CommandDef[] = [
   { name: "model", usage: "/model [ref] [--base-url URL] [--api-key-env ENV]", description: "切换模型和网关" },
+  { name: "image", usage: "/image <path>",            description: "添加本地图片" },
+  { name: "paste-image", usage: "/paste-image",      description: "添加剪贴板图片" },
   { name: "read",  usage: "/read <path>",          description: "读取文件内容" },
   { name: "bash",  usage: "/bash <cmd>",            description: "执行 Shell 命令" },
   { name: "ls",    usage: "/ls [path]",             description: "列出目录" },

@@ -2,6 +2,12 @@ import process from "node:process";
 import { contentAsString } from "../content.ts";
 import { loadLlmConfigFromEnv } from "../llm/index.ts";
 import {
+  cycleThinkingLevel,
+  thinkingLevelToDisplay,
+  withThinkingLevel,
+} from "../think-intensity.ts";
+import type { ModelThinkingLevel } from "../pi-ai/types.ts";
+import {
   createAgentHistory,
   MaxTurnsExceededError,
   runAgentTurn,
@@ -13,10 +19,9 @@ import {
 } from "../preprocessors/index.ts";
 import { createTools } from "../tools/index.ts";
 import type { AgentMessage } from "../types.ts";
-import { createMcpApprovalGate, mcpAutoApproveFromEnv } from "../mcp/approval.ts";
 import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
-import { PermissionManager, type PermissionMode } from "../permissions.ts";
+import { PERMISSION_MODES, PermissionManager, type PermissionMode } from "../permissions.ts";
 import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 
 type ToolView = {
@@ -35,6 +40,7 @@ type TuiState = {
   pendingUser?: string;
   status: string;
   permissionMode: PermissionMode;
+  thinkingLevel: ModelThinkingLevel;
   /** Stores the current pending permission request for keyboard resolution. */
   pendingPermissionRequestId?: string;
   /** Stores the current session ID for permission resolution. */
@@ -63,7 +69,7 @@ function short(value: string, max = 160): string {
 
 function render(state: TuiState): void {
   const lines: string[] = [
-    `${ANSI.cyan}mini-agent TUI${ANSI.reset} ${ANSI.dim}(Ctrl+C 退出，输入 /clear 清空会话)${ANSI.reset}`,
+    `${ANSI.cyan}mini-agent TUI${ANSI.reset} ${ANSI.dim}(Ctrl+R 快切思考，Shift+↑↓ 精调，Shift+Tab 切换权限，输入 /clear 清空会话)${ANSI.reset}`,
     "",
   ];
 
@@ -83,7 +89,11 @@ function render(state: TuiState): void {
     lines.push(`${icon}${ANSI.reset} ${tool.name}${tool.preview ? ` ${ANSI.dim}${short(tool.preview, 100)}${ANSI.reset}` : ""}`);
   }
 
-  lines.push("", `${ANSI.dim}${state.status}${ANSI.reset}`, `${state.busy ? "" : "> "}${state.input}`);
+  lines.push(
+    "",
+    `${ANSI.dim}思考: ${thinkingLevelToDisplay(state.thinkingLevel)} · 权限: ${state.permissionMode} · ${state.status}${ANSI.reset}`,
+    `${state.busy ? "" : "> "}${state.input}`,
+  );
   // Redraw inside the alternate screen so raw-mode keystrokes replace the frame.
   process.stdout.write(`${ANSI.clear}${lines.join("\n")}`);
 
@@ -145,7 +155,7 @@ async function main(): Promise<void> {
   }
 
   const cwd = process.cwd();
-  const llm = loadLlmConfigFromEnv();
+  let activeLlm = loadLlmConfigFromEnv();
   const vision = loadVisionConfigFromEnv();
   const autoSubagent = loadAutoSubagentOptionsFromEnv();
   const state: TuiState = {
@@ -157,6 +167,7 @@ async function main(): Promise<void> {
     pendingUser: undefined,
     status: "就绪",
     permissionMode: "auto" as PermissionMode,
+    thinkingLevel: activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off"),
   };
   const permissionManager = new PermissionManager(state.permissionMode);
   // Set up audit logging
@@ -198,6 +209,14 @@ async function main(): Promise<void> {
     void Promise.all([mcpRuntime.close(), codebaseRuntime.close()]).finally(() => process.exit(0));
   };
 
+  const adjustThinkingLevel = (direction: "increase" | "decrease", wrap = false) => {
+    if (state.busy) return;
+    activeLlm = withThinkingLevel(activeLlm, cycleThinkingLevel(activeLlm, direction, { wrap }));
+    state.thinkingLevel = activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off");
+    state.status = `思考强度: ${thinkingLevelToDisplay(state.thinkingLevel)}`;
+    render(state);
+  };
+
   process.stdout.write(`${ANSI.alternateScreen}${ANSI.hideCursor}`);
   screenActive = true;
   process.stdin.setRawMode(true);
@@ -223,33 +242,26 @@ async function main(): Promise<void> {
     state.streamingText = "";
     state.busy = true;
     state.status = "请求模型中...";
+    const turnLlm = activeLlm;
     render(state);
+    const permissionTurn = permissionManager.beginTurn(
+      "tui_session",
+      (request) => {
+        state.pendingPermissionRequestId = request.id;
+        state.pendingPermissionSessionId = "tui_session";
+        state.status = `等待权限确认: ${request.tool} (${request.risk}) [按 A 允许 / D 拒绝 / Enter 拒绝 / Esc 取消]`;
+        render(state);
+      },
+      abortController.signal,
+    );
     try {
-      // Wrap permission manager with MCP approval gate
-      const mcpApproval = createMcpApprovalGate({
-        allow: mcpAutoApproveFromEnv(),
-        approvalHint: "Restart with MINI_AGENT_MCP_AUTO_APPROVE=1 to approve MCP calls in the TUI.",
-      });
-
       state.history = await runAgentTurn(state.history, text, {
-        llm,
+        llm: turnLlm,
         tools,
         autoSubagent,
         preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
         signal: abortController.signal,
-        permissionMode: state.permissionMode,
-        authorizeTool: async (tool, args, signal) => {
-          // First check MCP approval
-          await mcpApproval(tool, args, signal);
-          // Then check permission manager
-          await permissionManager.authorize("tui_session", tool, args, signal, (request) => {
-            // Store pending permission for keyboard resolution
-            state.pendingPermissionRequestId = request.id;
-            state.pendingPermissionSessionId = "tui_session";
-            state.status = `等待权限确认: ${request.tool} (${request.risk}) [按 A 允许 / D 拒绝 / Enter 拒绝 / Esc 取消]`;
-            render(state);
-          });
-        },
+        permissionTurn,
         onEvent: (event) => {
           handleEvent(state, event);
           render(state);
@@ -270,11 +282,37 @@ async function main(): Promise<void> {
       state.busy = false;
       state.status = `错误: ${error instanceof Error ? error.message : String(error)}`;
       render(state);
+    } finally {
+      permissionTurn.close();
     }
   };
 
   process.stdin.on("data", (chunk: string) => {
-    for (const char of chunk) {
+    let inputChunk = chunk;
+    for (const [sequence, direction] of [
+      ["\u001b[1;2A", "increase"],
+      ["\u001b[1;2B", "decrease"],
+      ["\u001b.", "increase"],
+      ["\u001b,", "decrease"],
+    ] as const) {
+      if (!inputChunk.includes(sequence)) continue;
+      if (!state.busy) adjustThinkingLevel(direction);
+      inputChunk = inputChunk.replaceAll(sequence, "");
+    }
+    if (inputChunk.includes("\u0012")) {
+      if (!state.busy) adjustThinkingLevel("increase", true);
+      inputChunk = inputChunk.replaceAll("\u0012", "");
+    }
+    if (inputChunk.includes("\u001b[Z")) {
+      const current = PERMISSION_MODES.indexOf(state.permissionMode);
+      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "auto";
+      permissionManager.setMode(next);
+      state.permissionMode = permissionManager.getMode();
+      state.status = `权限模式: ${next}`;
+      inputChunk = inputChunk.replaceAll("\u001b[Z", "");
+      render(state);
+    }
+    for (const char of inputChunk) {
       if (char === "\u0003") return quit();
       if (char === "\u001b") {
         if (state.pendingPermissionRequestId && state.pendingPermissionSessionId) {

@@ -3,6 +3,32 @@ import assert from "node:assert/strict";
 import { createInitialState, tuiReducer } from "../src/tui/state.ts";
 
 describe("TUI sidebar state", () => {
+  it("tracks, deduplicates, sends, and clears image attachments", () => {
+    const image = { path: "/tmp/screenshot.png", mimeType: "image/png", size: 42 };
+    let state = createInitialState("test-model");
+
+    state = tuiReducer(state, { type: "ADD_PENDING_IMAGE", image });
+    state = tuiReducer(state, { type: "ADD_PENDING_IMAGE", image });
+    assert.deepEqual(state.pendingImages, [image]);
+    assert.match(state.status, /screenshot\.png/);
+
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Analyze this", images: [image] });
+    assert.deepEqual(state.messages[0], { kind: "user", text: "Analyze this", images: [image] });
+
+    state = tuiReducer(state, { type: "CLEAR_PENDING_IMAGES" });
+    assert.deepEqual(state.pendingImages, []);
+  });
+
+  it("surfaces attachment errors without marking a running turn as finished", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Keep working" });
+    state = tuiReducer(state, { type: "ATTACHMENT_ERROR", message: "Clipboard has no image" });
+
+    assert.equal(state.busy, true);
+    assert.equal(state.status, "图片添加失败");
+    assert.deepEqual(state.messages.at(-1), { kind: "error", text: "Clipboard has no image" });
+  });
+
   it("tracks the goal, workflow step, file path, and tool card", () => {
     let state = createInitialState("test-model");
     state = tuiReducer(state, { type: "USER_MESSAGE", text: "Inspect the workspace" });

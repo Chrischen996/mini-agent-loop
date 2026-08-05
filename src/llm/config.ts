@@ -20,6 +20,11 @@ import {
 import type { ToolCallFormat } from "../hermes/types.ts";
 import type { Tool } from "../tools/types.ts";
 import type { AgentMessage, AssistantMessage } from "../types.ts";
+import {
+  getDefaultThinkingLevel,
+  normalizeThinkingLevelForModel,
+} from "../think-intensity.ts";
+import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -34,6 +39,8 @@ export type LlmConfig = {
   timeoutMs?: number;
   piModel?: ModelRef["piModel"];
   reasoning: boolean;
+  /** Provider-neutral thinking level for the current model. Optional for legacy callers. */
+  thinkingLevel?: ModelThinkingLevel;
   imagePolicy: ImagePolicy;
   /**
    * The wire format used for tool calling.
@@ -158,6 +165,10 @@ export function loadLlmConfigFromEnv(): LlmConfig {
       timeoutMs: configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS),
       piModel: resolved.piModel,
       reasoning: resolved.reasoning,
+      thinkingLevel: normalizeThinkingLevelForModel(
+        resolved.reasoning,
+        activeProfile.thinkingLevel ?? getDefaultThinkingLevel(),
+      ),
       imagePolicy,
       toolCallFormat: resolved.toolCallFormat ?? "openai",
     };
@@ -217,6 +228,10 @@ export function loadLlmConfigFromEnv(): LlmConfig {
     timeoutMs: configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS),
     piModel: resolved.piModel,
     reasoning: resolved.reasoning,
+    thinkingLevel: normalizeThinkingLevelForModel(
+      resolved.reasoning,
+      getDefaultThinkingLevel(),
+    ),
     imagePolicy,
     toolCallFormat: resolved.toolCallFormat ?? "openai",
   };
@@ -235,6 +250,7 @@ export function makeLlmConfig(
     maxTokens?: number;
     timeoutMs?: number;
     reasoning?: boolean;
+    thinkingLevel?: ModelThinkingLevel;
     imagePolicy?: ImagePolicy;
   },
 ): LlmConfig {
@@ -250,6 +266,10 @@ export function makeLlmConfig(
     timeoutMs: partial.timeoutMs,
     piModel: resolved.piModel,
     reasoning: partial.reasoning ?? resolved.reasoning,
+    thinkingLevel: normalizeThinkingLevelForModel(
+      partial.reasoning ?? resolved.reasoning,
+      partial.thinkingLevel ?? getDefaultThinkingLevel(),
+    ),
     imagePolicy: partial.imagePolicy ?? "placeholder",
     toolCallFormat: resolved.toolCallFormat ?? "openai",
   };
@@ -297,6 +317,12 @@ export function switchLlmModel(
     maxTokens: resolved.maxTokens,
     piModel: resolved.piModel,
     reasoning: resolved.reasoning,
+    thinkingLevel: normalizeThinkingLevelForModel(
+      resolved.reasoning,
+      config.reasoning
+        ? config.thinkingLevel ?? getDefaultThinkingLevel()
+        : getDefaultThinkingLevel(),
+    ),
     toolCallFormat: resolved.toolCallFormat ?? "openai",
   };
 

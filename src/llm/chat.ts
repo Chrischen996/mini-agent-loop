@@ -32,6 +32,12 @@ import {
   type StreamChatUsage,
 } from "./retry.ts";
 
+function reasoningOption(config: LlmConfig): "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | undefined {
+  const level = config.thinkingLevel ?? (config.reasoning ? "medium" : "off");
+  if (!config.reasoning || level === "off") return undefined;
+  return level;
+}
+
 // ─── Pi-AI chat (internal) ───────────────────────────────────────────────────
 
 async function completePiChat(
@@ -50,7 +56,7 @@ async function completePiChat(
     timeoutMs: requestTimeout(config),
     signal,
     apiKey: config.apiKey,
-    reasoning: config.reasoning ? "medium" : undefined,
+    reasoning: reasoningOption(config),
   });
   return fromPiAssistant(result).message;
 }
@@ -71,7 +77,7 @@ async function* streamPiChat(
     timeoutMs: requestTimeout(config),
     signal,
     apiKey: config.apiKey,
-    reasoning: config.reasoning ? "medium" : undefined,
+    reasoning: reasoningOption(config),
   });
   for await (const event of stream) {
     if (event.type === "text_delta") {
@@ -165,6 +171,9 @@ export async function completeChat(
     max_tokens: config.maxTokens,
     messages: toOpenAIMessages(prepared.messages, supportsImage),
   };
+
+  const reasoningEffort = reasoningOption(config);
+  if (reasoningEffort) body.reasoning_effort = reasoningEffort;
 
   // Hermes format: tools are embedded in the system prompt, not in the API request
   if (!isHermes && tools && tools.length > 0 && config.capabilities.tools) {
@@ -272,6 +281,9 @@ export async function* streamChat(
     max_tokens: config.maxTokens,
     messages: toOpenAIMessages(prepared.messages, supportsImage),
   };
+
+  const reasoningEffort = reasoningOption(config);
+  if (reasoningEffort) body.reasoning_effort = reasoningEffort;
 
   // Hermes format: tools are embedded in the system prompt, not in the API request
   if (!isHermes && tools && tools.length > 0 && config.capabilities.tools) {

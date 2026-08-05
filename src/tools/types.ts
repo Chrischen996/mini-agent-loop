@@ -27,6 +27,7 @@ export type ToolAnnotations = {
 
 export type ToolSource =
   | { kind: "local" }
+  | { kind: "web"; package: "pi-web-access" }
   | { kind: "mcp"; serverId: string; toolName: string };
 
 export type Tool<TArgs = Record<string, unknown>> = {
