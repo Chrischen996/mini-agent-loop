@@ -84,6 +84,7 @@ npm install
 | `MINI_AGENT_AUTO_SUBAGENT_PROFILE` | no | `researcher` |
 | `MINI_AGENT_AUTO_SUBAGENT_MODEL` | no | parent model |
 | `MINI_AGENT_AUTO_SUBAGENT_MAX_TURNS` | no | profile/default |
+| `MINI_AGENT_SKILLS` | no | comma-separated registered skill names |
 
 \* Real runs need at least one supported provider key.
 `/model` only lists
@@ -98,6 +99,23 @@ For a deterministic code-level preflight, opt in with:
 export MINI_AGENT_AUTO_SUBAGENT=1
 export MINI_AGENT_AUTO_SUBAGENT_PROFILE=researcher  # optional
 ```
+
+Skills can be activated for CLI, TUI, and Web sessions with
+`MINI_AGENT_SKILLS=skill-a,skill-b`. Programmatic callers can pass `skills`,
+`skillNames`, and `skillRegistry` to the agent loop or server options.
+At startup, the CLI, TUI, and Web server automatically discover
+`skills/<directory>/SKILL.md` files in the workspace and register them. A file
+may use optional frontmatter:
+
+```markdown
+---
+name: repo-research
+description: Inspect repositories before answering
+---
+Read the relevant source files before answering.
+```
+
+Without frontmatter, the directory name is used as the Skill name.
 
 The loop scores the initial request using explainable signals such as prompt
 length, multi-step language, code/workspace context, and investigation terms.

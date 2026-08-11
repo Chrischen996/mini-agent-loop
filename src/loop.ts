@@ -38,6 +38,8 @@ import type {
   ToolResultMessage,
 } from "./types.ts";
 import { validateToolArgs } from "./validate.ts";
+import type { Skill, SkillRegistry } from "./skills/types.ts";
+import { defaultSkillRegistry } from "./skills/registry.ts";
 
 export type NextTurnUpdate = {
   llm?: LlmConfig;
@@ -104,6 +106,20 @@ export type AgentLoopOptions = {
    * and the agent is informed to output a plan instead of executing directly.
    */
   permissionMode?: PermissionMode;
+  /**
+   * Skills to activate for this loop/turn.
+   * Skills can contribute system prompt fragments, tools, and preprocessors.
+   */
+  skills?: Skill[];
+  /**
+   * Skill names to resolve from the registry.
+   */
+  skillNames?: string[];
+  /**
+   * Skill registry to use for name resolution.
+   * Defaults to the global defaultSkillRegistry.
+   */
+  skillRegistry?: SkillRegistry;
 };
 
 export type LoopEvent =
@@ -401,7 +417,47 @@ async function runAgentTurnInternal(
     parallelToolExecution = false,
     permissionMode,
     permissionTurn,
+    skills = [],
+    skillNames = [],
+    skillRegistry = defaultSkillRegistry,
   } = options;
+
+  // ── Skill resolution and merging ─────────────────────────────────────────
+  const resolvedFromNames = skillRegistry.resolve(skillNames);
+  const activeSkills: Skill[] = [...skills, ...resolvedFromNames];
+
+  // Merge skill-provided system prompt fragments
+  const skillPromptFragments = activeSkills
+    .map((s) => s.systemPromptFragment)
+    .filter((f): f is string => Boolean(f));
+
+  // Merge skill-provided tools
+  const skillTools: Tool[] = activeSkills.flatMap((s) =>
+    s.tools ? resolveToolProvider(s.tools) : [],
+  );
+
+  // Merge skill-provided preprocessors
+  const skillPreprocessors: MessagePreprocessor[] = activeSkills.flatMap(
+    (s) => s.preprocessors ?? [],
+  );
+
+  const finalPreprocessors = [...preprocessors, ...skillPreprocessors];
+
+  const runSkillHooks = async (
+    phase: "beforeTurn" | "afterTurn",
+    ctx: {
+      turn: number;
+      currentLlm: LlmConfig;
+      assistantMessage: AssistantMessage;
+      toolResults: ToolResultMessage[];
+      messages: AgentMessage[];
+    },
+  ): Promise<void> => {
+    for (const skill of activeSkills) {
+      await skill.hooks?.[phase]?.(ctx);
+    }
+  };
+
   const parsedThinking = parseThinkingIntensityPrompt(userText);
   const initialLlm = parsedThinking.intensity
     ? buildIntenseLlm(configuredLlm, parsedThinking.intensity)
@@ -432,13 +488,27 @@ async function runAgentTurnInternal(
         content: userContent ?? effectiveUserText ?? "",
       },
     ],
-    preprocessors,
+    finalPreprocessors,
     preprocessContext,
   );
   const messages: AgentMessage[] = [...compactHistory(history, currentContext), ...initialBatch];
 
   // Keep the model's active mode synchronized when a session changes modes.
   if (activePermissionMode !== undefined) applyPermissionModePrompt(messages, activePermissionMode);
+
+  // ── Apply skill system prompt fragments ──────────────────────────────────
+  if (skillPromptFragments.length > 0 && messages.length > 0) {
+    const systemMsg = messages[0];
+    if (systemMsg.role === "system" && typeof systemMsg.content === "string") {
+      const existing = systemMsg.content;
+      // Avoid duplicate injection
+      const alreadyInjected = skillPromptFragments.every((frag) => existing.includes(frag));
+      if (!alreadyInjected) {
+        systemMsg.content = `${existing}\n\n${skillPromptFragments.join("\n\n")}`;
+      }
+    }
+  }
+
   let overflowRetries = 0;
   let emptyAssistantResponses = 0;
   let autoSubagentAttempted = false;
@@ -659,7 +729,7 @@ async function runAgentTurnInternal(
       permissionTurn?.assertCurrent();
       processedToolMessages = (await applyPreprocessors(
         toolMessages,
-        preprocessors,
+        finalPreprocessors,
         preprocessContext,
       )) as ToolResultMessage[];
       permissionTurn?.assertCurrent();
@@ -697,7 +767,17 @@ async function runAgentTurnInternal(
       }
       throw err;
     }
-    const turnTools = resolveToolProvider(tools);
+
+    await runSkillHooks("beforeTurn", {
+      turn,
+      currentLlm,
+      assistantMessage: { role: "assistant", content: "" },
+      toolResults: [],
+      messages: [...messages],
+    });
+
+    const baseTools = resolveToolProvider(tools);
+    const turnTools = [...baseTools, ...skillTools];
 
     // Optional deterministic preflight. This happens once before the first
     // model request and is intentionally not passed into nested subagent loops.
@@ -757,7 +837,7 @@ async function runAgentTurnInternal(
           };
           const processedToolMessages = (await applyPreprocessors(
             [toolMessage],
-            preprocessors,
+            finalPreprocessors,
             preprocessContext,
           )) as ToolResultMessage[];
           messages.push(...processedToolMessages);
@@ -857,6 +937,24 @@ async function runAgentTurnInternal(
       }
       throw err;
     }
+
+    const afterToolResults = messages
+      .slice()
+      .reverse()
+      .filter((m): m is ToolResultMessage => m.role === "tool")
+      .reverse();
+    // Only include tool results that belong to this assistant response.
+    const assistantCallIds = new Set((assistant.toolCalls ?? []).map((c) => c.id));
+    const turnToolResults = afterToolResults.filter((m) => assistantCallIds.has(m.toolCallId));
+
+    await runSkillHooks("afterTurn", {
+      turn,
+      currentLlm,
+      assistantMessage: assistant,
+      toolResults: turnToolResults,
+      messages: [...messages],
+    });
+
     if (action === "done" || action === "aborted") return messages;
   }
 
