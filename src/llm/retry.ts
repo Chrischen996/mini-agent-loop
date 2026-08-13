@@ -1,5 +1,5 @@
 /**
- * Error classification, retry strategies, and abort utilities.
+ * Error classification, retry strategies, abort utilities, and unified LLM event contract.
  */
 import type { AssistantMessage } from "../types.ts";
 
@@ -11,9 +11,57 @@ export type StreamChatUsage = {
   totalTokens: number;
 };
 
+// ─── Legacy event type (kept for backward compat; loop now uses LlmStreamEvent) ───
+
 export type StreamChatEvent =
   | { type: "text_delta"; text: string; kind: "reasoning" | "answer" }
   | { type: "assistant"; message: AssistantMessage; usage?: StreamChatUsage };
+
+// ─── Unified LLM stream event contract ───────────────────────────────────────
+// The LLM layer emits ONLY these events to the Agent Loop.
+// The loop never inspects provider-specific response details.
+
+export type ToolCallDelta = {
+  index: number;
+  id?: string;
+  name?: string;
+  argDelta?: string;
+};
+
+export type LlmStreamEvent =
+  | { type: "reasoning_delta"; text: string }
+  | { type: "answer_delta"; text: string }
+  | { type: "tool_call_delta"; delta: ToolCallDelta }
+  | { type: "completed"; message: AssistantMessage; usage?: StreamChatUsage }
+  | { type: "error"; error: Error }
+  | { type: "attempt_reset" }; // emitted before a recovery retry so the UI can clear temp reasoning
+
+// ─── Typed incomplete-response errors ────────────────────────────────────────
+
+export class IncompleteLlmResponseError extends Error {
+  readonly reason: "reasoning_only" | "empty";
+  constructor(reason: "reasoning_only" | "empty") {
+    super(`LLM incomplete response: ${reason}`);
+    this.name = "IncompleteLlmResponseError";
+    this.reason = reason;
+  }
+}
+
+export class OutputTruncatedError extends Error {
+  constructor() {
+    super("LLM output reached max_tokens");
+    this.name = "OutputTruncatedError";
+  }
+}
+
+export class ProtocolError extends Error {
+  constructor(msg: string) {
+    super(`LLM protocol error: ${msg}`);
+    this.name = "ProtocolError";
+    this.msg = msg;
+  }
+  readonly msg: string;
+}
 
 // ─── Context overflow ────────────────────────────────────────────────────────
 
@@ -44,32 +92,32 @@ export type RetryStrategy = {
  */
 export function classifyError(error: unknown): RetryableErrorType | null {
   const message = error instanceof Error ? error.message : String(error);
-  
+
   // Rate limit (429 or explicit rate limit messages)
   if (/rate limit|429|too many requests|quota exceeded/i.test(message)) {
     return "rate_limit";
   }
-  
+
   // Server overload / temporary unavailability
   if (/502|503|504|server (busy|overload|unavailable)|service unavailable/i.test(message)) {
     return "server_overload";
   }
-  
+
   // Network failures
   if (/network error|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|fetch failed|ECONNRESET/i.test(message)) {
     return "network";
   }
-  
+
   // Our internal timeout
   if (/timed out after.*ms/i.test(message)) {
     return "timeout";
   }
-  
+
   // Context overflow (handled separately)
   if (isContextOverflowError(error)) {
     return "context_overflow";
   }
-  
+
   return null;
 }
 
@@ -80,32 +128,25 @@ export function classifyError(error: unknown): RetryableErrorType | null {
 export function getRetryStrategy(errorType: RetryableErrorType): RetryStrategy {
   switch (errorType) {
     case "rate_limit":
-      // Aggressive backoff for rate limits
       return { maxRetries: 3, baseDelayMs: 2000, maxDelayMs: 60000, backoffMultiplier: 3 };
     case "server_overload":
-      // Moderate backoff for server issues
       return { maxRetries: 3, baseDelayMs: 1000, maxDelayMs: 10000, backoffMultiplier: 2 };
     case "network":
-      // Quick retry for network glitches
       return { maxRetries: 2, baseDelayMs: 500, maxDelayMs: 5000, backoffMultiplier: 2 };
     case "timeout":
-      // Single retry for timeouts (may need longer timeout instead)
       return { maxRetries: 1, baseDelayMs: 0, maxDelayMs: 0, backoffMultiplier: 1 };
     case "context_overflow":
-      // No retry here; handled by compaction logic
       return { maxRetries: 0, baseDelayMs: 0, maxDelayMs: 0, backoffMultiplier: 1 };
   }
 }
 
 /**
  * Calculate backoff delay with jitter for a given retry attempt.
- * Jitter reduces thundering herd when many clients retry simultaneously.
  */
 export function calculateBackoff(attempt: number, strategy: RetryStrategy): number {
   if (strategy.baseDelayMs === 0) return 0;
   const exponential = strategy.baseDelayMs * Math.pow(strategy.backoffMultiplier, attempt - 1);
   const capped = Math.min(exponential, strategy.maxDelayMs);
-  // Add ±20% jitter
   const jitter = capped * (0.8 + Math.random() * 0.4);
   return Math.floor(jitter);
 }

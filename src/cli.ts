@@ -19,7 +19,8 @@ import {
 } from "./subagent/index.ts";
 import { resolveToolProvider, type Tool } from "./tools/types.ts";
 import type { ContentPart, MessageContent } from "./types.ts";
-import { buildIntenseLlm, parseThinkingIntensityPrompt } from "./think-intensity.ts";
+import { buildIntenseLlm, parseThinkingCommandMode, parseThinkingIntensityPrompt } from "./think-intensity.ts";
+import { loadThinkingModeFromEnv } from "./thinking-policy.ts";
 import {
   PermissionManager,
   isPermissionMode,
@@ -61,6 +62,9 @@ function logEvent(event: LoopEvent): void {
       );
       break;
     }
+    case "thinking_policy":
+      console.error(`[thinking] mode=adaptive phase=${event.phase} level=${event.level} reasons=${event.reasons.join(",")}`);
+      break;
     case "max_turns":
       console.error(`[max_turns] reached limit ${event.maxTurns}; partial history preserved`);
       break;
@@ -113,7 +117,8 @@ export function parseCliArgs(argv: string[]): {
     "read", "bash", "edit", "write", "grep", "find", "ls",
     "codebase_open", "codebase_search", "codebase_read", "codebase_explain",
     "web_search", "fetch_content", "get_search_content", "source_check",
-    "subagent",
+    "subagent", "git_status", "git_diff", "git_checkpoint", "git_undo", "git_branch_isolate",
+    "validate_workspace",
   ]);
   const parseToolList = (value: string, flag: string): ToolName[] => {
     const names = value.split(",").map((name) => name.trim()).filter(Boolean);
@@ -241,6 +246,9 @@ async function main(): Promise<void> {
   const requestLlm = thinking.intensity
     ? buildIntenseLlm(llm, thinking.intensity)
     : llm;
+  const thinkingMode = thinking.intensity
+    ? "fixed"
+    : parseThinkingCommandMode(rawPrompt) ?? loadThinkingModeFromEnv();
   const vision = loadVisionConfigFromEnv();
   console.error(
     `[config] model=${requestLlm.model} thinking=${requestLlm.thinkingLevel ?? "off"} vision=${requestLlm.capabilities.input.includes("image")} policy=${requestLlm.imagePolicy} preprocessor=${vision?.model ?? "disabled"}`,
@@ -330,6 +338,10 @@ async function main(): Promise<void> {
       userContent,
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
       permissionTurn: activePermissionTurn,
+      autoValidate: process.env.MINI_AGENT_AUTO_VALIDATE === "1",
+      validationWorkspace: process.cwd(),
+      autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
+      thinkingMode,
       onEvent: logEvent,
     });
   } catch (error) {

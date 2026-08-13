@@ -26,4 +26,16 @@ describe("buildModelPrompt", () => {
     assert.match(result.modelPrompt, /请阅读引用的文件/);
     assert.match(result.modelPrompt, /package\.json/);
   });
+
+  it("strips /think:auto and selects adaptive thinking mode", () => {
+    const result = buildModelPrompt({
+      prompt: "/think:auto 修复类型检查失败",
+      referencedPaths: [],
+      hasImages: false,
+    });
+    assert.equal(result.displayPrompt, "修复类型检查失败");
+    assert.equal(result.modelPrompt, "修复类型检查失败");
+    assert.equal(result.thinkingLevel, null);
+    assert.equal(result.thinkingMode, "adaptive");
+  });
 });

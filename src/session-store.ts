@@ -4,6 +4,7 @@ import path from "node:path";
 import type { AgentMessage } from "./types.ts";
 import type { PermissionMode } from "./permissions.ts";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
+import type { ThinkingMode } from "./thinking-policy.ts";
 
 type SessionCreatedEvent = {
   type: "session_created";
@@ -11,7 +12,10 @@ type SessionCreatedEvent = {
   createdAt: number;
   modelId?: string;
   thinkingLevel?: ModelThinkingLevel;
+  thinkingMode?: ThinkingMode;
   permissionMode?: PermissionMode;
+  parentSessionId?: string;
+  forkedFromMessage?: number;
 };
 
 type SessionSnapshotEvent = {
@@ -20,8 +24,11 @@ type SessionSnapshotEvent = {
   createdAt: number;
   modelId?: string;
   thinkingLevel?: ModelThinkingLevel;
+  thinkingMode?: ThinkingMode;
   permissionMode?: PermissionMode;
   messages: AgentMessage[];
+  parentSessionId?: string;
+  forkedFromMessage?: number;
 };
 
 type SessionEvent = SessionCreatedEvent | SessionSnapshotEvent;
@@ -31,8 +38,11 @@ export type PersistedSession = {
   createdAt: number;
   modelId?: string;
   thinkingLevel?: ModelThinkingLevel;
+  thinkingMode?: ThinkingMode;
   permissionMode?: PermissionMode;
   messages: AgentMessage[];
+  parentSessionId?: string;
+  forkedFromMessage?: number;
 };
 
 function isSessionEvent(value: unknown): value is SessionEvent {
@@ -103,8 +113,11 @@ export class SessionStore {
               createdAt: parsed.createdAt,
               modelId: parsed.modelId,
               thinkingLevel: parsed.thinkingLevel,
+              thinkingMode: parsed.thinkingMode,
               permissionMode: parsed.permissionMode,
               messages: [],
+              parentSessionId: parsed.parentSessionId,
+              forkedFromMessage: parsed.forkedFromMessage,
             };
           } else if (Array.isArray(parsed.messages)) {
             current = {
@@ -112,8 +125,11 @@ export class SessionStore {
               createdAt: parsed.createdAt,
               modelId: parsed.modelId ?? current?.modelId,
               thinkingLevel: parsed.thinkingLevel ?? current?.thinkingLevel,
+              thinkingMode: parsed.thinkingMode ?? current?.thinkingMode,
               permissionMode: parsed.permissionMode ?? current?.permissionMode,
               messages: parsed.messages,
+              parentSessionId: parsed.parentSessionId ?? current?.parentSessionId,
+              forkedFromMessage: parsed.forkedFromMessage ?? current?.forkedFromMessage,
             };
           }
         } catch {
@@ -166,7 +182,10 @@ export class SessionStore {
       createdAt: session.createdAt,
       modelId: session.modelId,
       thinkingLevel: session.thinkingLevel,
+      thinkingMode: session.thinkingMode,
       permissionMode: session.permissionMode,
+      parentSessionId: session.parentSessionId,
+      forkedFromMessage: session.forkedFromMessage,
     });
     await this.save(session);
   }
@@ -178,8 +197,11 @@ export class SessionStore {
       createdAt: session.createdAt,
       modelId: session.modelId,
       thinkingLevel: session.thinkingLevel,
+      thinkingMode: session.thinkingMode,
       permissionMode: session.permissionMode,
       messages: session.messages,
+      parentSessionId: session.parentSessionId,
+      forkedFromMessage: session.forkedFromMessage,
     });
   }
 

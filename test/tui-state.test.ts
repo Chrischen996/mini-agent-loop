@@ -1,6 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createInitialState, tuiReducer } from "../src/tui/state.ts";
+import {
+  createInitialState,
+  preserveScrollOnAppend,
+  tuiReducer,
+} from "../src/tui/state.ts";
 
 describe("TUI sidebar state", () => {
   it("tracks, deduplicates, sends, and clears image attachments", () => {
@@ -175,5 +179,115 @@ describe("TUI sidebar state", () => {
     });
     assert.equal(state.busy, true);
     assert.equal(state.streamingReasoning, "next run");
+  });
+
+  it("reports automatic continuation without resetting context token usage", () => {
+    let state = { ...createInitialState("test-model"), usedTokens: 42_000, contextTokens: 40_000, busy: true };
+    state = tuiReducer(state, { type: "AUTO_CONTINUE", count: 1, max: 5 });
+
+    assert.equal(state.busy, true);
+    assert.equal(state.usedTokens, 42_000);
+    assert.equal(state.contextTokens, 40_000);
+    assert.equal(state.status, "自动续跑 (1/5)...");
+  });
+
+  it("scrolls history and re-pins on new user messages", () => {
+    let state = createInitialState("test-model");
+    for (let i = 0; i < 5; i++) {
+      state = tuiReducer(state, { type: "USER_MESSAGE", text: `turn ${i}` });
+      state = tuiReducer(state, {
+        type: "LOOP_EVENT",
+        event: { type: "done", messages: [] },
+      });
+    }
+    assert.equal(state.scrollOffset, 0);
+
+    state = tuiReducer(state, { type: "SCROLL_BY", delta: 2 });
+    assert.equal(state.scrollOffset, 2);
+
+    state = tuiReducer(state, { type: "SCROLL_BY", delta: 100 });
+    assert.equal(state.scrollOffset, 102);
+
+    state = tuiReducer(state, { type: "SCROLL_TO_BOTTOM" });
+    assert.equal(state.scrollOffset, 0);
+
+    state = tuiReducer(state, { type: "SCROLL_TO", offset: 3 });
+    assert.equal(state.scrollOffset, 3);
+
+    // New user turns always re-pin to the latest content.
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "fresh" });
+    assert.equal(state.scrollOffset, 0);
+  });
+
+  it("resets scroll offset on RESET", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "a" });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "done", messages: [] } });
+    state = tuiReducer(state, { type: "SCROLL_BY", delta: 1 });
+    assert.equal(state.scrollOffset, 1);
+    state = tuiReducer(state, { type: "RESET" });
+    assert.equal(state.scrollOffset, 0);
+  });
+
+  it("preserveScrollOnAppend keeps history stable while scrolled up", () => {
+    assert.equal(preserveScrollOnAppend(0, 4, 6), 0); // pinned to bottom
+    assert.equal(preserveScrollOnAppend(2, 4, 6), 4); // 2 + (6-4) = 4
+    assert.equal(preserveScrollOnAppend(2, 4, 4), 2); // no change
+    assert.equal(preserveScrollOnAppend(5, 4, 3), 4); // 5 + (3-4) = 4
+  });
+
+  it("preserves upward scroll when assistant and tool messages append", () => {
+    let state = createInitialState("test-model");
+    for (let i = 0; i < 3; i++) {
+      state = tuiReducer(state, { type: "USER_MESSAGE", text: `turn ${i}` });
+      state = tuiReducer(state, {
+        type: "LOOP_EVENT",
+        event: { type: "done", messages: [] },
+      });
+    }
+    // 3 user messages so far
+    assert.equal(state.messages.length, 3);
+
+    state = tuiReducer(state, { type: "SCROLL_BY", delta: 2 });
+    assert.equal(state.scrollOffset, 2);
+
+    // Assistant finalizes a new message while user is scrolled up.
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "reply" },
+      },
+    });
+    assert.equal(state.messages.length, 4);
+    assert.equal(state.scrollOffset, 3); // 2 + 1
+
+    // Tool cards also append into history and must preserve viewport.
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "tool_start",
+        call: { id: "c1", name: "bash", arguments: { command: "ls" } },
+      },
+    });
+    assert.equal(state.messages.length, 5);
+    assert.equal(state.scrollOffset, 4); // 3 + 1
+
+    // Errors append too.
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "error", message: "boom" },
+    });
+    assert.equal(state.messages.length, 6);
+    assert.equal(state.scrollOffset, 5); // 4 + 1
+  });
+
+  it("adds help and other notices as renderable messages", () => {
+    const state = tuiReducer(createInitialState("test-model"), {
+      type: "ADD_NOTICE",
+      title: "Help",
+      text: "/help show help",
+    });
+    assert.deepEqual(state.messages.at(-1), { kind: "notice", title: "Help", text: "/help show help" });
   });
 });

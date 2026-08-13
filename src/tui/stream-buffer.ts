@@ -6,6 +6,9 @@ type BufferedDelta = Extract<LoopEvent, { type: "assistant_delta" }>;
 
 type EmitEvent = (event: LoopEvent) => void;
 
+/** Keep streamed TUI updates below the terminal's redraw cadence. */
+export const DEFAULT_STREAM_BUFFER_DELAY_MS = 80;
+
 /**
  * Batches streamed deltas without allowing a completed turn to write into the
  * next turn. A run id also keeps late provider callbacks from reviving stale UI.
@@ -16,7 +19,7 @@ export class TurnEventBuffer {
   private pending: BufferedDelta[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(private readonly emit: EmitEvent, private readonly delayMs = 50) {}
+  constructor(private readonly emit: EmitEvent, private readonly delayMs = DEFAULT_STREAM_BUFFER_DELAY_MS) {}
 
   start(): number {
     this.cancelTimer();

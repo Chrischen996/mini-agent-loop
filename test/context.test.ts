@@ -46,4 +46,30 @@ describe("context compaction", () => {
     assert.ok(calls.length > 0);
     assert.ok(calls.every((call) => results.includes(call.id)));
   });
+
+  it("rolls an existing summary forward without duplicating or losing the first goal", () => {
+    const firstHistory: AgentMessage[] = [
+      { role: "system", content: "system" },
+      { role: "user", content: "first goal: preserve this requirement" },
+      ...Array.from({ length: 8 }, (_, index) => ({
+        role: "assistant" as const,
+        content: `first pass ${index} ${"x".repeat(60)}`,
+      })),
+    ];
+    const firstCompaction = compactHistory(firstHistory, { maxTokens: 120, keepRecentMessages: 2 });
+    const secondHistory: AgentMessage[] = [
+      ...firstCompaction,
+      ...Array.from({ length: 6 }, (_, index) => ({
+        role: "user" as const,
+        content: `second pass ${index} ${"y".repeat(60)}`,
+      })),
+    ];
+    const secondCompaction = compactHistory(secondHistory, { maxTokens: 120, keepRecentMessages: 2 });
+    const summaries = secondCompaction.filter((message) =>
+      message.role === "system" && message.content.includes("Conversation summary"));
+
+    assert.equal(summaries.length, 1);
+    assert.match(summaries[0]?.role === "system" ? summaries[0].content : "", /first goal/);
+    assert.match(JSON.stringify(secondCompaction), /second pass 5/);
+  });
 });

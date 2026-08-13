@@ -8,9 +8,11 @@ export {
   type LlmConfig,
   type ChatFn,
   type ModelSwitchOverrides,
+  DEFAULT_OUTPUT_TOKEN_CAP,
   loadDotEnvFile,
   loadLlmConfigFromEnv,
   makeLlmConfig,
+  resolveOutputTokenLimit,
   switchLlmModel,
   resolveEffectiveApiKey,
 } from "./config.ts";
@@ -30,6 +32,13 @@ export {
   calculateBackoff,
   isAbortError,
   throwIfAborted,
+  // ── unified LLM event contract ──
+  type LlmStreamEvent,
+  type ToolCallDelta,
+  // ── typed incomplete-response errors ──
+  IncompleteLlmResponseError,
+  OutputTruncatedError,
+  ProtocolError,
 } from "./retry.ts";
 
 // ── vision ───────────────────────────────────────────────────────────────────

@@ -1,9 +1,26 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { TurnEventBuffer } from "../src/tui/stream-buffer.ts";
+import { DEFAULT_STREAM_BUFFER_DELAY_MS, TurnEventBuffer } from "../src/tui/stream-buffer.ts";
 import type { LoopEvent } from "../src/loop.ts";
 
 describe("TurnEventBuffer", () => {
+  it("batches streamed reasoning deltas with the default redraw window", () => {
+    const events: LoopEvent[] = [];
+    const buffer = new TurnEventBuffer((event) => events.push(event));
+    const runId = buffer.start();
+
+    buffer.handle(runId, { type: "assistant_delta", kind: "reasoning", text: "r1" });
+    buffer.handle(runId, { type: "assistant_delta", kind: "reasoning", text: "r2" });
+
+    assert.equal(DEFAULT_STREAM_BUFFER_DELAY_MS, 80);
+    assert.equal(events.length, 0);
+    buffer.handle(runId, { type: "done", messages: [] });
+    const delta = events[0];
+    assert.equal(delta?.type, "assistant_delta");
+    assert.equal(delta && delta.type === "assistant_delta" ? delta.text : "", "r1r2");
+    assert.equal(events[1]?.type, "done");
+  });
+
   it("preserves reasoning and answer boundaries before terminal events", () => {
     const events: LoopEvent[] = [];
     const buffer = new TurnEventBuffer((event) => events.push(event), 1_000);

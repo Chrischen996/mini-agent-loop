@@ -19,6 +19,8 @@ import { createRepositoryStoreFromEnv, RepositoryStore } from "../codebase/repos
 import { createCodebaseTools } from "../codebase/tools.ts";
 import type { CodebaseSemanticProvider } from "../codebase/deepwiki-provider.ts";
 import { createWebAccessTools } from "../web-access/index.ts";
+import { createGitTools } from "./git.ts";
+import { createValidationTool } from "./validation.ts";
 
 export type { JsonSchema, Tool, ToolResult } from "./types.ts";
 export type { ReadArgs } from "./read.ts";
@@ -47,7 +49,8 @@ export type ToolName =
   | "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls"
   | "codebase_open" | "codebase_search" | "codebase_read" | "codebase_explain"
   | "web_search" | "fetch_content" | "get_search_content" | "source_check"
-  | "subagent";
+  | "subagent" | "git_status" | "git_diff" | "git_checkpoint" | "git_undo" | "git_branch_isolate"
+  | "validate_workspace";
 
 const WEB_ACCESS_TOOL_NAMES = new Set<ToolName>([
   "web_search",
@@ -80,6 +83,8 @@ export function createAllTools(cwd: string): Tool[] {
     createGrepTool(cwd) as Tool,
     createFindTool(cwd) as Tool,
     createLsTool(cwd) as Tool,
+    ...createGitTools(cwd),
+    createValidationTool(cwd),
   ];
 }
 
@@ -90,6 +95,14 @@ export function createTools(cwd: string, options: ToolSelection & {
   webAccess?: boolean;
 } = {}): Tool[] {
   const tools = createDefaultTools(cwd, options);
+  const selectedGit = options.tools
+    ? options.tools.filter((name) => name.startsWith("git_") || name === "validate_workspace")
+    : ["git_status", "git_diff", "git_checkpoint", "git_undo", "git_branch_isolate", "validate_workspace"] as ToolName[];
+  const existingNames = new Set(tools.map((tool) => tool.name));
+  tools.push(...[...createGitTools(cwd), createValidationTool(cwd)].filter((tool) =>
+    !existingNames.has(tool.name)
+      && selectedGit.includes(tool.name as ToolName)
+      && !options.excludeTools?.includes(tool.name as ToolName)));
   const explicitSelection = options.tools;
   const codebaseNames = new Set(["codebase_open", "codebase_search", "codebase_read", "codebase_explain"]);
   const selectedCodebase = explicitSelection ? explicitSelection.filter((name) => codebaseNames.has(name)) : [...codebaseNames];

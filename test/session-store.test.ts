@@ -3,9 +3,30 @@ import { appendFile, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { truncateSessionMessages } from "../src/server.ts";
 import { SessionStore } from "../src/session-store.ts";
 
 describe("SessionStore", () => {
+  it("truncates an incomplete assistant tool-call block as one unit", () => {
+    const messages = truncateSessionMessages([
+      { role: "system", content: "system" },
+      { role: "user", content: "start" },
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          { id: "call-one", name: "read", arguments: {} },
+          { id: "call-two", name: "read", arguments: {} },
+        ],
+      },
+      { role: "tool", toolCallId: "call-one", name: "read", content: "one" },
+      { role: "tool", toolCallId: "call-two", name: "read", content: "two" },
+      { role: "assistant", content: "complete" },
+    ], 3);
+
+    assert.deepEqual(messages.map((message) => message.role), ["system", "user"]);
+  });
+
   it("evicts sessions that exceed TTL on load", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-ttl-"));
     try {
@@ -62,6 +83,45 @@ describe("SessionStore", () => {
 
       const restored = await new SessionStore(root).loadAll();
       assert.deepEqual(restored.get(session.id)?.messages, session.messages);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("round-trips fork metadata", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-fork-"));
+    try {
+      const store = new SessionStore(root);
+      await store.create({
+        id: "child-session",
+        createdAt: Date.now(),
+        parentSessionId: "parent-session",
+        forkedFromMessage: 3,
+        messages: [],
+      });
+      const restored = await store.loadAll();
+      assert.equal(restored.get("child-session")?.parentSessionId, "parent-session");
+      assert.equal(restored.get("child-session")?.forkedFromMessage, 3);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("round-trips the session thinking mode and current level", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-thinking-"));
+    try {
+      const store = new SessionStore(root);
+      await store.create({
+        id: "adaptive-session",
+        createdAt: Date.now(),
+        thinkingMode: "adaptive",
+        thinkingLevel: "high",
+        messages: [{ role: "user", content: "continue the task" }],
+      });
+
+      const restored = await new SessionStore(root).loadAll();
+      assert.equal(restored.get("adaptive-session")?.thinkingMode, "adaptive");
+      assert.equal(restored.get("adaptive-session")?.thinkingLevel, "high");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

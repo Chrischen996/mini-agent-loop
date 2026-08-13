@@ -21,6 +21,7 @@ import type { ToolCallFormat } from "../hermes/types.ts";
 import type { Tool } from "../tools/types.ts";
 import type { AgentMessage, AssistantMessage } from "../types.ts";
 import {
+  clampThinkingLevelForModel,
   getDefaultThinkingLevel,
   normalizeThinkingLevelForModel,
 } from "../think-intensity.ts";
@@ -39,6 +40,8 @@ export type LlmConfig = {
   timeoutMs?: number;
   piModel?: ModelRef["piModel"];
   reasoning: boolean;
+  /** Provider compatibility flags used by the fallback OpenAI-compatible path. */
+  compat?: Record<string, unknown>;
   /** Provider-neutral thinking level for the current model. Optional for legacy callers. */
   thinkingLevel?: ModelThinkingLevel;
   imagePolicy: ImagePolicy;
@@ -70,6 +73,29 @@ export type ModelSwitchOverrides = {
   baseUrl?: string;
   apiKey?: string;
 };
+
+export const DEFAULT_OUTPUT_TOKEN_CAP = 32_768;
+const DEFAULT_OUTPUT_CONTEXT_RATIO = 0.25;
+
+/** Resolve the per-request output limit without changing the model catalog capability. */
+export function resolveOutputTokenLimit(
+  modelMaxTokens: number,
+  contextWindow: number,
+  requestedMaxTokens?: number,
+): number {
+  const safeContextWindow = Number.isFinite(contextWindow)
+    ? Math.max(2, Math.floor(contextWindow))
+    : 2;
+  const safeModelMax = Number.isFinite(modelMaxTokens)
+    ? Math.max(1, Math.floor(modelMaxTokens))
+    : 1;
+  const requested = requestedMaxTokens === undefined
+    ? Math.min(DEFAULT_OUTPUT_TOKEN_CAP, Math.max(1, Math.floor(safeContextWindow * DEFAULT_OUTPUT_CONTEXT_RATIO)))
+    : Number.isFinite(requestedMaxTokens)
+      ? Math.max(1, Math.floor(requestedMaxTokens))
+      : 1;
+  return Math.min(requested, safeModelMax, safeContextWindow - 1);
+}
 
 // ─── Timeout / signal utilities ──────────────────────────────────────────────
 
@@ -161,10 +187,11 @@ export function loadLlmConfigFromEnv(): LlmConfig {
       model: resolved.id,
       capabilities: resolved.capabilities,
       contextWindow: resolved.contextWindow,
-      maxTokens: resolved.maxTokens,
+      maxTokens: resolveOutputTokenLimit(resolved.maxTokens, resolved.contextWindow),
       timeoutMs: configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS),
       piModel: resolved.piModel,
       reasoning: resolved.reasoning,
+      compat: resolved.compat,
       thinkingLevel: normalizeThinkingLevelForModel(
         resolved.reasoning,
         activeProfile.thinkingLevel ?? getDefaultThinkingLevel(),
@@ -173,7 +200,10 @@ export function loadLlmConfigFromEnv(): LlmConfig {
       toolCallFormat: resolved.toolCallFormat ?? "openai",
     };
     const relayRegistry = loadRelayRegistryFromEnv();
-    return applyRelayIfMatched(base, relayRegistry);
+    return applyRelayIfMatched({
+      ...base,
+      thinkingLevel: clampThinkingLevelForModel(base, base.thinkingLevel ?? "off"),
+    }, relayRegistry);
   }
 
   // ── 2. Existing environment-variable / fallback logic ──────────────────────
@@ -224,10 +254,11 @@ export function loadLlmConfigFromEnv(): LlmConfig {
     model: resolved.id,
     capabilities: resolved.capabilities,
     contextWindow: resolved.contextWindow,
-    maxTokens: resolved.maxTokens,
+    maxTokens: resolveOutputTokenLimit(resolved.maxTokens, resolved.contextWindow),
     timeoutMs: configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS),
     piModel: resolved.piModel,
     reasoning: resolved.reasoning,
+    compat: resolved.compat,
     thinkingLevel: normalizeThinkingLevelForModel(
       resolved.reasoning,
       getDefaultThinkingLevel(),
@@ -238,7 +269,10 @@ export function loadLlmConfigFromEnv(): LlmConfig {
 
   // Apply relay from MINI_AGENT_RELAY env var (overrides baseUrl + adds getApiKey)
   const relayRegistry = loadRelayRegistryFromEnv();
-  return applyRelayIfMatched(base, relayRegistry);
+  return applyRelayIfMatched({
+    ...base,
+    thinkingLevel: clampThinkingLevelForModel(base, base.thinkingLevel ?? "off"),
+  }, relayRegistry);
 }
 
 /** Test helper / explicit config builder. */
@@ -255,23 +289,32 @@ export function makeLlmConfig(
   },
 ): LlmConfig {
   const resolved = resolveModel(partial.model, partial.baseUrl);
-  return {
+  const base: LlmConfig = {
     apiKey: partial.apiKey,
     provider: partial.provider ?? resolved.provider,
     baseUrl: partial.baseUrl.replace(/\/$/, ""),
     model: partial.model,
     capabilities: partial.capabilities ?? resolved.capabilities,
     contextWindow: partial.contextWindow ?? resolved.contextWindow,
-    maxTokens: partial.maxTokens ?? resolved.maxTokens,
+    maxTokens: resolveOutputTokenLimit(
+      resolved.maxTokens,
+      partial.contextWindow ?? resolved.contextWindow,
+      partial.maxTokens,
+    ),
     timeoutMs: partial.timeoutMs,
     piModel: resolved.piModel,
     reasoning: partial.reasoning ?? resolved.reasoning,
+    compat: resolved.compat,
     thinkingLevel: normalizeThinkingLevelForModel(
       partial.reasoning ?? resolved.reasoning,
       partial.thinkingLevel ?? getDefaultThinkingLevel(),
     ),
     imagePolicy: partial.imagePolicy ?? "placeholder",
     toolCallFormat: resolved.toolCallFormat ?? "openai",
+  };
+  return {
+    ...base,
+    thinkingLevel: clampThinkingLevelForModel(base, base.thinkingLevel ?? "off"),
   };
 }
 
@@ -314,9 +357,10 @@ export function switchLlmModel(
     model: resolved.id,
     capabilities: resolved.capabilities,
     contextWindow: resolved.contextWindow,
-    maxTokens: resolved.maxTokens,
+    maxTokens: resolveOutputTokenLimit(resolved.maxTokens, resolved.contextWindow),
     piModel: resolved.piModel,
     reasoning: resolved.reasoning,
+    compat: resolved.compat,
     thinkingLevel: normalizeThinkingLevelForModel(
       resolved.reasoning,
       config.reasoning
@@ -327,10 +371,14 @@ export function switchLlmModel(
   };
 
   // Apply relay for the new model if a registry is provided
+  const clampedNext = {
+    ...next,
+    thinkingLevel: clampThinkingLevelForModel(next, next.thinkingLevel ?? "off"),
+  };
   if (relayRegistry && relayRegistry.length > 0) {
-    return applyRelayIfMatched(next, relayRegistry);
+    return applyRelayIfMatched(clampedNext, relayRegistry);
   }
-  return next;
+  return clampedNext;
 }
 
 /**

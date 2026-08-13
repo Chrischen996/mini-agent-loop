@@ -19,6 +19,9 @@ export type ContextManagerOptions = {
 
 const DEFAULT_MAX_CHARS = 160_000;
 const DEFAULT_KEEP_RECENT = 12;
+const SUMMARY_START = "[Conversation summary - older messages were compacted to fit the context window]";
+const SUMMARY_END = "[End conversation summary]";
+const SUMMARY_OMISSION = "[... older summary details omitted ...]";
 
 /** Conservative, dependency-free estimate for mixed English/CJK content. */
 export function estimateTextTokens(text: string): number {
@@ -60,6 +63,42 @@ function messageTokens(message: AgentMessage): number {
   return value;
 }
 
+function isSummaryMessage(message: AgentMessage): boolean {
+  return message.role === "system" && message.content.startsWith(SUMMARY_START);
+}
+
+function summaryLines(message: AgentMessage): string[] {
+  if (message.role !== "system" || !isSummaryMessage(message)) return [];
+  return message.content
+    .split("\n")
+    .slice(1, -1)
+    .filter((line) => line.trim().length > 0 && line !== SUMMARY_OMISSION);
+}
+
+function fitSummaryLines(lines: string[], maxChars: number, maxTokens: number): string[] {
+  const fits = (values: string[]): boolean => {
+    const text = values.join("\n");
+    return text.length <= maxChars && estimateTextTokens(text) <= maxTokens;
+  };
+  if (fits(lines)) return lines;
+  if (lines.length === 0) return [];
+
+  const selected = [lines[0]!];
+  const tail: string[] = [];
+  for (let index = lines.length - 1; index > 0; index -= 1) {
+    const candidate = [selected[0]!, SUMMARY_OMISSION, lines[index]!, ...tail];
+    if (!fits(candidate)) break;
+    tail.unshift(lines[index]!);
+  }
+  const result = tail.length > 0 ? [selected[0]!, SUMMARY_OMISSION, ...tail] : selected;
+  if (fits(result)) return result;
+
+  const availableChars = Math.max(0, maxChars - 3);
+  let first = selected[0]!.slice(0, availableChars);
+  while (first && estimateTextTokens(first) > maxTokens) first = first.slice(0, -1);
+  return first ? [`${first}${first.length < selected[0]!.length ? "..." : ""}`] : [];
+}
+
 export function estimateContextTokens(history: AgentMessage[], tools: Tool[] = []): number {
   const messageTotal = history.reduce((total, message) => total + messageTokens(message), 0);
   const toolTotal = tools.reduce(
@@ -87,7 +126,8 @@ export function compactHistory(
   history: AgentMessage[],
   options: ContextManagerOptions = {},
 ): AgentMessage[] {
-  const system = history.find((message) => message.role === "system");
+  const system = history.find((message) => message.role === "system" && !isSummaryMessage(message));
+  const existingSummaryLines = history.filter(isSummaryMessage).flatMap(summaryLines);
   const nonSystem = history.filter((message) => message.role !== "system");
   const maxChars = options.maxChars ?? DEFAULT_MAX_CHARS;
   const keepRecent = Math.max(2, options.keepRecentMessages ?? DEFAULT_KEEP_RECENT);
@@ -101,12 +141,23 @@ export function compactHistory(
   if (splitAt <= 0) return history;
   const oldMessages = nonSystem.slice(0, splitAt);
   const recentMessages = nonSystem.slice(splitAt);
+  const summaryOverhead = estimateTextTokens(`${SUMMARY_START}\n${SUMMARY_END}`) + 4;
+  const fixedTokens = estimateContextTokens([...(system ? [system] : []), ...recentMessages]);
+  const fixedChars = [...(system ? [system] : []), ...recentMessages]
+    .reduce((total, message) => total + messageChars(message), 0);
+  const fittedLines = fitSummaryLines(
+    [...existingSummaryLines, ...oldMessages.map(compactMessage)],
+    options.maxTokens === undefined
+      ? Number.MAX_SAFE_INTEGER
+      : Math.max(0, maxChars - fixedChars - SUMMARY_START.length - SUMMARY_END.length - 2),
+    Math.max(0, (options.maxTokens ?? Number.MAX_SAFE_INTEGER) - fixedTokens - summaryOverhead),
+  );
   const summaryMessage: AgentMessage = {
     role: "system",
     content: [
-      "[Conversation summary - older messages were compacted to fit the context window]",
-      oldMessages.map(compactMessage).join("\n"),
-      "[End conversation summary]",
+      SUMMARY_START,
+      fittedLines.join("\n"),
+      SUMMARY_END,
     ].join("\n"),
   };
   return [...(system ? [system] : []), summaryMessage, ...recentMessages];

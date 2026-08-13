@@ -28,25 +28,36 @@ type CommandPaletteProps = {
   filter: string;         // what the user typed after /
   selectedIndex: number;
   candidates: CommandDef[];
+  maxVisible?: number;
 };
 
-export function CommandPalette({ filter, selectedIndex, candidates }: CommandPaletteProps): React.ReactElement | null {
+function visibleWindow<T>(items: T[], selectedIndex: number, maxVisible: number): { visible: T[]; start: number } {
+  const count = Math.max(1, maxVisible);
+  const start = Math.max(0, Math.min(selectedIndex - count + 1, items.length - count));
+  return { visible: items.slice(start, start + count), start };
+}
+
+export function CommandPalette({ filter, selectedIndex, candidates, maxVisible = 6 }: CommandPaletteProps): React.ReactElement | null {
   if (candidates.length === 0) return null;
+  const { visible, start } = visibleWindow(candidates, selectedIndex, maxVisible);
 
   return (
     <Box flexDirection="column" paddingX={2}>
       <Text dimColor>── 命令 /{filter} ──────────────</Text>
-      {candidates.map((cmd, i) => (
+      {visible.map((cmd, i) => {
+        const index = start + i;
+        return (
         <Box key={cmd.name} gap={2}>
-          <Text color={i === selectedIndex ? C.selection : undefined}>
-            {i === selectedIndex ? "▶" : " "}
+          <Text color={index === selectedIndex ? C.selection : undefined}>
+            {index === selectedIndex ? "▶" : " "}
           </Text>
-          <Text color={i === selectedIndex ? C.assistant : C.muted} bold={i === selectedIndex}>
+          <Text color={index === selectedIndex ? C.assistant : C.muted} bold={index === selectedIndex}>
             {cmd.usage}
           </Text>
           <Text dimColor>{cmd.description}</Text>
         </Box>
-      ))}
+        );
+      })}
       <Text dimColor>Tab/Enter 选中  ↑↓ 导航  Esc 关闭</Text>
     </Box>
   );
@@ -58,30 +69,33 @@ type FileAutocompleteProps = {
   candidates: string[];
   selectedIndex: number;
   prefix: string;
+  maxVisible?: number;
 };
 
-export function FileAutocomplete({ candidates, selectedIndex, prefix }: FileAutocompleteProps): React.ReactElement | null {
+export function FileAutocomplete({ candidates, selectedIndex, prefix, maxVisible = 8 }: FileAutocompleteProps): React.ReactElement | null {
   if (candidates.length === 0) return null;
+  const { visible, start } = visibleWindow(candidates, selectedIndex, maxVisible);
 
   return (
     <Box flexDirection="column" paddingX={2}>
       <Text dimColor>── 文件 {prefix} ──────────────</Text>
-      {candidates.slice(0, 8).map((candidate, i) => (
+      {visible.map((candidate, i) => {
+        const index = start + i;
+        return (
         <Box key={candidate} gap={1}>
-          <Text color={i === selectedIndex ? C.selection : undefined}>
-            {i === selectedIndex ? "▶" : " "}
+          <Text color={index === selectedIndex ? C.selection : undefined}>
+            {index === selectedIndex ? "▶" : " "}
           </Text>
           <Text
-            color={i === selectedIndex ? C.assistant : C.muted}
-            bold={i === selectedIndex}
+            color={index === selectedIndex ? C.assistant : C.muted}
+            bold={index === selectedIndex}
           >
             {candidate}
           </Text>
         </Box>
-      ))}
-      {candidates.length > 8 && (
-        <Text dimColor>  … {candidates.length - 8} more</Text>
-      )}
+        );
+      })}
+      {candidates.length > visible.length && <Text dimColor>显示 {start + 1}-{start + visible.length} / {candidates.length}</Text>}
       <Text dimColor>Tab/→ 补全  ↑↓ 导航  Esc 关闭</Text>
     </Box>
   );
@@ -93,6 +107,7 @@ type ModelPickerProps = {
   selectedIndex: number;
   query: string;
   current: string;
+  maxVisible?: number;
 };
 
 export function formatContextWindow(value: number): string {
@@ -101,8 +116,8 @@ export function formatContextWindow(value: number): string {
   return String(value);
 }
 
-export function ModelPicker({ candidates, contextWindows, selectedIndex, query, current }: ModelPickerProps): React.ReactElement | null {
-  const pageSize = 12;
+export function ModelPicker({ candidates, contextWindows, selectedIndex, query, current, maxVisible = 12 }: ModelPickerProps): React.ReactElement | null {
+  const pageSize = Math.max(1, maxVisible);
   const start = Math.max(0, Math.min(selectedIndex - pageSize + 1, candidates.length - pageSize));
   const visible = candidates.slice(start, start + pageSize);
   return (

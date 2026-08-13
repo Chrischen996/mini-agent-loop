@@ -62,6 +62,7 @@ export type ImageAttachment = {
 export type ChatMessage =
   | { kind: "user"; text: string; images?: ImageAttachment[] }
   | { kind: "assistant"; text: string; reasoning?: string }
+  | { kind: "notice"; title?: string; text: string }
   | { kind: "tool_call"; id: string; name: string; args: string; rawArgs: Record<string, unknown>; status: ToolState; result?: string; durationMs?: number; startedAt: number }
   | { kind: "subagent_call"; id: string; task: string; profile?: string; depth: number; status: ToolState; result?: string; turns?: number; totalTokens?: number; innerEvents: SubagentInnerEvent[]; toolCallCount: number; startedAt: number; durationMs?: number; expanded: boolean }
   | { kind: "error"; text: string };
@@ -98,11 +99,17 @@ export type TuiState = {
   expandedThinking: number[];
   /** Currently focused message index for keyboard navigation; -1 = none. */
   focusedMessageIndex: number;
+  /**
+   * Number of visual terminal rows below the viewport.
+   * 0 = stick to bottom (show latest).
+   */
+  scrollOffset: number;
 };
 
 export type TuiAction =
   | { type: "USER_MESSAGE"; text: string; images?: ImageAttachment[] }
   | { type: "LOOP_EVENT"; event: LoopEvent }
+  | { type: "AUTO_CONTINUE"; count: number; max: number }
   | { type: "MODEL_CHANGED"; modelName: string }
   | { type: "SET_STATUS"; status: string }
   | { type: "RESET" }
@@ -117,7 +124,11 @@ export type TuiAction =
   | { type: "TOGGLE_SUBAGENT_EXPAND"; id: string }
   | { type: "ADD_PENDING_IMAGE"; image: ImageAttachment }
   | { type: "CLEAR_PENDING_IMAGES" }
-  | { type: "ATTACHMENT_ERROR"; message: string };
+  | { type: "ATTACHMENT_ERROR"; message: string }
+  | { type: "ADD_NOTICE"; title?: string; text: string }
+  | { type: "SCROLL_BY"; delta: number }
+  | { type: "SCROLL_TO"; offset: number }
+  | { type: "SCROLL_TO_BOTTOM" };
 
 function shortPreview(s: string, max = 200): string {
   const oneLine = s.replace(/\s+/g, " ").trim();
@@ -182,6 +193,7 @@ export function createInitialState(modelName: string): TuiState {
     expandedThinking: [],
     focusedMessageIndex: -1,
     pendingImages: [],
+    scrollOffset: 0,
   };
 }
 
@@ -193,6 +205,20 @@ export function reasoningMessageIndices(messages: ChatMessage[]): number[] {
     if (msg?.kind === "assistant" && msg.reasoning) indices.push(i);
   }
   return indices;
+}
+
+/**
+ * Reducer-level append operations retain the current row offset. App.tsx adds
+ * the measured row-height delta after render so wrapped text stays anchored.
+ */
+export function preserveScrollOnAppend(
+  scrollOffset: number,
+  previousCount: number,
+  nextCount: number,
+): number {
+  // Stick to bottom when pinned; otherwise preserve visual position.
+  if (scrollOffset === 0) return 0;
+  return Math.max(0, scrollOffset + (nextCount - previousCount));
 }
 
 export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
@@ -210,6 +236,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         status: "思考中...",
         streamingText: "",
         streamingReasoning: "",
+        // New user turns always re-pin the feed to the latest content.
+        scrollOffset: 0,
       };
 
     case "RESET":
@@ -224,6 +252,15 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
 
     case "SET_STATUS":
       return { ...state, status: action.status };
+
+    case "AUTO_CONTINUE":
+      return {
+        ...state,
+        busy: true,
+        streamingText: "",
+        streamingReasoning: "",
+        status: `自动续跑 (${action.count}/${action.max})...`,
+      };
 
     case "CLEAR_PENDING_PERMISSION":
       return {
@@ -348,19 +385,31 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             status: hasTools ? "执行工具..." : "整理回复...",
             usedTokens,
             contextTokens,
+            scrollOffset: preserveScrollOnAppend(
+              state.scrollOffset,
+              state.messages.length,
+              newMessages.length,
+            ),
           };
         }
 
-        case "error":
+        case "error": {
+          const newMessages: ChatMessage[] = [...state.messages, { kind: "error", text: event.message }];
           return {
             ...state,
             busy: false,
-            messages: [...state.messages, { kind: "error", text: event.message }],
+            messages: newMessages,
             streamingText: "",
             streamingReasoning: "",
             pendingPermission: undefined,
             status: "请求失败",
+            scrollOffset: preserveScrollOnAppend(
+              state.scrollOffset,
+              state.messages.length,
+              newMessages.length,
+            ),
           };
+        }
 
         case "max_turns":
           return {
@@ -375,6 +424,12 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             contextTokens: event.afterTokens,
             status: `上下文已压缩 ${event.beforeTokens} → ${event.afterTokens} tokens`,
+          };
+
+        case "thinking_policy":
+          return {
+            ...state,
+            status: `自适应思考: ${event.level} (${event.reasons.join(", ")})`,
           };
 
         case "tool_start": {
@@ -403,13 +458,19 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             label: toolLabel(event.call.name, rawArgs),
             status: "running",
           };
+          const newMessages: ChatMessage[] = [...state.messages, card];
           return {
             ...state,
-            messages: [...state.messages, card],
+            messages: newMessages,
             steps: [...state.steps.filter((item) => item.id !== step.id), step],
             touchedFiles: [...state.touchedFiles, ...paths.filter((path) => !state.touchedFiles.includes(path))].slice(-50),
             toolCards: [...state.toolCards.filter((item) => item.id !== sidebarCard.id), sidebarCard],
             status: `${event.call.name}...`,
+            scrollOffset: preserveScrollOnAppend(
+              state.scrollOffset,
+              state.messages.length,
+              newMessages.length,
+            ),
           };
         }
 
@@ -503,10 +564,16 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             startedAt: Date.now(),
             expanded: false,
           };
+          const newMessages: ChatMessage[] = [...state.messages, card];
           return {
             ...state,
-            messages: [...state.messages, card],
+            messages: newMessages,
             status: `子代理 (depth ${evt.depth})...`,
+            scrollOffset: preserveScrollOnAppend(
+              state.scrollOffset,
+              state.messages.length,
+              newMessages.length,
+            ),
           };
         }
         case "subagent_event": {
@@ -586,12 +653,40 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     case "CLEAR_PENDING_IMAGES":
       return { ...state, pendingImages: [] };
 
-    case "ATTACHMENT_ERROR":
+    case "ATTACHMENT_ERROR": {
+      const newMessages: ChatMessage[] = [...state.messages, { kind: "error", text: action.message }];
       return {
         ...state,
-        messages: [...state.messages, { kind: "error", text: action.message }],
+        messages: newMessages,
         status: "图片添加失败",
+        scrollOffset: preserveScrollOnAppend(
+          state.scrollOffset,
+          state.messages.length,
+          newMessages.length,
+        ),
       };
+    }
+
+    case "ADD_NOTICE": {
+      const messages: ChatMessage[] = [
+        ...state.messages,
+        { kind: "notice", text: action.text, ...(action.title ? { title: action.title } : {}) },
+      ];
+      return { ...state, messages, status: "就绪", scrollOffset: 0 };
+    }
+
+    case "SCROLL_BY": {
+      const next = Math.max(0, state.scrollOffset + action.delta);
+      return next === state.scrollOffset ? state : { ...state, scrollOffset: next };
+    }
+
+    case "SCROLL_TO": {
+      const next = Math.max(0, action.offset);
+      return next === state.scrollOffset ? state : { ...state, scrollOffset: next };
+    }
+
+    case "SCROLL_TO_BOTTOM":
+      return state.scrollOffset === 0 ? state : { ...state, scrollOffset: 0 };
 
     default:
       return state;

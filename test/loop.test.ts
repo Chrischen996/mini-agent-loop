@@ -96,6 +96,40 @@ describe("runAgentLoop", () => {
     }
   });
 
+  it("records paired automatic validation after a successful write", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "mini-agent-auto-validation-"));
+    try {
+      await writeFile(path.join(root, "package.json"), JSON.stringify({ scripts: { test: "node -e \"process.exit(0)\"" } }), "utf8");
+      let calls = 0;
+      const messages = await runAgentLoop("write", {
+        llm: dummyLlm,
+        tools: [{
+          name: "write",
+          description: "write",
+          parameters: { type: "object" },
+          execute: async () => ({ content: "written" }),
+        }],
+        autoValidate: true,
+        validationWorkspace: root,
+        chat: async () => {
+          calls += 1;
+          return calls === 1
+            ? { role: "assistant", content: "", toolCalls: [{ id: "write_1", name: "write", arguments: {} }] }
+            : { role: "assistant", content: "done" };
+        },
+      });
+      const validationAssistant = messages.find((message) => message.role === "assistant" && message.toolCalls?.[0]?.name === "validate_workspace");
+      const validationTool = messages.find((message) => message.role === "tool" && message.name === "validate_workspace");
+      assert.ok(validationAssistant);
+      assert.ok(validationTool && validationTool.role === "tool");
+      if (validationAssistant?.role === "assistant" && validationTool?.role === "tool") {
+        assert.equal(validationTool.toolCallId, validationAssistant.toolCalls?.[0]?.id);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("unknown tool becomes isError tool result without throwing", async () => {
     const tools = createDefaultTools(process.cwd());
     const chat = createUnknownToolFauxChat("call_unknown_1");
@@ -196,6 +230,105 @@ describe("runAgentTurn", () => {
     assert.equal(messages.find((message) => message.role === "user")?.content, "inspect this");
   });
 
+  it("emits an adaptive initial decision before the first model call", async () => {
+    const configs: typeof dummyLlm[] = [];
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+    const reasoningLlm = makeLlmConfig({
+      apiKey: "test",
+      baseUrl: "http://localhost/v1",
+      model: "faux",
+      reasoning: true,
+      thinkingLevel: "medium",
+    });
+
+    await runAgentTurn(createAgentHistory(), "Explain this module", {
+      llm: reasoningLlm,
+      tools: [],
+      thinkingMode: "adaptive",
+      onEvent: (event) => events.push(event),
+      chat: async (config) => {
+        configs.push(config);
+        return { role: "assistant", content: "done" };
+      },
+    });
+
+    assert.equal(configs[0]?.thinkingLevel, "low");
+    const policyEvent = events.find((event) => event.type === "thinking_policy");
+    assert.ok(policyEvent && policyEvent.type === "thinking_policy");
+    if (policyEvent?.type === "thinking_policy") {
+      assert.equal(policyEvent.phase, "initial");
+      assert.equal(policyEvent.level, "low");
+    }
+  });
+
+  it("escalates adaptive effort after a tool failure for the next model call", async () => {
+    const configs: typeof dummyLlm[] = [];
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+    let calls = 0;
+    const reasoningLlm = makeLlmConfig({
+      apiKey: "test",
+      baseUrl: "http://localhost/v1",
+      model: "faux",
+      reasoning: true,
+      thinkingLevel: "medium",
+    });
+    const failingTool: Tool = {
+      name: "failing_tool",
+      description: "always fails",
+      parameters: { type: "object" },
+      execute: async () => ({ content: "failure", isError: true }),
+    };
+
+    await runAgentTurn(createAgentHistory(), "Explain this failure", {
+      llm: reasoningLlm,
+      tools: [failingTool],
+      thinkingMode: "adaptive",
+      onEvent: (event) => events.push(event),
+      chat: async (config) => {
+        configs.push(config);
+        calls += 1;
+        return calls === 1
+          ? { role: "assistant", content: "", toolCalls: [{ id: "failure_1", name: "failing_tool", arguments: {} }] }
+          : { role: "assistant", content: "recovered" };
+      },
+    });
+
+    assert.deepEqual(configs.map((config) => config.thinkingLevel), ["low", "medium"]);
+    const escalation = events.find((event) => event.type === "thinking_policy" && event.phase === "escalation");
+    assert.ok(escalation && escalation.type === "thinking_policy");
+    if (escalation?.type === "thinking_policy") {
+      assert.equal(escalation.previousLevel, "low");
+      assert.equal(escalation.level, "medium");
+      assert.deepEqual(escalation.reasons, ["tool_failure"]);
+    }
+  });
+
+  it("keeps an explicit thinking command fixed when adaptive is the default", async () => {
+    let capturedConfig: typeof dummyLlm | undefined;
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+    const reasoningLlm = makeLlmConfig({
+      apiKey: "test",
+      baseUrl: "http://localhost/v1",
+      model: "faux",
+      reasoning: true,
+      thinkingLevel: "medium",
+    });
+
+    await runAgentTurn(createAgentHistory(), "/think:high Explain this module", {
+      llm: reasoningLlm,
+      tools: [],
+      thinkingMode: "adaptive",
+      onEvent: (event) => events.push(event),
+      chat: async (config) => {
+        capturedConfig = config;
+        return { role: "assistant", content: "done" };
+      },
+    });
+
+    assert.equal(capturedConfig?.thinkingLevel, "high");
+    assert.equal(events.some((event) => event.type === "thinking_policy"), false);
+  });
+
   it("retries a reasoning-only assistant response before completing", async () => {
     let calls = 0;
     const messages = await runAgentTurn(createAgentHistory(), "continue", {
@@ -229,6 +362,41 @@ describe("runAgentTurn", () => {
     });
     assert.equal(messages.at(-1)?.role, "assistant");
     assert.ok(events.some((event) => event.type === "context_compacted"));
+  });
+
+  it("does not compact a short Grok conversation with the balanced output budget", async () => {
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+    const grok = makeLlmConfig({
+      apiKey: "test",
+      baseUrl: "https://gateway.example/v1",
+      model: "xai/grok-4.5",
+    });
+    await runAgentTurn(createAgentHistory("system"), "hello", {
+      llm: grok,
+      tools: [],
+      onEvent: (event) => events.push(event),
+      chat: async () => ({ role: "assistant", content: "ok" }),
+    });
+
+    assert.equal(grok.maxTokens, 32_768);
+    assert.equal(events.some((event) => event.type === "context_compacted"), false);
+  });
+
+  it("respects an explicit context reserve independently from the request output limit", async () => {
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+    const history = [
+      ...createAgentHistory("system"),
+      ...Array.from({ length: 8 }, (_, index) => ({ role: "user" as const, content: `message ${index} ${"x".repeat(80)}` })),
+    ];
+    await runAgentTurn(history, "latest", {
+      llm: makeLlmConfig({ apiKey: "test", baseUrl: "http://localhost/v1", model: "faux", contextWindow: 500, maxTokens: 200 }),
+      tools: [],
+      context: { reserveTokens: 10, keepRecentMessages: 2 },
+      onEvent: (event) => events.push(event),
+      chat: async () => ({ role: "assistant", content: "ok" }),
+    });
+
+    assert.equal(events.some((event) => event.type === "context_compacted"), false);
   });
 
   it("retries one provider context overflow after compaction", async () => {

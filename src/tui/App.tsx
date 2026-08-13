@@ -1,4 +1,4 @@
-import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo } from "react";
+import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from "react";
 import { Box, Text, useApp, useInput, useStdout, type Key } from "ink";
 import { readdir, stat } from "node:fs/promises";
 import * as nodePath from "node:path";
@@ -22,10 +22,14 @@ import {
 } from "../loop.ts";
 import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
 import {
+  buildIntenseLlm,
   cycleThinkingLevel,
+  parseThinkingCommandMode,
+  parseThinkingIntensityPrompt,
   thinkingLevelToDisplay,
   withThinkingLevel,
 } from "../think-intensity.ts";
+import { loadThinkingModeFromEnv } from "../thinking-policy.ts";
 import { adaptHistoryForModel } from "../message-adapter.ts";
 import { findExactModelReferenceMatch, getAllModels, resolveModel, searchModels, type ModelRef } from "../models.ts";
 import {
@@ -61,6 +65,9 @@ import {
   type PermissionTurnContext,
 } from "../permissions.ts";
 import { TurnEventBuffer } from "./stream-buffer.ts";
+import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./layout.ts";
+import { estimateViewportContentHeight } from "./message-viewport.ts";
+
 import { TUI_COLORS as C } from "./theme.ts";
 import { PasteAwareTextInput } from "./components/PasteAwareTextInput.tsx";
 import {
@@ -215,6 +222,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const { exit } = useApp();
   const { stdout } = useStdout();
   const termWidth = stdout?.columns ?? 80;
+  // Leave one terminal row unused so Ink never enters its full-screen clear
+  // path (`outputHeight >= rows`) while streamed reasoning is growing.
+  const termHeight = getTuiViewportHeight(stdout?.rows);
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const llmRef = useRef(llm);
   llmRef.current = llm;
@@ -565,6 +575,24 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     dispatch({ type: "SET_STATUS", status: `思考强度: ${thinkingLevelToDisplay(nextLevel)}` });
   }, [state.busy, state.pendingPermission]);
 
+  const requestedPickerItems =
+    acMode === "command" ? Math.min(6, cmdCandidates.length)
+      : acMode === "file" ? Math.min(8, fileCandidates.length)
+        : acMode === "model" || acMode === "model-picker" ? Math.min(12, modelCandidates.length)
+          : acMode === "profile-list" ? Math.min(10, profileListState?.profiles.length ?? 0)
+            : acMode ? 4 : 0;
+  const pickerLayout = getPickerLayout({
+    termRows: stdout?.rows,
+    requestedItems: requestedPickerItems,
+    hasPendingImages: state.pendingImages.length > 0,
+    extraRows: acMode === "model" || acMode === "model-picker" || acMode === "file" ? 3 : 2,
+  });
+  const feedHeight = getMessageFeedHeight({
+    termRows: stdout?.rows,
+    hasPendingImages: state.pendingImages.length > 0,
+    pickerRows: pickerLayout.totalRows,
+  });
+
   // ── keyboard handler ─────────────────────────────────────────────────────
 
   useInput((_ch: string, key: Key) => {
@@ -640,6 +668,33 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     if (!acMode && key.meta && key.downArrow) {
       dispatch({ type: "FOCUS_NEXT_REASONING", direction: 1 });
       return;
+    }
+
+    // Message history scrolling (does not steal autocomplete navigation).
+    // PageUp/PageDown and Ctrl+↑/↓ move a bottom-anchored window over history.
+    if (!acMode) {
+      if (key.pageUp) {
+        dispatch({ type: "SCROLL_BY", delta: Math.max(1, feedHeight - 2) });
+        return;
+      }
+      if (key.pageDown) {
+        dispatch({ type: "SCROLL_BY", delta: -Math.max(1, feedHeight - 2) });
+        return;
+      }
+      if (key.ctrl && key.upArrow) {
+        dispatch({ type: "SCROLL_BY", delta: 1 });
+        return;
+      }
+      if (key.ctrl && key.downArrow) {
+        dispatch({ type: "SCROLL_BY", delta: -1 });
+        return;
+      }
+      // Ctrl+G jumps back to the latest messages (stick-to-bottom).
+      if (key.ctrl && (_ch === "g" || _ch === "G")) {
+        suppressInputEchoRef.current = true;
+        dispatch({ type: "SCROLL_TO_BOTTOM" });
+        return;
+      }
     }
     if (acMode === "profile-name") {
       if (key.escape) {
@@ -860,7 +915,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
     if (trimmed === "/help" || trimmed === "/?") {
-      dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: { id: "help", name: "help", arguments: {} }, result: { content: SLASH_COMMANDS.map((c) => `${c.usage.padEnd(28)} ${c.description}`).join("\n"), isError: false } } });
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "可用命令",
+        text: SLASH_COMMANDS.map((command) => `${command.usage.padEnd(28)} ${command.description}`).join("\n"),
+      });
       setInput("");
       return;
     }
@@ -922,7 +981,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
     const prompt = trimmed || DEFAULT_IMAGE_PROMPT;
-    const turnLlm = llm;
+    const parsedThinking = parseThinkingIntensityPrompt(prompt);
+    let turnLlm = parsedThinking.intensity
+      ? buildIntenseLlm(llm, parsedThinking.intensity)
+      : llm;
+    if (parsedThinking.intensity) setLlm(turnLlm);
     let imageParts: import("../types.ts").ImagePart[];
     try {
       imageParts = await Promise.all(pendingImgs.map(imageAttachmentToPart));
@@ -950,8 +1013,15 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const MAX_AUTO_CONTINUES = 5;
     let autoContinueCount = 0;
     let currentUserText = prompt;
+    const thinkingMode = parsedThinking.intensity
+      ? "fixed"
+      : parseThinkingCommandMode(prompt) ?? loadThinkingModeFromEnv();
 
     const onLoopEvent = (event: LoopEvent) => {
+      if (event.type === "thinking_policy") {
+        turnLlm = withThinkingLevel(turnLlm, event.level);
+        setLlm(turnLlm);
+      }
       streamBuffer.handle(runId, event);
     };
 
@@ -975,6 +1045,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             signal: abortRef.current.signal,
             userContent: currentUserContent,
             permissionTurn,
+            autoValidate: process.env.MINI_AGENT_AUTO_VALIDATE === "1",
+            validationWorkspace: cwd,
+            autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
+            thinkingMode,
             onEvent: onLoopEvent,
           });
           streamBuffer.finish(runId);
@@ -1006,12 +1080,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             }
             currentUserText = "继续完成之前的工作";
             currentUserContent = currentUserText;
-            dispatch({ type: "LOOP_EVENT", event: {
-              type: "context_compacted",
-              beforeTokens: 0,
-              afterTokens: 0,
-              reason: `自动续跑 (${autoContinueCount}/${MAX_AUTO_CONTINUES})`,
-            }});
+            dispatch({ type: "AUTO_CONTINUE", count: autoContinueCount, max: MAX_AUTO_CONTINUES });
             continue;
           }
           throw err;
@@ -1052,11 +1121,30 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   // ── render ────────────────────────────────────────────────────────────────
 
+  const viewportContentHeight = estimateViewportContentHeight({
+    messages: state.messages,
+    streamingText: state.streamingText,
+    streamingReasoning: state.streamingReasoning,
+    busy: state.busy,
+    thinkingMode: state.thinkingMode,
+    expandedThinking: state.expandedThinking,
+    width: termWidth,
+    maxMessages: 200,
+  });
+  const previousViewportHeightRef = useRef(viewportContentHeight);
+  useLayoutEffect(() => {
+    const previous = previousViewportHeightRef.current;
+    previousViewportHeightRef.current = viewportContentHeight;
+    if (state.scrollOffset > 0 && viewportContentHeight > previous) {
+      dispatch({ type: "SCROLL_BY", delta: viewportContentHeight - previous });
+    }
+  }, [viewportContentHeight, state.scrollOffset]);
+
   return (
-    <Box flexDirection="column" width={termWidth}>
+    <Box flexDirection="column" width={termWidth} height={termHeight} overflow="hidden">
       <Header />
 
-      <Box flexDirection="column" flexGrow={1}>
+      <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
         <MessageFeed
           messages={state.messages}
           streamingText={state.streamingText}
@@ -1066,121 +1154,143 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           focusedMessageIndex={state.focusedMessageIndex}
           busy={state.busy}
           status={state.status}
+          availableHeight={feedHeight}
+          width={termWidth}
+          scrollOffset={state.scrollOffset}
         />
-      </Box>
-
-      {/* Command palette */}
-      {acMode === "command" && (
-        <CommandPalette
-          filter={input.slice(1)}
-          selectedIndex={acIndex}
-          candidates={cmdCandidates}
-        />
-      )}
-
-      {/* File autocomplete */}
-      {acMode === "file" && (
-        <FileAutocomplete
-          candidates={fileCandidates}
-          selectedIndex={acIndex}
-          prefix={fileFragment}
-        />
-      )}
-
-      {(acMode === "model" || acMode === "model-picker") && (
-        <ModelPicker
-          candidates={modelCandidates}
-          contextWindows={modelContextWindows}
-          selectedIndex={acIndex}
-          query={modelQuery}
-          current={`${llm.provider}/${llm.model}`}
-        />
-      )}
-
-      {acMode === "model-setup" && modelSetup && (
-        <Box flexDirection="column" paddingX={2}>
-          <Text color={C.primary} bold>── 配置模型 ──</Text>
-          <Text>模型: {modelSetup.model.provider}/{modelSetup.model.id}</Text>
-          <Text dimColor>Base URL: {modelSetup.field === "baseUrl" ? "正在编辑" : modelSetup.baseUrl}</Text>
-          <Text dimColor>API Key: {modelSetup.field === "apiKey" ? "正在编辑" : "已设置"}</Text>
-          {modelSetup.error && <Text color={C.error}>{modelSetup.error}</Text>}
-          <Text dimColor>Enter 确认当前字段，Esc 取消</Text>
-        </Box>
-      )}
-
-      {acMode === "profile-name" && pendingProfileSetup && (
-        <Box flexDirection="column" paddingX={2}>
-          <Text color={C.primary} bold>── 保存配置文件 ──</Text>
-          <Text>模型: {pendingProfileSetup.model.provider}/{pendingProfileSetup.model.id}</Text>
-          <Text dimColor>输入配置文件名称（Enter 保存，Esc 跳过）:</Text>
-        </Box>
-      )}
-
-      {acMode === "profile-list" && profileListState && (
-        <Box flexDirection="column" paddingX={2}>
-          <Text color={C.primary} bold>── 配置文件列表 ──</Text>
-          {profileListState.profiles.length === 0 && <Text dimColor>无已保存的配置文件</Text>}
-          {profileListState.profiles.map((p, i) => (
-            <Text key={p.name} color={i === profileListState.selectedIndex ? C.selection : undefined}>
-              {i === profileListState.selectedIndex ? "▶ " : "  "}
-              {p.active ? "✓ " : "  "}
-              {p.name} ({p.model}) — {p.baseUrl}
-            </Text>
-          ))}
-          <Text dimColor>↑↓ 选择，Enter 激活，Esc 取消，/profiles delete &lt;name&gt; 删除</Text>
-        </Box>
-      )}
-
-      {/* Input row */}
-      {state.pendingImages.length > 0 && (
-        <Box paddingX={1} gap={1}>
-          {state.pendingImages.map((img, idx) => (
-            <Text key={idx} color={C.user}>
-              🖼️ {img.path.split("/").pop()}
-            </Text>
-          ))}
-        </Box>
-      )}
-      <Box paddingX={1} gap={1}>
-        <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : ">"}</Text>
-        <Box flexGrow={1} minWidth={0}>
-          <PasteAwareTextInput
-            value={input}
-            onChange={setInputSafe}
-            onPasteImage={handlePasteImage}
-            pasteEnabled={!state.pendingPermission}
-            mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
-            onSubmit={(val) => {
-              if ((acMode === "model" || acMode === "model-picker") && modelCandidates[acIndex]) {
-                selectModel(modelCandidates[acIndex]!);
-              } else {
-                void handleSubmit(val);
-              }
-            }}
-            placeholder={
-              state.busy ? "运行中，可输入消息并排队"
-                : acMode === "model-picker" ? "搜索模型"
-                  : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "输入 Base URL"
-                    : acMode === "model-setup" ? "输入 API Key，可留空使用环境变量"
-                      : acMode === "profile-name" ? "输入配置文件名称（例如 coding-fast）"
-                        : acMode === "profile-list" ? "↑↓ 选择配置文件，Enter 激活"
-                          : "输入消息，/ 命令，或 @文件 引用"
-            }
+        {/* Keep transient pickers in the dynamic region so they cannot push the
+            input and status bar outside the fixed terminal viewport. */}
+        {acMode === "command" && (
+          <CommandPalette
+            filter={input.slice(1)}
+            selectedIndex={acIndex}
+            candidates={cmdCandidates}
+            maxVisible={pickerLayout.itemRows}
           />
-          {state.busy && queuedCount > 0 && <Text color={C.running}>队列 {queuedCount}</Text>}
-        </Box>
+        )}
+
+        {acMode === "file" && (
+          <FileAutocomplete
+            candidates={fileCandidates}
+            selectedIndex={acIndex}
+            prefix={fileFragment}
+            maxVisible={pickerLayout.itemRows}
+          />
+        )}
+
+        {(acMode === "model" || acMode === "model-picker") && (
+          <ModelPicker
+            candidates={modelCandidates}
+            contextWindows={modelContextWindows}
+            selectedIndex={acIndex}
+            query={modelQuery}
+            current={`${llm.provider}/${llm.model}`}
+            maxVisible={pickerLayout.itemRows}
+          />
+        )}
+
+        {acMode === "model-setup" && modelSetup && (
+          <Box flexDirection="column" paddingX={2}>
+            <Text color={C.primary} bold>── 配置模型 ──</Text>
+            <Text>模型: {modelSetup.model.provider}/{modelSetup.model.id}</Text>
+            <Text dimColor>Base URL: {modelSetup.field === "baseUrl" ? "正在编辑" : modelSetup.baseUrl}</Text>
+            <Text dimColor>API Key: {modelSetup.field === "apiKey" ? "正在编辑" : "已设置"}</Text>
+            {modelSetup.error && <Text color={C.error}>{modelSetup.error}</Text>}
+            <Text dimColor>Enter 确认当前字段，Esc 取消</Text>
+          </Box>
+        )}
+
+        {acMode === "profile-name" && pendingProfileSetup && (
+          <Box flexDirection="column" paddingX={2}>
+            <Text color={C.primary} bold>── 保存配置文件 ──</Text>
+            <Text>模型: {pendingProfileSetup.model.provider}/{pendingProfileSetup.model.id}</Text>
+            <Text dimColor>输入配置文件名称（Enter 保存，Esc 跳过）:</Text>
+          </Box>
+        )}
+
+        {acMode === "profile-list" && profileListState && (
+          <Box flexDirection="column" paddingX={2}>
+            <Text color={C.primary} bold>── 配置文件列表 ──</Text>
+            {profileListState.profiles.length === 0 && <Text dimColor>无已保存的配置文件</Text>}
+            {(() => {
+              const count = Math.max(1, pickerLayout.itemRows);
+              const start = Math.max(0, Math.min(
+                profileListState.selectedIndex - count + 1,
+                profileListState.profiles.length - count,
+              ));
+              const visible = profileListState.profiles.slice(start, start + count);
+              return <>
+                {visible.map((profile, visibleIndex) => {
+                  const index = start + visibleIndex;
+                  return (
+                    <Text key={profile.name} color={index === profileListState.selectedIndex ? C.selection : undefined}>
+                      {index === profileListState.selectedIndex ? "▶ " : "  "}
+                      {profile.active ? "✓ " : "  "}
+                      {profile.name} ({profile.model}) — {profile.baseUrl}
+                    </Text>
+                  );
+                })}
+                {profileListState.profiles.length > visible.length && (
+                  <Text dimColor>显示 {start + 1}-{start + visible.length} / {profileListState.profiles.length}</Text>
+                )}
+              </>;
+            })()}
+            <Text dimColor>↑↓ 选择，Enter 激活，Esc 取消，/profiles delete &lt;name&gt; 删除</Text>
+          </Box>
+        )}
       </Box>
-      <StatusBar
-        modelName={state.modelName}
-        tokenEstimate={state.usedTokens || state.contextTokens}
-        contextWindow={llm.contextWindow}
-        cwd={cwd}
-        busy={state.busy}
-        status={state.status}
-        queuedCount={queuedCount}
-        permissionMode={state.permissionMode}
-        thinkingLevel={llm.thinkingLevel ?? (llm.reasoning ? "medium" : "off")}
-      />
+
+      <Box flexDirection="column" flexShrink={0}>
+        {state.pendingImages.length > 0 && (
+          <Box paddingX={1} gap={1}>
+            {state.pendingImages.map((img, idx) => (
+              <Text key={idx} color={C.user}>
+                🖼️ {img.path.split("/").pop()}
+              </Text>
+            ))}
+          </Box>
+        )}
+        <Box paddingX={1} gap={1} flexShrink={0}>
+          <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : ">"}</Text>
+          <Box flexGrow={1} minWidth={0}>
+            <PasteAwareTextInput
+              value={input}
+              onChange={setInputSafe}
+              onPasteImage={handlePasteImage}
+              pasteEnabled={!state.pendingPermission}
+              mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
+              onSubmit={(val) => {
+                if ((acMode === "model" || acMode === "model-picker") && modelCandidates[acIndex]) {
+                  selectModel(modelCandidates[acIndex]!);
+                } else {
+                  void handleSubmit(val);
+                }
+              }}
+              placeholder={
+                state.busy ? "运行中，可输入消息并排队"
+                  : acMode === "model-picker" ? "搜索模型"
+                    : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "输入 Base URL"
+                      : acMode === "model-setup" ? "输入 API Key，可留空使用环境变量"
+                        : acMode === "profile-name" ? "输入配置文件名称（例如 coding-fast）"
+                          : acMode === "profile-list" ? "↑↓ 选择配置文件，Enter 激活"
+                            : "输入消息，/ 命令，或 @文件 引用"
+              }
+            />
+            {state.busy && queuedCount > 0 && <Text color={C.running}>队列 {queuedCount}</Text>}
+          </Box>
+        </Box>
+        <StatusBar
+          modelName={state.modelName}
+          tokenEstimate={state.usedTokens || state.contextTokens}
+          contextWindow={llm.contextWindow}
+          cwd={cwd}
+          busy={state.busy}
+          status={state.status}
+          queuedCount={queuedCount}
+          permissionMode={state.permissionMode}
+          thinkingLevel={llm.thinkingLevel ?? (llm.reasoning ? "medium" : "off")}
+        />
+      </Box>
     </Box>
   );
 }

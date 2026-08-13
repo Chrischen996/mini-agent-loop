@@ -50,11 +50,15 @@ import {
 } from "./workspace.ts";
 import {
   intensityToModelThinkingLevel,
+  parseThinkingCommandMode,
   parseThinkingIntensityPrompt,
   withThinkingLevel,
 } from "./think-intensity.ts";
+import { loadThinkingModeFromEnv, type ThinkingMode } from "./thinking-policy.ts";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
 import { PermissionManager, isPermissionMode, type PermissionDecision, type PermissionMode } from "./permissions.ts";
+import { GitWorkflow } from "./git/workflow.ts";
+import { formatValidationReport, runValidation, type ValidationStepName } from "./validation.ts";
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 5;
@@ -74,7 +78,11 @@ type Session = {
   llmOverride?: LlmConfig;
   /** Persisted per-session thinking level, if changed by /think. */
   thinkingLevel?: ModelThinkingLevel;
+  /** Fixed or adaptive effort selection for subsequent session messages. */
+  thinkingMode?: ThinkingMode;
   permissionManager: PermissionManager;
+  parentSessionId?: string;
+  forkedFromMessage?: number;
 };
 
 export type AgentServerOptions = {
@@ -111,6 +119,10 @@ export type AgentServerOptions = {
   subagentEnabled?: boolean;
   /** Optional code-level preflight delegation. Disabled unless enabled. */
   autoSubagent?: AutoSubagentOptions;
+  autoValidate?: boolean;
+  autoCheckpoint?: boolean;
+  thinkingMode?: ThinkingMode;
+  maxThinkingEscalations?: number;
   /** Default permission mode for new and restored Web sessions. */
   permissionMode?: PermissionMode;
 };
@@ -186,6 +198,16 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         name: event.call.name,
         isError: Boolean(event.result.isError),
         preview: contentAsString(event.result.content).slice(0, 500),
+      };
+    case "thinking_policy":
+      return {
+        type: "thinking_policy",
+        mode: event.mode,
+        phase: event.phase,
+        previousLevel: event.previousLevel,
+        level: event.level,
+        score: event.score,
+        reasons: event.reasons.slice(0, 12),
       };
     case "permission_required":
       return {
@@ -335,11 +357,40 @@ function formatReferencedBlock(paths: string[]): string {
   ].join("\n");
 }
 
+export function truncateSessionMessages(messages: AgentMessage[], visibleCount: number): AgentMessage[] {
+  const system = messages.filter((message) => message.role === "system");
+  const visible = messages.filter((message) => message.role !== "system").slice(0, visibleCount);
+  for (let index = 0; index < visible.length; index += 1) {
+    const message = visible[index];
+    if (message.role !== "assistant" || !message.toolCalls?.length) continue;
+    const expected = new Set(message.toolCalls.map((call) => call.id));
+    const found = new Set<string>();
+    for (const candidate of visible.slice(index + 1)) {
+      if (candidate.role === "tool") found.add(candidate.toolCallId);
+      if (candidate.role === "user" || candidate.role === "assistant") break;
+    }
+    if ([...expected].some((id) => !found.has(id))) {
+      visible.splice(index);
+      break;
+    }
+  }
+  return [...system, ...visible];
+}
+
+function visibleMessageCount(messages: AgentMessage[]): number {
+  return messages.filter((message) => message.role !== "system").length;
+}
+
 export function buildModelPrompt(input: {
   prompt: string;
   referencedPaths: string[];
   hasImages: boolean;
-}): { displayPrompt: string; modelPrompt: string; thinkingLevel: ModelThinkingLevel | null } {
+}): {
+  displayPrompt: string;
+  modelPrompt: string;
+  thinkingLevel: ModelThinkingLevel | null;
+  thinkingMode: ThinkingMode | null;
+} {
   const thinking = parseThinkingIntensityPrompt(input.prompt.trim());
   const text = thinking.prompt;
   const refs = input.referencedPaths;
@@ -367,6 +418,7 @@ export function buildModelPrompt(input: {
     thinkingLevel: thinking.intensity
       ? intensityToModelThinkingLevel(thinking.intensity)
       : null,
+    thinkingMode: thinking.intensity ? "fixed" : parseThinkingCommandMode(input.prompt) ?? null,
   };
 }
 
@@ -379,6 +431,7 @@ async function parseMessageRequest(
   displayPrompt: string;
   modelPrompt: string;
   thinkingLevel: ModelThinkingLevel | null;
+  thinkingMode: ThinkingMode | null;
   images: ContentPart[];
   imageNames: string[];
   documents: ContentPart[];
@@ -437,6 +490,7 @@ async function parseMessageRequest(
     displayPrompt: built.displayPrompt,
     modelPrompt: built.modelPrompt,
     thinkingLevel: built.thinkingLevel,
+    thinkingMode: built.thinkingMode,
     images,
     imageNames,
     documents,
@@ -471,13 +525,17 @@ export function createAgentServer(options: AgentServerOptions): Express {
   }
   const documentStore = new DocumentStore(path.join(dataRoot, "documents"));
   const sessionStore = new SessionStore(path.join(dataRoot, "sessions"));
+  const gitWorkflow = new GitWorkflow(workspace);
   const persistedSession = (session: Session): PersistedSession => ({
     id: session.id,
     createdAt: session.createdAt,
     modelId: session.modelId,
     thinkingLevel: session.thinkingLevel,
+    thinkingMode: session.thinkingMode,
     permissionMode: session.permissionManager.getMode(),
     messages: session.messages,
+    parentSessionId: session.parentSessionId,
+    forkedFromMessage: session.forkedFromMessage,
   });
   const saveSession = (session: Session): Promise<void> => sessionStore.save(persistedSession(session));
   const restorePromise = sessionStore.loadAll().then((restored) => {
@@ -490,23 +548,30 @@ export function createAgentServer(options: AgentServerOptions): Express {
         permissionManager: new PermissionManager(persisted.permissionMode ?? defaultPermissionMode),
         modelId: persisted.modelId,
         thinkingLevel: persisted.thinkingLevel,
+        thinkingMode: persisted.thinkingMode,
+        parentSessionId: persisted.parentSessionId,
+        forkedFromMessage: persisted.forkedFromMessage,
       };
-      // Restore per-session LLM config from persisted modelId
+      // Restore the model choice first, then apply the persisted effort level
+      // even when the session stayed on the server default model.
+      let restoredLlm = options.llm;
       if (persisted.modelId) {
         try {
-          session.llmOverride = switchLlmModel(
+          restoredLlm = switchLlmModel(
             options.llm,
             persisted.modelId,
             {},
             options.relayRegistry,
           );
-          if (persisted.thinkingLevel) {
-            session.llmOverride = withThinkingLevel(session.llmOverride, persisted.thinkingLevel);
-          }
         } catch {
           // Model no longer available — fall back to server default
           session.modelId = undefined;
         }
+      }
+      if (persisted.modelId || persisted.thinkingLevel) {
+        session.llmOverride = persisted.thinkingLevel
+          ? withThinkingLevel(restoredLlm, persisted.thinkingLevel)
+          : restoredLlm;
       }
       sessions.set(persisted.id, session);
       await documentStore.restoreSession(persisted.id);
@@ -542,6 +607,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       contextWindow: resolveModel(options.llm.model, options.llm.baseUrl).contextWindow,
       maxTokens: options.llm.maxTokens,
       thinkingLevel: options.llm.thinkingLevel ?? (options.llm.reasoning ? "medium" : "off"),
+      thinkingMode: options.thinkingMode ?? loadThinkingModeFromEnv(),
       workspace: path.basename(workspace),
       workspaceLabel: path.basename(workspace),
       maxImages: MAX_IMAGES,
@@ -576,6 +642,54 @@ export function createAgentServer(options: AgentServerOptions): Express {
           : 400;
       response.status(status).json({ error: message });
     }
+  });
+
+  app.get("/api/git/status", async (_request, response) => {
+    try { response.json(await gitWorkflow.status()); }
+    catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.get("/api/git/diff", async (request, response) => {
+    try {
+      response.type("text/plain").send(await gitWorkflow.diff({
+        staged: String(request.query.staged ?? "") === "true",
+        path: request.query.path ? String(request.query.path) : undefined,
+      }));
+    } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.get("/api/git/checkpoints", async (_request, response) => {
+    try { response.json({ checkpoints: await gitWorkflow.listCheckpoints() }); }
+    catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.post("/api/git/checkpoints", async (request, response) => {
+    try {
+      const checkpoint = await gitWorkflow.createCheckpoint(String(request.body?.label ?? "agent-change"));
+      response.status(201).json(checkpoint);
+    } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.post("/api/git/undo", async (request, response) => {
+    const checkpointId = String(request.body?.checkpointId ?? "");
+    if (!checkpointId) { response.status(400).json({ error: "checkpointId is required" }); return; }
+    try { response.json(await gitWorkflow.undo(checkpointId)); }
+    catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.post("/api/git/branches", async (request, response) => {
+    try { response.status(201).json(await gitWorkflow.createIsolatedBranch(String(request.body?.label ?? "task"))); }
+    catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
+  });
+
+  app.post("/api/validation", async (request, response) => {
+    const requested = Array.isArray(request.body?.steps) ? request.body.steps : undefined;
+    const steps = requested?.filter((value: unknown): value is ValidationStepName =>
+      value === "test" || value === "typecheck" || value === "build");
+    try {
+      const report = await runValidation({ workspace, steps, timeoutMs: typeof request.body?.timeoutMs === "number" ? request.body.timeoutMs : undefined });
+      response.status(report.ok ? 200 : 422).json({ ...report, summary: formatValidationReport(report) });
+    } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
   });
 
   // ── Model discovery & per-session switching ─────────────────────────────────
@@ -705,6 +819,23 @@ export function createAgentServer(options: AgentServerOptions): Express {
 
   // ── Sessions ────────────────────────────────────────────────────────────────
 
+  app.get("/api/sessions", (_request, response) => {
+    const items = [...sessions.values()]
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((session) => ({
+        id: session.id,
+        createdAt: session.createdAt,
+        busy: session.busy,
+        parentSessionId: session.parentSessionId ?? null,
+        forkedFromMessage: session.forkedFromMessage ?? null,
+        messageCount: visibleMessageCount(session.messages),
+        modelId: session.modelId,
+        thinkingLevel: session.thinkingLevel ?? (session.llmOverride ?? options.llm).thinkingLevel ?? "off",
+        thinkingMode: session.thinkingMode ?? loadThinkingModeFromEnv(),
+      }));
+    response.json({ sessions: items });
+  });
+
   app.post("/api/sessions", async (_request, response) => {
     const id = randomUUID();
     const session: Session = {
@@ -712,12 +843,102 @@ export function createAgentServer(options: AgentServerOptions): Express {
       messages: createAgentHistory(undefined, defaultPermissionMode),
       createdAt: Date.now(),
       busy: false,
+      thinkingMode: options.thinkingMode ?? loadThinkingModeFromEnv(),
       permissionManager: new PermissionManager(defaultPermissionMode),
     };
     sessions.set(id, session);
     await sessionStore.create(persistedSession(session));
     void documentStore.createSession(id);
     response.status(201).json({ id, createdAt: session.createdAt, permissionMode: session.permissionManager.getMode() });
+  });
+
+  app.post("/api/sessions/:id/fork", async (request, response) => {
+    const parent = sessions.get(request.params.id);
+    if (!parent) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    if (parent.busy) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
+    const requestedIndex = request.body?.messageIndex;
+    const visibleMessages = parent.messages.filter((message) => message.role !== "system");
+    const messageIndex = requestedIndex === undefined
+      ? visibleMessages.length
+      : Number(requestedIndex);
+    if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex > visibleMessages.length) {
+      response.status(400).json({ error: `messageIndex must be an integer between 0 and ${visibleMessages.length}` });
+      return;
+    }
+    const messages = truncateSessionMessages(parent.messages, messageIndex);
+    const safeMessageIndex = visibleMessageCount(messages);
+    const id = randomUUID();
+    const child: Session = {
+      id,
+      messages,
+      createdAt: Date.now(),
+      busy: false,
+      modelId: parent.modelId,
+      llmOverride: parent.llmOverride,
+        thinkingLevel: parent.thinkingLevel,
+        thinkingMode: parent.thinkingMode,
+      permissionManager: new PermissionManager(parent.permissionManager.getMode()),
+      parentSessionId: parent.id,
+      forkedFromMessage: safeMessageIndex,
+    };
+    sessions.set(id, child);
+    await sessionStore.create(persistedSession(child));
+    await documentStore.createSession(id);
+    response.status(201).json({
+      id,
+      parentSessionId: parent.id,
+      forkedFromMessage: safeMessageIndex,
+      createdAt: child.createdAt,
+      messageCount: safeMessageIndex,
+    });
+  });
+
+  app.post("/api/sessions/:id/rewind", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    if (session.busy) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
+    const visibleMessages = session.messages.filter((message) => message.role !== "system");
+    const messageIndex = Number(request.body?.messageIndex);
+    if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex > visibleMessages.length) {
+      response.status(400).json({ error: `messageIndex must be an integer between 0 and ${visibleMessages.length}` });
+      return;
+    }
+    session.messages = truncateSessionMessages(session.messages, messageIndex);
+    const safeMessageIndex = visibleMessageCount(session.messages);
+    await saveSession(session);
+    response.json({ id: session.id, messageIndex: safeMessageIndex, messageCount: safeMessageIndex });
+  });
+
+  app.get("/api/sessions/tree", (_request, response) => {
+    const nodes = [...sessions.values()].map((session) => ({
+      id: session.id,
+      createdAt: session.createdAt,
+      parentSessionId: session.parentSessionId ?? null,
+      forkedFromMessage: session.forkedFromMessage ?? null,
+      messageCount: visibleMessageCount(session.messages),
+      busy: session.busy,
+      children: [] as string[],
+    }));
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const roots: string[] = [];
+    for (const node of nodes) {
+      const parent = node.parentSessionId ? byId.get(node.parentSessionId) : undefined;
+      if (parent && parent !== node) parent.children.push(node.id);
+      else roots.push(node.id);
+    }
+    response.json({ sessions: nodes, roots });
   });
 
   app.get("/api/sessions/:id/permission-mode", (request, response) => {
@@ -784,7 +1005,10 @@ export function createAgentServer(options: AgentServerOptions): Express {
     response.json({
       id: session.id,
       busy: session.busy,
-      modelId: session.modelId,
+        modelId: session.modelId,
+        thinkingMode: session.thinkingMode ?? loadThinkingModeFromEnv(),
+      parentSessionId: session.parentSessionId ?? null,
+      forkedFromMessage: session.forkedFromMessage ?? null,
       permissionMode: session.permissionManager.getMode(),
       model: effectiveLlm.model,
       thinkingLevel: effectiveLlm.thinkingLevel ?? (effectiveLlm.reasoning ? "medium" : "off"),
@@ -871,10 +1095,17 @@ export function createAgentServer(options: AgentServerOptions): Express {
       });
       response.flushHeaders();
       const abortController = new AbortController();
-      const onClientClose = () => {
+      // `request.close` can fire when the request body finishes and does not
+      // mean the user cancelled generation. Abort only on a genuinely aborted
+      // request or when the streaming response closes before it finishes.
+      const onClientAbort = () => {
         if (!abortController.signal.aborted) abortController.abort();
       };
-      request.on("close", onClientClose);
+      const onResponseClose = () => {
+        if (!response.writableFinished) onClientAbort();
+      };
+      request.on("aborted", onClientAbort);
+      response.on("close", onResponseClose);
       const send = (payload: Record<string, unknown>): void => {
         if (!response.writableEnded) {
           response.write(`${JSON.stringify(payload)}\n`);
@@ -915,6 +1146,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
           session.llmOverride = effectiveLlm;
           session.thinkingLevel = effectiveLlm.thinkingLevel;
         }
+        if (input.thinkingMode) session.thinkingMode = input.thinkingMode;
         // Build the tool set, optionally including the subagent tool
         const baseToolProvider: ToolProvider = () => [...resolveToolProvider(tools), documentTool];
         const enableSubagent = options.subagentEnabled || (options.subagentProfiles && options.subagentProfiles.length > 0);
@@ -949,8 +1181,25 @@ export function createAgentServer(options: AgentServerOptions): Express {
             userContent,
             signal: abortController.signal,
             permissionTurn,
-            prepareNextTurn: options.prepareNextTurn,
+            autoValidate: options.autoValidate ?? process.env.MINI_AGENT_AUTO_VALIDATE === "1",
+            validationWorkspace: workspace,
+            autoCheckpoint: options.autoCheckpoint ?? process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
+            thinkingMode: input.thinkingMode ?? session.thinkingMode ?? options.thinkingMode ?? loadThinkingModeFromEnv(),
+            maxThinkingEscalations: options.maxThinkingEscalations,
+            prepareNextTurn: async (context) => {
+              const update = await options.prepareNextTurn?.(context);
+              if (update?.llm) {
+                session.llmOverride = update.llm;
+                session.modelId = `${update.llm.provider}/${update.llm.model}`;
+                session.thinkingLevel = update.llm.thinkingLevel;
+              }
+              return update;
+            },
             onEvent: (event) => {
+              if (event.type === "thinking_policy") {
+                session.thinkingLevel = event.level;
+                session.llmOverride = withThinkingLevel(session.llmOverride ?? effectiveLlm, event.level);
+              }
               send(safeEvent(event));
               if (event.type === "tool_end" && event.result.files) {
                 for (const file of event.result.files) {
@@ -978,7 +1227,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
         }
       } finally {
         permissionTurn.close();
-        request.off("close", onClientClose);
+        request.off("aborted", onClientAbort);
+        response.off("close", onResponseClose);
         session.busy = false;
         if (!response.writableEnded) response.end();
       }

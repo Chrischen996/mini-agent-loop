@@ -4,6 +4,7 @@ import type { LlmConfig } from "./llm/config.ts";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
 
 export type ThinkingIntensity = "low" | "med" | "high" | "xhigh";
+export type ThinkingCommandMode = "adaptive";
 
 /** The default user-facing intensity when no explicit setting is present. */
 export const DEFAULT_THINKING_INTENSITY: ThinkingIntensity = "med";
@@ -16,7 +17,7 @@ export const THINKING_INTENSITY_TO_MODEL_LEVEL: Readonly<Record<ThinkingIntensit
 };
 
 /** Only a leading, standalone command changes the request. */
-const THINKING_COMMAND_RE = /^\s*\/think:(low|med|high|xhigh)(?=$|\s)/i;
+const THINKING_COMMAND_RE = /^\s*\/think:(low|med|high|xhigh|auto)(?=$|\s)/i;
 
 export type ThinkingIntensityPrompt = {
   intensity: ThinkingIntensity | null;
@@ -36,6 +37,11 @@ function findThinkingCommand(userMessage: string): RegExpMatchArray | null {
 /** Parse a leading standalone `/think:<level>` command. */
 export function parseThinkingIntensityCommand(userMessage: string): ThinkingIntensity | null {
   return normalizeIntensity(findThinkingCommand(userMessage)?.[1]);
+}
+
+/** Parse a leading `/think:auto` command for one adaptive task workflow. */
+export function parseThinkingCommandMode(userMessage: string): ThinkingCommandMode | null {
+  return findThinkingCommand(userMessage)?.[1]?.toLowerCase() === "auto" ? "adaptive" : null;
 }
 
 /** Remove a leading thinking command while preserving the actual user prompt. */
@@ -77,7 +83,7 @@ export type ThinkingLlmConfig = LlmConfig & { thinkingLevel: ModelThinkingLevel 
 
 /**
  * Stable UI order used by the direct effort shortcuts. Provider/model catalogs
- * can narrow this list through `thinkingLevelMap`.
+ * can explicitly mark unavailable levels with `thinkingLevelMap`.
  */
 export const THINKING_LEVEL_ORDER: readonly ModelThinkingLevel[] = [
   "minimal",
@@ -93,9 +99,12 @@ function modelSupportsLevel(
   level: ModelThinkingLevel,
 ): boolean {
   if (!config.reasoning) return level === "off";
-  const levelMap = config.piModel?.thinkingLevelMap;
-  if (!levelMap) return level !== "off";
-  return Object.prototype.hasOwnProperty.call(levelMap, level);
+  const mapped = config.piModel?.thinkingLevelMap?.[level];
+  if (mapped === null) return false;
+  // Pi requires an explicit provider mapping for its two extended levels.
+  // Lower levels use the provider default when their mapping is omitted.
+  if (level === "xhigh" || level === "max") return mapped !== undefined;
+  return true;
 }
 
 /** Return the effort levels that can be selected for the active model. */
@@ -127,6 +136,26 @@ export function cycleThinkingLevel(
   return choices[nextIndex]!;
 }
 
+/** Clamp a requested level to the closest effort supported by the active model. */
+export function clampThinkingLevelForModel(
+  config: Pick<LlmConfig, "reasoning" | "piModel">,
+  requested: ModelThinkingLevel,
+): ModelThinkingLevel {
+  if (!config.reasoning || requested === "off") return "off";
+  const choices = getThinkingLevelChoices(config);
+  if (choices.includes(requested)) return requested;
+  const requestedIndex = THINKING_LEVEL_ORDER.indexOf(requested);
+  for (let index = requestedIndex; index < THINKING_LEVEL_ORDER.length; index += 1) {
+    const candidate = THINKING_LEVEL_ORDER[index];
+    if (candidate && choices.includes(candidate)) return candidate;
+  }
+  for (let index = requestedIndex - 1; index >= 0; index -= 1) {
+    const candidate = THINKING_LEVEL_ORDER[index];
+    if (candidate && choices.includes(candidate)) return candidate;
+  }
+  return choices[0] ?? "medium";
+}
+
 export function thinkingLevelToDisplay(level: ModelThinkingLevel): string {
   const labels: Record<ModelThinkingLevel, string> = {
     off: "关闭",
@@ -144,10 +173,7 @@ export function thinkingLevelToDisplay(level: ModelThinkingLevel): string {
 export function buildIntenseLlm(base: LlmConfig, intensity: ThinkingIntensity): ThinkingLlmConfig {
   return {
     ...base,
-    thinkingLevel: normalizeThinkingLevelForModel(
-      base.reasoning,
-      intensityToModelThinkingLevel(intensity),
-    ),
+    thinkingLevel: clampThinkingLevelForModel(base, intensityToModelThinkingLevel(intensity)),
   };
 }
 
@@ -155,7 +181,7 @@ export function buildIntenseLlm(base: LlmConfig, intensity: ThinkingIntensity): 
 export function withThinkingLevel(base: LlmConfig, level: ModelThinkingLevel): ThinkingLlmConfig {
   return {
     ...base,
-    thinkingLevel: normalizeThinkingLevelForModel(base.reasoning, level),
+    thinkingLevel: clampThinkingLevelForModel(base, level),
   };
 }
 

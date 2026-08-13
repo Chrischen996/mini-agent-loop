@@ -4,6 +4,7 @@ import Spinner from "ink-spinner";
 import type { ChatMessage, ThinkingDisplayMode } from "../state.ts";
 import { SubagentCard } from "./SubagentCard.tsx";
 import { TUI_COLORS as C } from "../theme.ts";
+import { selectMessageViewport } from "../message-viewport.ts";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -427,7 +428,34 @@ type MessageFeedProps = {
   busy?: boolean;
   status?: string;
   maxMessages?: number;
+  /** Rows available for the feed after chrome (header/input/status). */
+  availableHeight?: number;
+  /** Terminal width used for wrap-aware height estimates. */
+  width?: number;
+  /**
+   * Number of trailing history messages hidden below the viewport.
+   * 0 = stick to bottom.
+   */
+  scrollOffset?: number;
 };
+
+function ViewportSlice({
+  clipTop,
+  visibleHeight,
+  children,
+}: {
+  clipTop: number;
+  visibleHeight: number;
+  children: React.ReactNode;
+}): React.ReactElement {
+  return (
+    <Box height={visibleHeight} flexShrink={0} overflow="hidden">
+      <Box flexDirection="column" marginTop={-clipTop}>
+        {children}
+      </Box>
+    </Box>
+  );
+}
 
 export function MessageFeed({
   messages,
@@ -439,90 +467,130 @@ export function MessageFeed({
   focusedMessageIndex = -1,
   busy = false,
   status = "思考中...",
-  maxMessages = 100,
+  maxMessages = 200,
+  availableHeight = 20,
+  width = 80,
+  scrollOffset = 0,
 }: MessageFeedProps): React.ReactElement {
   const effectiveMode: ThinkingDisplayMode =
     thinkingMode ?? (showThinking ? "summary" : "hidden");
   const expandedSet = new Set(expandedThinking);
-  // Slice keeps last N messages; map absolute indices for focus/expand state.
-  const startIndex = Math.max(0, messages.length - maxMessages);
-  const visible = messages.slice(startIndex);
+  const viewport = selectMessageViewport({
+    messages,
+    streamingText,
+    streamingReasoning,
+    busy,
+    thinkingMode: effectiveMode,
+    expandedThinking,
+    scrollOffset,
+    availableHeight,
+    width,
+    maxMessages,
+  });
 
   return (
-    <Box flexDirection="column" flexGrow={1} paddingX={1}>
-      {visible.map((msg, offset) => {
-        const absoluteIndex = startIndex + offset;
+    <Box flexDirection="column" flexGrow={1} paddingX={1} overflow="hidden">
+      {viewport.items.map((item, itemIndex) => {
+        if (item.kind === "history_hint") {
+          return (
+            <Box key={`hint-${itemIndex}`} marginBottom={0}>
+              <Text color={C.info} dimColor>
+                {item.direction === "above"
+                  ? `↑ 还有 ${item.hiddenRows} 行`
+                  : `↓ 还有 ${item.hiddenRows} 行 · Ctrl+G 回到底部`}
+              </Text>
+            </Box>
+          );
+        }
+        if (item.kind === "streaming_reasoning") {
+          return (
+            <ViewportSlice key="streaming-reasoning" clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
+              <ThinkingBlock content={streamingReasoning} isStreaming={busy} mode={effectiveMode} />
+            </ViewportSlice>
+          );
+        }
+        if (item.kind === "streaming_text") {
+          return (
+            <ViewportSlice key="streaming-text" clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
+              <Text color={C.assistant} wrap="wrap">{streamingText}</Text>
+            </ViewportSlice>
+          );
+        }
+        if (item.kind === "busy_status") {
+          return (
+            <ViewportSlice key="busy-status" clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
+              <Box marginBottom={0} gap={1}>
+                <Text color={C.running}><Spinner type="dots" /></Text>
+                <Text color={C.running} dimColor>{status}</Text>
+              </Box>
+            </ViewportSlice>
+          );
+        }
+
+        const msg = item.message;
+        const absoluteIndex = item.index;
         if (msg.kind === "user") {
           return (
-            <Box key={absoluteIndex} marginBottom={0} gap={1} flexDirection="column">
-              <Box gap={1}>
-                <Text color={C.user} bold>{">"}</Text>
-                <Text color={C.assistant}>{msg.text}</Text>
-              </Box>
-              {msg.images?.length ? (
-                <Box marginLeft={2} gap={1}>
-                  {msg.images.map((image) => (
-                    <Text key={image.path} color={C.info}>[image: {image.path.split("/").pop()}]</Text>
-                  ))}
+            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
+              <Box marginBottom={0} gap={1} flexDirection="column">
+                <Box gap={1}>
+                  <Text color={C.user} bold>{">"}</Text>
+                  <Text color={C.assistant}>{msg.text}</Text>
                 </Box>
-              ) : null}
-            </Box>
+                {msg.images?.length ? (
+                  <Box marginLeft={2} gap={1}>
+                    {msg.images.map((image) => (
+                      <Text key={image.path} color={C.info}>[image: {image.path.split("/").pop()}]</Text>
+                    ))}
+                  </Box>
+                ) : null}
+              </Box>
+            </ViewportSlice>
           );
         }
         if (msg.kind === "assistant") {
           const formattedText = msg.text ? formatAssistantText(msg.text) : "";
           return (
-            <Box key={absoluteIndex} marginBottom={0} flexDirection="column">
-              {msg.reasoning && (
-                <ThinkingBlock
-                  content={msg.reasoning}
-                  mode={effectiveMode}
-                  forceExpanded={expandedSet.has(absoluteIndex)}
-                  focused={focusedMessageIndex === absoluteIndex}
-                />
-              )}
-              {formattedText && <Text color={C.assistant} wrap="wrap">{formattedText}</Text>}
-            </Box>
+            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
+              <Box marginBottom={0} flexDirection="column">
+                {msg.reasoning && (
+                  <ThinkingBlock
+                    content={msg.reasoning}
+                    mode={effectiveMode}
+                    forceExpanded={expandedSet.has(absoluteIndex)}
+                    focused={focusedMessageIndex === absoluteIndex}
+                  />
+                )}
+                {formattedText && <Text color={C.assistant} wrap="wrap">{formattedText}</Text>}
+              </Box>
+            </ViewportSlice>
           );
         }
         if (msg.kind === "tool_call") {
-          return <ToolCallRow key={msg.id} msg={msg} />;
+          return <ViewportSlice key={msg.id} clipTop={item.clipTop} visibleHeight={item.visibleHeight}><ToolCallRow msg={msg} /></ViewportSlice>;
+        }
+        if (msg.kind === "notice") {
+          return (
+            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
+              <Box flexDirection="column" borderStyle="single" borderColor={C.info} paddingX={1}>
+                {msg.title && <Text color={C.info} bold>{msg.title}</Text>}
+                <Text color={C.assistant}>{msg.text}</Text>
+              </Box>
+            </ViewportSlice>
+          );
         }
         if (msg.kind === "subagent_call") {
-          return <SubagentCard key={msg.id} msg={msg} />;
+          return <ViewportSlice key={msg.id} clipTop={item.clipTop} visibleHeight={item.visibleHeight}><SubagentCard msg={msg} /></ViewportSlice>;
         }
         if (msg.kind === "error") {
           return (
-            <Box key={absoluteIndex} marginBottom={0}>
+            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
               <Text color={C.error}>✗ {msg.text}</Text>
-            </Box>
+            </ViewportSlice>
           );
         }
         return null;
       })}
-
-      {/* Live streaming reasoning */}
-      {streamingReasoning ? (
-        <ThinkingBlock
-          content={streamingReasoning}
-          isStreaming={busy}
-          mode={effectiveMode}
-        />
-      ) : null}
-
-      {/* Live streaming answer text */}
-      {streamingText ? (
-        <Box marginBottom={0} flexDirection="column">
-          <Text color={C.assistant} wrap="wrap">{streamingText}</Text>
-        </Box>
-      ) : null}
-
-      {busy ? (
-        <Box marginBottom={0} gap={1}>
-          <Text color={C.running}><Spinner type="dots" /></Text>
-          <Text color={C.running} dimColor>{status}</Text>
-        </Box>
-      ) : null}
     </Box>
   );
 }

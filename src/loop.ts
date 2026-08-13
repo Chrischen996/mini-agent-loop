@@ -22,7 +22,18 @@ import {
   type RetryableErrorType,
 } from "./llm/index.ts";
 import { resolveModel } from "./models.ts";
-import { buildIntenseLlm, parseThinkingIntensityPrompt } from "./think-intensity.ts";
+import {
+  buildIntenseLlm,
+  parseThinkingCommandMode,
+  parseThinkingIntensityPrompt,
+  withThinkingLevel,
+} from "./think-intensity.ts";
+import {
+  decideInitialThinkingLevel,
+  decideNextThinkingLevel,
+  type ThinkingMode,
+  type ThinkingPolicyDecision,
+} from "./thinking-policy.ts";
 import type { MessagePreprocessor } from "./preprocessors/index.ts";
 import {
   decideAutoSubagent,
@@ -40,6 +51,8 @@ import type {
 import { validateToolArgs } from "./validate.ts";
 import type { Skill, SkillRegistry } from "./skills/types.ts";
 import { defaultSkillRegistry } from "./skills/registry.ts";
+import { formatValidationReport, runValidation } from "./validation.ts";
+import { GitWorkflow } from "./git/workflow.ts";
 
 export type NextTurnUpdate = {
   llm?: LlmConfig;
@@ -101,6 +114,14 @@ export type AgentLoopOptions = {
    * execute in parallel via Promise.all. Default: false (serial).
    */
   parallelToolExecution?: boolean;
+  /** Automatically run test/typecheck/build after a write-like tool call. */
+  autoValidate?: boolean;
+  validationWorkspace?: string;
+  autoCheckpoint?: boolean;
+  /** Fixed respects explicit/default effort; adaptive applies an explainable task policy. */
+  thinkingMode?: ThinkingMode;
+  /** Maximum adaptive effort increases after tool or validation failures. Default: 2. */
+  maxThinkingEscalations?: number;
   /**
    * Permission mode for the session. When "plan", write tools are blocked
    * and the agent is informed to output a plan instead of executing directly.
@@ -130,6 +151,15 @@ export type LoopEvent =
   | { type: "max_turns"; maxTurns: number; messages: AgentMessage[] }
   | { type: "tool_start"; call: ToolCall }
   | { type: "tool_end"; call: ToolCall; result: ToolResult }
+  | {
+      type: "thinking_policy";
+      mode: "adaptive";
+      phase: "initial" | "escalation";
+      previousLevel?: import("./pi-ai/types.ts").ModelThinkingLevel;
+      level: import("./pi-ai/types.ts").ModelThinkingLevel;
+      score: number;
+      reasons: string[];
+    }
   | {
       type: "aborted";
       messages: AgentMessage[];
@@ -221,6 +251,10 @@ export function buildSystemPrompt(mode?: PermissionMode): string {
   "- `grep` — search file contents by regex or literal pattern.",
   "- `find` — find files by glob pattern.",
   "- `ls` — list directory contents.",
+  "- `git_status` / `git_diff` — inspect repository state and current changes.",
+  "- `git_checkpoint` / `git_undo` — create and restore recoverable Git snapshots.",
+  "- `git_branch_isolate` — create a clean isolated Git worktree branch.",
+  "- `validate_workspace` — run test, typecheck, and build scripts in order.",
   "- `document_edit` — edit an uploaded PDF/DOCX by exact replacements and create a downloadable DOCX/PDF.",
   "- `codebase_open` — open a public GitHub repository as a read-only source snapshot.",
   "- `codebase_search` — search an opened external repository and return commit/file/line evidence.",
@@ -266,7 +300,8 @@ export function buildSystemPrompt(mode?: PermissionMode): string {
   "/think:low     – switch to lightweight model (fast response)",
   "/think:med     – switch to balanced model (default)",
   "/think:high    – switch to deep reasoning model",
-  "/think:xhigh   – switch to maximum intensity model",
+  "/think:xhigh   – request the highest supported intensity",
+  "/think:auto    – choose and adjust effort from task complexity and failures",
   "",
   "Task execution guidelines:",
   "- When executing a multi-step task, complete ALL steps in a single response.",
@@ -415,6 +450,11 @@ async function runAgentTurnInternal(
     context,
     authorizeTool,
     parallelToolExecution = false,
+    autoValidate = false,
+    validationWorkspace = process.cwd(),
+    autoCheckpoint = false,
+    thinkingMode = "fixed",
+    maxThinkingEscalations = 2,
     permissionMode,
     permissionTurn,
     skills = [],
@@ -459,16 +499,36 @@ async function runAgentTurnInternal(
   };
 
   const parsedThinking = parseThinkingIntensityPrompt(userText);
+  const requestedThinkingMode = parsedThinking.intensity
+    ? "fixed"
+    : parseThinkingCommandMode(userText);
+  const effectiveThinkingMode = requestedThinkingMode ?? thinkingMode;
+  const initialDecision = !parsedThinking.intensity && effectiveThinkingMode === "adaptive"
+    ? decideInitialThinkingLevel({
+      prompt: parsedThinking.prompt,
+      llm: configuredLlm,
+      hasAttachments: Array.isArray(userContent) && userContent.length > 1,
+    })
+    : undefined;
   const initialLlm = parsedThinking.intensity
     ? buildIntenseLlm(configuredLlm, parsedThinking.intensity)
-    : configuredLlm;
+    : initialDecision
+      ? withThinkingLevel(configuredLlm, initialDecision.level)
+      : configuredLlm;
   const effectiveUserText = parsedThinking.prompt;
   const useInjectedChat = options.chat !== undefined;
   const activePermissionMode = permissionTurn?.mode ?? permissionMode;
   const activeSignal = signal ?? permissionTurn?.signal;
+  let checkpointPromise: Promise<unknown> | undefined;
+  const checkpointBeforeWrite = async (tool: Tool): Promise<void> => {
+    if (!autoCheckpoint || checkpointPromise || !["write", "edit", "delete", "mkdir", "copy", "move", "patch", "document_edit"].includes(tool.name)) return;
+    checkpointPromise = new GitWorkflow(validationWorkspace).createCheckpoint(`before-turn-${Date.now()}`);
+    await checkpointPromise;
+  };
   const executeTool = async (tool: Tool, args: Record<string, unknown>): Promise<ToolResult> => {
-    if (permissionTurn) return permissionTurn.execute(tool, args, activeSignal);
+    if (permissionTurn) return permissionTurn.execute(tool, args, activeSignal, () => checkpointBeforeWrite(tool));
     await authorizeTool?.(tool, args, signal);
+    await checkpointBeforeWrite(tool);
     return tool.execute(args, signal);
   };
   let currentLlm = initialLlm;
@@ -512,6 +572,19 @@ async function runAgentTurnInternal(
   let overflowRetries = 0;
   let emptyAssistantResponses = 0;
   let autoSubagentAttempted = false;
+  let thinkingEscalations = 0;
+  let reasoningOnlyRetries = 0;
+
+  if (initialDecision) {
+    onEvent?.({
+      type: "thinking_policy",
+      mode: "adaptive",
+      phase: "initial",
+      level: initialLlm.thinkingLevel ?? "off",
+      score: initialDecision.score,
+      reasons: initialDecision.reasons,
+    });
+  }
 
   const prepareNextTurn = async (
     turn: number,
@@ -537,6 +610,28 @@ async function runAgentTurnInternal(
       };
     }
     if (update?.context) currentContext = update.context;
+
+    if (effectiveThinkingMode !== "adaptive") return;
+    const decision = decideNextThinkingLevel({
+      llm: currentLlm,
+      currentLevel: currentLlm.thinkingLevel ?? "off",
+      toolResults,
+      escalationCount: thinkingEscalations,
+      maxEscalations: maxThinkingEscalations,
+    });
+    if (!decision) return;
+    const previousLevel = currentLlm.thinkingLevel ?? "off";
+    currentLlm = withThinkingLevel(currentLlm, decision.level);
+    thinkingEscalations += 1;
+    onEvent?.({
+      type: "thinking_policy",
+      mode: "adaptive",
+      phase: "escalation",
+      previousLevel,
+      level: currentLlm.thinkingLevel ?? "off",
+      score: decision.score,
+      reasons: decision.reasons,
+    });
   };
 
   /**
@@ -740,7 +835,25 @@ async function runAgentTurnInternal(
       return "aborted";
     }
     messages.push(...processedToolMessages);
-    await prepareNextTurn(turn, assistant, processedToolMessages);
+    let nextTurnToolResults = processedToolMessages;
+    if (autoValidate && processedToolMessages.some((message) =>
+      !message.isError && ["write", "edit", "delete", "mkdir", "copy", "move", "patch", "document_edit"].includes(message.name))) {
+      const validationCall: ToolCall = { id: `auto_validation_${turn}`, name: "validate_workspace", arguments: {} };
+      const validationAssistant: AssistantMessage = { role: "assistant", content: "", toolCalls: [validationCall] };
+      messages.push(validationAssistant);
+      onEvent?.({ type: "assistant", message: validationAssistant });
+      onEvent?.({ type: "tool_start", call: validationCall });
+      const report = await runValidation({ workspace: validationWorkspace, signal: activeSignal });
+      const validationResult: ToolResult = { content: formatValidationReport(report), isError: !report.ok };
+      const validationMessage: ToolResultMessage = {
+        role: "tool", toolCallId: validationCall.id, name: validationCall.name,
+        content: validationResult.content, isError: validationResult.isError,
+      };
+      messages.push(validationMessage);
+      nextTurnToolResults = [...processedToolMessages, validationMessage];
+      onEvent?.({ type: "tool_end", call: validationCall, result: validationResult });
+    }
+    await prepareNextTurn(turn, assistant, nextTurnToolResults);
     try {
       permissionTurn?.assertCurrent();
     } catch (err) {
@@ -871,10 +984,12 @@ async function runAgentTurnInternal(
         };
         let sawFinal = false;
         let streamed = "";
+        let sawReasoning = false;
         try {
           for await (const event of streamChat(currentLlm, messages, turnTools, activeSignal)) {
             if (event.type === "text_delta") {
               if (event.kind === "answer") streamed += event.text;
+              else sawReasoning = true;
               onEvent?.({ type: "assistant_delta", text: event.text, kind: event.kind });
               continue;
             }
@@ -896,6 +1011,36 @@ async function runAgentTurnInternal(
         }
         if (!sawFinal) {
           throw new Error("LLM stream ended without a final assistant message");
+        }
+        // Some gateways send answer deltas and then a terminal assistant
+        // object with empty content. Preserve the streamed answer for loop
+        // history and final-response handling instead of treating it as an
+        // empty assistant turn.
+        if (!assistant.content.trim() && streamed.trim()) {
+          assistant = { ...assistant, content: streamed };
+        }
+        if (
+          sawReasoning &&
+          !assistant.content.trim() &&
+          !(assistant.toolCalls && assistant.toolCalls.length > 0) &&
+          currentLlm.thinkingLevel !== "off" &&
+          reasoningOnlyRetries < 1
+        ) {
+          // A few OpenAI-compatible gateways terminate after emitting the
+          // hidden reasoning block when an unsupported effort parameter is
+          // present. Retry once with thinking disabled to recover the answer.
+          reasoningOnlyRetries += 1;
+          currentLlm = withThinkingLevel(currentLlm, "off");
+          continue;
+        }
+        if (
+          reasoningOnlyRetries > 0 &&
+          !assistant.content.trim() &&
+          !(assistant.toolCalls && assistant.toolCalls.length > 0)
+        ) {
+          throw new Error(
+            "LLM returned reasoning without a final answer; the configured gateway/model did not produce assistant content after retry",
+          );
         }
       }
     } catch (err) {

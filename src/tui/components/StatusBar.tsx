@@ -56,12 +56,12 @@ export function StatusBar({ modelName, tokenEstimate, contextWindow, cwd, busy, 
         {queuedCount > 0 && <Text color={C.running}>队列: {queuedCount}</Text>}
         <Text color={C.info} wrap="truncate-end">{modelName}</Text>
         <Text color={C.thinking} wrap="truncate-end">思考: {thinkingLevelToDisplay(thinkingLevel)}</Text>
-        <Text dimColor>≈{tokenEstimate} / {formatContextWindow(contextWindow)}</Text>
+        <Text dimColor>{tokenEstimate} / {formatContextWindow(contextWindow)}</Text>
         <Text color={C.thinking} wrap="truncate-end">{modeLabel}</Text>
         {branch && <Text color={C.info} wrap="truncate-end">⎇ {branch}</Text>}
       </Box>
       <Box gap={2} flexShrink={1}>
-        <Text dimColor wrap="truncate-end">[Ctrl+R] 快切思考  [Shift+↑↓] 精调  [Shift+Tab] 切模式  [/clear] 清空  [Ctrl+C] 退出</Text>
+        <Text dimColor wrap="truncate-end">[PgUp/PgDn] 滚动  [Ctrl+R] 思考  [Shift+Tab] 模式  [/clear] 清空  [Ctrl+C] 退出</Text>
       </Box>
     </Box>
   );

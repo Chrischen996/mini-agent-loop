@@ -38,6 +38,22 @@ function reasoningOption(config: LlmConfig): "minimal" | "low" | "medium" | "hig
   return level;
 }
 
+function addReasoningOption(body: Record<string, unknown>, config: LlmConfig): void {
+  const effort = reasoningOption(config);
+  if (!effort) return;
+
+  // Some provider model definitions explicitly reject OpenAI's generic
+  // reasoning_effort field (notably xAI/Grok). Sending it through a custom
+  // OpenAI-compatible gateway can produce reasoning-only responses.
+  if (config.compat?.supportsReasoningEffort === false) return;
+
+  if (config.compat?.thinkingFormat === "openrouter") {
+    body.reasoning = { effort };
+    return;
+  }
+  body.reasoning_effort = effort;
+}
+
 // ─── Pi-AI chat (internal) ───────────────────────────────────────────────────
 
 async function completePiChat(
@@ -99,6 +115,7 @@ async function* streamPiChat(
 async function* iterateSseDataLines(
   response: Response,
   signal?: AbortSignal,
+  onDone?: () => void,
 ): AsyncGenerator<string> {
   if (!response.body) {
     throw new Error("LLM stream response missing body");
@@ -126,15 +143,21 @@ async function* iterateSseDataLines(
       if (!line.startsWith("data:")) continue;
       const data = line.slice(5).trim();
       if (!data) continue;
-      if (data === "[DONE]") return;
+      if (data === "[DONE]") {
+        onDone?.();
+        return;
+      }
       yield data;
     }
   }
 
+  // Flush a UTF-8 code point that may have been split across the final chunk.
+  buffer += decoder.decode();
   const trailing = buffer.trim();
   if (trailing.startsWith("data:")) {
     const data = trailing.slice(5).trim();
-    if (data && data !== "[DONE]") yield data;
+    if (data === "[DONE]") onDone?.();
+    else if (data) yield data;
   }
   } finally {
     signal?.removeEventListener("abort", onAbort);
@@ -172,8 +195,7 @@ export async function completeChat(
     messages: toOpenAIMessages(prepared.messages, supportsImage),
   };
 
-  const reasoningEffort = reasoningOption(config);
-  if (reasoningEffort) body.reasoning_effort = reasoningEffort;
+  addReasoningOption(body, config);
 
   // Hermes format: tools are embedded in the system prompt, not in the API request
   if (!isHermes && tools && tools.length > 0 && config.capabilities.tools) {
@@ -215,6 +237,7 @@ export async function completeChat(
 
   let data: {
     choices?: Array<{
+      finish_reason?: string | null;
       message?: {
         content?: string | null;
         tool_calls?: OpenAIToolCall[];
@@ -228,9 +251,20 @@ export async function completeChat(
     throw new Error(`LLM response is not valid JSON: ${rawText.slice(0, 200)}`);
   }
 
-  const message = data.choices?.[0]?.message;
+  const choice = data.choices?.[0];
+  const message = choice?.message;
   if (!message) {
     throw new Error("LLM response missing choices[0].message");
+  }
+
+  const finishReason = choice.finish_reason ?? null;
+  if (finishReason === "length") {
+    throw new Error(
+      `LLM output reached max_tokens (${config.maxTokens}); increase maxTokens or continue the task.`,
+    );
+  }
+  if (finishReason === "content_filter" || finishReason === "error") {
+    throw new Error(`LLM response stopped with finish_reason=${finishReason}`);
   }
 
   const content =
@@ -282,8 +316,7 @@ export async function* streamChat(
     messages: toOpenAIMessages(prepared.messages, supportsImage),
   };
 
-  const reasoningEffort = reasoningOption(config);
-  if (reasoningEffort) body.reasoning_effort = reasoningEffort;
+  addReasoningOption(body, config);
 
   // Hermes format: tools are embedded in the system prompt, not in the API request
   if (!isHermes && tools && tools.length > 0 && config.capabilities.tools) {
@@ -318,6 +351,7 @@ export async function* streamChat(
 
   if (!response.ok) {
     const rawText = await response.text();
+    request.cleanup();
     throw new Error(
       `LLM HTTP ${response.status}: ${rawText.slice(0, 500) || response.statusText}`,
     );
@@ -327,7 +361,14 @@ export async function* streamChat(
   const toolAcc = new Map<number, ToolCallAccumulator>();
   let usage: StreamChatUsage | undefined;
 
-  for await (const data of iterateSseDataLines(response, request.signal)) {
+  let sawDoneMarker = false;
+  let sawFinishReason = false;
+  let sawTerminalMessage = false;
+  let finishReason: string | null = null;
+  try {
+    for await (const data of iterateSseDataLines(response, request.signal, () => {
+      sawDoneMarker = true;
+    })) {
     let parsed: {
       usage?: {
         prompt_tokens?: number;
@@ -335,9 +376,12 @@ export async function* streamChat(
         total_tokens?: number;
       };
       choices?: Array<{
+        finish_reason?: string | null;
         delta?: {
-          content?: string | null;
+          content?: string | Array<{ type?: string; text?: string }> | null;
           reasoning_content?: string | null;
+          reasoning?: string | null;
+          reasoning_text?: string | null;
           tool_calls?: Array<{
             index?: number;
             id?: string;
@@ -345,8 +389,10 @@ export async function* streamChat(
           }>;
         };
         message?: {
-          content?: string | null;
+          content?: string | Array<{ type?: string; text?: string }> | null;
           reasoning_content?: string | null;
+          reasoning?: string | null;
+          reasoning_text?: string | null;
           tool_calls?: OpenAIToolCall[];
         };
       }>;
@@ -369,10 +415,30 @@ export async function* streamChat(
     const choice = parsed.choices?.[0];
     if (!choice) continue;
 
+    if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
+      sawFinishReason = true;
+      finishReason = choice.finish_reason;
+    }
+
     if (choice.message && !choice.delta) {
-      if (typeof choice.message.content === "string" && choice.message.content && !content) {
-        content = choice.message.content;
-        yield { type: "text_delta", text: content, kind: "answer" };
+      sawTerminalMessage = true;
+      const terminalContent = typeof choice.message.content === "string"
+        ? choice.message.content
+        : Array.isArray(choice.message.content)
+          ? choice.message.content
+              .filter((part) => part.type === "text" && typeof part.text === "string")
+              .map((part) => part.text)
+              .join("")
+          : "";
+      if (terminalContent && !content) {
+        content = terminalContent;
+        yield { type: "text_delta", text: terminalContent, kind: "answer" };
+      }
+      for (const field of [choice.message.reasoning_content, choice.message.reasoning, choice.message.reasoning_text]) {
+        if (typeof field === "string" && field.length > 0) {
+          yield { type: "text_delta", text: field, kind: "reasoning" };
+          break;
+        }
       }
       if (choice.message.tool_calls) {
         for (const [index, tc] of choice.message.tool_calls.entries()) {
@@ -390,13 +456,24 @@ export async function* streamChat(
     if (!delta) continue;
 
     // Emit reasoning_content as text deltas (DeepSeek reasoning models)
-    if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) {
-      yield { type: "text_delta", text: delta.reasoning_content, kind: "reasoning" };
+    for (const field of [delta.reasoning_content, delta.reasoning, delta.reasoning_text]) {
+      if (typeof field === "string" && field.length > 0) {
+        yield { type: "text_delta", text: field, kind: "reasoning" };
+        break;
+      }
     }
 
-    if (typeof delta.content === "string" && delta.content.length > 0) {
-      content += delta.content;
-      yield { type: "text_delta", text: delta.content, kind: "answer" };
+    const answerDelta = typeof delta.content === "string"
+      ? delta.content
+      : Array.isArray(delta.content)
+        ? delta.content
+            .filter((part) => part.type === "text" && typeof part.text === "string")
+            .map((part) => part.text)
+            .join("")
+        : "";
+    if (answerDelta.length > 0) {
+      content += answerDelta;
+      yield { type: "text_delta", text: answerDelta, kind: "answer" };
     }
 
     if (delta.tool_calls) {
@@ -415,14 +492,25 @@ export async function* streamChat(
         toolAcc.set(index, current);
       }
     }
-  }
+    }
 
-  if (request.didTimeout()) {
+    if (request.didTimeout()) {
+      throw new Error(`LLM request timed out after ${requestTimeout(config)}ms. Check the proxy URL and availability.`);
+    }
+    if (finishReason === "length") {
+      throw new Error(`LLM output reached max_tokens (${config.maxTokens}); increase maxTokens or continue the task.`);
+    }
+    if (finishReason === "content_filter" || finishReason === "error") {
+      throw new Error(`LLM stream stopped with finish_reason=${finishReason}`);
+    }
+    if (!sawDoneMarker && !sawFinishReason && !sawTerminalMessage) {
+      throw new Error("LLM stream ended before completion (missing finish_reason, terminal message, or [DONE])");
+    }
+  } finally {
+    // Always clear the timeout and parent abort listener, including network
+    // failures and malformed/incomplete provider streams.
     request.cleanup();
-    throw new Error(`LLM request timed out after ${requestTimeout(config)}ms. Check the proxy URL and availability.`);
   }
-
-  request.cleanup();
 
   const rawToolCalls: OpenAIToolCall[] | undefined =
     toolAcc.size > 0

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { imagePart, textPart } from "../src/content.ts";
-import { completeChat, makeLlmConfig } from "../src/llm/index.ts";
+import {
+  completeChat,
+  makeLlmConfig,
+  resolveOutputTokenLimit,
+} from "../src/llm/index.ts";
 import type { AgentMessage } from "../src/types.ts";
 
 const llm = makeLlmConfig({
@@ -18,6 +22,37 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("completeChat wire protocol", () => {
+  it("uses a balanced output limit for models whose capability fills the context window", async () => {
+    const originalFetch = globalThis.fetch;
+    let requestBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return jsonResponse({ choices: [{ message: { content: "done" } }] });
+    }) as typeof fetch;
+
+    try {
+      const grok = makeLlmConfig({
+        apiKey: "test",
+        baseUrl: "https://gateway.example/v1",
+        model: "xai/grok-4.5",
+      });
+      assert.equal(grok.contextWindow, 500_000);
+      assert.equal(grok.maxTokens, 32_768);
+      await completeChat(grok, [{ role: "user", content: "hello" }]);
+      assert.equal(requestBody?.max_tokens, 32_768);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("caps default output at 25% for small windows and preserves explicit limits", () => {
+    assert.equal(resolveOutputTokenLimit(100_000, 16_000), 4_000);
+    assert.equal(resolveOutputTokenLimit(8_000, 128_000), 8_000);
+    assert.equal(resolveOutputTokenLimit(100_000, 16_000, 6_000), 6_000);
+    assert.equal(resolveOutputTokenLimit(100_000, 16_000, 99_000), 15_999);
+    assert.equal(resolveOutputTokenLimit(100_000, 16_000, Number.NaN), 1);
+  });
+
   it("passes the configured thinking level to an OpenAI-compatible reasoning model", async () => {
     const originalFetch = globalThis.fetch;
     let requestBody: Record<string, unknown> | undefined;
@@ -276,6 +311,58 @@ describe("completeChat errors", () => {
       await assert.rejects(
         () => completeChat(llm, [{ role: "user", content: "hello" }]),
         /missing choices\[0\]\.message/,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("surfaces max-token truncation instead of treating it as a complete answer", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      jsonResponse({
+        choices: [{
+          message: { content: "partial answer cut off mid" },
+          finish_reason: "length",
+        }],
+      })) as typeof fetch;
+
+    try {
+      await assert.rejects(
+        () => completeChat(llm, [{ role: "user", content: "hello" }]),
+        /reached max_tokens/,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("surfaces content_filter and error finish reasons", async () => {
+    const originalFetch = globalThis.fetch;
+    const responses = [
+      jsonResponse({
+        choices: [{
+          message: { content: "" },
+          finish_reason: "content_filter",
+        }],
+      }),
+      jsonResponse({
+        choices: [{
+          message: { content: "" },
+          finish_reason: "error",
+        }],
+      }),
+    ];
+    globalThis.fetch = (async () => responses.shift()!) as typeof fetch;
+
+    try {
+      await assert.rejects(
+        () => completeChat(llm, [{ role: "user", content: "hello" }]),
+        /finish_reason=content_filter/,
+      );
+      await assert.rejects(
+        () => completeChat(llm, [{ role: "user", content: "hello" }]),
+        /finish_reason=error/,
       );
     } finally {
       globalThis.fetch = originalFetch;

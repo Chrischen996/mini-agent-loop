@@ -85,6 +85,8 @@ npm install
 | `MINI_AGENT_AUTO_SUBAGENT_MODEL` | no | parent model |
 | `MINI_AGENT_AUTO_SUBAGENT_MAX_TURNS` | no | profile/default |
 | `MINI_AGENT_SKILLS` | no | comma-separated registered skill names |
+| `MINI_AGENT_AUTO_VALIDATE` | no | `1` runs test/typecheck/build after write-like tools |
+| `MINI_AGENT_AUTO_CHECKPOINT` | no | `1` creates a Git checkpoint before the first write in each turn |
 
 \* Real runs need at least one supported provider key.
 `/model` only lists
@@ -328,6 +330,19 @@ can opt into the read-only tools with `--tools grep,find,ls`, or remove tools
 with `--exclude-tools bash`. SDK/server callers can pass the equivalent
 selection to `createDefaultTools`.
 
+Git workflow tools are available in the normal workspace tool set:
+
+- `git_status` and `git_diff` inspect the current branch and changes.
+- `git_checkpoint` records a recoverable snapshot without changing the current branch.
+- `git_undo` restores tracked and untracked files to a checkpoint after permission approval.
+- `git_branch_isolate` creates a clean `mini-agent/*` worktree branch. It refuses dirty worktrees.
+- `validate_workspace` runs `test`, `typecheck`, and `build` scripts in order and stops at the first failure.
+
+Set `MINI_AGENT_AUTO_CHECKPOINT=1` to checkpoint before the first write-like tool
+in each turn. Set `MINI_AGENT_AUTO_VALIDATE=1` to run the validation chain after
+write-like tools and return the report to the next model turn. Both settings are
+opt-in because they execute repository commands and can take time.
+
 External public GitHub analysis adds four tools by default:
 
 - `codebase_open`: create a read-only handle for `owner/repo` or a GitHub URL.
@@ -422,6 +437,17 @@ PUT    /api/sessions/:id/permission-mode  { mode: plan|manual|auto|bypass }
 POST   /api/sessions/:id/permissions/:requestId  { decision: allow|deny }
 DELETE /api/sessions/:id
 POST   /api/sessions/:id/messages  multipart(prompt, referencedPaths, images) -> NDJSON stream
+GET    /api/sessions                 list sessions with parent/fork metadata
+GET    /api/sessions/tree            session tree metadata
+POST   /api/sessions/:id/fork        { messageIndex? } -> child session
+POST   /api/sessions/:id/rewind      { messageIndex } -> truncated session
+GET    /api/git/status
+GET    /api/git/diff?staged=true&path=...
+GET    /api/git/checkpoints
+POST   /api/git/checkpoints         { label? }
+POST   /api/git/undo                { checkpointId }
+POST   /api/git/branches            { label? }
+POST   /api/validation              { steps?, timeoutMs? }
 ```
 
 ## Terminal TUI
@@ -457,7 +483,10 @@ current session configuration and never rewrite the user prompt. The setting
 is provider-neutral: it does not automatically switch providers or models.
 The default is `medium` for reasoning-capable models and `off` otherwise;
 `DEFAULT_THINKING_INTENSITY=low|med|high|xhigh` overrides the startup default.
-Profiles may persist an optional `thinkingLevel`.
+Profiles may persist an optional `thinkingLevel`. Set
+`MINI_AGENT_THINKING_MODE=adaptive` to classify the initial task effort and
+step it up after tool or validation failures; `/think:auto` enables that mode
+for one request, while `/think:low|med|high|xhigh` pins a fixed level.
 
 ## Test (offline)
 

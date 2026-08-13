@@ -50,7 +50,7 @@ export type PermissionTurnContext = {
   readonly revision: number;
   readonly signal: AbortSignal;
   authorize(tool: Tool, args: Record<string, unknown>, signal?: AbortSignal): Promise<void>;
-  execute(tool: Tool, args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolResult>;
+  execute(tool: Tool, args: Record<string, unknown>, signal?: AbortSignal, beforeExecute?: () => void | Promise<void>): Promise<ToolResult>;
   assertCurrent(): void;
   close(): void;
 };
@@ -103,6 +103,9 @@ const AUTO_ALLOWED = new Set([
   "fetch_content",
   "get_search_content",
   "source_check",
+  "git_status",
+  "git_diff",
+  "validate_workspace",
 ]);
 
 const WRITE_TOOLS = new Set([
@@ -114,6 +117,9 @@ const WRITE_TOOLS = new Set([
   "move",
   "patch",
   "document_edit",
+  "git_checkpoint",
+  "git_undo",
+  "git_branch_isolate",
 ]);
 
 const DANGEROUS_COMMANDS = new Set([
@@ -329,6 +335,7 @@ export function getRiskLevel(
 ): "safe" | "medium" | "high" {
   // Plan mode: analysis only. Writes and dangerous shell stay high risk.
   if (mode === "plan") {
+    if (tool.name === "validate_workspace") return "high";
     if (tool.name === "bash") {
       const command = typeof args.command === "string" ? args.command : "";
       return isDangerousBashCommand(command) ? "high" : "safe";
@@ -344,12 +351,13 @@ export function getRiskLevel(
 
   // Manual mode: every tool call requires an explicit decision.
   if (mode === "manual") {
+    if (tool.name === "validate_workspace") return "medium";
     if (tool.source?.kind === "mcp") return "high";
     if (tool.name === "bash") {
       const cmd = typeof args.command === "string" ? args.command : "";
       return isDangerousBashCommand(cmd) ? "high" : "medium";
     }
-    if (tool.name === "delete" || tool.name === "document_edit") return "high";
+    if (tool.name === "delete" || tool.name === "document_edit" || tool.name === "git_undo") return "high";
     if (WRITE_TOOLS.has(tool.name)) return "medium";
     if (AUTO_ALLOWED.has(tool.name)) return "medium";
     return "medium";
@@ -367,7 +375,8 @@ export function getRiskLevel(
     if (isDangerousBashCommand(cmd)) return "high";
     return "medium";
   }
-  if (tool.name === "delete" || tool.name === "document_edit") return "high";
+  if (tool.name === "validate_workspace") return "medium";
+  if (tool.name === "delete" || tool.name === "document_edit" || tool.name === "git_undo") return "high";
   if (WRITE_TOOLS.has(tool.name)) return "medium";
   if (AUTO_ALLOWED.has(tool.name)) return "safe";
   return "medium";
@@ -474,8 +483,10 @@ export class PermissionManager {
       revision,
       signal: merged.signal,
       authorize,
-      execute: async (tool, args, signal) => {
+      execute: async (tool, args, signal, beforeExecute) => {
         await authorize(tool, args, signal);
+        assertCurrent();
+        await beforeExecute?.();
         assertCurrent();
         const combined = mergeAbortSignals(merged.signal, signal);
         try {
