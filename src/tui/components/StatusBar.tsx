@@ -17,9 +17,10 @@ type StatusBarProps = {
   queuedCount?: number;
   permissionMode: PermissionMode;
   thinkingLevel: ModelThinkingLevel;
+  cacheReadTokens?: number;
 };
 
-export function StatusBar({ modelName, tokenEstimate, contextWindow, cwd, busy, status = "就绪", queuedCount = 0, permissionMode, thinkingLevel }: StatusBarProps): React.ReactElement {
+export function StatusBar({ modelName, tokenEstimate, contextWindow, cwd, busy, status = "就绪", queuedCount = 0, permissionMode, thinkingLevel, cacheReadTokens }: StatusBarProps): React.ReactElement {
   const cwdShort = cwd.length > 30 ? `…${cwd.slice(-28)}` : cwd;
   const [branch, setBranch] = useState<string>();
   const modeLabel = permissionMode === "plan" ? "计划" : permissionMode === "manual" ? "手动" : permissionMode === "auto" ? "自动" : "绕过";
@@ -59,6 +60,9 @@ export function StatusBar({ modelName, tokenEstimate, contextWindow, cwd, busy, 
         <Text dimColor>{tokenEstimate} / {formatContextWindow(contextWindow)}</Text>
         <Text color={C.thinking} wrap="truncate-end">{modeLabel}</Text>
         {branch && <Text color={C.info} wrap="truncate-end">⎇ {branch}</Text>}
+        {cacheReadTokens !== undefined && cacheReadTokens > 0 && (
+          <Text color={C.info} wrap="truncate-end">CACHE:{Math.round(cacheReadTokens / Math.max(1, tokenEstimate) * 100)}%</Text>
+        )}
       </Box>
       <Box gap={2} flexShrink={1}>
         <Text dimColor wrap="truncate-end">[PgUp/PgDn] 滚动  [Ctrl+R] 思考  [Shift+Tab] 模式  [/clear] 清空  [Ctrl+C] 退出</Text>

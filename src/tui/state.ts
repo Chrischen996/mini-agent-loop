@@ -84,6 +84,8 @@ export type TuiState = {
   modelName: string;
   usedTokens: number;
   contextTokens: number;
+  /** Cache hit tokens from last assistant response. */
+  cacheReadTokens?: number;
   /** Pending images attached via /image command. */
   pendingImages: ImageAttachment[];
   /** Global default for how thinking blocks are shown. */
@@ -187,6 +189,7 @@ export function createInitialState(modelName: string): TuiState {
     modelName,
     usedTokens: 0,
     contextTokens: 0,
+    cacheReadTokens: undefined,
     thinkingMode: "summary",
     permissionMode: "auto",
     pendingPermission: undefined,
@@ -377,6 +380,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             : state.messages;
           const usedTokens = event.usage?.totalTokens ?? state.usedTokens;
           const contextTokens = event.usage?.promptTokens ?? state.contextTokens;
+          const cacheReadTokens = event.usage?.cacheReadTokens ?? state.cacheReadTokens;
           return {
             ...state,
             messages: newMessages,
@@ -385,6 +389,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             status: hasTools ? "执行工具..." : "整理回复...",
             usedTokens,
             contextTokens,
+            cacheReadTokens,
             scrollOffset: preserveScrollOnAppend(
               state.scrollOffset,
               state.messages.length,

@@ -409,6 +409,11 @@ export async function* streamChat(
         promptTokens: parsed.usage.prompt_tokens ?? 0,
         completionTokens: parsed.usage.completion_tokens ?? 0,
         totalTokens: parsed.usage.total_tokens ?? 0,
+        cacheReadTokens: (parsed.usage as any).prompt_tokens_details?.cached_tokens 
+          ?? (parsed.usage as any).prompt_cache_hit_tokens 
+          ?? undefined,
+        cacheWriteTokens: (parsed.usage as any).prompt_tokens_details?.cache_write_tokens 
+          ?? undefined,
       };
     }
 

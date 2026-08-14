@@ -1289,6 +1289,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           queuedCount={queuedCount}
           permissionMode={state.permissionMode}
           thinkingLevel={llm.thinkingLevel ?? (llm.reasoning ? "medium" : "off")}
+          cacheReadTokens={state.cacheReadTokens}
         />
       </Box>
     </Box>

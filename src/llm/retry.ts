@@ -9,6 +9,10 @@ export type StreamChatUsage = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Tokens served from prompt cache (cache hit). */
+  cacheReadTokens?: number;
+  /** Tokens written to prompt cache (cache miss/write). */
+  cacheWriteTokens?: number;
 };
 
 // ─── Legacy event type (kept for backward compat; loop now uses LlmStreamEvent) ───
