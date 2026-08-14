@@ -1,7 +1,7 @@
 /**
  * Error classification, retry strategies, abort utilities, and unified LLM event contract.
  */
-import type { AssistantMessage } from "../types.ts";
+import type { AgentMessage, AssistantMessage } from "../types.ts";
 
 // ─── Shared types ────────────────────────────────────────────────────────────
 
@@ -72,10 +72,13 @@ export class ProtocolError extends Error {
 /** Thrown when the LLM request times out. May contain partial content. */
 export class LlmTimeoutError extends Error {
   readonly partialContent?: string;
-  constructor(partialContent?: string) {
+  readonly messages?: AgentMessage[];
+
+  constructor(partialContent?: string, messages?: AgentMessage[]) {
     super(`LLM request timed out after ${typeof process !== 'undefined' ? 'request timeout' : 'timeout'}`);
     this.name = "LlmTimeoutError";
     this.partialContent = partialContent;
+    this.messages = messages;
   }
 }
 

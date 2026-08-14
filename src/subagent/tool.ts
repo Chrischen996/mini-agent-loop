@@ -19,7 +19,7 @@
 import { randomUUID } from "node:crypto";
 import { contentAsString } from "../content.ts";
 import { switchLlmModel, type LlmConfig } from "../llm/index.ts";
-import { runAgentLoop, type LoopEvent } from "../loop.ts";
+import { runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "../loop.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
 import type {
   SubagentArgs,
@@ -27,14 +27,17 @@ import type {
   SubagentBatchTask,
   SubagentEvent,
   SubagentProfile,
+  SubagentRuntimeInfo,
   SubagentToolOptions,
 } from "./types.ts";
 import type { PermissionTurnContext } from "../permissions.ts";
+import type { ThinkingMode } from "../thinking-policy.ts";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const DEFAULT_MAX_TURNS = 5;
 const DEFAULT_MAX_DEPTH = 3;
+const DEFAULT_MAX_CONCURRENCY_BATCH = 0; // 0 = unlimited (all concurrent)
 const SUBAGENT_TOOL_NAME = "subagent";
 
 const DEFAULT_SUBAGENT_SYSTEM_PROMPT = [
@@ -42,6 +45,55 @@ const DEFAULT_SUBAGENT_SYSTEM_PROMPT = [
   "Do not ask follow-up questions — work with the information provided.",
   "When you have finished the task, respond with your final answer directly.",
 ].join("\n");
+
+// ─── Global cross-batch concurrency limiter ────────────────────────────────────
+let _globalActiveCount = 0;
+type GlobalConcurrencyWaiter = {
+  resolve: () => void;
+  reject: (reason?: unknown) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+};
+const _globalConcurrencyQueue: GlobalConcurrencyWaiter[] = [];
+
+/** Acquire a global concurrency slot. Resolves immediately if under limit. */
+async function acquireGlobalSlot(limit: number, signal?: AbortSignal): Promise<void> {
+  if (limit <= 0) return; // No global limit
+  if (signal?.aborted) throw signal.reason ?? new Error("Aborted");
+  if (_globalActiveCount < limit) {
+    _globalActiveCount++;
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const waiter: GlobalConcurrencyWaiter = { resolve, reject, signal };
+    const onAbort = () => {
+      const index = _globalConcurrencyQueue.indexOf(waiter);
+      if (index >= 0) _globalConcurrencyQueue.splice(index, 1);
+      reject(signal?.reason ?? new Error("Aborted"));
+    };
+    waiter.onAbort = onAbort;
+    signal?.addEventListener("abort", onAbort, { once: true });
+    _globalConcurrencyQueue.push(waiter);
+  });
+  _globalActiveCount++;
+}
+
+/** Release a global concurrency slot. */
+function releaseGlobalSlot(): void {
+  if (_globalActiveCount > 0) {
+    _globalActiveCount--;
+    while (_globalConcurrencyQueue.length > 0) {
+      const next = _globalConcurrencyQueue.shift()!;
+      next.signal?.removeEventListener("abort", next.onAbort!);
+      if (next.signal?.aborted) {
+        next.reject(next.signal.reason ?? new Error("Aborted"));
+        continue;
+      }
+      next.resolve();
+      break;
+    }
+  }
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -94,6 +146,27 @@ function extractFinalAnswer(
 }
 
 /**
+ * Build runtime info for a resolved LLM config.
+ * Tracks whether the model switch succeeded or fell back.
+ */
+function buildRuntimeInfo(
+  llm: LlmConfig,
+  requestedModel: string | undefined,
+  switchSucceeded: boolean,
+  thinkingMode: ThinkingMode,
+): SubagentRuntimeInfo {
+  return {
+    model: llm.model,
+    provider: llm.provider,
+    baseUrl: llm.baseUrl,
+    thinkingMode,
+    thinkingLevel: llm.thinkingLevel,
+    modelSwitchSucceeded: switchSucceeded,
+    requestedModel,
+  };
+}
+
+/**
  * Merge multiple abort signals into a single AbortController.
  * Compatible with Node.js 18 (no AbortSignal.any()).
  *
@@ -126,6 +199,63 @@ function mergeAbortSignals(
   };
 }
 
+/**
+ * Run tasks with a concurrency limit using a token-bucket semaphore.
+ * Compatible with Node.js 18 (no AbortSignal.any()).
+ *
+ * When `maxConcurrency` is 0 or undefined, all tasks run concurrently
+ * (original Promise.allSettled behavior).
+ */
+async function runWithConcurrency<T>(
+  tasks: Array<() => Promise<T>>,
+  maxConcurrency: number,
+): Promise<T[]> {
+  if (maxConcurrency <= 0 || maxConcurrency >= tasks.length) {
+    return Promise.all(tasks.map((fn) => fn()));
+  }
+
+  /**
+   * Each slot holds either a pending factory function or a settled promise.
+   * A factory is only called when a worker grabs that slot, enforcing concurrency.
+   */
+  type Pending<T> = { tag: "pending"; factory: () => Promise<T>; index: number };
+  type Resolved<T> = { tag: "resolved"; result: PromiseSettledResult<T>; index: number };
+  type Slot<T> = Pending<T> | Resolved<T>;
+
+  const slots: Slot<T>[] = tasks.map((fn, i) => ({ tag: "pending", factory: fn, index: i }));
+
+  const limit = Math.min(maxConcurrency, tasks.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (true) {
+      const idx = nextIndex;
+      if (idx >= tasks.length) return;
+      nextIndex += 1;
+      const slot = slots[idx]!;
+      if (slot.tag === "resolved") continue;
+      // Only now call the factory — this is what enforces the concurrency limit
+      const result = await Promise.allSettled([slot.factory()]).then(
+        ([r]): PromiseSettledResult<T> => r,
+      );
+      slots[idx] = { tag: "resolved", result, index: slot.index };
+    }
+  }
+
+  await Promise.all(Array.from({ length: limit }, () => worker()));
+
+  // Reassemble in original index order, throwing on first rejection
+  const ordered = slots
+    .filter((s): s is Resolved<T> => s.tag === "resolved")
+    .sort((a, b) => a.index - b.index);
+  const results: T[] = new Array(ordered.length);
+  for (const slot of ordered) {
+    if (slot.result.status === "rejected") throw slot.result.reason;
+    results[slot.index] = slot.result.value;
+  }
+  return results;
+}
+
 // ─── Main factory ────────────────────────────────────────────────────────────
 
 /**
@@ -151,7 +281,17 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
     getPermissionTurn,
     getPermissionMode,
     authorizeTool,
+    timeout: constructorTimeout,
+    thinkingMode: parentThinkingMode,
+    maxThinkingEscalations: parentMaxEscalations,
+    getParentHistory,
+    parentRuntime,
   } = options;
+  const globalBudgetState = options.globalBudgetState ?? (
+    options.globalTokenBudget !== undefined
+      ? { used: 0, limit: options.globalTokenBudget }
+      : undefined
+  );
 
   // Build the parameter schema dynamically to include available profile names.
   const profileEnum =
@@ -221,6 +361,33 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
           description:
             "Background context from the parent agent. Prepended to the sub-agent's system prompt.",
         },
+        thinkingMode: {
+          type: "string",
+          enum: ["fixed", "adaptive"],
+          description:
+            "Thinking mode for the sub-agent loop. 'adaptive' enables explainable effort escalation after tool failures.",
+        },
+        maxThinkingEscalations: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "Maximum adaptive effort increases after tool or validation failures. Default: 2.",
+        },
+        contextPolicy: {
+          type: "object",
+          description:
+            "Optional context compaction policy (same shape as parent loop's context option).",
+        },
+        skillNames: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Skill names to activate for this sub-agent loop.",
+        },
+        inheritContextHistory: {
+          type: "boolean",
+          description: "Whether to include the parent agent's current message history.",
+        },
       },
       required: ["task"],
       additionalProperties: false,
@@ -248,19 +415,57 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
         : baseSystemPrompt;
       const allowedTools = profile?.allowedTools ?? args.tools;
       const maxTurns = args.maxTurns ?? profile?.maxTurns ?? DEFAULT_MAX_TURNS;
-      const timeout = profile?.timeout;
+      // Resolve timeout: profile.timeout > constructor timeout
+      const timeout = profile?.timeout ?? constructorTimeout;
+
+      // ── Thinking mode & escalation: args > profile > parent > default ──
+      const effectiveParentLlm = parentRuntime?.llm ?? parentLlm;
+      const effectiveParentThinkingMode = parentRuntime?.thinkingMode ?? parentThinkingMode;
+      const effectiveParentMaxEscalations = parentRuntime?.maxThinkingEscalations ?? parentMaxEscalations;
+      const effectiveContextPolicy = args.contextPolicy ?? parentRuntime?.context;
+      const inheritedParentHistory = args.inheritContextHistory
+        ? parentRuntime?.history ?? getParentHistory?.()
+        : undefined;
+      const effectiveThinkingMode: ThinkingMode =
+        args.thinkingMode ?? profile?.thinkingMode ?? effectiveParentThinkingMode ?? "fixed";
+      const effectiveMaxEscalations =
+        args.maxThinkingEscalations ?? profile?.maxThinkingEscalations ?? effectiveParentMaxEscalations ?? 2;
+
       // Model resolution: args.model > profile.llm > parentLlm
-      let llm: LlmConfig = profile?.llm ?? parentLlm;
+      // Track whether the model switch actually succeeded.
+      let llm: LlmConfig = profile?.llm ?? effectiveParentLlm;
+      let modelSwitchSucceeded = true;
       if (args.model) {
         try {
-          llm = switchLlmModel(parentLlm, args.model);
-        } catch {
-          // If model switch fails, fall back to profile/parent
+          llm = switchLlmModel(effectiveParentLlm, args.model);
+        } catch (error) {
+          // Explicit model override failed — return isError instead of
+          // silently falling back to the profile or parent model.
+          return {
+            content: `model "${args.model}" not found or invalid: ${error instanceof Error ? error.message : String(error)}`,
+            isError: true,
+          };
         }
       }
 
+      if (globalBudgetState && globalBudgetState.used >= globalBudgetState.limit) {
+        return {
+          content: `Sub-agent global token budget exhausted (${globalBudgetState.limit}).`,
+          isError: true,
+        };
+      }
+
+      // Build runtime info for observability events
+      const runtimeInfo = buildRuntimeInfo(
+        llm,
+        args.model,
+        modelSwitchSucceeded,
+        effectiveThinkingMode,
+      );
+
       // ── Build child tool set ────────────────────────────────────
       const childTools = buildChildTools(parentTools, allowedTools, false);
+      const childRuntimeRef: AgentRuntimeRef = {};
 
       // If the child is allowed to spawn sub-agents itself (depth < maxDepth),
       // add a nested subagent tool with incremented depth.
@@ -280,17 +485,24 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
           getPermissionTurn,
           getPermissionMode,
           authorizeTool,
+          timeout,
+          thinkingMode: effectiveThinkingMode,
+          maxThinkingEscalations: effectiveMaxEscalations,
+          parentRuntime: childRuntimeRef,
+          globalBudgetState,
+          checkGlobalBudget: options.checkGlobalBudget,
         });
         childTools.push(nestedSubagentTool as Tool);
       }
 
-      // ── Emit start event ────────────────────────────────────────
+      // ── Emit start event (with runtime info) ────────────────────
       onSubagentEvent?.({
         type: "subagent_start",
         id: invocationId,
         task: args.task,
         profile: args.profile,
         depth,
+        runtime: runtimeInfo,
       });
 
       // ── Merge abort signals (fix: properly combine ALL signals) ─
@@ -311,6 +523,8 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
 
       // ── Token tracking ──────────────────────────────────────────
       let accumulatedTokens = 0;
+      type ErrorKind = "timeout" | "api" | "compaction" | "max_turns" | "abort";
+      const errors: Array<{ message: string; kind: ErrorKind }> = [];
 
       // ── Run the nested loop ─────────────────────────────────────
       let finalMessages: import("../types.ts").AgentMessage[];
@@ -328,10 +542,37 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
           permissionTurn: getPermissionTurn?.() ?? permissionTurn,
           authorizeTool,
           ...(injectedChat ? { chat: injectedChat } : {}),
+          // ── Pass through thinking mode & escalation ─────────────
+          thinkingMode: effectiveThinkingMode,
+          maxThinkingEscalations: effectiveMaxEscalations,
+          // ── Pass through context policy if provided ─────────────
+          ...(effectiveContextPolicy ? { context: effectiveContextPolicy } : {}),
+          // ── Pass through skill names if provided ────────────────
+          ...(args.skillNames && args.skillNames.length > 0
+            ? { skillNames: args.skillNames }
+            : {}),
+          // ── Inherit parent history when requested ───────────────
+          ...(inheritedParentHistory ? { _parentHistory: inheritedParentHistory } : {}),
+          runtimeRef: childRuntimeRef,
           onEvent: (event: LoopEvent) => {
             // Accumulate token usage from assistant events
             if (event.type === "assistant" && event.usage) {
-              accumulatedTokens += event.usage.totalTokens;
+              const delta = event.usage.totalTokens;
+              accumulatedTokens += delta;
+              if (globalBudgetState) {
+                globalBudgetState.used += delta;
+                if (globalBudgetState.used > globalBudgetState.limit) {
+                  throw new Error(`Sub-agent global token budget exceeded (${globalBudgetState.limit}).`);
+                }
+                options.checkGlobalBudget?.(globalBudgetState.used);
+              } else {
+                options.checkGlobalBudget?.(accumulatedTokens);
+              }
+            }
+
+            // Capture notable errors for subagent_end reporting
+            if (event.type === "error") {
+              errors.push({ message: event.message, kind: "api" });
             }
 
             onSubagentEvent?.({
@@ -347,7 +588,17 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
         const errorMessage =
           err instanceof Error ? err.message : String(err);
 
+        // Classify the error kind
         const isTimeout = timeoutController?.signal.aborted === true;
+        const isMaxTurns = err instanceof Error && err.name === "MaxTurnsExceededError";
+
+        if (isTimeout) {
+          errors.push({ message: "Sub-agent timeout exceeded", kind: "timeout" });
+        } else if (isMaxTurns) {
+          errors.push({ message: errorMessage, kind: "max_turns" });
+        } else {
+          errors.push({ message: errorMessage, kind: "api" });
+        }
 
         onSubagentEvent?.({
           type: "subagent_end",
@@ -357,6 +608,9 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
           depth,
           turns: 0,
           totalTokens: accumulatedTokens,
+          runtime: runtimeInfo,
+          errors,
+          autoDelegationInherited: false, // auto-delegation is deliberately not inherited
         });
 
         return {
@@ -369,6 +623,32 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
         // Clean up timeout and signal listeners
         if (timeoutId !== undefined) clearTimeout(timeoutId);
         merged.cleanup();
+      }
+
+      // ── Post-run timeout check ───────────────────────────────────
+      // The timeout may have fired during runAgentLoop but not thrown
+      // (e.g. when the injected chat completes before the timeout). Check
+      // here to report it as a timeout error.
+      if (timeoutController?.signal.aborted === true && !success) {
+        // Already handled in catch above
+      } else if (timeoutController?.signal.aborted === true) {
+        // Timeout fired but runAgentLoop returned normally — treat as timeout
+        onSubagentEvent?.({
+          type: "subagent_end",
+          id: invocationId,
+          result: "",
+          success: false,
+          depth,
+          turns: 0,
+          totalTokens: accumulatedTokens,
+          runtime: runtimeInfo,
+          errors: [{ message: "Sub-agent timeout exceeded", kind: "timeout" }],
+          autoDelegationInherited: false,
+        });
+        return {
+          content: `Sub-agent timed out after ${timeout}ms. Consider increasing the timeout or simplifying the task.`,
+          isError: true,
+        };
       }
 
       // ── Extract result ──────────────────────────────────────────
@@ -384,6 +664,9 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
         depth,
         turns,
         totalTokens: accumulatedTokens,
+        runtime: runtimeInfo,
+        errors: errors.length > 0 ? errors : undefined,
+        autoDelegationInherited: false, // auto-delegation is intentionally isolated per subagent
       });
 
       if (!finalAnswer) {
@@ -406,9 +689,9 @@ const SUBAGENT_BATCH_TOOL_NAME = "subagent_batch";
  * Create the `subagent_batch` {@link Tool} that runs multiple subagents in parallel.
  *
  * Each task in the batch spawns an independent subagent via the single
- * `createSubagentTool`, and all tasks execute concurrently using
- * `Promise.allSettled`. Results are collected in order and returned as
- * a combined text result.
+ * `createSubagentTool`, and all tasks execute concurrently (optionally
+ * bounded by `maxConcurrency`) using a token-bucket semaphore.
+ * Results are collected in order and returned as a combined text result.
  */
 export function createSubagentBatchTool(options: SubagentToolOptions): Tool<SubagentBatchArgs> {
   const singleTool = createSubagentTool(options);
@@ -426,6 +709,7 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
       "Run multiple sub-agents in parallel. Each task spawns an independent sub-agent that executes concurrently.",
       "Use this when you have multiple independent sub-tasks that can be done simultaneously.",
       "Results are collected and returned together once all sub-agents complete.",
+      "Optionally control concurrency with `maxConcurrency` to avoid overwhelming rate limits.",
     ].join(" "),
     annotations: {
       title: "Parallel Sub-Agents",
@@ -450,12 +734,40 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
               model: { type: "string", description: "Optional model override." },
               maxTurns: { type: "integer", minimum: 1, description: "Max turns override." },
               sharedContext: { type: "string", description: "Shared context for this task." },
+              thinkingMode: {
+                type: "string",
+                enum: ["fixed", "adaptive"],
+                description: "Thinking mode override.",
+              },
+              maxThinkingEscalations: {
+                type: "integer",
+                minimum: 0,
+                description: "Max adaptive escalations override.",
+              },
+              contextPolicy: {
+                type: "object",
+                description: "Context compaction policy override.",
+              },
+              skillNames: {
+                type: "array",
+                items: { type: "string" },
+                description: "Skill names override.",
+              },
+              inheritContextHistory: {
+                type: "boolean",
+                description: "Whether to include the parent's current message history.",
+              },
             },
             required: ["label", "task"],
           },
           description: "Array of tasks to run in parallel.",
           minItems: 1,
           maxItems: 10,
+        },
+        maxConcurrency: {
+          type: "integer",
+          minimum: 0,
+          description: "Maximum concurrent sub-agents. 0 or omitted means all run concurrently.",
         },
       },
       required: ["tasks"],
@@ -467,21 +779,40 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
         return { content: "No tasks provided for batch execution.", isError: true };
       }
 
-      // Run all tasks in parallel
-      const settled = await Promise.allSettled(
-        args.tasks.map((task: SubagentBatchTask) =>
-          singleTool.execute(
-            {
-              task: task.task,
-              profile: task.profile,
-              model: task.model,
-              maxTurns: task.maxTurns,
-              sharedContext: task.sharedContext,
-            },
-            execSignal,
-          ),
-        ),
-      );
+      const maxConcurrency = args.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY_BATCH;
+      const globalLimit = options.globalConcurrencyLimit ?? 0;
+
+      // Run all tasks respecting both local and global concurrency limits.
+      // runWithConcurrency throws on first rejection; callers get a single error.
+      const settled = await runWithConcurrency(
+        args.tasks.map((task: SubagentBatchTask) => async () => {
+          // Wait for a global concurrency slot if limit is set
+          await acquireGlobalSlot(globalLimit, execSignal);
+          try {
+            return await singleTool.execute(
+              {
+                task: task.task,
+                profile: task.profile,
+                model: task.model,
+                maxTurns: task.maxTurns,
+                sharedContext: task.sharedContext,
+                thinkingMode: task.thinkingMode,
+                maxThinkingEscalations: task.maxThinkingEscalations,
+                contextPolicy: task.contextPolicy,
+                skillNames: task.skillNames,
+                inheritContextHistory: task.inheritContextHistory,
+              },
+              execSignal,
+            );
+          } finally {
+            releaseGlobalSlot();
+          }
+        }),
+        maxConcurrency,
+      ).catch((reason): import("../tools/types.ts").ToolResult[] => {
+        // On error, return error results for all tasks so we still produce output.
+        return args.tasks.map(() => ({ content: String(reason), isError: true }));
+      });
 
       // Collect results in order
       const parts: string[] = [];
@@ -490,20 +821,13 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
         const outcome = settled[i]!;
         const header = `── ${task.label} ──`;
 
-        if (outcome.status === "fulfilled") {
-          const result = outcome.value;
-          const content = typeof result.content === "string"
-            ? result.content
-            : "[complex content]";
-          parts.push(`${header}\n${result.isError ? "[ERROR] " : ""}${content}`);
-        } else {
-          parts.push(`${header}\n[FAILED] ${outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)}`);
-        }
+        const content = typeof outcome.content === "string"
+          ? outcome.content
+          : "[complex content]";
+        parts.push(`${header}\n${outcome.isError ? "[ERROR] " : ""}${content}`);
       }
 
-      const hasErrors = settled.some(
-        (s) => s.status === "rejected" || (s.status === "fulfilled" && s.value.isError),
-      );
+      const hasErrors = settled.some((s) => s.isError);
 
       return {
         content: parts.join("\n\n"),

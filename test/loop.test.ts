@@ -12,6 +12,7 @@ import {
 } from "../src/loop.ts";
 import { contentAsString } from "../src/content.ts";
 import { makeLlmConfig } from "../src/llm/index.ts";
+import { LlmTimeoutError } from "../src/llm/retry.ts";
 import { createDefaultTools, createReadTool } from "../src/tools/index.ts";
 import type { Tool } from "../src/tools/types.ts";
 import { PermissionManager } from "../src/permissions.ts";
@@ -20,6 +21,8 @@ import {
   createInfiniteToolFauxChat,
   createUnknownToolFauxChat,
 } from "./faux-model.ts";
+import { streamChat } from "../src/llm/index.ts";
+import type { AgentMessage } from "../src/types.ts";
 
 const dummyLlm = makeLlmConfig({
   apiKey: "test-key",
@@ -845,6 +848,61 @@ describe("createReadTool", () => {
       assert.match(contentAsString(result.content), /resolves outside workspace cwd/);
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("LlmTimeoutError in loop", () => {
+  it("does NOT throw MaxTurnsExceededError when stream hits LlmTimeoutError with partial content", async () => {
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+    const originalFetch = globalThis.fetch;
+
+    // Return a response that yields one delta then hangs forever,
+    // causing the internal request timeout to fire and throw LlmTimeoutError.
+    globalThis.fetch = (async () => new Response(
+      new ReadableStream({
+        start(ctrl) {
+          ctrl.enqueue(
+            new TextEncoder().encode(
+              'data: {"choices":[{"delta":{"content":"par"}}]}\n\n',
+            ),
+          );
+          // Never enqueue more data — the request will timeout.
+        },
+      }),
+      { headers: { "Content-Type": "text/event-stream" } },
+    )) as typeof fetch;
+
+    try {
+      const llm = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "http://localhost/v1",
+        model: "gpt-4o-mini",
+        timeoutMs: 20,
+      });
+
+      await assert.rejects(
+        () =>
+          runAgentTurn(createAgentHistory(), "hello", {
+            llm,
+            tools: [],
+            onEvent: (event) => events.push(event),
+          }),
+        (err: unknown) => {
+          // Must be LlmTimeoutError, NOT MaxTurnsExceededError
+          assert.ok(
+            err instanceof LlmTimeoutError,
+            `expected LlmTimeoutError but got ${(err as Error)?.constructor?.name ?? String(err)}`,
+          );
+          assert.ok(!(err instanceof MaxTurnsExceededError), "must not throw MaxTurnsExceededError");
+          return true;
+        },
+      );
+      // The partial assistant message should have been saved via onEvent.
+      assert.ok(events.some((e) => e.type === "assistant_delta" && e.kind === "answer"), "should have emitted answer delta");
+      assert.ok(events.some((e) => e.type === "assistant"), "should have emitted partial assistant message");
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 });

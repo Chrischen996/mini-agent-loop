@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { makeLlmConfig, streamChat, OutputTruncatedError } from "../src/llm/index.ts";
-import type { AgentMessage } from "../src/types.ts";
+import { makeLlmConfig, streamChat, OutputTruncatedError, LlmTimeoutError } from "../src/llm/index.ts";
+import type { AgentMessage, AssistantMessage } from "../src/types.ts";
 
 function sseResponse(chunks: string[]): Response {
   const payload = chunks.map((chunk) => `data: ${chunk}\n\n`).join("") + "data: [DONE]\n\n";
@@ -270,5 +270,93 @@ describe("streamChat", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it("omits stream_options when supportsUsageInStreaming is explicitly false", async () => {
+    const originalFetch = globalThis.fetch;
+    let requestBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return sseResponse([
+        JSON.stringify({ choices: [{ delta: { content: "ok" } }] }),
+      ]);
+    }) as typeof fetch;
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "http://localhost/v1",
+        model: "gpt-4o-mini",
+        compat: { supportsUsageInStreaming: false },
+      });
+      for await (const _event of streamChat(config, [{ role: "user", content: "hi" }])) {
+        // Consume the stream to force request construction and completion.
+      }
+      assert.equal(requestBody?.stream_options, undefined, "stream_options must be absent");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("includes stream_options by default when supportsUsageInStreaming is not set", async () => {
+    const originalFetch = globalThis.fetch;
+    let requestBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_input, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return sseResponse([
+        JSON.stringify({ choices: [{ delta: { content: "ok" } }] }),
+      ]);
+    }) as typeof fetch;
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "http://localhost/v1",
+        model: "gpt-4o-mini",
+      });
+      for await (const _event of streamChat(config, [{ role: "user", content: "hi" }])) {
+        // Consume the stream to force request construction and completion.
+      }
+      assert.deepEqual(requestBody?.stream_options, { include_usage: true });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("throws LlmTimeoutError when the stream stalls and times out", async () => {
+    const originalFetch = globalThis.fetch;
+    // Return a response that never produces data, so the internal timeout fires.
+    globalThis.fetch = (async () => new Response(
+      new ReadableStream({ start(_ctrl) { /* never enqueue */ } }),
+      { headers: { "Content-Type": "text/event-stream" } },
+    )) as typeof fetch;
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "http://localhost/v1",
+        model: "gpt-4o-mini",
+        timeoutMs: 10,
+      });
+      await assert.rejects(
+        async () => {
+          for await (const _event of streamChat(config, [{ role: "user", content: "hi" }])) { /* consume */ }
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof LlmTimeoutError, `expected LlmTimeoutError but got ${err?.constructor?.name ?? String(err)}`);
+          return true;
+        },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("recognises Pi provider timeout messages with the normalisation regex", () => {
+    // The Pi error normalisation logic uses this regex to decide whether to
+    // yield LlmTimeoutError instead of a plain Error.
+    assert.ok(/timed? ?out|timeout|request timed/i.test("Request timed out."));
+    assert.ok(/timed? ?out|timeout|request timed/i.test("request timed out after 30s"));
+    assert.ok(!/timed? ?out|timeout|request timed/i.test("Invalid API key"));
   });
 });

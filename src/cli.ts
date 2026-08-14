@@ -4,7 +4,7 @@ import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { imagePart, textPart } from "./content.ts";
 import { loadLlmConfigFromEnv } from "./llm/index.ts";
-import { MaxTurnsExceededError, previewContent, runAgentLoop, type LoopEvent } from "./loop.ts";
+import { MaxTurnsExceededError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
 import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
@@ -14,6 +14,7 @@ import { createMcpRuntimeFromEnv } from "./mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
 import {
   createSubagentTool,
+  createSubagentBatchTool,
   defaultProfiles,
   loadAutoSubagentOptionsFromEnv,
 } from "./subagent/index.ts";
@@ -72,7 +73,7 @@ function logEvent(event: LoopEvent): void {
       console.error(`[done] messages=${event.messages.length}`);
       break;
     case "subagent_start":
-      console.error(`[subagent_start] id=${event.id} depth=${event.depth} task=${event.task.slice(0, 80)}${event.profile ? ` profile=${event.profile}` : ""}`);
+      console.error(`[subagent_start] id=${event.id} depth=${event.depth} model=${event.runtime.model} provider=${event.runtime.provider} thinking=${event.runtime.thinkingMode} task=${event.task.slice(0, 80)}${event.profile ? ` profile=${event.profile}` : ""}`);
       break;
     case "subagent_event":
       // Show inner events with indentation based on depth
@@ -86,7 +87,7 @@ function logEvent(event: LoopEvent): void {
       }
       break;
     case "subagent_end":
-      console.error(`[subagent_end] id=${event.id} depth=${event.depth} success=${event.success} turns=${event.turns} tokens=${event.totalTokens}`);
+      console.error(`[subagent_end] id=${event.id} depth=${event.depth} success=${event.success} model=${event.runtime.model} turns=${event.turns} tokens=${event.totalTokens}${event.errors?.length ? ` errors=${event.errors.map((error) => error.kind).join(",")}` : ""}`);
       break;
   }
 }
@@ -273,6 +274,7 @@ async function main(): Promise<void> {
     throw error;
   });
   let tools;
+  const parentRuntime: AgentRuntimeRef = {};
   try {
     const configuredTools = mcpRuntime.toolProvider(createTools(cwd, {
       tools: selectedTools,
@@ -321,8 +323,20 @@ async function main(): Promise<void> {
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
       onSubagentEvent: (subEvent) => logEvent(subEvent),
       getPermissionTurn: () => permissionTurn,
+      thinkingMode,
+      parentRuntime,
     });
-    const enrichedTools = [...baseTools, subagentTool as Tool];
+    const subagentBatchTool = createSubagentBatchTool({
+      parentLlm: requestLlm,
+      parentTools: baseTools,
+      profiles: defaultProfiles,
+      preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+      onSubagentEvent: (subEvent) => logEvent(subEvent),
+      getPermissionTurn: () => permissionTurn,
+      thinkingMode,
+      parentRuntime,
+    });
+    const enrichedTools = [...baseTools, subagentTool as Tool, subagentBatchTool as Tool];
     tools = () => enrichedTools;
   }
 
@@ -342,6 +356,7 @@ async function main(): Promise<void> {
       validationWorkspace: process.cwd(),
       autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
       thinkingMode,
+      runtimeRef: parentRuntime,
       onEvent: logEvent,
     });
   } catch (error) {

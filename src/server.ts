@@ -20,6 +20,7 @@ import { getActiveProfile, loadProfileStore } from "./profile-store.ts";
 import {
   createAgentHistory,
   runAgentTurn,
+  type AgentRuntimeRef,
   type LoopEvent,
 } from "./loop.ts";
 import {
@@ -254,6 +255,7 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         task: event.task.slice(0, 500),
         profile: event.profile,
         depth: event.depth,
+        runtime: event.runtime,
       };
     case "subagent_event":
       return {
@@ -271,6 +273,14 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         turns: event.turns,
         totalTokens: event.totalTokens,
         resultPreview: event.result.slice(0, 300),
+        runtime: event.runtime,
+        autoDelegationInherited: event.autoDelegationInherited,
+        ...(event.errors ? {
+          errors: event.errors.map((error) => ({
+            kind: error.kind,
+            message: error.message.slice(0, 500),
+          })),
+        } : {}),
       };
   }
 }
@@ -1127,6 +1137,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       const userContent: ContentPart[] | undefined = attachments.length
         ? [textPart(input.modelPrompt), ...attachments]
         : undefined;
+      const parentRuntime: AgentRuntimeRef = {};
 
       try {
         const operationScope = randomUUID();
@@ -1161,6 +1172,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
                 signal: abortController.signal,
                 onSubagentEvent: (subEvent: import("./subagent/types.ts").SubagentEvent) => send(safeEvent(subEvent)),
                 permissionTurn,
+                thinkingMode: session.thinkingMode ?? options.thinkingMode ?? loadThinkingModeFromEnv(),
+                maxThinkingEscalations: options.maxThinkingEscalations,
+                parentRuntime,
               };
               return [
                 ...base,
@@ -1186,6 +1200,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
             autoCheckpoint: options.autoCheckpoint ?? process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
             thinkingMode: input.thinkingMode ?? session.thinkingMode ?? options.thinkingMode ?? loadThinkingModeFromEnv(),
             maxThinkingEscalations: options.maxThinkingEscalations,
+            runtimeRef: parentRuntime,
             prepareNextTurn: async (context) => {
               const update = await options.prepareNextTurn?.(context);
               if (update?.llm) {

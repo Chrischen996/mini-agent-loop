@@ -305,6 +305,7 @@ export function makeLlmConfig(
     imagePolicy?: ImagePolicy;
     sessionId?: string;
     cacheRetention?: CacheRetention;
+    compat?: Record<string, unknown>;
   },
 ): LlmConfig {
   const resolved = resolveModel(partial.model, partial.baseUrl);
@@ -323,7 +324,7 @@ export function makeLlmConfig(
     timeoutMs: partial.timeoutMs,
     piModel: resolved.piModel,
     reasoning: partial.reasoning ?? resolved.reasoning,
-    compat: resolved.compat,
+    compat: partial.compat ?? resolved.compat,
     thinkingLevel: normalizeThinkingLevelForModel(
       partial.reasoning ?? resolved.reasoning,
       partial.thinkingLevel ?? getDefaultThinkingLevel(),

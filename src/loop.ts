@@ -125,6 +125,11 @@ export type AgentLoopOptions = {
   /** Maximum adaptive effort increases after tool or validation failures. Default: 2. */
   maxThinkingEscalations?: number;
   /**
+   * Mutable runtime snapshot exposed to nested tools during this loop.
+   * The loop updates it as model, thinking policy, and history change.
+   */
+  runtimeRef?: AgentRuntimeRef;
+  /**
    * Permission mode for the session. When "plan", write tools are blocked
    * and the agent is informed to output a plan instead of executing directly.
    */
@@ -143,6 +148,20 @@ export type AgentLoopOptions = {
    * Defaults to the global defaultSkillRegistry.
    */
   skillRegistry?: SkillRegistry;
+  /**
+   * Optional parent message history to pass when `inheritContextHistory`
+   * is requested by the subagent caller. Used internally; not exposed
+   * in the public tool args schema.
+   */
+  _parentHistory?: AgentMessage[];
+};
+
+export type AgentRuntimeRef = {
+  llm?: LlmConfig;
+  history?: AgentMessage[];
+  thinkingMode?: ThinkingMode;
+  maxThinkingEscalations?: number;
+  context?: ContextManagerOptions;
 };
 
 export type LoopEvent =
@@ -412,11 +431,29 @@ export async function runAgentLoop(
   const { systemPrompt, permissionMode, permissionTurn, ...turnOptions } = options;
   const activePermissionMode = permissionTurn?.mode ?? permissionMode;
   const prompt = systemPrompt ?? buildSystemPrompt(activePermissionMode);
+  const history = turnOptions._parentHistory
+    ? inheritHistoryWithPrompt(turnOptions._parentHistory, prompt)
+    : createAgentHistory(prompt, activePermissionMode);
   return runAgentTurn(
-    createAgentHistory(prompt, activePermissionMode),
+    history,
     userText,
     { ...turnOptions, permissionMode: activePermissionMode, permissionTurn },
   );
+}
+
+function inheritHistoryWithPrompt(history: AgentMessage[], childPrompt: string): AgentMessage[] {
+  const inherited = history.map((message) => ({ ...message }));
+  const system = inherited[0];
+  if (system?.role === "system") {
+    const parentPrompt = contentAsString(system.content);
+    if (parentPrompt && parentPrompt !== childPrompt) {
+      system.content = `${childPrompt}\n\n[Inherited parent system context]\n${parentPrompt}`;
+    } else {
+      system.content = childPrompt;
+    }
+    return inherited;
+  }
+  return [{ role: "system", content: childPrompt }, ...inherited];
 }
 
 export async function runAgentTurn(
@@ -457,6 +494,7 @@ async function runAgentTurnInternal(
     autoCheckpoint = false,
     thinkingMode = "fixed",
     maxThinkingEscalations = 2,
+    runtimeRef,
     permissionMode,
     permissionTurn,
     skills = [],
@@ -555,6 +593,16 @@ async function runAgentTurnInternal(
   );
   const messages: AgentMessage[] = [...compactHistory(history, currentContext), ...initialBatch];
 
+  const syncRuntimeRef = (): void => {
+    if (!runtimeRef) return;
+    runtimeRef.llm = currentLlm;
+    runtimeRef.history = messages;
+    runtimeRef.thinkingMode = effectiveThinkingMode;
+    runtimeRef.maxThinkingEscalations = maxThinkingEscalations;
+    runtimeRef.context = currentContext;
+  };
+  syncRuntimeRef();
+
   // Keep the model's active mode synchronized when a session changes modes.
   if (activePermissionMode !== undefined) applyPermissionModePrompt(messages, activePermissionMode);
 
@@ -612,6 +660,7 @@ async function runAgentTurnInternal(
       };
     }
     if (update?.context) currentContext = update.context;
+    syncRuntimeRef();
 
     if (effectiveThinkingMode !== "adaptive") return;
     const decision = decideNextThinkingLevel({
@@ -625,6 +674,7 @@ async function runAgentTurnInternal(
     const previousLevel = currentLlm.thinkingLevel ?? "off";
     currentLlm = withThinkingLevel(currentLlm, decision.level);
     thinkingEscalations += 1;
+    syncRuntimeRef();
     onEvent?.({
       type: "thinking_policy",
       mode: "adaptive",
@@ -1019,14 +1069,17 @@ async function runAgentTurnInternal(
             emitAborted(onEvent, messages, permissionTurn);
             return messages;
           }
-          // Handle timeout with partial content - mark as incomplete but don't discard
-          if (err instanceof LlmTimeoutError && streamed) {
-            assistant = { role: "assistant", content: streamed };
-            messages.push(assistant);
-            onEvent?.({ type: "assistant", message: assistant });
-            // Don't throw - let the loop handle partial response
-            // The assistant has partial content which is better than nothing
-            break;
+          // Timeout is a terminal state: preserve partial output but re-throw
+          // so the upper layer emits an error event instead of continuing
+          // the loop or hitting MaxTurnsExceededError.
+          if (err instanceof LlmTimeoutError) {
+            if (streamed) {
+              const partial = { role: "assistant" as const, content: streamed };
+              messages.push(partial);
+              onEvent?.({ type: "assistant", message: partial });
+            }
+            // Attach the accumulated messages so the caller can restore history.
+            throw new LlmTimeoutError(err.partialContent, messages);
           }
           throw err;
         }

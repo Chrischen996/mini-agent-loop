@@ -60,7 +60,7 @@ export type ImageAttachment = {
 };
 
 export type ChatMessage =
-  | { kind: "user"; text: string; images?: ImageAttachment[] }
+  | { kind: "user"; text: string; displayText?: string; images?: ImageAttachment[] }
   | { kind: "assistant"; text: string; reasoning?: string }
   | { kind: "notice"; title?: string; text: string }
   | { kind: "tool_call"; id: string; name: string; args: string; rawArgs: Record<string, unknown>; status: ToolState; result?: string; durationMs?: number; startedAt: number }
@@ -109,7 +109,7 @@ export type TuiState = {
 };
 
 export type TuiAction =
-  | { type: "USER_MESSAGE"; text: string; images?: ImageAttachment[] }
+  | { type: "USER_MESSAGE"; text: string; displayText?: string; images?: ImageAttachment[] }
   | { type: "LOOP_EVENT"; event: LoopEvent }
   | { type: "AUTO_CONTINUE"; count: number; max: number }
   | { type: "MODEL_CHANGED"; modelName: string }
@@ -232,6 +232,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         messages: [...state.messages, {
           kind: "user",
           text: action.text,
+          ...(action.displayText !== undefined ? { displayText: action.displayText } : {}),
           ...(action.images?.length ? { images: action.images } : {}),
         }],
         goal: state.goal || action.text,

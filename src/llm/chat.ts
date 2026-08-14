@@ -117,7 +117,13 @@ async function* streamPiChat(
         yield { type: "error", error: new DOMException("The operation was aborted", "AbortError") };
         return;
       }
-      yield { type: "error", error: new Error(event.error.errorMessage || "Pi provider stream failed") };
+      const errMsg = event.error.errorMessage || "Pi provider stream failed";
+      // Normalize Pi provider timeout errors to LlmTimeoutError for consistent handling
+      if (/timed? ?out|timeout|request timed/i.test(errMsg)) {
+        yield { type: "error", error: new LlmTimeoutError() };
+      } else {
+        yield { type: "error", error: new Error(errMsg) };
+      }
     }
   }
 }
@@ -326,8 +332,8 @@ export async function* streamChat(
     stream: true,
     max_tokens: config.maxTokens,
     messages: toOpenAIMessages(prepared.messages, supportsImage),
-    // Enable usage in streaming to get cache token stats
-    stream_options: { include_usage: true },
+    // Only send stream_options for providers that support it (not all OpenAI-compatible gateways accept this field)
+    ...(config.compat?.supportsUsageInStreaming !== false ? { stream_options: { include_usage: true } } : {}),
   };
 
   addReasoningOption(body, config);
@@ -420,10 +426,10 @@ export async function* streamChat(
     // Capture usage whenever it appears (some providers send it mid-stream or at end)
     if (parsed.usage) {
       const promptTokens = parsed.usage.prompt_tokens ?? 0;
-      const cacheReadTokens = (parsed.usage as any).prompt_tokens_details?.cached_tokens 
-        ?? (parsed.usage as any).prompt_cache_hit_tokens 
+      const cacheReadTokens = (parsed.usage as any).prompt_tokens_details?.cached_tokens
+        ?? (parsed.usage as any).prompt_cache_hit_tokens
         ?? undefined;
-      const cacheWriteTokens = (parsed.usage as any).prompt_tokens_details?.cache_write_tokens 
+      const cacheWriteTokens = (parsed.usage as any).prompt_tokens_details?.cache_write_tokens
         ?? undefined;
       const inputTokens = Math.max(0, promptTokens - (cacheReadTokens ?? 0) - (cacheWriteTokens ?? 0));
       usage = {

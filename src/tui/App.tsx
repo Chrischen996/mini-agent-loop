@@ -19,8 +19,10 @@ import {
   createAgentHistory,
   MaxTurnsExceededError,
   runAgentTurn,
+  type AgentRuntimeRef,
   type LoopEvent,
 } from "../loop.ts";
+import { LlmTimeoutError } from "../llm/retry.ts";
 import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
 import {
   buildIntenseLlm,
@@ -236,9 +238,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   // Create the subagent tool — dispatches SubagentEvents to the TUI reducer
   const subagentToolsRef = useRef<Tool[]>([]);
-  const subagentLlmRef = useRef<LlmConfig | null>(null);
+  const subagentRuntimeRef = useRef<AgentRuntimeRef>({});
   const getSubagentTools = useCallback((parentLlm = llm): Tool[] => {
-    if (subagentToolsRef.current.length === 0 || subagentLlmRef.current !== parentLlm) {
+    if (subagentToolsRef.current.length === 0) {
       const sharedOptions = {
         parentLlm,
         parentTools: agentToolsRef.current,
@@ -248,12 +250,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           dispatch({ type: "SUBAGENT_EVENT", event });
         },
         getPermissionTurn: () => permissionTurnRef.current ?? undefined,
+        parentRuntime: subagentRuntimeRef.current,
       };
       subagentToolsRef.current = [
         createSubagentTool(sharedOptions) as Tool,
         createSubagentBatchTool(sharedOptions) as Tool,
       ];
-      subagentLlmRef.current = parentLlm;
     }
     return subagentToolsRef.current;
   }, [llm, vision]);
@@ -1011,7 +1013,16 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       abortRef.current.signal,
     );
     permissionTurnRef.current = permissionTurn;
-    dispatch({ type: "USER_MESSAGE", text: prompt, images: pendingImgs });
+    // Collapse multi-line pastes into a summary for display, but keep full text for model context.
+    const normalizedPrompt = prompt.replace(/\r\n/g, '\n');
+    const isMultiLine = normalizedPrompt.includes('\n');
+    const lineCount = isMultiLine ? normalizedPrompt.split('\n').length : 1;
+    // Count graphemes properly (emoji = 1 char, not 2 UTF-16 units)
+    const charCount = [...normalizedPrompt].length;
+    const displayText = isMultiLine
+      ? `[已复制 ${lineCount} 行 / ${charCount} 字]`
+      : undefined;
+    dispatch({ type: "USER_MESSAGE", text: prompt, ...(displayText !== undefined ? { displayText } : {}), images: pendingImgs });
 
     const streamBuffer = streamBufferRef.current!;
     const runId = streamBuffer.start();
@@ -1054,6 +1065,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             validationWorkspace: cwd,
             autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
             thinkingMode,
+            runtimeRef: subagentRuntimeRef.current,
             onEvent: onLoopEvent,
           });
           streamBuffer.finish(runId);
@@ -1088,6 +1100,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             dispatch({ type: "AUTO_CONTINUE", count: autoContinueCount, max: MAX_AUTO_CONTINUES });
             continue;
           }
+          if (err instanceof LlmTimeoutError && err.messages) {
+            // Timeout with partial content: save the partial history so the next
+            // turn starts from the known state instead of losing the streamed output.
+            historyRef.current = err.messages;
+            streamBuffer.finish(runId);
+            dispatch({ type: "LOOP_EVENT", event: { type: "error", message: `LLM timeout — partial response saved (${err.partialContent?.substring(0, 80) || ""})` } });
+            break;
+          }
           throw err;
         }
       }
@@ -1114,7 +1134,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       if (permissionTurnRef.current === permissionTurn) permissionTurnRef.current = null;
       permissionTurn.close();
     }
-  }, [state.busy, acMode, modelSetup, pendingProfileSetup, profileListState, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup, openProfileList, getPermissionManager, addPendingImage, handlePasteImage, cwd]);
+  }, [state.busy, acMode, modelSetup, pendingProfileSetup, profileListState, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup, openProfileList, getPermissionManager, addPendingImage, handlePasteImage, conversationId, cwd]);
 
   // Start the next queued prompt only after the current turn has emitted done/error/aborted.
   useEffect(() => {

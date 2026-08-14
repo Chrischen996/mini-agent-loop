@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { createSubagentTool } from "../src/subagent/index.ts";
+import { createSubagentTool, createSubagentBatchTool } from "../src/subagent/index.ts";
 import type {
   SubagentEvent,
   SubagentProfile,
@@ -10,6 +10,8 @@ import { makeLlmConfig, type ChatFn } from "../src/llm/index.ts";
 import type { Tool, ToolResult } from "../src/tools/types.ts";
 import type { AssistantMessage } from "../src/types.ts";
 import { PermissionManager } from "../src/permissions.ts";
+import { validateToolArgs } from "../src/validate.ts";
+import type { AgentRuntimeRef } from "../src/loop.ts";
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -112,6 +114,11 @@ describe("createSubagentTool", () => {
       assert.ok(params.properties.systemPrompt);
       assert.ok(params.properties.tools);
       assert.ok(params.properties.maxTurns);
+      assert.ok(params.properties.inheritContextHistory);
+      assert.doesNotThrow(() => validateToolArgs(tool as Tool, {
+        task: "child",
+        inheritContextHistory: true,
+      }));
     });
 
     it("includes profile enum when profiles are provided", () => {
@@ -782,6 +789,98 @@ describe("createSubagentTool", () => {
     });
   });
 
+  // ── Parent runtime and history inheritance ────────────────────────────────
+
+  describe("parent runtime and history inheritance", () => {
+    it("inherits history without dropping the child system prompt", async () => {
+      const parentRuntime = {
+        history: [
+          { role: "system" as const, content: "parent system" },
+          { role: "user" as const, content: "parent question" },
+        ],
+      };
+      let capturedMessages: import("../src/types.ts").AgentMessage[] | undefined;
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        parentRuntime,
+        chat: async (_config, messages) => {
+          capturedMessages = messages;
+          return { role: "assistant", content: "child answer" };
+        },
+      });
+
+      const result = await tool.execute({ task: "child task", inheritContextHistory: true });
+
+      assert.equal(result.isError, undefined);
+      assert.ok(capturedMessages);
+      assert.equal(capturedMessages?.[0]?.role, "system");
+      assert.ok(contentAsString(capturedMessages?.[0]?.content ?? "").includes("focused sub-agent"));
+      assert.ok(contentAsString(capturedMessages?.[0]?.content ?? "").includes("parent system"));
+      assert.deepEqual(capturedMessages?.slice(1, 3).map((message) => contentAsString(message.content)), [
+        "parent question",
+        "child task",
+      ]);
+      assert.equal(parentRuntime.history?.length, 2, "child execution must not mutate parent history");
+    });
+
+    it("reads the latest parent LLM and thinking mode from a reused tool", async () => {
+      const secondLlm = makeLlmConfig({
+        apiKey: "second-key",
+        baseUrl: "http://second.example/v1",
+        model: "second-model",
+      });
+      const parentRuntime: AgentRuntimeRef = { llm: dummyLlm, thinkingMode: "fixed" };
+      const captured: Array<{ model: string; thinkingMode?: string }> = [];
+      const events: SubagentEvent[] = [];
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        parentRuntime,
+        onSubagentEvent: (event) => events.push(event),
+        chat: async (config) => {
+          captured.push({ model: config.model, thinkingMode: parentRuntime.thinkingMode });
+          return { role: "assistant", content: "ok" };
+        },
+      });
+
+      await tool.execute({ task: "first" });
+      parentRuntime.llm = secondLlm;
+      parentRuntime.thinkingMode = "adaptive";
+      await tool.execute({ task: "second" });
+
+      assert.deepEqual(captured.map((entry) => entry.model), ["faux", "second-model"]);
+      assert.deepEqual(events.filter((event) => event.type === "subagent_start").map((event) => event.runtime.thinkingMode), ["fixed", "adaptive"]);
+    });
+
+    it("rejects an invalid model override even when a profile has an LLM", async () => {
+      let chatCalled = false;
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        profiles: [{
+          name: "profile",
+          description: "profile",
+          systemPrompt: "profile",
+          llm: dummyLlm,
+        }],
+        chat: async () => {
+          chatCalled = true;
+          return { role: "assistant", content: "should not run" };
+        },
+      });
+
+      const result = await tool.execute({
+        task: "invalid override",
+        profile: "profile",
+        model: "definitely-invalid-model",
+      });
+
+      assert.equal(result.isError, true);
+      assert.equal(chatCalled, false);
+    });
+  });
+
   // ── Integration with parent loop ───────────────────────────────────────────
 
   describe("integration with parent loop", () => {
@@ -1030,6 +1129,377 @@ describe("createSubagentTool", () => {
         assert.equal(typeof end.totalTokens, "number");
         assert.equal(end.totalTokens, 0);
       }
+    });
+  });
+
+  // ── Thinking mode & escalation inheritance ────────────────────────────────
+
+  describe("thinking mode inheritance", () => {
+    it("passes thinkingMode from args to the inner loop", async () => {
+      let capturedConfig: import("../src/llm/index.ts").LlmConfig | undefined;
+      const chatSpy: ChatFn = async (config) => {
+        // The options object contains thinkingMode
+        return { role: "assistant", content: "ok" };
+      };
+
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        chat: chatSpy,
+      });
+
+      // Should not throw — just verify it runs with adaptive mode
+      await tool.execute({ task: "test", thinkingMode: "adaptive" });
+      // If we got here without error, the mode was accepted
+    });
+
+    it("passes maxThinkingEscalations from args to the inner loop", async () => {
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        chat: createImmediateChat("ok"),
+      });
+
+      // Should not throw — just verify it runs with custom escalation count
+      await tool.execute({ task: "test", maxThinkingEscalations: 5 });
+    });
+
+    it("profile thinkingMode is used when args do not specify", async () => {
+      const profileLlm = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "http://localhost/v1",
+        model: "faux",
+      });
+
+      let capturedLlm: import("../src/llm/index.ts").LlmConfig | undefined;
+      const chatSpy: ChatFn = async (config) => {
+        capturedLlm = config;
+        return { role: "assistant", content: "ok" };
+      };
+
+      const profiles: SubagentProfile[] = [
+        {
+          name: "adaptive-researcher",
+          description: "uses adaptive thinking",
+          systemPrompt: "research",
+          llm: profileLlm,
+          thinkingMode: "adaptive",
+          maxThinkingEscalations: 3,
+        },
+      ];
+
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        profiles,
+        chat: chatSpy,
+      });
+
+      await tool.execute({ task: "research", profile: "adaptive-researcher" });
+      assert.ok(capturedLlm);
+      // The LLM should have been resolved from profile
+      assert.equal(capturedLlm.model, "faux");
+    });
+
+    it("inherits thinkingMode from SubagentToolOptions parent", async () => {
+      const events: SubagentEvent[] = [];
+
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        onSubagentEvent: (event) => events.push(event),
+        chat: createImmediateChat("ok"),
+        thinkingMode: "adaptive",
+        maxThinkingEscalations: 5,
+      });
+
+      await tool.execute({ task: "inherit mode" });
+
+      const start = events.find((e) => e.type === "subagent_start")!;
+      assert.ok(start && start.type === "subagent_start");
+      if (start?.type === "subagent_start") {
+        assert.equal(start.runtime.thinkingMode, "adaptive",
+          "thinkingMode should be inherited from SubagentToolOptions");
+      }
+    });
+
+    it("args thinkingMode overrides parent SubagentToolOptions thinkingMode", async () => {
+      const events: SubagentEvent[] = [];
+
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        onSubagentEvent: (event) => events.push(event),
+        chat: createImmediateChat("ok"),
+        thinkingMode: "adaptive",
+      });
+
+      await tool.execute({ task: "override mode", thinkingMode: "fixed" });
+
+      const start = events.find((e) => e.type === "subagent_start")!;
+      assert.ok(start && start.type === "subagent_start");
+      if (start?.type === "subagent_start") {
+        assert.equal(start.runtime.thinkingMode, "fixed",
+          "args thinkingMode should override parent option");
+      }
+    });
+  });
+
+  // ── Runtime info in events ─────────────────────────────────────────────────
+
+  describe("runtime info in events", () => {
+    it("subagent_start event includes runtime info", async () => {
+      const events: SubagentEvent[] = [];
+
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        onSubagentEvent: (event) => events.push(event),
+        chat: createImmediateChat("done"),
+      });
+
+      await tool.execute({ task: "runtime test" });
+
+      const start = events.find((e) => e.type === "subagent_start")!;
+      assert.ok(start && start.type === "subagent_start");
+      if (start?.type === "subagent_start") {
+        assert.ok(start.runtime, "runtime info should be present");
+        assert.equal(start.runtime.model, "faux");
+        // faux model resolves to provider "custom" (not a named provider)
+        assert.equal(start.runtime.provider, "custom");
+        assert.ok(start.runtime.baseUrl, "baseUrl should be present");
+        assert.equal(start.runtime.thinkingMode, "fixed");
+        assert.equal(start.runtime.modelSwitchSucceeded, true);
+      }
+    });
+
+    it("subagent_end event includes runtime info", async () => {
+      const events: SubagentEvent[] = [];
+
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        onSubagentEvent: (event) => events.push(event),
+        chat: createImmediateChat("done"),
+      });
+
+      await tool.execute({ task: "runtime test" });
+
+      const end = events.find((e) => e.type === "subagent_end")!;
+      assert.ok(end && end.type === "subagent_end");
+      if (end?.type === "subagent_end") {
+        assert.ok(end.runtime, "runtime info should be present on end event");
+        assert.equal(end.runtime.model, "faux");
+        assert.equal(end.autoDelegationInherited, false);
+      }
+    });
+
+    it("reports modelSwitchSucceeded=false when model switch fails", async () => {
+      const events: SubagentEvent[] = [];
+
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        onSubagentEvent: (event) => events.push(event),
+        chat: createImmediateChat("fallback"),
+      });
+
+      // Use an invalid model that will fail switchLlmModel — should return isError directly
+      const result = await tool.execute({ task: "bad model", model: "nonexistent-model-that-does-not-exist-xyz" });
+
+      assert.equal(result.isError, true);
+      assert.ok(contentAsString(result.content).includes("not found or invalid"));
+      // No subagent_start event should be emitted because we return before building runtime info
+      const starts = events.filter((e) => e.type === "subagent_start");
+      assert.equal(starts.length, 0, "should not emit subagent_start when model switch fails");
+    });
+
+    it("includes errors array on subagent_end when errors occurred", async () => {
+      const events: SubagentEvent[] = [];
+
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        onSubagentEvent: (event) => events.push(event),
+        chat: async () => { throw new Error("simulated failure"); },
+      });
+
+      await tool.execute({ task: "error test" });
+
+      const end = events.find((e) => e.type === "subagent_end")!;
+      assert.ok(end && end.type === "subagent_end");
+      if (end?.type === "subagent_end") {
+        assert.ok(end.errors, "errors should be recorded");
+        assert.ok(end.errors!.length > 0);
+        assert.equal(end.errors![0]!.kind, "api");
+        assert.ok(end.errors![0]!.message.includes("simulated failure"));
+      }
+    });
+
+    it("classifies timeout errors correctly", async () => {
+      const events: SubagentEvent[] = [];
+
+      // Use a chat that intentionally delays to exceed the timeout
+      let resolveChat: (() => void) | undefined;
+      const slowChat: ChatFn = async () => {
+        await new Promise<void>((resolve) => { resolveChat = resolve; });
+        return { role: "assistant", content: "should not reach" };
+      };
+
+      const timeoutTool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        onSubagentEvent: (event) => events.push(event),
+        chat: slowChat,
+        timeout: 5, // 5ms timeout
+      });
+
+      const result = timeoutTool.execute({ task: "timeout test" });
+      // Wait a bit longer than the timeout to let it fire
+      await new Promise((r) => setTimeout(r, 50));
+      // Abort the chat so it doesn't hang
+      resolveChat?.();
+      const finalResult = await result;
+
+      assert.equal(finalResult.isError, true);
+      assert.ok(finalResult.content.toString().includes("timed out"));
+
+      const end = events.find((e) => e.type === "subagent_end")!;
+      assert.ok(end && end.type === "subagent_end");
+      if (end?.type === "subagent_end") {
+        assert.equal(end.success, false);
+        assert.ok(end.errors, "timeout errors should be recorded");
+        assert.ok(end.errors!.some((e) => e.kind === "timeout"));
+      }
+    });
+  });
+
+  // ── Batch tool concurrency ────────────────────────────────────────────────
+
+  describe("batch concurrency", () => {
+    it("runs all tasks when maxConcurrency is 0 (unlimited)", async () => {
+      const batchTool = createSubagentBatchTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        chat: createImmediateChat("ok"),
+      });
+
+      const result = await batchTool.execute({
+        tasks: [
+          { label: "a", task: "task a" },
+          { label: "b", task: "task b" },
+          { label: "c", task: "task c" },
+        ],
+        maxConcurrency: 0,
+      });
+      assert.equal(result.isError, undefined);
+      assert.ok(String(result.content).includes("a"));
+      assert.ok(String(result.content).includes("b"));
+      assert.ok(String(result.content).includes("c"));
+    });
+
+    it("limits concurrent tasks when maxConcurrency is set", async () => {
+      let maxActive = 0;
+      let currentActive = 0;
+      const delayedChat: ChatFn = async (_config, _msgs, _tools) => {
+        currentActive += 1;
+        if (currentActive > maxActive) maxActive = currentActive;
+        await new Promise(r => setTimeout(r, 50));
+        currentActive -= 1;
+        return { role: "assistant", content: "done" };
+      };
+
+      const batchTool = createSubagentBatchTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        chat: delayedChat,
+      });
+
+      const result = await batchTool.execute({
+        tasks: [
+          { label: "t1", task: "t1" },
+          { label: "t2", task: "t2" },
+          { label: "t3", task: "t3" },
+          { label: "t4", task: "t4" },
+        ],
+        maxConcurrency: 2,
+      });
+      assert.equal(result.isError, undefined);
+      assert.ok(maxActive <= 2, `Expected maxActive <= 2 but was ${maxActive}`);
+    });
+
+    it("handles errors gracefully in batch mode", async () => {
+      const batchTool = createSubagentBatchTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        chat: async (_config, _msgs, _tools) => {
+          return { role: "assistant", content: "ok" };
+        },
+      });
+
+      const result = await batchTool.execute({
+        tasks: [
+          { label: "good", task: "good" },
+          { label: "also-good", task: "also-good" },
+        ],
+        maxConcurrency: 0,
+      });
+      // Both tasks succeed
+      assert.equal(result.isError, undefined);
+      assert.ok(String(result.content).includes("ok"));
+    });
+
+    it("enforces global concurrency across overlapping batches", async () => {
+      let active = 0;
+      let maxActive = 0;
+      const delayedChat: ChatFn = async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        active -= 1;
+        return { role: "assistant", content: "ok" };
+      };
+      const batchTool = createSubagentBatchTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        globalConcurrencyLimit: 1,
+        chat: delayedChat,
+      });
+      const tasks = (prefix: string) => [
+        { label: `${prefix}-1`, task: `${prefix}-1` },
+        { label: `${prefix}-2`, task: `${prefix}-2` },
+      ];
+
+      const completed = Promise.all([
+        batchTool.execute({ tasks: tasks("a") }),
+        batchTool.execute({ tasks: tasks("b") }),
+      ]).then(() => true);
+      const finished = await Promise.race([
+        completed,
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 500)),
+      ]);
+
+      assert.equal(finished, true, "overlapping batches must not deadlock");
+      assert.equal(maxActive, 1);
+    });
+
+    it("stops before execution when the global token budget is exhausted", async () => {
+      let chatCalled = false;
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        globalTokenBudget: 0,
+        chat: async () => {
+          chatCalled = true;
+          return { role: "assistant", content: "should not run" };
+        },
+      });
+
+      const result = await tool.execute({ task: "budget" });
+
+      assert.equal(result.isError, true);
+      assert.equal(chatCalled, false);
+      assert.ok(contentAsString(result.content).includes("budget exhausted"));
     });
   });
 

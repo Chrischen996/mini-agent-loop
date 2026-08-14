@@ -535,7 +535,7 @@ export function MessageFeed({
               <Box marginBottom={0} gap={1} flexDirection="column">
                 <Box gap={1}>
                   <Text color={C.user} bold>{">"}</Text>
-                  <Text color={C.assistant}>{msg.text}</Text>
+                  <Text color={C.assistant}>{msg.displayText ?? msg.text}</Text>
                 </Box>
                 {msg.images?.length ? (
                   <Box marginLeft={2} gap={1}>

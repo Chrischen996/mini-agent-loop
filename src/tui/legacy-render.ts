@@ -55,7 +55,14 @@ export function buildLegacyFrameLines(state: LegacyTuiState): string[] {
     if (message.role === "tool") lines.push(`${ANSI.dim}[${message.name}] ${short(contentAsString(message.content))}${ANSI.reset}`);
   }
 
-  if (state.pendingUser) lines.push(`${ANSI.green}> ${ANSI.reset}${state.pendingUser}`);
+  if (state.pendingUser) {
+    const normalized = state.pendingUser.replace(/\r\n/g, '\n');
+    const lineCount = normalized.split('\n').length;
+    const isMultiLine = lineCount > 1;
+    const charCount = [...normalized].length;
+    const display = isMultiLine ? `${lineCount} 行 / ${charCount} 字` : normalized;
+    lines.push(`${ANSI.green}> ${ANSI.reset}${display}`);
+  }
   if (state.streamingText) lines.push(`${ANSI.cyan}assistant:${ANSI.reset} ${state.streamingText}`);
 
   for (const tool of state.tools.slice(-4)) {

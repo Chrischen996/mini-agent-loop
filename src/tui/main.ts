@@ -15,6 +15,7 @@ import {
   createAgentHistory,
   MaxTurnsExceededError,
   runAgentTurn,
+  type AgentRuntimeRef,
   type LoopEvent,
 } from "../loop.ts";
 import {
@@ -26,6 +27,8 @@ import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
 import { PERMISSION_MODES, PermissionManager, type PermissionMode } from "../permissions.ts";
 import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
+import { createSubagentTool, createSubagentBatchTool, defaultProfiles } from "../subagent/index.ts";
+import type { SubagentEvent } from "../subagent/types.ts";
 import {
   buildLegacyCursorOutput,
   buildLegacyFrameLines,
@@ -123,6 +126,8 @@ async function main(): Promise<void> {
     thinkingLevel: activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off"),
   };
   const permissionManager = new PermissionManager(state.permissionMode);
+  let cursorCol = 0;   // column offset within current line of multi-line input
+  let cursorRow = 0;   // which line (0-indexed) the cursor is on
   // Set up audit logging
   permissionManager.onPermissionEvent = (event) => {
     if (event.type === "request") {
@@ -136,12 +141,51 @@ async function main(): Promise<void> {
     throw error;
   });
   let tools;
+  const parentRuntime: AgentRuntimeRef = {};
   try {
-    tools = mcpRuntime.toolProvider(createTools(cwd, {
+    const baseTools = mcpRuntime.toolProvider(createTools(cwd, {
       codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
       codebaseStore: codebaseRuntime.store,
       codebaseProvider: codebaseRuntime.semanticProvider,
     }));
+    // Build subagent tool with current thinking mode
+    const subagentTool = createSubagentTool({
+      parentLlm: activeLlm,
+      parentTools: baseTools,
+      profiles: defaultProfiles,
+      preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+      onSubagentEvent: (event: SubagentEvent) => {
+        if (event.type === "subagent_start") {
+          state.status = `子 agent 启动: ${event.task.slice(0, 60)}...`;
+          render(state);
+        } else if (event.type === "subagent_end") {
+          state.status = event.success ? "子 agent 完成" : "子 agent 失败";
+          render(state);
+        }
+      },
+      parentRuntime,
+    });
+    const subagentBatchTool = createSubagentBatchTool({
+      parentLlm: activeLlm,
+      parentTools: baseTools,
+      profiles: defaultProfiles,
+      preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+      onSubagentEvent: (event: SubagentEvent) => {
+        if (event.type === "subagent_start") {
+          state.status = `子 agent 启动: ${event.task.slice(0, 60)}...`;
+          render(state);
+        } else if (event.type === "subagent_end") {
+          state.status = event.success ? "子 agent 完成" : "子 agent 失败";
+          render(state);
+        }
+      },
+      parentRuntime,
+    });
+    tools = () => [
+      ...baseTools(),
+      subagentTool as import("../tools/types.ts").Tool,
+      subagentBatchTool as import("../tools/types.ts").Tool,
+    ];
     tools();
   } catch (error) {
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
@@ -192,6 +236,8 @@ async function main(): Promise<void> {
     }
 
     state.input = "";
+    cursorCol = 0;
+    cursorRow = 0;
     state.pendingUser = text;
     state.streamingText = "";
     state.busy = true;
@@ -230,6 +276,7 @@ async function main(): Promise<void> {
         validationWorkspace: cwd,
         autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
         thinkingMode,
+        runtimeRef: parentRuntime,
         onEvent: (event) => {
           handleEvent(state, event);
           if (event.type === "thinking_policy") {
@@ -283,15 +330,47 @@ async function main(): Promise<void> {
       inputChunk = inputChunk.replaceAll("\u001b[Z", "");
       render(state);
     }
+    // Strip recognized escape sequences BEFORE the per-char loop so they're not
+    // emitted as individual printable characters.
+    const ARROW_SEQUENCES = ["\u001b[1;2A", "\u001b[1;2B", "\u001b[A", "\u001b[B", "\u001b[D", "\u001b[C"] as const;
+    for (const seq of ARROW_SEQUENCES) {
+      if (inputChunk.includes(seq)) inputChunk = inputChunk.replaceAll(seq, "");
+    }
+    // Emit arrow keys as individual tokens after stripping sequences above,
+    // so that the per-char loop below can handle them explicitly.
     for (const char of inputChunk) {
       if (char === "\u0003") return quit();
-      if (char === "\u001b") {
-        if (state.pendingPermissionRequestId && state.pendingPermissionSessionId) {
-          permissionManager.resolve(state.pendingPermissionSessionId, state.pendingPermissionRequestId, "deny");
-          state.pendingPermissionRequestId = undefined;
-          state.pendingPermissionSessionId = undefined;
-          state.status = "权限已取消";
-          render(state);
+      if (char === "\u001b") continue;
+      // Arrow keys (sent as individual up/down/left/right chars when terminfo is active)
+      if (char === "\u0001" || char === "\u0005" || char === "\u0002" || char === "\u0006") {
+        if (!state.busy && state.pendingUser === undefined) {
+          if (char === "\u0001") {
+            // Ctrl+A — move to start of input
+            cursorCol = 0; cursorRow = 0;
+            render(state);
+          } else if (char === "\u0005") {
+            // Ctrl+E — move to end of input
+            const lines = state.input.split("\n");
+            cursorRow = lines.length - 1;
+            cursorCol = lines[cursorRow].length;
+            render(state);
+          } else if (char === "\u0002") {
+            // Ctrl+B — move left
+            if (cursorCol > 0) { cursorCol--; } else if (cursorRow > 0) {
+              cursorRow--;
+              cursorCol = state.input.split("\n")[cursorRow].length;
+            }
+            render(state);
+          } else if (char === "\u0006") {
+            // Ctrl+F — move right
+            const lines = state.input.split("\n");
+            if (cursorCol < lines[cursorRow].length) { cursorCol++; }
+            else if (cursorRow < lines.length - 1) {
+              cursorRow++;
+              cursorCol = 0;
+            }
+            render(state);
+          }
         }
         continue;
       }
@@ -309,8 +388,22 @@ async function main(): Promise<void> {
         continue;
       }
       if (char === "\u007f") {
-        state.input = state.input.slice(0, -1);
-        render(state);
+        if (!state.busy && state.pendingUser === undefined && state.input.length > 0) {
+          // Delete character before cursor (handles multi-line)
+          const lines = state.input.split("\n");
+          if (cursorCol > 0) {
+            lines[cursorRow] = lines[cursorRow].slice(0, cursorCol - 1) + lines[cursorRow].slice(cursorCol);
+            cursorCol--;
+          } else if (cursorRow > 0) {
+            const prevLine = lines[cursorRow - 1];
+            lines[cursorRow - 1] = prevLine + lines[cursorRow];
+            lines.splice(cursorRow, 1);
+            cursorRow--;
+            cursorCol = prevLine.length;
+          }
+          state.input = lines.join("\n");
+          render(state);
+        }
         continue;
       }
       if (char >= " " && char !== "\u007f") {
@@ -328,8 +421,14 @@ async function main(): Promise<void> {
           render(state);
           return;
         }
-        state.input += char;
-        render(state);
+        if (!state.busy && state.pendingUser === undefined) {
+          const lines = state.input.split("\n");
+          lines[cursorRow] = lines[cursorRow].slice(0, cursorCol) + char + lines[cursorRow].slice(cursorCol);
+          cursorCol++;
+          state.input = lines.join("\n");
+          render(state);
+        }
+        continue;
       }
     }
   });

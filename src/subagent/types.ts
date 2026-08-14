@@ -7,12 +7,14 @@
  * context.
  */
 
-import type { LoopEvent } from "../loop.ts";
+import type { AgentRuntimeRef, LoopEvent } from "../loop.ts";
 import type { ChatFn, LlmConfig } from "../llm/index.ts";
 import type { ToolProvider } from "../tools/types.ts";
 import type { MessagePreprocessor } from "../preprocessors/index.ts";
 import type { PermissionMode, PermissionTurnContext } from "../permissions.ts";
 import type { Tool } from "../tools/types.ts";
+import type { ThinkingMode } from "../thinking-policy.ts";
+import type { AgentMessage } from "../types.ts";
 
 // ─── Subagent configuration ─────────────────────────────────────────────────
 
@@ -49,6 +51,16 @@ export type SubagentProfile = {
    * When omitted, inherits the parent's current LLM config.
    */
   llm?: LlmConfig;
+  /**
+   * Thinking mode for the subagent loop. Defaults to "fixed".
+   * "adaptive" enables explainable effort escalation after tool failures.
+   */
+  thinkingMode?: ThinkingMode;
+  /**
+   * Maximum adaptive effort increases after tool or validation failures.
+   * Default: 2. Only used when thinkingMode is "adaptive".
+   */
+  maxThinkingEscalations?: number;
 };
 
 // ─── Runtime options passed when creating the subagent tool ──────────────────
@@ -56,6 +68,43 @@ export type SubagentProfile = {
 export type SubagentToolOptions = {
   /** LLM config the subagent inherits when no profile overrides it. */
   parentLlm: LlmConfig;
+  /**
+   * Timeout in milliseconds for subagent execution.
+   * Profile-level timeout takes precedence when both are set.
+   */
+  timeout?: number;
+  /**
+   * Parent's thinking mode, inherited by child subagents that don't
+   * explicitly override it via args or profile.
+   */
+  thinkingMode?: ThinkingMode;
+  /**
+   * Parent's max adaptive escalation count, inherited by child subagents
+   * that don't explicitly override it via args or profile.
+   */
+  maxThinkingEscalations?: number;
+  /**
+   * Optional callback to retrieve the parent's current message history.
+   * Used when the subagent args request `inheritContextHistory: true`.
+   */
+  getParentHistory?: () => import("../types.ts").AgentMessage[] | undefined;
+  /**
+   * Global token budget shared across all subagents (parent + children).
+   * When set, each subagent checks against the budget before running.
+   */
+  globalTokenBudget?: number;
+  /** Internal shared state used by nested subagents and batch siblings. */
+  globalBudgetState?: { used: number; limit: number };
+  /**
+   * Callback to deduct tokens from the global budget and check limits.
+   * Called with accumulated tokens after each assistant event.
+   */
+  checkGlobalBudget?: (tokens: number) => void;
+  /**
+   * Maximum concurrent subagents across all batches (global limit).
+   * 0 or undefined means no global limit.
+   */
+  globalConcurrencyLimit?: number;
   /** Full tool set available to the parent; subagent picks a subset. */
   parentTools: ToolProvider;
   /** Pre-defined subagent profiles. */
@@ -81,6 +130,8 @@ export type SubagentToolOptions = {
   permissionTurn?: PermissionTurnContext;
   /** Resolve the current parent turn while the tool is reused across turns. */
   getPermissionTurn?: () => PermissionTurnContext | undefined;
+  /** Mutable parent runtime updated by the shared agent loop. */
+  parentRuntime?: AgentRuntimeRef;
   /** @deprecated Use permissionTurn/getPermissionTurn. */
   getPermissionMode?: () => PermissionMode;
   /** @deprecated Use permissionTurn/getPermissionTurn. */
@@ -113,6 +164,36 @@ export type SubagentArgs = {
    * Prepended to the subagent's system prompt as background knowledge.
    */
   sharedContext?: string;
+  /**
+   * Thinking mode for the subagent loop. Overrides profile default.
+   * "adaptive" enables explainable effort escalation after failures.
+   */
+  thinkingMode?: ThinkingMode;
+  /**
+   * Maximum adaptive effort increases after tool or validation failures.
+   * Only meaningful when thinkingMode is "adaptive".
+   */
+  maxThinkingEscalations?: number;
+  /**
+   * Optional context compaction policy inherited from the parent.
+   * Controls how messages are compressed for long-running sessions.
+   */
+  contextPolicy?: import("../context.ts").ContextManagerOptions;
+  /**
+   * Skill names to activate for this subagent loop.
+   * Skills contribute system prompt fragments, tools, and preprocessors.
+   */
+  skillNames?: string[];
+  /**
+   * Whether to inherit the parent's message history (for session continuity).
+   * Default: false — subagent starts with a fresh context.
+   */
+  inheritContextHistory?: boolean;
+  /**
+   * Optional parent message history to pass to the subagent when
+   * `inheritContextHistory` is true. Used internally by the subagent tool.
+   */
+  _parentHistory?: AgentMessage[];
 };
 
 // ─── Parallel subagent batch arguments ───────────────────────────────────────
@@ -133,6 +214,16 @@ export type SubagentBatchTask = {
   maxTurns?: number;
   /** Shared context for this task. */
   sharedContext?: string;
+  /** Thinking mode override. */
+  thinkingMode?: ThinkingMode;
+  /** Max adaptive escalation override. */
+  maxThinkingEscalations?: number;
+  /** Context compaction policy override. */
+  contextPolicy?: import("../context.ts").ContextManagerOptions;
+  /** Skill names override. */
+  skillNames?: string[];
+  /** Whether to inherit the parent's current message history. */
+  inheritContextHistory?: boolean;
 };
 
 /**
@@ -141,9 +232,35 @@ export type SubagentBatchTask = {
 export type SubagentBatchArgs = {
   /** Array of tasks to run in parallel. */
   tasks: SubagentBatchTask[];
+  /**
+   * Maximum concurrent subagents. When undefined or 0, all tasks run
+   * concurrently (original behavior). When set, batches are processed
+   * with the specified concurrency limit.
+   */
+  maxConcurrency?: number;
 };
 
 // ─── Subagent-specific events ────────────────────────────────────────────────
+
+/**
+ * Metadata about the resolved LLM config for observability.
+ */
+export type SubagentRuntimeInfo = {
+  /** The model identifier actually used (may differ from requested on fallback). */
+  model: string;
+  /** Provider name (e.g. "openai", "anthropic", "faux"). */
+  provider: string;
+  /** Base URL for API requests. */
+  baseUrl: string;
+  /** The thinking mode in effect ("fixed" | "adaptive"). */
+  thinkingMode: ThinkingMode;
+  /** The thinking level applied to the model (e.g. "off", "low", "medium", ...). */
+  thinkingLevel?: import("../pi-ai/types.ts").ModelThinkingLevel;
+  /** Whether the requested model was resolved successfully. */
+  modelSwitchSucceeded: boolean;
+  /** The originally requested model (empty if none was requested). */
+  requestedModel?: string;
+};
 
 export type SubagentEvent =
   | {
@@ -153,6 +270,8 @@ export type SubagentEvent =
       task: string;
       profile?: string;
       depth: number;
+      /** Runtime info about the resolved LLM configuration. */
+      runtime: SubagentRuntimeInfo;
     }
   | {
       type: "subagent_event";
@@ -173,4 +292,10 @@ export type SubagentEvent =
       turns: number;
       /** Cumulative token usage across all turns (0 when unavailable). */
       totalTokens: number;
+      /** Runtime info recorded at subagent start (for observability). */
+      runtime: SubagentRuntimeInfo;
+      /** Any errors encountered during execution. */
+      errors?: Array<{ message: string; kind: "timeout" | "api" | "compaction" | "max_turns" | "abort" }>;
+      /** Whether auto-delegation was inherited from the parent (false = deliberate isolation). */
+      autoDelegationInherited: boolean;
     };

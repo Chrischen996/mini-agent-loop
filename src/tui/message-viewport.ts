@@ -58,7 +58,7 @@ export function estimateMessageHeight(
   const { width, thinkingMode, expandedThinking, index } = options;
   switch (message.kind) {
     case "user":
-      return Math.max(1, countTerminalRows(message.text, Math.max(10, width - 4))) + (message.images?.length ? 1 : 0);
+      return Math.max(1, countTerminalRows(message.displayText ?? message.text, Math.max(10, width - 4))) + (message.images?.length ? 1 : 0);
     case "assistant":
       return Math.max(
         1,
