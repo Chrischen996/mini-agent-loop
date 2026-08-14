@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { makeLlmConfig, streamChat } from "../src/llm/index.ts";
+import { makeLlmConfig, streamChat, OutputTruncatedError } from "../src/llm/index.ts";
 import type { AgentMessage } from "../src/types.ts";
 
 function sseResponse(chunks: string[]): Response {
@@ -40,12 +40,12 @@ describe("streamChat", () => {
         events.push(event);
       }
       assert.deepEqual(
-        events.filter((event) => event.type === "text_delta").map((event) => event.type === "text_delta" ? event.text : ""),
+        events.filter((event) => event.type === "answer_delta" || event.type === "reasoning_delta").map((event) => event.type === "answer_delta" || event.type === "reasoning_delta" ? event.text : ""),
         ["你", "好"],
       );
       const final = events.at(-1);
-      assert.equal(final?.type, "assistant");
-      if (final?.type === "assistant") {
+      assert.equal(final?.type, "completed");
+      if (final?.type === "completed") {
         assert.equal(final.message.content, "你好");
         assert.equal(final.message.toolCalls, undefined);
       }
@@ -102,8 +102,8 @@ describe("streamChat", () => {
         events.push(event);
       }
       const final = events.at(-1);
-      assert.equal(final?.type, "assistant");
-      if (final?.type === "assistant") {
+      assert.equal(final?.type, "completed");
+      if (final?.type === "completed") {
         assert.equal(final.message.content, "");
         assert.equal(final.message.toolCalls?.length, 1);
         assert.equal(final.message.toolCalls?.[0]?.name, "read");
@@ -133,8 +133,8 @@ describe("streamChat", () => {
         events.push(event);
       }
       const final = events.at(-1);
-      assert.equal(final?.type, "assistant");
-      if (final?.type === "assistant") assert.equal(final.message.content, "ok");
+      assert.equal(final?.type, "completed");
+      if (final?.type === "completed") assert.equal(final.message.content, "ok");
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -158,8 +158,8 @@ describe("streamChat", () => {
         events.push(event);
       }
       const final = events.at(-1);
-      assert.equal(final?.type, "assistant");
-      if (final?.type === "assistant") assert.equal(final.message.content, "terminal");
+      assert.equal(final?.type, "completed");
+      if (final?.type === "completed") assert.equal(final.message.content, "terminal");
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -205,14 +205,14 @@ describe("streamChat", () => {
         baseUrl: "http://localhost/v1",
         model: "gpt-4o-mini",
       });
-      await assert.rejects(
-        async () => {
-          for await (const _event of streamChat(config, [{ role: "user", content: "hi" }])) {
-            // Consume the stream to exercise finish_reason handling.
-          }
-        },
-        /reached max_tokens/,
-      );
+      const events = [];
+      for await (const event of streamChat(config, [{ role: "user", content: "hi" }])) {
+        events.push(event);
+      }
+      // Should yield an error event for max_tokens truncation
+      const errorEvent = events.find(e => e.type === "error");
+      assert.ok(errorEvent);
+      assert.ok(errorEvent?.error instanceof OutputTruncatedError);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -235,12 +235,12 @@ describe("streamChat", () => {
       const events = [];
       for await (const event of streamChat(config, [{ role: "user", content: "hi" }])) events.push(event);
       assert.deepEqual(
-        events.filter((event) => event.type === "text_delta").map((event) => event.text),
+        events.filter((event) => event.type === "answer_delta" || event.type === "reasoning_delta").map((event) => event.text),
         ["plan ", "answer"],
       );
       const final = events.at(-1);
-      assert.equal(final?.type, "assistant");
-      if (final?.type === "assistant") assert.equal(final.message.content, "answer");
+      assert.equal(final?.type, "completed");
+      if (final?.type === "completed") assert.equal(final.message.content, "answer");
     } finally {
       globalThis.fetch = originalFetch;
     }

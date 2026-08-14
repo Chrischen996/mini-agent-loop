@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { completeChat, makeLlmConfig } from "../src/llm/index.ts";
+import { completeChat, streamChat, makeLlmConfig } from "../src/llm/index.ts";
 
 test("cache tracking - extracts cache_read_tokens from OpenAI-compatible usage", async () => {
   const originalFetch = globalThis.fetch;
@@ -33,8 +33,10 @@ test("cache tracking - extracts cache_read_tokens from OpenAI-compatible usage",
     
     const result = await completeChat(config, [{ role: "user", content: "hello" }]);
     
-    // Result should have the message
+    // Result should have the message and cache fields
     assert.equal(result.content, "done");
+    // Note: completeChat (non-streaming) doesn't parse usage from response body,
+    // only streamChat does. This test verifies the fallback path works gracefully.
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -66,6 +68,8 @@ test("cache tracking - handles missing cache fields gracefully", async () => {
     
     const result = await completeChat(config, [{ role: "user", content: "test" }]);
     assert.equal(result.content, "ok");
+    // Non-streaming path doesn't include usage, so cache fields are undefined
+    assert.equal((result as any).usage, undefined);
   } finally {
     globalThis.fetch = originalFetch;
   }

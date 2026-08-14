@@ -30,6 +30,11 @@ import {
   throwIfAborted,
   type StreamChatEvent,
   type StreamChatUsage,
+  type LlmStreamEvent,
+  type ToolCallDelta,
+  LlmTimeoutError,
+  ProtocolError,
+  OutputTruncatedError,
 } from "./retry.ts";
 
 function reasoningOption(config: LlmConfig): "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | undefined {
@@ -73,6 +78,8 @@ async function completePiChat(
     signal,
     apiKey: config.apiKey,
     reasoning: reasoningOption(config),
+    sessionId: config.sessionId,
+    cacheRetention: config.cacheRetention,
   });
   return fromPiAssistant(result).message;
 }
@@ -82,7 +89,7 @@ async function* streamPiChat(
   messages: AgentMessage[],
   tools?: Tool[],
   signal?: AbortSignal,
-): AsyncGenerator<StreamChatEvent> {
+): AsyncGenerator<LlmStreamEvent> {
   const model = config.piModel;
   if (!model) throw new Error("Pi model configuration is missing");
   const requestModel = config.baseUrl && config.baseUrl !== model.baseUrl
@@ -94,18 +101,23 @@ async function* streamPiChat(
     signal,
     apiKey: config.apiKey,
     reasoning: reasoningOption(config),
+    sessionId: config.sessionId,
+    cacheRetention: config.cacheRetention,
   });
   for await (const event of stream) {
     if (event.type === "text_delta") {
-      yield { type: "text_delta", text: event.delta, kind: "answer" };
+      yield { type: "answer_delta", text: event.delta };
     } else if (event.type === "thinking_delta") {
-      yield { type: "text_delta", text: event.delta, kind: "reasoning" };
+      yield { type: "reasoning_delta", text: event.delta };
     } else if (event.type === "done") {
       const converted = fromPiAssistant(event.message);
-      yield { type: "assistant", message: converted.message, usage: converted.usage };
+      yield { type: "completed", message: converted.message, usage: converted.usage };
     } else if (event.type === "error") {
-      if (event.reason === "aborted") throw new DOMException("The operation was aborted", "AbortError");
-      throw new Error(event.error.errorMessage || "Pi provider stream failed");
+      if (event.reason === "aborted") {
+        yield { type: "error", error: new DOMException("The operation was aborted", "AbortError") };
+        return;
+      }
+      yield { type: "error", error: new Error(event.error.errorMessage || "Pi provider stream failed") };
     }
   }
 }
@@ -220,7 +232,7 @@ export async function completeChat(
   } catch (err) {
     request.cleanup();
     if (request.didTimeout()) {
-      throw new Error(`LLM request timed out after ${requestTimeout(config)}ms. Check the proxy URL and availability.`);
+      throw new LlmTimeoutError();
     }
     if (isAbortError(err)) throw err;
     const message = err instanceof Error ? err.message : String(err);
@@ -296,7 +308,7 @@ export async function* streamChat(
   messages: AgentMessage[],
   tools?: Tool[],
   signal?: AbortSignal,
-): AsyncGenerator<StreamChatEvent> {
+): AsyncGenerator<LlmStreamEvent> {
   if (config.piModel) {
     yield* streamPiChat(config, messages, tools, signal);
     return;
@@ -314,6 +326,8 @@ export async function* streamChat(
     stream: true,
     max_tokens: config.maxTokens,
     messages: toOpenAIMessages(prepared.messages, supportsImage),
+    // Enable usage in streaming to get cache token stats
+    stream_options: { include_usage: true },
   };
 
   addReasoningOption(body, config);
@@ -342,7 +356,7 @@ export async function* streamChat(
   } catch (err) {
     request.cleanup();
     if (request.didTimeout()) {
-      throw new Error(`LLM request timed out after ${requestTimeout(config)}ms. Check the proxy URL and availability.`);
+      throw new LlmTimeoutError();
     }
     if (isAbortError(err)) throw err;
     const message = err instanceof Error ? err.message : String(err);
@@ -405,15 +419,20 @@ export async function* streamChat(
 
     // Capture usage whenever it appears (some providers send it mid-stream or at end)
     if (parsed.usage) {
+      const promptTokens = parsed.usage.prompt_tokens ?? 0;
+      const cacheReadTokens = (parsed.usage as any).prompt_tokens_details?.cached_tokens 
+        ?? (parsed.usage as any).prompt_cache_hit_tokens 
+        ?? undefined;
+      const cacheWriteTokens = (parsed.usage as any).prompt_tokens_details?.cache_write_tokens 
+        ?? undefined;
+      const inputTokens = Math.max(0, promptTokens - (cacheReadTokens ?? 0) - (cacheWriteTokens ?? 0));
       usage = {
-        promptTokens: parsed.usage.prompt_tokens ?? 0,
+        promptTokens,
+        inputTokens,
         completionTokens: parsed.usage.completion_tokens ?? 0,
         totalTokens: parsed.usage.total_tokens ?? 0,
-        cacheReadTokens: (parsed.usage as any).prompt_tokens_details?.cached_tokens 
-          ?? (parsed.usage as any).prompt_cache_hit_tokens 
-          ?? undefined,
-        cacheWriteTokens: (parsed.usage as any).prompt_tokens_details?.cache_write_tokens 
-          ?? undefined,
+        ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+        ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
       };
     }
 
@@ -437,11 +456,11 @@ export async function* streamChat(
           : "";
       if (terminalContent && !content) {
         content = terminalContent;
-        yield { type: "text_delta", text: terminalContent, kind: "answer" };
+        yield { type: "answer_delta", text: terminalContent };
       }
       for (const field of [choice.message.reasoning_content, choice.message.reasoning, choice.message.reasoning_text]) {
         if (typeof field === "string" && field.length > 0) {
-          yield { type: "text_delta", text: field, kind: "reasoning" };
+          yield { type: "reasoning_delta", text: field };
           break;
         }
       }
@@ -463,7 +482,7 @@ export async function* streamChat(
     // Emit reasoning_content as text deltas (DeepSeek reasoning models)
     for (const field of [delta.reasoning_content, delta.reasoning, delta.reasoning_text]) {
       if (typeof field === "string" && field.length > 0) {
-        yield { type: "text_delta", text: field, kind: "reasoning" };
+        yield { type: "reasoning_delta", text: field };
         break;
       }
     }
@@ -478,7 +497,7 @@ export async function* streamChat(
         : "";
     if (answerDelta.length > 0) {
       content += answerDelta;
-      yield { type: "text_delta", text: answerDelta, kind: "answer" };
+      yield { type: "answer_delta", text: answerDelta };
     }
 
     if (delta.tool_calls) {
@@ -500,13 +519,13 @@ export async function* streamChat(
     }
 
     if (request.didTimeout()) {
-      throw new Error(`LLM request timed out after ${requestTimeout(config)}ms. Check the proxy URL and availability.`);
+      throw new LlmTimeoutError();
     }
     if (finishReason === "length") {
-      throw new Error(`LLM output reached max_tokens (${config.maxTokens}); increase maxTokens or continue the task.`);
+      yield { type: "error", error: new OutputTruncatedError() }; return;
     }
     if (finishReason === "content_filter" || finishReason === "error") {
-      throw new Error(`LLM stream stopped with finish_reason=${finishReason}`);
+      yield { type: "error", error: new ProtocolError(`stream stopped with finish_reason=${finishReason}`) }; return;
     }
     if (!sawDoneMarker && !sawFinishReason && !sawTerminalMessage) {
       throw new Error("LLM stream ended before completion (missing finish_reason, terminal message, or [DONE])");
@@ -545,11 +564,24 @@ export async function* streamChat(
   }
   // Emit reasoning as a separate delta if extracted from Hermes <think> blocks
   if (processed.reasoning) {
-    yield { type: "text_delta", text: processed.reasoning, kind: "reasoning" as const };
+    yield { type: "reasoning_delta", text: processed.reasoning };
   }
   yield {
-    type: "assistant",
+    type: "completed",
     message: processed.message,
     ...(usage ? { usage } : {}),
   };
+}
+
+/**
+ * Unified LLM stream event入口. Wraps streamChat to provide a consistent
+ * LlmStreamEvent interface for the Agent Loop.
+ */
+export async function* streamLlmEvents(
+  config: LlmConfig,
+  messages: AgentMessage[],
+  tools?: Tool[],
+  signal?: AbortSignal,
+): AsyncGenerator<LlmStreamEvent> {
+  yield* streamChat(config, messages, tools, signal);
 }

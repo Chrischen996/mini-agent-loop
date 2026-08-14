@@ -16,10 +16,12 @@ import {
   isAbortError,
   isContextOverflowError,
   streamChat,
+  streamLlmEvents,
   type ChatFn,
   type LlmConfig,
   type StreamChatUsage,
   type RetryableErrorType,
+  LlmTimeoutError,
 } from "./llm/index.ts";
 import { resolveModel } from "./models.ts";
 import {
@@ -986,16 +988,26 @@ async function runAgentTurnInternal(
         let streamed = "";
         let sawReasoning = false;
         try {
-          for await (const event of streamChat(currentLlm, messages, turnTools, activeSignal)) {
-            if (event.type === "text_delta") {
-              if (event.kind === "answer") streamed += event.text;
-              else sawReasoning = true;
-              onEvent?.({ type: "assistant_delta", text: event.text, kind: event.kind });
+          for await (const event of streamLlmEvents(currentLlm, messages, turnTools, activeSignal)) {
+            if (event.type === "answer_delta") {
+              streamed += event.text;
+              onEvent?.({ type: "assistant_delta", text: event.text, kind: "answer" });
               continue;
             }
-            assistant = event.message;
-            lastUsage = event.usage;
-            sawFinal = true;
+            if (event.type === "reasoning_delta") {
+              sawReasoning = true;
+              onEvent?.({ type: "assistant_delta", text: event.text, kind: "reasoning" });
+              continue;
+            }
+            if (event.type === "completed") {
+              assistant = event.message;
+              lastUsage = event.usage;
+              sawFinal = true;
+              continue;
+            }
+            if (event.type === "error") {
+              throw event.error;
+            }
           }
         } catch (err) {
           if (isAbortError(err)) {
@@ -1006,6 +1018,15 @@ async function runAgentTurnInternal(
             }
             emitAborted(onEvent, messages, permissionTurn);
             return messages;
+          }
+          // Handle timeout with partial content - mark as incomplete but don't discard
+          if (err instanceof LlmTimeoutError && streamed) {
+            assistant = { role: "assistant", content: streamed };
+            messages.push(assistant);
+            onEvent?.({ type: "assistant", message: assistant });
+            // Don't throw - let the loop handle partial response
+            // The assistant has partial content which is better than nothing
+            break;
           }
           throw err;
         }

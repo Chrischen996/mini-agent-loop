@@ -86,8 +86,18 @@ const PROVIDER_ENV_KEYS: Record<string, string[]> = {
 
 const piRuntime = builtinModels();
 
+/**
+ * Whether a model can be used with a custom baseUrl while retaining its native
+ * Pi adapter. Models with custom request schemas (like chat templates) need
+ * the Pi adapter; standard OpenAI-compatible models fall back to raw path.
+ */
 function supportsNativeCustomBaseUrl(model: ModelRef): boolean {
-  return model.api === "anthropic-messages";
+  // Anthropic always needs its native adapter
+  if (model.api === "anthropic-messages") return true;
+  // Models with chat templates or other custom request params need Pi adapter
+  if (model.compat?.chatTemplateKwargs) return true;
+  // Standard OpenAI-compatible models can use raw path with any baseUrl
+  return false;
 }
 
 function toModelRef(model: PiModel<Api>): ModelRef {

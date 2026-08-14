@@ -261,6 +261,15 @@ export function fromPiAssistant(message: PiAssistantMessage): {
   const toolCalls = message.content
     .filter((part) => part.type === "toolCall")
     .map((part) => ({ id: part.id, name: part.name, arguments: part.arguments }));
+  
+  // Map pi-ai usage to unified StreamChatUsage
+  // pi-ai: input (uncached), cacheRead, cacheWrite, output
+  // StreamChatUsage: promptTokens (total), inputTokens (uncached), completionTokens, cacheReadTokens, cacheWriteTokens
+  const input = message.usage.input || 0;
+  const cacheRead = message.usage.cacheRead || 0;
+  const cacheWrite = message.usage.cacheWrite || 0;
+  const promptTokens = input + cacheRead + cacheWrite;
+  
   return {
     message: {
       role: "assistant",
@@ -268,9 +277,12 @@ export function fromPiAssistant(message: PiAssistantMessage): {
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
     },
     usage: {
-      promptTokens: message.usage.input,
-      completionTokens: message.usage.output,
+      promptTokens,
+      inputTokens: input,
+      completionTokens: message.usage.output || 0,
       totalTokens: message.usage.totalTokens,
+      ...(cacheRead > 0 ? { cacheReadTokens: cacheRead } : {}),
+      ...(cacheWrite > 0 ? { cacheWriteTokens: cacheWrite } : {}),
     },
   };
 }

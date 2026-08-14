@@ -7,6 +7,8 @@ import type { AssistantMessage } from "../types.ts";
 
 export type StreamChatUsage = {
   promptTokens: number;
+  /** Tokens that were not served from cache (uncached input). */
+  inputTokens: number;
   completionTokens: number;
   totalTokens: number;
   /** Tokens served from prompt cache (cache hit). */
@@ -67,6 +69,16 @@ export class ProtocolError extends Error {
   readonly msg: string;
 }
 
+/** Thrown when the LLM request times out. May contain partial content. */
+export class LlmTimeoutError extends Error {
+  readonly partialContent?: string;
+  constructor(partialContent?: string) {
+    super(`LLM request timed out after ${typeof process !== 'undefined' ? 'request timeout' : 'timeout'}`);
+    this.name = "LlmTimeoutError";
+    this.partialContent = partialContent;
+  }
+}
+
 // ─── Context overflow ────────────────────────────────────────────────────────
 
 export function isContextOverflowError(error: unknown): boolean {
@@ -95,6 +107,9 @@ export type RetryStrategy = {
  * Returns null for non-retryable errors (auth, validation, etc).
  */
 export function classifyError(error: unknown): RetryableErrorType | null {
+  // Typed timeout errors take priority
+  if (error instanceof LlmTimeoutError) return "timeout";
+  
   const message = error instanceof Error ? error.message : String(error);
 
   // Rate limit (429 or explicit rate limit messages)

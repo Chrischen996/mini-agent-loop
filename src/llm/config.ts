@@ -26,6 +26,7 @@ import {
   normalizeThinkingLevelForModel,
 } from "../think-intensity.ts";
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
+import type { CacheRetention } from "../pi-ai/types.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -61,6 +62,18 @@ export type LlmConfig = {
    * - Relay / gateway with a different auth scheme than the upstream provider
    */
   getApiKey?: () => string | Promise<string>;
+  /**
+   * Optional session identifier for providers that support session-based caching.
+   * Used to enable prompt caching across multiple requests in the same conversation.
+   */
+  sessionId?: string;
+  /**
+   * Prompt cache retention preference. Controls how long cached prompts are retained.
+   * - `"none"` — disable caching
+   * - `"short"` — standard cache (default)
+   * - `"long"` — long-term cache where supported
+   */
+  cacheRetention?: CacheRetention;
 };
 
 export type ChatFn = (
@@ -198,6 +211,8 @@ export function loadLlmConfigFromEnv(): LlmConfig {
       ),
       imagePolicy,
       toolCallFormat: resolved.toolCallFormat ?? "openai",
+      sessionId: process.env.MINI_AGENT_SESSION_ID,
+      cacheRetention: process.env.MINI_AGENT_CACHE_RETENTION as CacheRetention | undefined,
     };
     const relayRegistry = loadRelayRegistryFromEnv();
     return applyRelayIfMatched({
@@ -265,6 +280,8 @@ export function loadLlmConfigFromEnv(): LlmConfig {
     ),
     imagePolicy,
     toolCallFormat: resolved.toolCallFormat ?? "openai",
+    sessionId: process.env.MINI_AGENT_SESSION_ID,
+    cacheRetention: process.env.MINI_AGENT_CACHE_RETENTION as CacheRetention | undefined,
   };
 
   // Apply relay from MINI_AGENT_RELAY env var (overrides baseUrl + adds getApiKey)
@@ -286,6 +303,8 @@ export function makeLlmConfig(
     reasoning?: boolean;
     thinkingLevel?: ModelThinkingLevel;
     imagePolicy?: ImagePolicy;
+    sessionId?: string;
+    cacheRetention?: CacheRetention;
   },
 ): LlmConfig {
   const resolved = resolveModel(partial.model, partial.baseUrl);
@@ -311,6 +330,8 @@ export function makeLlmConfig(
     ),
     imagePolicy: partial.imagePolicy ?? "placeholder",
     toolCallFormat: resolved.toolCallFormat ?? "openai",
+    sessionId: partial.sessionId,
+    cacheRetention: partial.cacheRetention,
   };
   return {
     ...base,
@@ -368,6 +389,9 @@ export function switchLlmModel(
         : getDefaultThinkingLevel(),
     ),
     toolCallFormat: resolved.toolCallFormat ?? "openai",
+    // Inherit sessionId and cacheRetention from current config or env
+    sessionId: config.sessionId ?? process.env.MINI_AGENT_SESSION_ID,
+    cacheRetention: config.cacheRetention ?? (process.env.MINI_AGENT_CACHE_RETENTION as CacheRetention | undefined),
   };
 
   // Apply relay for the new model if a registry is provided

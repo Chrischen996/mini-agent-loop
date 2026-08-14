@@ -39,6 +39,7 @@ export {
   IncompleteLlmResponseError,
   OutputTruncatedError,
   ProtocolError,
+  LlmTimeoutError,
 } from "./retry.ts";
 
 // ── vision ───────────────────────────────────────────────────────────────────
@@ -48,4 +49,4 @@ export { prepareMessagesForModel } from "./vision.ts";
 export { toOpenAIMessages } from "./wire.ts";
 
 // ── chat ─────────────────────────────────────────────────────────────────────
-export { completeChat, streamChat } from "./chat.ts";
+export { completeChat, streamChat, streamLlmEvents } from "./chat.ts";

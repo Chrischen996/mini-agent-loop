@@ -1,4 +1,5 @@
 import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from "react";
+import { randomUUID } from "node:crypto";
 import { Box, Text, useApp, useInput, useStdout, type Key } from "ink";
 import { readdir, stat } from "node:fs/promises";
 import * as nodePath from "node:path";
@@ -258,6 +259,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   }, [llm, vision]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
+  // Generate a stable conversation session ID on startup
+  const [conversationId, setConversationId] = useState(() => process.env.MINI_AGENT_SESSION_ID ?? randomUUID());
   const pendingImagesRef = useRef<ImageAttachment[]>([]);
   pendingImagesRef.current = state.pendingImages;
   const promptQueueRef = useRef<string[]>([]);
@@ -886,6 +889,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       pendingImagesRef.current = [];
       dispatch({ type: "RESET" });
       setInput("");
+      // Generate new conversation ID for fresh session
+      setConversationId(randomUUID());
       return;
     }
 
@@ -1038,7 +1043,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       while (true) {
         try {
           historyRef.current = await runAgentTurn(historyRef.current, currentUserText, {
-            llm: turnLlm,
+            llm: { ...turnLlm, sessionId: conversationId },
             tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools(turnLlm)],
             autoSubagent,
             preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
@@ -1290,6 +1295,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           permissionMode={state.permissionMode}
           thinkingLevel={llm.thinkingLevel ?? (llm.reasoning ? "medium" : "off")}
           cacheReadTokens={state.cacheReadTokens}
+          promptTokens={state.contextTokens}
         />
       </Box>
     </Box>
