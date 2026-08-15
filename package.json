@@ -2,6 +2,7 @@
   "name": "@krischen99999/mini-agent-loop",
   "version": "0.1.0",
   "type": "module",
+  "license": "MIT",
   "description": "Educational rebuild of a Pi-style agent loop (Phases 1–3)",
   "bin": {
     "mini-agent-loop": "dist/cli.js"
