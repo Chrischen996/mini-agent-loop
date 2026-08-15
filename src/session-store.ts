@@ -5,6 +5,7 @@ import type { AgentMessage } from "./types.ts";
 import type { PermissionMode } from "./permissions.ts";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
 import type { ThinkingMode } from "./thinking-policy.ts";
+import type { SessionPhase, ExecutionPlan } from "./plan-act/types.ts";
 
 type SessionCreatedEvent = {
   type: "session_created";
@@ -14,6 +15,8 @@ type SessionCreatedEvent = {
   thinkingLevel?: ModelThinkingLevel;
   thinkingMode?: ThinkingMode;
   permissionMode?: PermissionMode;
+  phase?: SessionPhase;
+  currentPlan?: ExecutionPlan;
   parentSessionId?: string;
   forkedFromMessage?: number;
 };
@@ -26,6 +29,8 @@ type SessionSnapshotEvent = {
   thinkingLevel?: ModelThinkingLevel;
   thinkingMode?: ThinkingMode;
   permissionMode?: PermissionMode;
+  phase?: SessionPhase;
+  currentPlan?: ExecutionPlan;
   messages: AgentMessage[];
   parentSessionId?: string;
   forkedFromMessage?: number;
@@ -40,6 +45,10 @@ export type PersistedSession = {
   thinkingLevel?: ModelThinkingLevel;
   thinkingMode?: ThinkingMode;
   permissionMode?: PermissionMode;
+  /** Current phase of the Plan-Act workflow. */
+  phase?: SessionPhase;
+  /** Currently active execution plan. */
+  currentPlan?: ExecutionPlan;
   messages: AgentMessage[];
   parentSessionId?: string;
   forkedFromMessage?: number;
@@ -115,6 +124,8 @@ export class SessionStore {
               thinkingLevel: parsed.thinkingLevel,
               thinkingMode: parsed.thinkingMode,
               permissionMode: parsed.permissionMode,
+              phase: parsed.phase,
+              currentPlan: parsed.currentPlan,
               messages: [],
               parentSessionId: parsed.parentSessionId,
               forkedFromMessage: parsed.forkedFromMessage,
@@ -127,6 +138,8 @@ export class SessionStore {
               thinkingLevel: parsed.thinkingLevel ?? current?.thinkingLevel,
               thinkingMode: parsed.thinkingMode ?? current?.thinkingMode,
               permissionMode: parsed.permissionMode ?? current?.permissionMode,
+              phase: parsed.phase ?? current?.phase,
+              currentPlan: parsed.currentPlan ?? current?.currentPlan,
               messages: parsed.messages,
               parentSessionId: parsed.parentSessionId ?? current?.parentSessionId,
               forkedFromMessage: parsed.forkedFromMessage ?? current?.forkedFromMessage,
@@ -184,6 +197,8 @@ export class SessionStore {
       thinkingLevel: session.thinkingLevel,
       thinkingMode: session.thinkingMode,
       permissionMode: session.permissionMode,
+      phase: session.phase,
+      currentPlan: session.currentPlan,
       parentSessionId: session.parentSessionId,
       forkedFromMessage: session.forkedFromMessage,
     });
@@ -199,6 +214,8 @@ export class SessionStore {
       thinkingLevel: session.thinkingLevel,
       thinkingMode: session.thinkingMode,
       permissionMode: session.permissionMode,
+      phase: session.phase,
+      currentPlan: session.currentPlan,
       messages: session.messages,
       parentSessionId: session.parentSessionId,
       forkedFromMessage: session.forkedFromMessage,

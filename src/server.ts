@@ -60,6 +60,7 @@ import type { ModelThinkingLevel } from "./pi-ai/types.ts";
 import { PermissionManager, isPermissionMode, type PermissionDecision, type PermissionMode } from "./permissions.ts";
 import { GitWorkflow } from "./git/workflow.ts";
 import { formatValidationReport, runValidation, type ValidationStepName } from "./validation.ts";
+import type { SessionPhase, ExecutionPlan } from "./plan-act/types.ts";
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 5;
@@ -84,6 +85,14 @@ type Session = {
   permissionManager: PermissionManager;
   parentSessionId?: string;
   forkedFromMessage?: number;
+  
+  // ─── Plan-Act Workflow ──────────────────────────────────────────
+  /** Current phase of the Plan-Act workflow. */
+  phase: SessionPhase;
+  /** Currently active execution plan. */
+  currentPlan?: ExecutionPlan;
+  /** History of all plans for this session. */
+  planHistory: ExecutionPlan[];
 };
 
 export type AgentServerOptions = {
@@ -543,6 +552,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
     thinkingLevel: session.thinkingLevel,
     thinkingMode: session.thinkingMode,
     permissionMode: session.permissionManager.getMode(),
+    phase: session.phase,
+    currentPlan: session.currentPlan,
     messages: session.messages,
     parentSessionId: session.parentSessionId,
     forkedFromMessage: session.forkedFromMessage,
@@ -561,6 +572,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
         thinkingMode: persisted.thinkingMode,
         parentSessionId: persisted.parentSessionId,
         forkedFromMessage: persisted.forkedFromMessage,
+        phase: (persisted.phase ?? "planning") as SessionPhase,
+        currentPlan: persisted.currentPlan,
+        planHistory: [],
       };
       // Restore the model choice first, then apply the persisted effort level
       // even when the session stayed on the server default model.
@@ -855,6 +869,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
       busy: false,
       thinkingMode: options.thinkingMode ?? loadThinkingModeFromEnv(),
       permissionManager: new PermissionManager(defaultPermissionMode),
+      phase: "planning",
+      currentPlan: undefined,
+      planHistory: [],
     };
     sessions.set(id, session);
     await sessionStore.create(persistedSession(session));
@@ -896,6 +913,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
       permissionManager: new PermissionManager(parent.permissionManager.getMode()),
       parentSessionId: parent.id,
       forkedFromMessage: safeMessageIndex,
+      phase: "planning",
+      currentPlan: undefined,
+      planHistory: [],
     };
     sessions.set(id, child);
     await sessionStore.create(persistedSession(child));
