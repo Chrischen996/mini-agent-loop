@@ -48,13 +48,111 @@ describe("model selection", () => {
       MISTRAL_API_KEY: "test",
       GROQ_API_KEY: "test",
       OPENROUTER_API_KEY: "test",
+      TOKENROUTER_API_KEY: "test",
     };
     assert.deepEqual(
       [...new Set(getAvailableModels(env).map((model) => model.provider))],
-      ["agnes-ai", "deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai"],
+      ["agnes-ai", "deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai", "tokenrouter"],
     );
-    assert.equal(getAllModels().length, 1075);
+    assert.equal(getAllModels().length, 1078);
     assert.ok(getAllModels().every((model) => model.contextWindow > 0 && model.maxTokens > 0));
+  });
+
+  it("registers both regional Kimi K3 models with their documented metadata", () => {
+    const models = getAllModels().filter(
+      (model) => model.id === "kimi-k3" && (model.provider === "moonshotai" || model.provider === "moonshotai-cn"),
+    );
+    const qualifiedReferences = models.map((model) => `${model.provider}/${model.id}`).sort();
+    assert.deepEqual(qualifiedReferences, ["moonshotai-cn/kimi-k3", "moonshotai/kimi-k3"]);
+
+    const byProvider = new Map(models.map((model) => [model.provider, model]));
+    assert.equal(byProvider.get("moonshotai")?.baseUrl, "https://api.moonshot.ai/v1");
+    assert.equal(byProvider.get("moonshotai-cn")?.baseUrl, "https://api.moonshot.cn/v1");
+
+    for (const model of models) {
+      assert.equal(model.name, "Kimi K3");
+      assert.equal(model.contextWindow, 1048576);
+      assert.equal(model.maxTokens, 131072);
+      assert.equal(model.reasoning, true);
+      assert.deepEqual(model.capabilities.input, ["text", "image"]);
+      assert.equal(model.capabilities.tools, true);
+      assert.deepEqual(model.cost, {
+        input: 3,
+        output: 15,
+        cacheRead: 0.3,
+        cacheWrite: 0,
+      });
+      assert.deepEqual(model.compat, {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: true,
+        maxTokensField: "max_completion_tokens",
+        supportsStrictMode: false,
+        thinkingFormat: "openai",
+      });
+      assert.deepEqual(model.thinkingLevelMap, {
+        off: null,
+        minimal: "low",
+        low: "low",
+        medium: "high",
+        high: "high",
+        xhigh: "max",
+        max: "max",
+      });
+    }
+
+    const searchReferences = searchModels("k3").map((model) => `${model.provider}/${model.id}`);
+    for (const reference of qualifiedReferences) {
+      assert.ok(searchReferences.includes(reference), `Expected search results to include ${reference}`);
+    }
+    for (const reference of qualifiedReferences) {
+      const resolved = resolveModel(reference);
+      assert.equal(`${resolved.provider}/${resolved.id}`, reference);
+    }
+  });
+
+  it("registers TokenRouter's fixed Kimi K3 Free route with compatible metadata", () => {
+    const models = getAllModels().filter(
+      (model) => model.provider === "tokenrouter" && model.id === "kimi-k3-free",
+    );
+    assert.equal(models.length, 1);
+    const model = models[0];
+    assert.ok(model);
+    assert.equal(model.provider, "tokenrouter");
+    assert.equal(model.baseUrl, "https://api.tokenrouter.io/v1");
+    assert.deepEqual(model.apiKeyEnv, ["TOKENROUTER_API_KEY"]);
+    assert.deepEqual(model.capabilities.input, ["text"]);
+    assert.equal(model.capabilities.tools, true);
+    assert.equal(model.reasoning, false);
+    assert.equal(model.contextWindow, 128000);
+    assert.equal(model.maxTokens, 16384);
+    assert.deepEqual(model.cost, {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+    assert.deepEqual(model.compat, {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      maxTokensField: "max_tokens",
+      supportsStrictMode: false,
+      thinkingFormat: "openai",
+    });
+
+    const available = getAvailableModels({ TOKENROUTER_API_KEY: "test" });
+    assert.ok(available.some((item) => item.provider === "tokenrouter" && item.id === "kimi-k3-free"));
+
+    const qualifiedReference = "tokenrouter/kimi-k3-free";
+    assert.ok(searchModels("kimi-k3-free").some(
+      (item) => `${item.provider}/${item.id}` === qualifiedReference,
+    ));
+
+    const resolved = resolveModel(qualifiedReference);
+    assert.equal(resolved.provider, "tokenrouter");
+    assert.equal(resolved.id, "kimi-k3-free");
+    assert.equal(resolved.baseUrl, "https://api.tokenrouter.io/v1");
   });
 
   it("registers Agnes AI with its documented OpenAI-compatible capabilities", () => {

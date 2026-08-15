@@ -2,6 +2,8 @@
 import { builtinModels } from "./pi-ai/providers/all.ts";
 import type { Api, Model as PiModel } from "./pi-ai/types.ts";
 import type { ToolCallFormat } from "./hermes/types.ts";
+import { KIMI_K3_MODELS } from "./kimi-k3-models.ts";
+import { TOKENROUTER_MODELS, tokenrouterProvider } from "./tokenrouter-models.ts";
 
 export type ModelCapabilities = {
   input: Array<"text" | "image">;
@@ -72,6 +74,7 @@ const PROVIDER_ENV_KEYS: Record<string, string[]> = {
   opencode: ["OPENCODE_API_KEY"],
   "opencode-go": ["OPENCODE_API_KEY"],
   openrouter: ["OPENROUTER_API_KEY"],
+  tokenrouter: ["TOKENROUTER_API_KEY"],
   together: ["TOGETHER_API_KEY"],
   "vercel-ai-gateway": ["AI_GATEWAY_API_KEY"],
   xai: ["XAI_API_KEY"],
@@ -86,18 +89,8 @@ const PROVIDER_ENV_KEYS: Record<string, string[]> = {
 
 const piRuntime = builtinModels();
 
-/**
- * Whether a model can be used with a custom baseUrl while retaining its native
- * Pi adapter. Models with custom request schemas (like chat templates) need
- * the Pi adapter; standard OpenAI-compatible models fall back to raw path.
- */
 function supportsNativeCustomBaseUrl(model: ModelRef): boolean {
-  // Anthropic always needs its native adapter
-  if (model.api === "anthropic-messages") return true;
-  // Models with chat templates or other custom request params need Pi adapter
-  if (model.compat?.chatTemplateKwargs) return true;
-  // Standard OpenAI-compatible models can use raw path with any baseUrl
-  return false;
+  return model.api === "anthropic-messages";
 }
 
 function toModelRef(model: PiModel<Api>): ModelRef {
@@ -123,7 +116,26 @@ function toModelRef(model: PiModel<Api>): ModelRef {
   };
 }
 
-const BUILT_IN_MODELS = piRuntime.getModels().map(toModelRef);
+function mergeBuiltInModels(
+  upstreamModels: readonly PiModel<Api>[],
+  fallbackModels: readonly PiModel<Api>[],
+): PiModel<Api>[] {
+  const models = new Map<string, PiModel<Api>>();
+  for (const model of [...upstreamModels, ...fallbackModels]) {
+    const key = `${model.provider}/${model.id}`.toLowerCase();
+    if (!models.has(key)) models.set(key, model);
+  }
+  return [...models.values()];
+}
+
+const BUILT_IN_MODELS = mergeBuiltInModels(
+  piRuntime.getModels(),
+  [...KIMI_K3_MODELS, ...TOKENROUTER_MODELS],
+).map(toModelRef);
+
+// The project-owned fallback is outside pi-ai's generated provider catalog,
+// so register its OpenAI-compatible transport in the runtime as well.
+piRuntime.setProvider(tokenrouterProvider());
 
 export const MODEL_REGISTRY: Record<string, ModelRef> = {};
 for (const model of BUILT_IN_MODELS) {

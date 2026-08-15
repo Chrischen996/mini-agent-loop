@@ -129,18 +129,156 @@ async function exportMacClipboardPng(outputPath: string): Promise<void> {
   });
 }
 
+export type WindowsClipboardCommand = {
+  command: "powershell.exe";
+  args: string[];
+};
+
+export function buildWindowsClipboardCommand(outputPath: string): WindowsClipboardCommand {
+  const psScript = [
+    "& {",
+    "param([string]$OutputPath)",
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "$clip = [System.Windows.Forms.Clipboard]::GetImage()",
+    "if ($clip -eq $null) { exit 1 }",
+    "try { $clip.Save($OutputPath, [System.Drawing.Imaging.ImageFormat]::Png) } finally { $clip.Dispose() }",
+    "}",
+  ].join("\n");
+
+  return {
+    command: "powershell.exe",
+    args: [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-STA",
+      "-Command",
+      psScript,
+      outputPath,
+    ],
+  };
+}
+
+async function exportWindowsClipboardPng(outputPath: string): Promise<void> {
+  const { command, args } = buildWindowsClipboardCommand(outputPath);
+
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const child = spawn(command, args, {
+      stdio: ["ignore", "ignore", "pipe"],
+      windowsHide: true,
+    });
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) rejectPromise(error);
+      else resolvePromise();
+    };
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish(new Error("clipboard read timed out"));
+    }, 5_000);
+
+    child.stderr?.resume();
+    child.once("error", (error) => finish(error));
+    child.once("close", (code) => {
+      if (code === 0) finish();
+      else finish(new Error("clipboard does not contain an image"));
+    });
+  });
+}
+
+async function exportLinuxClipboardPng(outputPath: string): Promise<void> {
+  const errors: string[] = [];
+
+  // Try wl-paste first (Wayland)
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn("wl-paste", ["--type", "image/png", "-o", outputPath], {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      child.once("error", reject);
+      child.once("close", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`wl-paste failed with code ${code}`));
+      });
+    });
+    return;
+  } catch (err) {
+    errors.push(`wl-paste: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Try xclip (X11)
+  try {
+    const tmpFile = outputPath + ".tmp";
+    const xclipChild = spawn("xclip", ["-selection", "clipboard", "-t", "image/png", "-o"]);
+    await new Promise<void>((resolve, reject) => {
+      const writeStream = require("node:fs").createWriteStream(tmpFile);
+      xclipChild.stdout?.pipe(writeStream);
+      xclipChild.once("error", reject);
+      writeStream.once("finish", resolve);
+      writeStream.once("error", reject);
+      xclipChild.once("close", (code) => {
+        if (code !== 0) reject(new Error(`xclip failed with code ${code}`));
+      });
+    });
+    await renameFile(tmpFile, outputPath);
+    return;
+  } catch (err) {
+    errors.push(`xclip: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Try xsel (X11 fallback)
+  try {
+    const tmpFile = outputPath + ".tmp";
+    const xselChild = spawn("xsel", ["--clipboard", "--output", "--target", "image/png"]);
+    await new Promise<void>((resolve, reject) => {
+      const writeStream = require("node:fs").createWriteStream(tmpFile);
+      xselChild.stdout?.pipe(writeStream);
+      xselChild.once("error", reject);
+      writeStream.once("finish", resolve);
+      writeStream.once("error", reject);
+      xselChild.once("close", (code) => {
+        if (code !== 0) reject(new Error(`xsel failed with code ${code}`));
+      });
+    });
+    await renameFile(tmpFile, outputPath);
+    return;
+  } catch (err) {
+    errors.push(`xsel: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  throw new Error(`No clipboard tool available. Tried: ${errors.join(", ")}`);
+}
+
+async function renameFile(src: string, dest: string): Promise<void> {
+  const { renameSync } = await import("node:fs");
+  renameSync(src, dest);
+}
+
 export async function readClipboardImage(
   options: ClipboardImageOptions = {},
 ): Promise<ImageAttachment> {
   const platform = options.platform ?? process.platform;
-  if (platform !== "darwin") {
-    throw new Error("clipboard image paste is currently supported on macOS; use /image <path>");
-  }
-
   const tempDirectory = await mkdtemp(join(options.tempRoot ?? tmpdir(), "mini-agent-clipboard-"));
   const outputPath = join(tempDirectory, "clipboard.png");
+
   try {
-    await (options.runClipboardExport ?? exportMacClipboardPng)(outputPath);
+    switch (platform) {
+      case "darwin":
+        await (options.runClipboardExport ?? exportMacClipboardPng)(outputPath);
+        break;
+      case "win32":
+        await (options.runClipboardExport ?? exportWindowsClipboardPng)(outputPath);
+        break;
+      case "linux":
+        await (options.runClipboardExport ?? exportLinuxClipboardPng)(outputPath);
+        break;
+      default:
+        throw new Error(`clipboard image paste is not supported on ${platform}; use /image <path>`);
+    }
+
     const buffer = await readFile(outputPath);
     const mimeType = validateImageBuffer(buffer, "clipboard image");
     const timestamp = (options.now ?? Date.now)();

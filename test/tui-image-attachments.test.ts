@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import React, { useState } from "react";
 import { render } from "ink";
 import {
+  buildWindowsClipboardCommand,
   imageAttachmentToPart,
   loadImageAttachment,
   readClipboardImage,
@@ -135,10 +136,45 @@ describe("TUI image attachments", () => {
     }
   });
 
+  it("launches the Windows clipboard reader in an STA PowerShell process", () => {
+    const outputPath = "C:\\Temp\\mini-agent\\clipboard.png";
+    const command = buildWindowsClipboardCommand(outputPath);
+
+    assert.equal(command.command, "powershell.exe");
+    assert.ok(command.args.includes("-STA"));
+    assert.equal(command.args.at(-1), outputPath);
+    const script = command.args[command.args.indexOf("-Command") + 1];
+    assert.match(script ?? "", /System\.Windows\.Forms\.Clipboard.*GetImage/);
+    assert.match(script ?? "", /ImageFormat\]::Png/);
+  });
+
+  it("reads a Windows clipboard image through the shared attachment path", async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), "mini-agent-clipboard-win-test-"));
+    let exportedPath = "";
+    try {
+      const attachment = await readClipboardImage({
+        platform: "win32",
+        tempRoot,
+        now: () => 456,
+        runClipboardExport: async (outputPath) => {
+          exportedPath = outputPath;
+          await writeFile(outputPath, ONE_PIXEL_PNG);
+        },
+      });
+
+      assert.equal(attachment.path, "clipboard-456.png");
+      assert.equal(attachment.mimeType, "image/png");
+      assert.equal(attachment.data, ONE_PIXEL_PNG.toString("base64"));
+      await assert.rejects(access(exportedPath), { code: "ENOENT" });
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("reports unsupported platforms instead of silently ignoring paste", async () => {
     await assert.rejects(
-      readClipboardImage({ platform: "linux" }),
-      /supported on macOS/,
+      readClipboardImage({ platform: "aix" }),
+      /supported on aix/,
     );
   });
 });
