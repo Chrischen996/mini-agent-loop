@@ -64,8 +64,8 @@
 - ✅ 计划执行器完成
 - ✅ Session 扩展完成
 - ✅ 持久化支持完成
-- ⏳ API 端点（Phase 3）
-- ⏳ Loop 集成（Phase 4）
+- ✅ **API 端点完成** (Phase 3)
+- ✅ **Loop 集成完成** (Phase 4)
 - ⏳ TUI 更新（Phase 5）
 
 ---

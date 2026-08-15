@@ -61,6 +61,9 @@ import { PermissionManager, isPermissionMode, type PermissionDecision, type Perm
 import { GitWorkflow } from "./git/workflow.ts";
 import { formatValidationReport, runValidation, type ValidationStepName } from "./validation.ts";
 import type { SessionPhase, ExecutionPlan } from "./plan-act/types.ts";
+import { planManager } from "./plan-act/plan-manager.ts";
+import { planGenerator } from "./plan-act/plan-generator.ts";
+import { validatePhaseTransition, createInitialPhase } from "./plan-act/state-machine.ts";
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 5;
@@ -1022,6 +1025,205 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     response.json({ resolved: true, decision });
+  });
+
+  // ─── Plan-Act Workflow API ──────────────────────────────────────────────────
+
+  /** GET /api/sessions/:id/phase - Get current phase */
+  app.get("/api/sessions/:id/phase", (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    response.json({ phase: session.phase });
+  });
+
+  /** PUT /api/sessions/:id/phase - Transition phase */
+  app.put("/api/sessions/:id/phase", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const targetPhase = request.body?.phase as SessionPhase | undefined;
+    if (!targetPhase) {
+      response.status(400).json({ error: "phase is required" });
+      return;
+    }
+    const result = validatePhaseTransition(session.phase, targetPhase, request.body);
+    if (!result.allowed) {
+      response.status(400).json({ error: result.reason });
+      return;
+    }
+    const previousPhase = session.phase;
+    session.phase = targetPhase;
+    await saveSession(session);
+    response.json({ from: previousPhase, to: targetPhase, reason: result.reason });
+  });
+
+  /** POST /api/sessions/:id/plans - Generate new plan */
+  app.post("/api/sessions/:id/plans", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    if (session.busy) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
+    const output = request.body?.output as string | undefined;
+    const summary = request.body?.summary as string | undefined;
+    if (!output) {
+      response.status(400).json({ error: "output is required" });
+      return;
+    }
+    const plan = planGenerator.generateAndStore(output, session.id, summary);
+    if (!plan) {
+      response.status(400).json({ error: "Failed to parse plan from output" });
+      return;
+    }
+    session.currentPlan = plan;
+    session.planHistory.push(plan);
+    session.phase = "review";
+    await saveSession(session);
+    response.status(201).json(plan);
+  });
+
+  /** GET /api/sessions/:id/plans - List plans for session */
+  app.get("/api/sessions/:id/plans", (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const plans = planManager.getSessionPlans(session.id);
+    response.json(plans);
+  });
+
+  /** GET /api/sessions/:id/plans/:planId - Get plan details */
+  app.get("/api/sessions/:id/plans/:planId", (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const plan = planManager.getPlan(request.params.planId);
+    if (!plan) {
+      response.status(404).json({ error: "Plan not found" });
+      return;
+    }
+    if (plan.sessionId !== session.id) {
+      response.status(403).json({ error: "Plan does not belong to this session" });
+      return;
+    }
+    response.json(plan);
+  });
+
+  /** POST /api/sessions/:id/plans/:planId/approve - Approve plan */
+  app.post("/api/sessions/:id/plans/:planId/approve", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const plan = planManager.getPlan(request.params.planId);
+    if (!plan) {
+      response.status(404).json({ error: "Plan not found" });
+      return;
+    }
+    if (plan.sessionId !== session.id) {
+      response.status(403).json({ error: "Plan does not belong to this session" });
+      return;
+    }
+    const approved = planManager.approvePlan(plan.id, request.body);
+    if (!approved) {
+      response.status(400).json({ error: "Failed to approve plan" });
+      return;
+    }
+    session.currentPlan = approved;
+    session.phase = "acting";
+    await saveSession(session);
+    response.json(approved);
+  });
+
+  /** POST /api/sessions/:id/plans/:planId/reject - Reject plan */
+  app.post("/api/sessions/:id/plans/:planId/reject", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const plan = planManager.getPlan(request.params.planId);
+    if (!plan) {
+      response.status(404).json({ error: "Plan not found" });
+      return;
+    }
+    if (plan.sessionId !== session.id) {
+      response.status(403).json({ error: "Plan does not belong to this session" });
+      return;
+    }
+    const reason = request.body?.reason as string | undefined;
+    const rejected = planManager.rejectPlan(plan.id, reason);
+    if (!rejected) {
+      response.status(400).json({ error: "Failed to reject plan" });
+      return;
+    }
+    session.currentPlan = undefined;
+    session.phase = "cancelled";
+    await saveSession(session);
+    response.json(rejected);
+  });
+
+  /** POST /api/sessions/:id/plans/:planId/modify - Request modifications */
+  app.post("/api/sessions/:id/plans/:planId/modify", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const plan = planManager.getPlan(request.params.planId);
+    if (!plan) {
+      response.status(404).json({ error: "Plan not found" });
+      return;
+    }
+    if (plan.sessionId !== session.id) {
+      response.status(403).json({ error: "Plan does not belong to this session" });
+      return;
+    }
+    const modified = planManager.updatePlanStatus(plan.id, "modified");
+    if (!modified) {
+      response.status(400).json({ error: "Failed to modify plan" });
+      return;
+    }
+    session.currentPlan = modified;
+    session.phase = "planning";
+    await saveSession(session);
+    response.json(modified);
+  });
+
+  /** DELETE /api/sessions/:id/plans/:planId - Delete plan */
+  app.delete("/api/sessions/:id/plans/:planId", (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const plan = planManager.getPlan(request.params.planId);
+    if (!plan) {
+      response.status(404).json({ error: "Plan not found" });
+      return;
+    }
+    if (plan.sessionId !== session.id) {
+      response.status(403).json({ error: "Plan does not belong to this session" });
+      return;
+    }
+    planManager.deletePlan(plan.id);
+    if (session.currentPlan?.id === plan.id) {
+      session.currentPlan = undefined;
+    }
+    response.status(204).end();
   });
 
   app.get("/api/sessions/:id", (request, response) => {

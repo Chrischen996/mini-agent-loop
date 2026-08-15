@@ -55,6 +55,10 @@ import type { Skill, SkillRegistry } from "./skills/types.ts";
 import { defaultSkillRegistry } from "./skills/registry.ts";
 import { formatValidationReport, runValidation } from "./validation.ts";
 import { GitWorkflow } from "./git/workflow.ts";
+import type { SessionPhase, ExecutionPlan, PlanActEvent } from "./plan-act/types.ts";
+import { planManager } from "./plan-act/plan-manager.ts";
+import { planGenerator } from "./plan-act/plan-generator.ts";
+import { validatePhaseTransition, isTerminalPhase } from "./plan-act/state-machine.ts";
 
 export type NextTurnUpdate = {
   llm?: LlmConfig;
@@ -154,6 +158,15 @@ export type AgentLoopOptions = {
    * in the public tool args schema.
    */
   _parentHistory?: AgentMessage[];
+  /**
+   * Optional session phase for Plan-Act workflow.
+   * When set, the loop will apply phase-specific prompts and detect plan generation.
+   */
+  sessionPhase?: SessionPhase;
+  /**
+   * Optional callback for plan events in Plan-Act workflow.
+   */
+  onPlanEvent?: (event: PlanActEvent) => void;
 };
 
 export type AgentRuntimeRef = {
@@ -216,11 +229,35 @@ const MODE_SUFFIX: Record<PermissionMode, string> = {
   bypass: "mode=bypass\n**当前权限模式：绕过模式 (bypass)**\n执行策略：不显示审批并直接执行所有已注册工具，但工具自身的 workspace/path sandbox 仍然有效。",
 };
 
+/** Phase-specific suffix appended to the system prompt. */
+const PHASE_SUFFIX: Record<SessionPhase, string> = {
+  planning: `\n\n**当前阶段：规划阶段 (Planning Phase)**\n\n你的任务是分析用户需求并生成详细的执行计划，而不是直接执行操作。\n\n规划要求：\n1. 理解用户意图和目标\n2. 使用只读工具收集必要信息（read, grep, find, ls, codebase_search 等）\n3. 生成结构化的执行计划，包含：\n   - 计划摘要\n   - 详细的执行步骤（每步说明工具、参数、原因）\n   - 风险评估\n   - 所需工具列表\n4. 输出计划后，等待用户批准\n\n注意：你当前无权执行写操作、危险命令或 MCP 工具，这些会被硬拒绝。`,
+  review: `\n\n**当前阶段：审查阶段 (Review Phase)**\n\n计划已生成，等待用户审批。你可以：\n- 回答用户对计划的疑问\n- 根据用户反馈修改计划\n- 如果用户批准，系统会自动切换到执行阶段`,
+  acting: `\n\n**当前阶段：执行阶段 (Acting Phase)**\n\n你正在执行已批准的计划。请按照计划的步骤顺序执行：\n1. 严格按照计划执行每一步\n2. 每步执行后报告结果\n3. 如果遇到意外情况，说明问题并建议是否需要重新规划\n4. 完成所有步骤后总结成果`,
+  completed: `\n\n任务已完成。`,
+  cancelled: `\n\n任务已取消。`,
+};
+
 function applyPermissionModePrompt(messages: AgentMessage[], mode: PermissionMode): void {
   const system = messages[0];
   if (!system || system.role !== "system" || typeof system.content !== "string") return;
   const base = system.content.split(PERMISSION_MODE_MARKER, 1)[0]!.trimEnd();
   system.content = `${base}${PERMISSION_MODE_MARKER}${MODE_SUFFIX[mode]}`;
+}
+
+function applyPhasePrompt(messages: AgentMessage[], phase: SessionPhase): void {
+  const system = messages[0];
+  if (!system || system.role !== "system" || typeof system.content !== "string") return;
+  const suffix = PHASE_SUFFIX[phase];
+  if (!suffix) return;
+  // Append phase suffix after mode marker
+  const parts = system.content.split(PERMISSION_MODE_MARKER);
+  if (parts.length >= 2) {
+    parts[1] = (parts[1] ?? "") + suffix;
+    system.content = parts.join(PERMISSION_MODE_MARKER);
+  } else {
+    system.content = `${system.content.trimEnd()}\n${suffix}`;
+  }
 }
 
 function emitAborted(
@@ -500,6 +537,8 @@ async function runAgentTurnInternal(
     skills = [],
     skillNames = [],
     skillRegistry = defaultSkillRegistry,
+    sessionPhase,
+    onPlanEvent,
   } = options;
 
   // ── Skill resolution and merging ─────────────────────────────────────────
@@ -605,6 +644,12 @@ async function runAgentTurnInternal(
 
   // Keep the model's active mode synchronized when a session changes modes.
   if (activePermissionMode !== undefined) applyPermissionModePrompt(messages, activePermissionMode);
+  
+  // Apply phase-specific prompt for Plan-Act workflow
+  if (sessionPhase) {
+    applyPhasePrompt(messages, sessionPhase);
+    onPlanEvent?.({ type: "planning_started", sessionId: "temp" });
+  }
 
   // ── Apply skill system prompt fragments ──────────────────────────────────
   if (skillPromptFragments.length > 0 && messages.length > 0) {
@@ -729,6 +774,19 @@ async function runAgentTurnInternal(
       emptyAssistantResponses = 0;
       messages.push(assistant);
       onEvent?.({ type: "assistant", message: assistant, usage });
+      
+      // Check if this is a plan generation in planning phase
+      if (sessionPhase === "planning" && onPlanEvent) {
+        const parsedPlan = planGenerator.parseFromLlmOutput(assistant.content, "temp");
+        if (parsedPlan.valid && parsedPlan.steps.length > 0) {
+          const plan = planManager.createPlan("temp", parsedPlan.summary, parsedPlan.steps as any);
+          if (plan) {
+            planManager.markPendingReview(plan.id);
+            onPlanEvent({ type: "plan_generated", plan });
+          }
+        }
+      }
+      
       onEvent?.({ type: "done", messages });
       return "done";
     }
