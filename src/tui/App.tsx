@@ -895,6 +895,27 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       setConversationId(randomUUID());
       return;
     }
+    if (trimmed === "/context") {
+      const compactions = state.contextCompactions;
+      const tokenEst = state.contextTokens;
+      const ctxWindow = modelContextWindows[state.modelName] ?? llm.contextWindow ?? 128000;
+      const pct = ctxWindow > 0 ? Math.round(tokenEst / ctxWindow * 100) : 0;
+      const lines = [
+        `上下文统计: ${tokenEst} / ${ctxWindow} tokens (${pct}%)`,
+        '',
+      ];
+      if (compactions.length === 0) {
+        lines.push('尚无压缩记录（上下文未超过阈值）');
+      } else {
+        lines.push(`已压缩 ${compactions.length} 次:`);
+        for (const c of compactions.slice(-5)) {
+          lines.push(`  turn${c.turn}: ${c.before} → ${c.after} (${c.reason})`);
+        }
+      }
+      dispatch({ type: "ADD_NOTICE", title: "上下文统计", text: lines.join("\n") });
+      setInput("");
+      return;
+    }
 
     if (/^\/paste-image$/i.test(trimmed)) {
       setInput("");

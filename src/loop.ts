@@ -488,7 +488,7 @@ async function runAgentTurnInternal(
     signal,
     context,
     authorizeTool,
-    parallelToolExecution = false,
+    parallelToolExecution = true,
     autoValidate = false,
     validationWorkspace = process.cwd(),
     autoCheckpoint = false,

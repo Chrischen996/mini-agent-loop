@@ -79,6 +79,8 @@ export type TuiState = {
   toolCards: ToolCardState[];
   streamingText: string;
   streamingReasoning: string;
+  /** Track context compaction events for /context command. */
+  contextCompactions: { before: number; after: number; reason: string; turn: number }[];
   busy: boolean;
   status: string;
   modelName: string;
@@ -196,6 +198,7 @@ export function createInitialState(modelName: string): TuiState {
     expandedThinking: [],
     focusedMessageIndex: -1,
     pendingImages: [],
+    contextCompactions: [],
     scrollOffset: 0,
   };
 }
