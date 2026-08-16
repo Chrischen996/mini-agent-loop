@@ -468,6 +468,21 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     clearAc();
   }, [fileCandidates, clearAc]);
 
+  // Intercept Tab at input to immediately show file autocomplete
+  const handleTabAt = useCallback((inputVal: string) => {
+    const trigger = extractFileAcTrigger(inputVal);
+    if (!trigger) return;
+    fileTriggerRef.current = trigger;
+    setFileFragment(trigger.fragment);
+    setCmdCandidates([]);
+    setAcMode("file");
+    if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
+    acDebounceRef.current = setTimeout(async () => {
+      const candidates = await listCandidates(cwd, trigger.fragment);
+      setFileCandidates(candidates);
+    }, 0);
+  }, [cwd]);
+
   const openModelPicker = useCallback((query = "") => {
     const choices = modelChoices(query);
     setModelQuery(query);
@@ -1303,6 +1318,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               value={input}
               onChange={setInputSafe}
               onPasteImage={handlePasteImage}
+              onTab={handleTabAt}
               pasteEnabled={!state.pendingPermission}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {
