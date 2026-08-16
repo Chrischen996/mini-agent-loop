@@ -655,6 +655,13 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
       const finalAnswer = extractFinalAnswer(finalMessages);
       // Count turns (assistant messages = turns)
       const turns = finalMessages.filter((m) => m.role === "assistant").length;
+      // Count total tool calls across all assistant messages
+      const toolCallCount = finalMessages.reduce(
+        (sum, m) => sum + (m.role === "assistant" && Array.isArray((m as import("../types.ts").AssistantMessage).toolCalls)
+          ? (m as import("../types.ts").AssistantMessage).toolCalls!.length
+          : 0),
+        0,
+      );
 
       onSubagentEvent?.({
         type: "subagent_end",
@@ -676,7 +683,13 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
         };
       }
 
-      return { content: finalAnswer };
+      // Append execution summary so the parent LLM can learn from delegation outcomes
+      const summaryLines = [
+        `— Sub-agent exec summary: ${turns} turn(s), ${toolCallCount} tool call(s), ~${accumulatedTokens} tokens${errors.length > 0 ? ` · ${errors.length} error(s)` : ""}${!modelSwitchSucceeded && args.model ? " · model fallback" : ""}`,
+        "",
+      ].join("");
+
+      return { content: summaryLines + finalAnswer };
     },
   };
 }
