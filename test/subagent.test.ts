@@ -166,7 +166,25 @@ describe("createSubagentTool", () => {
 
       const result = await tool.execute({ task: "What is the answer?" });
       assert.equal(result.isError, undefined);
-      assert.equal(contentAsString(result.content), "The answer is 42.");
+      const text = contentAsString(result.content);
+      assert.ok(text.includes("The answer is 42."), `expected answer in result, got: ${text}`);
+      assert.ok(text.startsWith("— Sub-agent exec summary:"), `expected summary prefix, got: ${text.slice(0, 60)}`);
+    });
+
+    it("prepends an execution summary to the sub-agent result", async () => {
+      const events: SubagentEvent[] = [];
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        onSubagentEvent: (event) => events.push(event),
+        chat: createImmediateChat("The final answer."),
+      });
+
+      const result = await tool.execute({ task: "summarize this" });
+      const text = contentAsString(result.content);
+      assert.ok(text.startsWith("— Sub-agent exec summary:"), `expected exec summary prefix, got: ${text.slice(0, 80)}`);
+      assert.ok(text.includes("1 turn(s)"), `expected turn count in summary, got: ${text}`);
+      assert.ok(text.includes("The final answer."), "original answer should follow the summary");
     });
 
     it("sub-agent can use tools from the parent and return a result", async () => {
@@ -179,7 +197,8 @@ describe("createSubagentTool", () => {
 
       const result = await tool.execute({ task: "echo hello" });
       assert.equal(result.isError, undefined);
-      assert.equal(contentAsString(result.content), "Echo test complete.");
+      const text = contentAsString(result.content);
+      assert.ok(text.includes("Echo test complete."), `expected answer in result, got: ${text}`);
     });
 
     it("returns isError when sub-agent produces no usable answer", async () => {
@@ -230,7 +249,8 @@ describe("createSubagentTool", () => {
 
       const result = await tool.execute({ task: "within depth" });
       assert.equal(result.isError, undefined);
-      assert.equal(contentAsString(result.content), "depth ok");
+      const text = contentAsString(result.content);
+      assert.ok(text.includes("depth ok"), `expected answer in result, got: ${text}`);
     });
 
     it("does not add nested subagent tool when child depth equals maxDepth", async () => {
