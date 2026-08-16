@@ -1064,7 +1064,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const runId = streamBuffer.start();
     const MAX_AUTO_CONTINUES = 5;
     let autoContinueCount = 0;
-    let currentUserText = prompt;
+    let currentUserText = prompt.replace(/@\S+/g, "").replace(/\s{2,}/g, " ").trim();
     const thinkingMode = parsedThinking.intensity
       ? "fixed"
       : parseThinkingCommandMode(prompt) ?? loadThinkingModeFromEnv();
@@ -1085,6 +1085,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           : currentUserContent;
         currentUserContent = [...contentParts, ...imageParts];
       }
+
 
       // Auto-continue loop: re-invoke runAgentTurn when maxTurns is exceeded.
       while (true) {
