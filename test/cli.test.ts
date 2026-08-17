@@ -121,7 +121,20 @@ describe("parseCliArgs", () => {
     const result = parseCliArgs(["--plan-execute", "execute the plan"]);
     assert.equal(result.planOnly, false);
     assert.equal(result.planExecute, true);
+    assert.equal(result.planYes, false);
     assert.equal(result.prompt, "execute the plan");
+  });
+
+  it("sets planYes when --yes flag is present", () => {
+    const result = parseCliArgs(["--yes", "do something"]);
+    assert.equal(result.planYes, true);
+    assert.equal(result.planOnly, false);
+  });
+
+  it("sets planYes together with --plan", () => {
+    const result = parseCliArgs(["--plan", "--yes", "write a plan"]);
+    assert.equal(result.planOnly, true);
+    assert.equal(result.planYes, true);
   });
 
   it("throws for invalid mode", () => {

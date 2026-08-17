@@ -14,6 +14,12 @@ export type PlanFile = {
   version: 1;
   prompt: string;
   plan: string;
+  /** Approval status: "pending" | "approved" | "rejected" */
+  approval: "pending" | "approved" | "rejected";
+  /** Approved-by: "user" | "auto--yes" */
+  approvedBy?: string;
+  /** Timestamp of last modification */
+  updatedAt: string;
   mode: "plan";
   cwd: string;
   timestamp: string;
@@ -21,18 +27,48 @@ export type PlanFile = {
 
 const PLAN_FILENAME = ".mini-agent-plan.json";
 
-export async function savePlan(cwd: string, prompt: string, plan: string): Promise<string> {
+export async function savePlan(
+  cwd: string,
+  prompt: string,
+  plan: string,
+  options: { approval?: PlanFile["approval"]; approvedBy?: string } = {},
+): Promise<string> {
   const planPath = path.join(cwd, PLAN_FILENAME);
+  const now = new Date().toISOString();
   const planFile: PlanFile = {
     version: 1,
     prompt,
     plan,
+    approval: options.approval ?? "pending",
+    approvedBy: options.approvedBy,
+    updatedAt: now,
     mode: "plan",
     cwd,
-    timestamp: new Date().toISOString(),
+    timestamp: now,
   };
   await writeFileAsync(planPath, JSON.stringify(planFile, null, 2), "utf8");
   return planPath;
+}
+
+/** Mark a plan as approved by a user. */
+export async function approvePlanAt(cwd: string, by: string): Promise<void> {
+  const plan = await loadPlan(cwd);
+  if (!plan) throw new Error("No plan found to approve");
+  plan.approval = "approved";
+  plan.approvedBy = by;
+  plan.updatedAt = new Date().toISOString();
+  const planPath = path.join(cwd, PLAN_FILENAME);
+  await writeFileAsync(planPath, JSON.stringify(plan, null, 2), "utf8");
+}
+
+/** Mark a plan as rejected. */
+export async function rejectPlanAt(cwd: string): Promise<void> {
+  const plan = await loadPlan(cwd);
+  if (!plan) throw new Error("No plan found to reject");
+  plan.approval = "rejected";
+  plan.updatedAt = new Date().toISOString();
+  const planPath = path.join(cwd, PLAN_FILENAME);
+  await writeFileAsync(planPath, JSON.stringify(plan, null, 2), "utf8");
 }
 
 export async function loadPlan(cwd: string): Promise<PlanFile | null> {

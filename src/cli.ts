@@ -6,7 +6,9 @@ import { imagePart, textPart } from "./content.ts";
 import { loadLlmConfigFromEnv } from "./llm/index.ts";
 import { MaxTurnsExceededError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
 import { loadAgentsMd } from "./agents-md.ts";
-import { savePlan, loadPlan, clearPlan } from "./plan-persist.ts";
+import { savePlan, loadPlan, clearPlan, approvePlanAt } from "./plan-persist.ts";
+import { parsePlan, formatPlanPreview, type PlanSummary } from "./plan-formatter.ts";
+import { approvePlan, type ApprovalDecision } from "./plan-approval.ts";
 import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
@@ -109,6 +111,9 @@ export function parseCliArgs(argv: string[]): {
   excludeTools?: ToolName[];
   allowMcpTools: boolean;
   mode: PermissionMode;
+  planOnly: boolean;
+  planExecute: boolean;
+  planYes: boolean;
 } {
   const imagePaths: string[] = [];
   const rest: string[] = [];
@@ -118,6 +123,7 @@ export function parseCliArgs(argv: string[]): {
   let mode: PermissionMode = "auto";
   let planOnly = false;
   let planExecute = false;
+  let planYes = false;
   const validTools = new Set<ToolName>([
     "read", "bash", "edit", "write", "grep", "find", "ls",
     "codebase_open", "codebase_search", "codebase_read", "codebase_explain",
@@ -154,6 +160,10 @@ export function parseCliArgs(argv: string[]): {
     }
     if (arg === "--plan-execute") {
       planExecute = true;
+      continue;
+    }
+    if (arg === "--yes") {
+      planYes = true;
       continue;
     }
     if (arg === "--mode") {
@@ -202,7 +212,7 @@ export function parseCliArgs(argv: string[]): {
     rest.push(arg);
   }
 
-  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools, allowMcpTools, mode, planOnly, planExecute };
+  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools, allowMcpTools, mode, planOnly, planExecute, planYes };
 }
 
 async function loadImagePart(
@@ -244,7 +254,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { prompt: rawPrompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools, mode, planOnly, planExecute } = parsed;
+  const { prompt: rawPrompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools, mode, planOnly, planExecute, planYes } = parsed;
   const thinking = parseThinkingIntensityPrompt(rawPrompt);
   const prompt = thinking.prompt;
   if (!prompt && imagePaths.length === 0) {
@@ -263,12 +273,34 @@ async function main(): Promise<void> {
     ? "\n\n⚠️ PLAN-ONLY MODE: produce a detailed execution plan only. Do NOT call write/edit/bash tools. Output your plan as markdown and stop."
     : "";
 
-  // --plan-execute: load saved plan and prepend to prompt
+  // --plan-execute: load saved plan, verify approval, prepend to prompt
   if (planExecute) {
     const savedPlan = await loadPlan(cwd);
     if (!savedPlan) {
       console.error("No saved plan found. Run with --plan first.");
       process.exit(1);
+    }
+    if (savedPlan.approval === "rejected") {
+      console.error("[plan] REJECTED — cannot execute a rejected plan.");
+      process.exit(1);
+    }
+    if (savedPlan.approval !== "approved" && !planYes) {
+      // Auto-approve if --yes flag is set, otherwise require explicit approval
+      const summary = parsePlan(savedPlan.prompt, savedPlan.plan);
+      console.error("[plan] Plan exists but not approved. Run with --plan first to generate, or add --yes to auto-approve.");
+      console.error(formatPlanPreview(summary));
+      console.error("");
+      console.error("Approve? (y/n): ");
+      const rl = await import("node:readline").then((m) => m.createInterface({ input: process.stdin, output: process.stdout }));
+      const answer = await new Promise<string>((resolve) => {
+        rl.question("  > ", (a) => { rl.close(); resolve(a.trim().toLowerCase()); });
+      });
+      if (answer !== "y" && answer !== "yes") {
+        console.error("[plan] Execution cancelled by user.");
+        process.exit(0);
+      }
+      await approvePlanAt(cwd, "user");
+      console.error("[plan] Approved.");
     }
     planSuffix = `\n\n## Saved Plan (approved)\n${savedPlan.plan}\n\nExecute the above plan. Do not deviate from it.`;
     console.error(`[plan] loaded plan for: ${savedPlan.prompt}`);
@@ -409,12 +441,27 @@ async function main(): Promise<void> {
       ? lastAssistant.content
       : lastAssistant.content.map((p: any) => p.type === "text" ? p.text : "").join("");
 
-    // --plan: save the generated plan to disk for later execution
+    // --plan: save the generated plan to disk, show preview, ask for approval
     if (planOnly) {
-      const planPath = await savePlan(cwd, prompt, answer);
+      const planPath = await savePlan(cwd, prompt, answer, { approval: "pending" });
       console.log(answer);
       console.error(`\n[plan] saved to ${planPath}`);
-      console.error("Run again with --plan-execute to execute this plan.");
+
+      // Show formatted preview
+      const summary = parsePlan(prompt, answer);
+      console.error(formatPlanPreview(summary));
+
+      if (planYes) {
+        // Auto-approve in --yes mode
+        await approvePlanAt(cwd, "auto--yes");
+        console.error("[plan] auto-approved (--yes flag).");
+        console.error("Run again with --plan-execute to execute this plan.");
+      } else {
+        console.error("");
+        console.error("Plan saved. Review the summary above, then run:");
+        console.error("  npx mini-agent-loop --plan-execute \"execute the plan\"");
+        console.error("Or auto-approve with: --plan --yes");
+      }
       return;
     }
 
