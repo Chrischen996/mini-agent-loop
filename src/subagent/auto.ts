@@ -19,16 +19,21 @@ export type AutoSubagentDecision = {
   profile: string;
 };
 
-const DEFAULT_MIN_SCORE = 3;
+const DEFAULT_MIN_SCORE = 2;
 
 const MULTI_STEP_PATTERN =
-  /(?:先|然后|接着|最后|步骤|分别|同时|并且|以及|对比|比较|first|then|next|finally|steps?|compare|multiple|and then)/i;
+  /(?:先|然后|接着|最后|步骤|分别|同时|并且|以及|对比|比较|first|then|next|finally|steps?|compare|multiple|and then|implement|create|build|develop)/i;
 const CODE_PATTERN =
-  /(?:代码|源码|仓库|项目|模块|文件|目录|接口|测试|实现|修改|重构|review|debug|fix|implement|refactor|code|repository|module|file|test)/i;
+  /(?:代码|源码|仓库|项目|模块|文件|目录|接口|测试|实现|修改|重构|review|debug|fix|implement|refactor|code|repository|module|file|test|feature|component|api|endpoint)/i;
 const INVESTIGATION_PATTERN =
-  /(?:分析|调查|排查|梳理|总结|审查|检查|解释|研究|analy[sz]e|investigate|review|inspect|explain|research|trace)/i;
+  /(?:分析|调查|排查|梳理|总结|审查|检查|解释|研究|analy[sz]e|investigate|review|inspect|explain|research|trace|summarize|overview)/i;
 const EXPLICIT_DELEGATION_PATTERN =
-  /(?:子\s*agent|子代理|sub[- ]?agent|delegate|委托|delegat(?:e|ion))/i;
+  /(?:子\\s*agent|子代理|sub[- ]?agent|delegate|委托|delegat(?:e|ion))/i;
+// Strong signals: tasks that clearly benefit from parallel or specialized delegation
+const COMPLEX_TASK_PATTERN =
+  /(?:多个|多种|一批| several|multiple files|multiple tests|batch|parallel|concurrent)/i;
+// Code files present in the prompt → likely a coding task
+const FILE_PATH_PATTERN = /\w+\.(ts|tsx|js|jsx|py|go|rs|md|json|yaml|yml|css|html)\b/;
 
 function readInt(value: string | undefined, minimum: number): number | undefined {
   if (!value) return undefined;
@@ -63,6 +68,14 @@ export function decideAutoSubagent(
   if (INVESTIGATION_PATTERN.test(text)) {
     score += 1;
     reasons.push("investigation or review task");
+  }
+  if (COMPLEX_TASK_PATTERN.test(text)) {
+    score += 2;
+    reasons.push("complex/parallel task signal");
+  }
+  if (FILE_PATH_PATTERN.test(text)) {
+    score += 1;
+    reasons.push("code file paths in prompt");
   }
   const explicitDelegation = EXPLICIT_DELEGATION_PATTERN.test(text);
   if (explicitDelegation) {
