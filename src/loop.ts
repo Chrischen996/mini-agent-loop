@@ -202,6 +202,7 @@ export type LoopEvent =
       permissionMode?: PermissionMode;
     }
   | { type: "permission_required"; request: PermissionRequest }
+  | { type: "plan_act_event"; event: PlanActEvent }
   | { type: "done"; messages: AgentMessage[] }
   | {
       type: "model_switched";
@@ -236,6 +237,7 @@ const PHASE_SUFFIX: Record<SessionPhase, string> = {
   acting: `\n\n**当前阶段：执行阶段 (Acting Phase)**\n\n你正在执行已批准的计划。请按照计划的步骤顺序执行：\n1. 严格按照计划执行每一步\n2. 每步执行后报告结果\n3. 如果遇到意外情况，说明问题并建议是否需要重新规划\n4. 完成所有步骤后总结成果`,
   completed: `\n\n任务已完成。`,
   cancelled: `\n\n任务已取消。`,
+  failed: `\n\n执行失败。`,
 };
 
 function applyPermissionModePrompt(messages: AgentMessage[], mode: PermissionMode): void {

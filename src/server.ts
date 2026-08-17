@@ -242,6 +242,10 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
           permissionMode: event.permissionMode,
         } : {}),
       };
+    case "plan_act_event":
+      return { type: "plan_act_event", event: safePlanActEvent(event.event) };
+    case "plan_act_event":
+      return { type: "plan_act_event", eventType: event.event.type, ...event.event };
     case "done":
       return { type: "done", messageCount: event.messages.length };
     case "model_switched":

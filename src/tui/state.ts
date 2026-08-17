@@ -3,8 +3,10 @@
 import type { LoopEvent } from "../loop.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
 import { PERMISSION_MODES, type PermissionMode } from "../permissions.ts";
+import type { SessionPhase, ExecutionPlan, PlanActEvent } from "../plan-act/types.ts";
 
 export type { PermissionMode } from "../permissions.ts";
+export type { SessionPhase } from "../plan-act/types.ts";
 
 export type MessageRole = "user" | "assistant" | "tool";
 
@@ -92,6 +94,10 @@ export type TuiState = {
   thinkingMode: ThinkingDisplayMode;
   /** Currently active permission mode. */
   permissionMode: PermissionMode;
+  /** Current Plan-Act workflow phase. */
+  phase: SessionPhase;
+  /** Currently active execution plan. */
+  currentPlan?: ExecutionPlan;
   /** Pending permission request shown to the user while execution waits. */
   pendingPermission?: PendingPermissionState;
   /**
@@ -111,6 +117,7 @@ export type TuiState = {
 export type TuiAction =
   | { type: "USER_MESSAGE"; text: string; displayText?: string; images?: ImageAttachment[] }
   | { type: "LOOP_EVENT"; event: LoopEvent }
+  | { type: "PLAN_ACT_EVENT"; event: PlanActEvent }
   | { type: "AUTO_CONTINUE"; count: number; max: number }
   | { type: "MODEL_CHANGED"; modelName: string }
   | { type: "SET_STATUS"; status: string }
@@ -118,6 +125,8 @@ export type TuiAction =
   | { type: "TOGGLE_THINKING_MODE" }
   | { type: "TOGGLE_PERMISSION_MODE" }
   | { type: "SET_PERMISSION_MODE"; mode: PermissionMode }
+  | { type: "APPROVE_PLAN"; planId: string }
+  | { type: "REJECT_PLAN"; planId: string; reason?: string }
   | { type: "CLEAR_PENDING_PERMISSION" }
   | { type: "TOGGLE_MESSAGE_THINKING"; index?: number }
   | { type: "SET_FOCUSED_MESSAGE"; index: number }
@@ -192,6 +201,8 @@ export function createInitialState(modelName: string): TuiState {
     cacheReadTokens: undefined,
     thinkingMode: "summary",
     permissionMode: "auto",
+    phase: "planning",
+    currentPlan: undefined,
     pendingPermission: undefined,
     expandedThinking: [],
     focusedMessageIndex: -1,
@@ -552,6 +563,96 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         default:
           return state;
       }
+    }
+
+    case "PLAN_ACT_EVENT": {
+      const event = action.event;
+      switch (event.type) {
+        case "planning_started":
+          return { ...state, phase: "planning", status: "规划中..." };
+        case "plan_generated":
+          return {
+            ...state,
+            phase: "review",
+            currentPlan: event.plan,
+            status: "计划已生成，等待审批 (A=批准 / R=拒绝)",
+          };
+        case "plan_approved":
+          return {
+            ...state,
+            phase: "acting",
+            currentPlan: state.currentPlan?.status === "approved"
+              ? state.currentPlan
+              : state.currentPlan
+                ? { ...state.currentPlan, status: "approved" as const }
+                : undefined,
+            status: "执行中...",
+          };
+        case "plan_rejected":
+          return {
+            ...state,
+            phase: "cancelled",
+            currentPlan: undefined,
+            status: "计划已拒绝",
+          };
+        case "plan_modified":
+          return {
+            ...state,
+            phase: "review",
+            currentPlan: event.plan,
+            status: "计划已修改，等待审批 (A=批准 / R=拒绝)",
+          };
+        case "acting_started":
+          return { ...state, phase: "acting", status: "执行计划..." };
+        case "step_started":
+          return { ...state, status: `执行: ${event.step.description.slice(0, 30)}...` };
+        case "step_completed":
+          return { ...state, status: "步骤完成" };
+        case "step_failed":
+          return { ...state, status: `步骤失败: ${event.error.slice(0, 50)}` };
+        case "all_steps_completed":
+          return {
+            ...state,
+            phase: "completed",
+            currentPlan: state.currentPlan
+              ? { ...state.currentPlan, status: "completed" as const }
+              : undefined,
+            status: "计划执行完成",
+          };
+        case "execution_failed":
+          return {
+            ...state,
+            phase: "failed",
+            currentPlan: state.currentPlan
+              ? { ...state.currentPlan, status: "failed" as const }
+              : undefined,
+            status: "执行失败",
+          };
+        default:
+          return state;
+      }
+    }
+
+    case "APPROVE_PLAN": {
+      const plan = state.currentPlan;
+      if (!plan || plan.status !== "pending_review") return state;
+      return {
+        ...state,
+        currentPlan: { ...plan, status: "approved" as const },
+        phase: "acting",
+        status: "计划已批准，开始执行...",
+      };
+    }
+    
+    case "REJECT_PLAN": {
+      const plan = state.currentPlan;
+      if (!plan) return state;
+      return {
+        ...state,
+        currentPlan: { ...plan, status: "rejected" as const },
+        phase: "cancelled",
+        status: "计划已拒绝",
+      };
     }
 
     case "SUBAGENT_EVENT": {

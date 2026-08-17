@@ -6,6 +6,8 @@ import * as nodePath from "node:path";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
+import { PhaseIndicator } from "./components/PhaseIndicator.tsx";
+import { PlanView } from "./components/PlanView.tsx";
 import { resolvePendingPermissionDecision } from "./pending-permission.ts";
 import {
   FileAutocomplete,
@@ -263,6 +265,17 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
   // Generate a stable conversation session ID on startup
   const [conversationId, setConversationId] = useState(() => process.env.MINI_AGENT_SESSION_ID ?? randomUUID());
+  
+  // Plan-Act approval callbacks
+  const handleApprovePlan = useCallback(() => {
+    if (!state.currentPlan) return;
+    dispatch({ type: "APPROVE_PLAN", planId: state.currentPlan.id });
+  }, [state.currentPlan]);
+  
+  const handleRejectPlan = useCallback(() => {
+    if (!state.currentPlan) return;
+    dispatch({ type: "REJECT_PLAN", planId: state.currentPlan.id });
+  }, [state.currentPlan]);
   const pendingImagesRef = useRef<ImageAttachment[]>([]);
   pendingImagesRef.current = state.pendingImages;
   const promptQueueRef = useRef<string[]>([]);
@@ -625,6 +638,20 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
     pendingPermissionRef.current = false;
+    
+    // Plan approval shortcuts when in review phase
+    if (!acMode && !state.busy && state.phase === "review" && state.currentPlan) {
+      if (_ch === "a" || _ch === "A") {
+        suppressInputEchoRef.current = true;
+        dispatch({ type: "APPROVE_PLAN", planId: state.currentPlan.id });
+        return;
+      }
+      if (_ch === "r" || _ch === "R") {
+        suppressInputEchoRef.current = true;
+        dispatch({ type: "REJECT_PLAN", planId: state.currentPlan.id });
+        return;
+      }
+    }
 
     // Codex-compatible effort shortcuts:
     // Shift+↑/↓ and Alt+./, change one level without touching the prompt.

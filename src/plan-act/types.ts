@@ -9,8 +9,9 @@ import type { ToolSource } from "../tools/types.ts";
  * - acting: Executing the approved plan
  * - completed: All steps finished successfully
  * - cancelled: User or system cancelled the operation
+ * - failed: Execution failed
  */
-export type SessionPhase = "planning" | "review" | "acting" | "completed" | "cancelled";
+export type SessionPhase = "planning" | "review" | "acting" | "completed" | "cancelled" | "failed";
 
 export const SESSION_PHASES: readonly SessionPhase[] = [
   "planning",

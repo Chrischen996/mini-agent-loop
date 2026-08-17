@@ -27,6 +27,7 @@ const TRANSITION_RULES: Record<
   ],
   completed: [],
   cancelled: [],
+  failed: [],
 };
 
 /**
