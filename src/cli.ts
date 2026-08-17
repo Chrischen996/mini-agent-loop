@@ -1,14 +1,30 @@
 #!/usr/bin/env node
 
-import { readFile, realpath } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { imagePart, textPart } from "./content.ts";
 import { loadLlmConfigFromEnv } from "./llm/index.ts";
 import { MaxTurnsExceededError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
 import { loadAgentsMd } from "./agents-md.ts";
-import { savePlan, loadPlan, clearPlan, approvePlanAt } from "./plan-persist.ts";
-import { parsePlan, formatPlanPreview, type PlanSummary } from "./plan-formatter.ts";
-import { approvePlan, type ApprovalDecision } from "./plan-approval.ts";
+import {
+  PLAN_ONLY_SUFFIX,
+  approveCurrentPlan,
+  archiveCurrentPlan,
+  createAndSavePlan,
+  editCurrentPlan,
+  formatPlanDiff,
+  formatPlanDocumentPreview,
+  formatPlanPreview,
+  historyPlanPath,
+  listPlanHistory,
+  loadPlanDocument,
+  markPlanExecutionResult,
+  planDocumentToSummary,
+  preparePlanForExecution,
+  rejectCurrentPlan,
+} from "./plan/index.ts";
 import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
@@ -124,6 +140,15 @@ export function parseCliArgs(argv: string[]): {
   planOnly: boolean;
   planExecute: boolean;
   planYes: boolean;
+  planRetry: boolean;
+  planForce: boolean;
+  planShow: boolean;
+  planApprove: boolean;
+  planReject: boolean;
+  planEdit: boolean;
+  planSetFile?: string;
+  planHistory: boolean;
+  planArchive: boolean;
 } {
   const imagePaths: string[] = [];
   const rest: string[] = [];
@@ -134,6 +159,15 @@ export function parseCliArgs(argv: string[]): {
   let planOnly = false;
   let planExecute = false;
   let planYes = false;
+  let planRetry = false;
+  let planForce = false;
+  let planShow = false;
+  let planApprove = false;
+  let planReject = false;
+  let planEdit = false;
+  let planSetFile: string | undefined;
+  let planHistory = false;
+  let planArchive = false;
   const validTools = new Set<ToolName>([
     "read", "bash", "edit", "write", "grep", "find", "ls",
     "codebase_open", "codebase_search", "codebase_read", "codebase_explain",
@@ -170,6 +204,53 @@ export function parseCliArgs(argv: string[]): {
     }
     if (arg === "--plan-execute") {
       planExecute = true;
+      continue;
+    }
+    if (arg === "--plan-retry") {
+      planRetry = true;
+      continue;
+    }
+    if (arg === "--plan-force") {
+      planForce = true;
+      continue;
+    }
+    if (arg === "--plan-show") {
+      planShow = true;
+      continue;
+    }
+    if (arg === "--plan-approve") {
+      planApprove = true;
+      continue;
+    }
+    if (arg === "--plan-reject") {
+      planReject = true;
+      continue;
+    }
+    if (arg === "--plan-edit") {
+      planEdit = true;
+      continue;
+    }
+    if (arg === "--plan-set-file") {
+      const next = argv[i + 1];
+      if (!next || next.startsWith("--")) {
+        throw new Error("--plan-set-file requires a path argument");
+      }
+      planSetFile = next;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--plan-set-file=")) {
+      const value = arg.slice("--plan-set-file=".length);
+      if (!value) throw new Error("--plan-set-file= requires a path");
+      planSetFile = value;
+      continue;
+    }
+    if (arg === "--plan-history") {
+      planHistory = true;
+      continue;
+    }
+    if (arg === "--plan-archive") {
+      planArchive = true;
       continue;
     }
     if (arg === "--yes") {
@@ -222,7 +303,26 @@ export function parseCliArgs(argv: string[]): {
     rest.push(arg);
   }
 
-  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools, allowMcpTools, mode, planOnly, planExecute, planYes };
+  return {
+    prompt: rest.join(" ").trim(),
+    imagePaths,
+    tools,
+    excludeTools,
+    allowMcpTools,
+    mode,
+    planOnly,
+    planExecute,
+    planYes,
+    planRetry,
+    planForce,
+    planShow,
+    planApprove,
+    planReject,
+    planEdit,
+    planSetFile,
+    planHistory,
+    planArchive,
+  };
 }
 
 async function loadImagePart(
@@ -264,57 +364,173 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { prompt: rawPrompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools, mode, planOnly, planExecute, planYes } = parsed;
+  const {
+    prompt: rawPrompt,
+    imagePaths,
+    tools: selectedTools,
+    excludeTools,
+    allowMcpTools,
+    mode,
+    planOnly,
+    planExecute,
+    planYes,
+    planRetry,
+    planForce,
+    planShow,
+    planApprove,
+    planReject,
+    planEdit,
+    planSetFile,
+    planHistory,
+    planArchive,
+  } = parsed;
   const thinking = parseThinkingIntensityPrompt(rawPrompt);
   const prompt = thinking.prompt;
-  if (!prompt && imagePaths.length === 0) {
+  const cwd = process.cwd();
+
+  // Early plan commands that do not need the LLM
+  if (planShow) {
+    const doc = await loadPlanDocument(cwd);
+    if (!doc) {
+      console.error("No saved plan found.");
+      process.exit(1);
+    }
+    console.error(formatPlanDocumentPreview(doc));
+    console.log(doc.rawMarkdown);
+    return;
+  }
+
+  if (planApprove) {
+    try {
+      const doc = await approveCurrentPlan(cwd, "user");
+      console.error(`[plan] approved (id=${doc.id})`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (planReject) {
+    try {
+      const doc = await rejectCurrentPlan(cwd);
+      console.error(`[plan] rejected (id=${doc.id})`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (planHistory) {
+    const history = await listPlanHistory(cwd);
+    if (history.length === 0) {
+      console.error("[plan] no archived plans");
+      return;
+    }
+    for (const doc of history) {
+      const promptSlice =
+        doc.prompt.length > 60 ? `${doc.prompt.slice(0, 60)}…` : doc.prompt;
+      console.error(
+        `${doc.id}  ${doc.status.padEnd(10)}  ${doc.updatedAt}  ${promptSlice}`,
+      );
+    }
+    return;
+  }
+
+  if (planArchive) {
+    try {
+      const { archivedPath, document } = await archiveCurrentPlan(cwd);
+      console.error(`[plan] archived id=${document.id} to ${archivedPath}`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (planSetFile) {
+    try {
+      const existing = await loadPlanDocument(cwd);
+      if (!existing) {
+        console.error("No saved plan found.");
+        process.exit(1);
+      }
+      const filePath = path.resolve(cwd, planSetFile);
+      const nextMarkdown = await readFile(filePath, "utf8");
+      const before = existing.rawMarkdown;
+      const doc = await editCurrentPlan(cwd, nextMarkdown);
+      console.error(formatPlanDiff(before, doc.rawMarkdown, doc.prompt));
+      console.error(formatPlanDocumentPreview(doc));
+      console.error(`[plan] updated from file ${planSetFile} (id=${doc.id}, status=${doc.status})`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (planEdit) {
+    try {
+      const existing = await loadPlanDocument(cwd);
+      if (!existing) {
+        console.error("No saved plan found.");
+        process.exit(1);
+      }
+      const editor = process.env.EDITOR || process.env.VISUAL || "vi";
+      const tmpDir = await mkdtemp(path.join(tmpdir(), "mini-agent-plan-"));
+      const tmpFile = path.join(tmpDir, "plan.md");
+      await writeFile(tmpFile, existing.rawMarkdown, "utf8");
+      const result = spawnSync(editor, [tmpFile], { stdio: "inherit" });
+      if (result.status !== 0) {
+        console.error(
+          `[plan] editor exited with status ${result.status ?? "unknown"}; aborting without save`,
+        );
+        process.exit(1);
+      }
+      const nextMarkdown = await readFile(tmpFile, "utf8");
+      const before = existing.rawMarkdown;
+      const doc = await editCurrentPlan(cwd, nextMarkdown);
+      console.error(formatPlanDiff(before, doc.rawMarkdown, doc.prompt));
+      console.error(formatPlanDocumentPreview(doc));
+      console.error(`[plan] edited (id=${doc.id}, status=${doc.status})`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (!prompt && imagePaths.length === 0 && !planExecute && !planRetry) {
     console.error(
       'Usage: npx tsx src/cli.ts "<prompt>" [--image path.png]...',
     );
     process.exit(1);
   }
 
-  const cwd = process.cwd();
   const agentsMd = await loadAgentsMd(cwd);
 
   // --plan flag: force plan mode and append plan-only instruction
-  const effectiveMode = planOnly ? "plan" : planExecute ? "bypass" : mode;
-  let planSuffix = planOnly
-    ? "\n\n⚠️ PLAN-ONLY MODE: produce a detailed execution plan only. Do NOT call write/edit/bash tools. Output your plan as markdown and stop."
-    : "";
+  const wantExecute = planExecute || planRetry;
+  const effectiveMode = planOnly ? "plan" : wantExecute ? "bypass" : mode;
+  let planSuffix = planOnly ? PLAN_ONLY_SUFFIX : "";
+  let trackingExecution = false;
 
-  // --plan-execute: load saved plan, verify approval, prepend to prompt
-  if (planExecute) {
-    const savedPlan = await loadPlan(cwd);
-    if (!savedPlan) {
-      console.error("No saved plan found. Run with --plan first.");
-      process.exit(1);
-    }
-    if (savedPlan.approval === "rejected") {
-      console.error("[plan] REJECTED — cannot execute a rejected plan.");
-      process.exit(1);
-    }
-    if (savedPlan.approval !== "approved" && !planYes) {
-      // Auto-approve if --yes flag is set, otherwise require explicit approval
-      const summary = parsePlan(savedPlan.prompt, savedPlan.plan);
-      console.error("[plan] Plan exists but not approved. Run with --plan first to generate, or add --yes to auto-approve.");
-      console.error(formatPlanPreview(summary));
-      console.error("");
-      console.error("Approve? (y/n): ");
-      const rl = await import("node:readline").then((m) => m.createInterface({ input: process.stdin, output: process.stdout }));
-      const answer = await new Promise<string>((resolve) => {
-        rl.question("  > ", (a) => { rl.close(); resolve(a.trim().toLowerCase()); });
+  // --plan-execute / --plan-retry: prepare saved plan (does NOT delete it)
+  if (wantExecute) {
+    try {
+      const prepared = await preparePlanForExecution(cwd, {
+        yes: planYes,
+        force: planForce,
+        workspaceRoot: cwd,
       });
-      if (answer !== "y" && answer !== "yes") {
-        console.error("[plan] Execution cancelled by user.");
-        process.exit(0);
-      }
-      await approvePlanAt(cwd, "user");
-      console.error("[plan] Approved.");
+      planSuffix = prepared.executionPromptSuffix;
+      trackingExecution = true;
+      console.error(`[plan] loaded plan for: ${prepared.document.prompt} (status=executing)`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
     }
-    planSuffix = `\n\n## Saved Plan (approved)\n${savedPlan.plan}\n\nExecute the above plan. Do not deviate from it.`;
-    console.error(`[plan] loaded plan for: ${savedPlan.prompt}`);
-    await clearPlan(cwd);
   }
   const llm = loadLlmConfigFromEnv();
   const requestLlm = thinking.intensity
@@ -429,10 +645,42 @@ async function main(): Promise<void> {
       onEvent: logEvent,
       agentsMd,
     });
+    if (trackingExecution) {
+      const last = [...messages].reverse().find((m) => m.role === "assistant");
+      const summary =
+        last && last.role === "assistant"
+          ? String(last.content).slice(0, 500)
+          : undefined;
+      const completed = await markPlanExecutionResult(cwd, {
+        ok: true,
+        summary,
+        workspaceRoot: cwd,
+      });
+      console.error(`[plan] completed (id=${completed.id})`);
+      console.error(`[plan] archived to ${historyPlanPath(cwd, completed.id)}`);
+      if (completed.execution?.auditReport) {
+        console.error(completed.execution.auditReport);
+      }
+    }
   } catch (error) {
+    if (trackingExecution) {
+      const message = error instanceof Error ? error.message : String(error);
+      const failed = await markPlanExecutionResult(cwd, {
+        ok: false,
+        error: message,
+        workspaceRoot: cwd,
+      });
+      if (failed.execution?.auditReport) {
+        console.error(failed.execution.auditReport);
+      }
+    }
     if (!(error instanceof MaxTurnsExceededError)) throw error;
     messages = error.messages;
     console.error(`[max_turns] reached limit ${error.maxTurns}; returning partial history`);
+    if (trackingExecution) {
+      // MaxTurns is partial success for history, but treat as failed execution
+      // already marked above only if we rethrow path; MaxTurns is caught so mark failed already
+    }
   } finally {
     activePermissionTurn.close();
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
@@ -448,22 +696,24 @@ async function main(): Promise<void> {
 
     // --plan: save the generated plan to disk, show preview, ask for approval
     if (planOnly) {
-      const planPath = await savePlan(cwd, prompt, answer, { approval: "pending" });
+      const doc = await createAndSavePlan(cwd, prompt, answer, {
+        autoApprove: planYes,
+        approvedBy: planYes ? "auto--yes" : undefined,
+      });
       console.log(answer);
-      console.error(`\n[plan] saved to ${planPath}`);
+      console.error(`\n[plan] saved (id=${doc.id}, status=${doc.status})`);
 
       // Show formatted preview
-      const summary = parsePlan(prompt, answer);
+      const summary = planDocumentToSummary(doc);
       console.error(formatPlanPreview(summary));
 
       if (planYes) {
-        // Auto-approve in --yes mode
-        await approvePlanAt(cwd, "auto--yes");
         console.error("[plan] auto-approved (--yes flag).");
         console.error("Run again with --plan-execute to execute this plan.");
       } else {
         console.error("");
         console.error("Plan saved. Review the summary above, then run:");
+        console.error("  npx mini-agent-loop --plan-approve");
         console.error("  npx mini-agent-loop --plan-execute \"execute the plan\"");
         console.error("Or auto-approve with: --plan --yes");
       }

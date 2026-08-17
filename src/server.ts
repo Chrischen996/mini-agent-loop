@@ -60,6 +60,19 @@ import type { ModelThinkingLevel } from "./pi-ai/types.ts";
 import { PermissionManager, isPermissionMode, type PermissionDecision, type PermissionMode } from "./permissions.ts";
 import { GitWorkflow } from "./git/workflow.ts";
 import { formatValidationReport, runValidation, type ValidationStepName } from "./validation.ts";
+import {
+  approveCurrentPlan,
+  archiveCurrentPlan,
+  createAndSavePlan,
+  editCurrentPlan,
+  listPlanHistory,
+  loadPlanDocument,
+  markPlanExecutionResult,
+  PLAN_ONLY_SUFFIX,
+  preparePlanForExecution,
+  rejectCurrentPlan,
+  type PlanDocument,
+} from "./plan/index.ts";
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 5;
@@ -67,6 +80,42 @@ const MAX_ATTACHMENTS = 5;
 const DEFAULT_IMAGE_PROMPT = "Please analyze the attached image(s).";
 const DEFAULT_REFERENCE_PROMPT = "请阅读引用的文件并说明要点";
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+function sessionPlanRoot(dataRoot: string, sessionId: string): string {
+  return path.join(dataRoot, "session-plans", sessionId);
+}
+
+function planSummaryPayload(plan: PlanDocument): Record<string, unknown> {
+  return {
+    id: plan.id,
+    status: plan.status,
+    prompt: plan.prompt.slice(0, 200),
+    approvedBy: plan.approvedBy,
+    updatedAt: plan.updatedAt,
+    files: plan.files,
+    steps: plan.steps?.map((s) => ({
+      index: s.index,
+      text: s.text.slice(0, 120),
+      status: s.status ?? "todo",
+      files: s.files,
+    })),
+    changedFiles: plan.execution?.changedFiles,
+    missingPlannedFiles: plan.execution?.missingPlannedFiles,
+    unplannedFiles: plan.execution?.unplannedFiles,
+    auditReport: plan.execution?.auditReport,
+  };
+}
+
+function planHttpError(error: unknown): { status: number; message: string } {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/no (saved )?plan/i.test(message) || /no plan found/i.test(message)) {
+    return { status: 404, message };
+  }
+  if (/not approved|rejected|cannot execute/i.test(message)) {
+    return { status: 400, message };
+  }
+  return { status: 500, message };
+}
 
 type Session = {
   id: string;
@@ -1024,7 +1073,454 @@ export function createAgentServer(options: AgentServerOptions): Express {
     response.json({ resolved: true, decision });
   });
 
-  app.get("/api/sessions/:id", (request, response) => {
+  // ── Session plan API (per-session plan kernel root) ─────────────────────────
+
+  app.get("/api/sessions/:id/plan", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const plan = await loadPlanDocument(sessionPlanRoot(dataRoot, session.id));
+    response.json({ plan });
+  });
+
+  app.post("/api/sessions/:id/plan", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const prompt = typeof request.body?.prompt === "string" ? request.body.prompt.trim() : "";
+    const planMarkdown = typeof request.body?.plan === "string" ? request.body.plan : "";
+    if (!prompt) {
+      response.status(400).json({ error: "prompt is required" });
+      return;
+    }
+    if (!planMarkdown.trim()) {
+      response.status(400).json({ error: "plan is required" });
+      return;
+    }
+    const autoApprove = Boolean(request.body?.autoApprove);
+    const planRoot = sessionPlanRoot(dataRoot, session.id);
+    const plan = await createAndSavePlan(planRoot, prompt, planMarkdown, {
+      autoApprove,
+      approvedBy: autoApprove ? "api" : undefined,
+    });
+    response.status(201).json({ plan });
+  });
+
+  app.post("/api/sessions/:id/plan/approve", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const by = typeof request.body?.by === "string" && request.body.by.trim()
+      ? request.body.by.trim()
+      : "api";
+    try {
+      const plan = await approveCurrentPlan(sessionPlanRoot(dataRoot, session.id), by);
+      response.json({ plan });
+    } catch (error) {
+      const { status, message } = planHttpError(error);
+      response.status(status).json({ error: message });
+    }
+  });
+
+  app.post("/api/sessions/:id/plan/reject", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    try {
+      const plan = await rejectCurrentPlan(sessionPlanRoot(dataRoot, session.id));
+      response.json({ plan });
+    } catch (error) {
+      const { status, message } = planHttpError(error);
+      response.status(status).json({ error: message });
+    }
+  });
+
+  app.post("/api/sessions/:id/plan/edit", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const planMarkdown = typeof request.body?.plan === "string" ? request.body.plan : "";
+    if (!planMarkdown.trim()) {
+      response.status(400).json({ error: "plan is required" });
+      return;
+    }
+    try {
+      const plan = await editCurrentPlan(sessionPlanRoot(dataRoot, session.id), planMarkdown);
+      response.json({ plan });
+    } catch (error) {
+      const { status, message } = planHttpError(error);
+      response.status(status).json({ error: message });
+    }
+  });
+
+  app.post("/api/sessions/:id/plan/archive", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    try {
+      const result = await archiveCurrentPlan(sessionPlanRoot(dataRoot, session.id));
+      response.json({ plan: result.document, archivedPath: result.archivedPath });
+    } catch (error) {
+      const { status, message } = planHttpError(error);
+      response.status(status).json({ error: message });
+    }
+  });
+
+  app.get("/api/sessions/:id/plan/history", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const plans = await listPlanHistory(sessionPlanRoot(dataRoot, session.id));
+    response.json({ plans });
+  });
+
+  app.post("/api/sessions/:id/plan/generate", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    if (session.busy) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
+    const prompt = typeof request.body?.prompt === "string" ? request.body.prompt.trim() : "";
+    if (!prompt) {
+      response.status(400).json({ error: "prompt is required" });
+      return;
+    }
+
+    session.busy = true;
+    const planRoot = sessionPlanRoot(dataRoot, session.id);
+    const previousMode = session.permissionManager.getMode();
+    let modeChanged = false;
+    const abortController = new AbortController();
+    const onClientAbort = () => {
+      if (!abortController.signal.aborted) abortController.abort();
+    };
+    request.on("aborted", onClientAbort);
+    request.on("close", () => {
+      if (!response.headersSent) onClientAbort();
+    });
+
+    try {
+      if (previousMode !== "plan") {
+        session.permissionManager.setMode("plan");
+        modeChanged = true;
+      }
+
+      const permissionTurn = session.permissionManager.beginTurn(
+        session.id,
+        () => {
+          /* plan generation is non-interactive */
+        },
+        abortController.signal,
+      );
+
+      const sessionLlm = session.llmOverride ?? options.llm;
+      const parentRuntime: AgentRuntimeRef = {};
+      const generatePrompt = prompt + PLAN_ONLY_SUFFIX;
+
+      try {
+        session.messages = await runAgentTurn(
+          session.messages,
+          generatePrompt,
+          {
+            llm: sessionLlm,
+            tools,
+            autoSubagent: options.autoSubagent,
+            preprocessors: options.preprocessors ?? [],
+            chat: options.chat,
+            signal: abortController.signal,
+            permissionTurn,
+            autoValidate: false,
+            validationWorkspace: workspace,
+            autoCheckpoint: false,
+            thinkingMode: session.thinkingMode ?? options.thinkingMode ?? loadThinkingModeFromEnv(),
+            maxThinkingEscalations: options.maxThinkingEscalations,
+            runtimeRef: parentRuntime,
+            prepareNextTurn: async (context) => {
+              const update = await options.prepareNextTurn?.(context);
+              if (update?.llm) {
+                session.llmOverride = update.llm;
+                session.modelId = `${update.llm.provider}/${update.llm.model}`;
+                session.thinkingLevel = update.llm.thinkingLevel;
+              }
+              return update;
+            },
+          },
+        );
+      } finally {
+        permissionTurn.close();
+      }
+
+      const lastAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
+      const answer =
+        lastAssistant && lastAssistant.role === "assistant"
+          ? String(lastAssistant.content)
+          : "";
+      if (!answer.trim()) {
+        response.status(502).json({ error: "Agent did not return a plan" });
+        return;
+      }
+
+      const plan = await createAndSavePlan(planRoot, prompt, answer);
+      await saveSession(session);
+      response.json({ plan, answer });
+    } catch (error) {
+      if (isAbortError(error)) {
+        response.status(499).json({ error: "Plan generation aborted" });
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      response.status(500).json({ error: message });
+    } finally {
+      request.off("aborted", onClientAbort);
+      if (modeChanged) {
+        session.permissionManager.setMode(previousMode);
+      }
+      session.busy = false;
+    }
+  });
+
+  const runPlanExecution = async (request: Request, response: Response, isRetry: boolean): Promise<void> => {
+    const sessionId = String(request.params.id);
+    const session = sessions.get(sessionId);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    if (session.busy) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
+
+    const planRoot = sessionPlanRoot(dataRoot, session.id);
+    let prepared: Awaited<ReturnType<typeof preparePlanForExecution>>;
+    try {
+      prepared = await preparePlanForExecution(planRoot, {
+        yes: Boolean(request.body?.yes),
+        force: Boolean(request.body?.force),
+        workspaceRoot: workspace,
+      });
+    } catch (error) {
+      const { status, message } = planHttpError(error);
+      response.status(status).json({ error: message });
+      return;
+    }
+
+    session.busy = true;
+    const previousMode = session.permissionManager.getMode();
+    let modeChanged = false;
+    if (previousMode !== "bypass") {
+      session.permissionManager.setMode("bypass");
+      modeChanged = true;
+    }
+
+    response.status(200);
+    response.set({
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    });
+    response.flushHeaders();
+
+    const abortController = new AbortController();
+    const onClientAbort = () => {
+      if (!abortController.signal.aborted) abortController.abort();
+    };
+    const onResponseClose = () => {
+      if (!response.writableFinished) onClientAbort();
+    };
+    request.on("aborted", onClientAbort);
+    response.on("close", onResponseClose);
+
+    const send = (payload: Record<string, unknown>): void => {
+      if (!response.writableEnded) {
+        response.write(`${JSON.stringify(payload)}\n`);
+      }
+    };
+
+    const permissionTurn = session.permissionManager.beginTurn(
+      session.id,
+      (permissionRequest) => send(safeEvent({ type: "permission_required", request: permissionRequest })),
+      abortController.signal,
+    );
+
+    send({
+      type: "plan_execution_started",
+      planId: prepared.document.id,
+      status: prepared.document.status,
+      prompt: prepared.document.prompt.slice(0, 200),
+      retry: isRetry,
+    });
+    send({ type: "plan_updated", plan: planSummaryPayload(prepared.document) });
+
+    const executionUserText = `Execute the approved plan.${prepared.executionPromptSuffix}`;
+    const parentRuntime: AgentRuntimeRef = {};
+
+    try {
+      const operationScope = randomUUID();
+      const documentTool = createDocumentEditTool(
+        documentStore,
+        String(request.params.id),
+        operationScope,
+      ) as Tool;
+      const sessionLlm = session.llmOverride ?? options.llm;
+      const baseToolProvider: ToolProvider = () => [...resolveToolProvider(tools), documentTool];
+      const enableSubagent = options.subagentEnabled || (options.subagentProfiles && options.subagentProfiles.length > 0);
+      const sessionTools: ToolProvider = enableSubagent
+        ? () => {
+            const base = resolveToolProvider(baseToolProvider);
+            const subagentOpts = {
+              parentLlm: sessionLlm,
+              parentTools: base,
+              profiles: options.subagentProfiles ?? defaultProfiles,
+              preprocessors: options.preprocessors ?? [],
+              signal: abortController.signal,
+              onSubagentEvent: (subEvent: import("./subagent/types.ts").SubagentEvent) => send(safeEvent(subEvent)),
+              permissionTurn,
+              thinkingMode: session.thinkingMode ?? options.thinkingMode ?? loadThinkingModeFromEnv(),
+              maxThinkingEscalations: options.maxThinkingEscalations,
+              parentRuntime,
+            };
+            return [
+              ...base,
+              createSubagentTool(subagentOpts) as Tool,
+              createSubagentBatchTool(subagentOpts) as Tool,
+            ];
+          }
+        : baseToolProvider;
+
+      session.messages = await runAgentTurn(
+        session.messages,
+        executionUserText,
+        {
+          llm: sessionLlm,
+          tools: sessionTools,
+          autoSubagent: options.autoSubagent,
+          preprocessors: options.preprocessors ?? [],
+          chat: options.chat,
+          signal: abortController.signal,
+          permissionTurn,
+          autoValidate: options.autoValidate ?? process.env.MINI_AGENT_AUTO_VALIDATE === "1",
+          validationWorkspace: workspace,
+          autoCheckpoint: options.autoCheckpoint ?? process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
+          thinkingMode: session.thinkingMode ?? options.thinkingMode ?? loadThinkingModeFromEnv(),
+          maxThinkingEscalations: options.maxThinkingEscalations,
+          runtimeRef: parentRuntime,
+          prepareNextTurn: async (context) => {
+            const update = await options.prepareNextTurn?.(context);
+            if (update?.llm) {
+              session.llmOverride = update.llm;
+              session.modelId = `${update.llm.provider}/${update.llm.model}`;
+              session.thinkingLevel = update.llm.thinkingLevel;
+            }
+            return update;
+          },
+          onEvent: (event) => {
+            if (event.type === "thinking_policy") {
+              session.thinkingLevel = event.level;
+              session.llmOverride = withThinkingLevel(session.llmOverride ?? sessionLlm, event.level);
+            }
+            send(safeEvent(event));
+            if (event.type === "tool_end" && event.result.files) {
+              for (const file of event.result.files) {
+                send({
+                  type: "file_ready",
+                  ...file,
+                  downloadUrl: `/api/sessions/${request.params.id}/files/${file.id}`,
+                });
+              }
+            }
+          },
+        },
+      );
+
+      const lastAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
+      const summary =
+        lastAssistant && lastAssistant.role === "assistant"
+          ? String(lastAssistant.content).slice(0, 500)
+          : undefined;
+      const completed = await markPlanExecutionResult(planRoot, {
+        ok: true,
+        summary,
+        workspaceRoot: workspace,
+      });
+      await saveSession(session);
+      send({ type: "plan_updated", plan: planSummaryPayload(completed) });
+      send({
+        type: "plan_execution_finished",
+        status: completed.status,
+        plan: planSummaryPayload(completed),
+        changedFiles: completed.execution?.changedFiles ?? [],
+        missingPlannedFiles: completed.execution?.missingPlannedFiles ?? [],
+        unplannedFiles: completed.execution?.unplannedFiles ?? [],
+        auditReport: completed.execution?.auditReport,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      try {
+        const failed = await markPlanExecutionResult(planRoot, {
+          ok: false,
+          error: message,
+          workspaceRoot: workspace,
+        });
+        send({ type: "plan_updated", plan: planSummaryPayload(failed) });
+        send({
+          type: "plan_execution_finished",
+          status: failed.status,
+          plan: planSummaryPayload(failed),
+          error: message,
+          changedFiles: failed.execution?.changedFiles ?? [],
+          missingPlannedFiles: failed.execution?.missingPlannedFiles ?? [],
+          unplannedFiles: failed.execution?.unplannedFiles ?? [],
+          auditReport: failed.execution?.auditReport,
+        });
+      } catch {
+        // ignore secondary plan write failures
+      }
+      if (isAbortError(err)) {
+        send({ type: "aborted", message: "已停止生成" });
+      } else {
+        send({ type: "error", message, retryable: isRetryableError(message) });
+      }
+      await saveSession(session);
+    } finally {
+      permissionTurn.close();
+      request.off("aborted", onClientAbort);
+      response.off("close", onResponseClose);
+      if (modeChanged) {
+        session.permissionManager.setMode(previousMode);
+      }
+      session.busy = false;
+      if (!response.writableEnded) response.end();
+    }
+  };
+
+  app.post("/api/sessions/:id/plan/execute", async (request, response) => {
+    await runPlanExecution(request, response, false);
+  });
+
+  app.post("/api/sessions/:id/plan/retry", async (request, response) => {
+    await runPlanExecution(request, response, true);
+  });
+
+  app.get("/api/sessions/:id", async (request, response) => {
     const session = sessions.get(request.params.id);
     if (!session) {
       response.status(404).json({ error: "Session not found" });
@@ -1032,14 +1528,22 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
     const effectiveLlm = session.llmOverride ?? options.llm;
     const resolved = resolveModel(effectiveLlm.model, effectiveLlm.baseUrl);
+    let planStatus: string | null = null;
+    try {
+      const plan = await loadPlanDocument(sessionPlanRoot(dataRoot, session.id));
+      planStatus = plan?.status ?? null;
+    } catch {
+      planStatus = null;
+    }
     response.json({
       id: session.id,
       busy: session.busy,
-        modelId: session.modelId,
-        thinkingMode: session.thinkingMode ?? loadThinkingModeFromEnv(),
+      modelId: session.modelId,
+      thinkingMode: session.thinkingMode ?? loadThinkingModeFromEnv(),
       parentSessionId: session.parentSessionId ?? null,
       forkedFromMessage: session.forkedFromMessage ?? null,
       permissionMode: session.permissionManager.getMode(),
+      planStatus,
       model: effectiveLlm.model,
       thinkingLevel: effectiveLlm.thinkingLevel ?? (effectiveLlm.reasoning ? "medium" : "off"),
       contextWindow: resolved.contextWindow,

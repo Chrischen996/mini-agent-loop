@@ -472,7 +472,23 @@ PUT    /api/sessions/:id/permission-mode  { mode: plan|bypass }
 POST   /api/sessions/:id/permissions/:requestId  { decision: allow|deny }
 DELETE /api/sessions/:id
 POST   /api/sessions/:id/messages  multipart(prompt, referencedPaths, images) -> NDJSON stream
+
+# Per-session plan workflow (stored under dataDir/session-plans/:id)
+GET    /api/sessions/:id/plan
+POST   /api/sessions/:id/plan                 { prompt, plan, autoApprove? }
+POST   /api/sessions/:id/plan/approve         { by? }
+POST   /api/sessions/:id/plan/reject
+POST   /api/sessions/:id/plan/edit            { plan }
+POST   /api/sessions/:id/plan/archive
+GET    /api/sessions/:id/plan/history
+POST   /api/sessions/:id/plan/generate        { prompt } -> { plan, answer }
+POST   /api/sessions/:id/plan/execute         { yes?, force? } -> NDJSON stream
+POST   /api/sessions/:id/plan/retry           { yes?, force? } -> NDJSON stream
 ```
+
+Plan execute/retry streams the usual agent NDJSON events plus:
+`plan_execution_started`, `plan_updated`, and `plan_execution_finished`.
+Session detail (`GET /api/sessions/:id`) includes `planStatus` when a plan exists.
 
 ## Terminal TUI
 
@@ -492,9 +508,36 @@ npm run tui
 Use `/model`, `/clear`, `/quit`, or `Ctrl+C` inside the terminal client. `/model`
 also accepts `--base-url`, `--api-key-env`, and temporary `--api-key` overrides. The
 previous dependency-free ANSI client remains available as `npm run tui:legacy`.
+TUI supports plan workflow slash commands: `/plan`, `/plan-show`, `/plan-approve`,
+`/plan-reject`, `/plan-run`, `/plan-retry`, `/plan-history`, `/plan-archive`.
 CLI one-shot runs accept `--mode plan|bypass` (default `plan`).
 `--plan` forces plan mode; `--plan-execute` loads a saved plan and runs it in
 `bypass`. Use `--mode=bypass` for unattended execution that may write files.
+
+### Plan workflow
+
+Plans are stored under `.mini-agent/plan/` (current + history archive).
+
+| Flag | Action |
+|------|--------|
+| `--plan` | Generate a plan only (no writes) |
+| `--plan --yes` | Generate and auto-approve |
+| `--plan-show` | Show current plan (metadata + preview) |
+| `--plan-approve` / `--plan-reject` | Approve or reject current plan |
+| `--plan-execute` / `--plan-retry` | Execute / retry a saved plan |
+| `--plan-force` | Force execution even if rejected/pending |
+| `--plan-edit` | Open `$EDITOR` / `$VISUAL` / `vi` on current plan markdown |
+| `--plan-set-file <path>` | Replace current plan markdown from a file |
+| `--plan-history` | List archived plans |
+| `--plan-archive` | Snapshot current plan into history |
+
+After execution, the workflow runs a **file audit** (git status/diff when available):
+planned vs changed files, unplanned edits, and inferred per-step status
+(`todo` / `doing` / `done` / `failed`). The audit is stored on the plan document
+and printed by CLI / TUI / server events.
+
+Successful `--plan-execute` runs auto-archive a completed copy to
+`.mini-agent/plan/history/<id>.json` (current plan is left in place).
 
 Thinking strength is configured independently from model selection. In either
 TUI, press `Ctrl+R` to cycle through all levels supported by the active model;

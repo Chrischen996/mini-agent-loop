@@ -137,6 +137,64 @@ describe("parseCliArgs", () => {
     assert.equal(result.planYes, true);
   });
 
+  it("parses new plan workflow flags", () => {
+    const result = parseCliArgs([
+      "--plan-retry",
+      "--plan-force",
+      "--plan-show",
+      "--plan-approve",
+      "--plan-reject",
+      "retry it",
+    ]);
+    assert.equal(result.planRetry, true);
+    assert.equal(result.planForce, true);
+    assert.equal(result.planShow, true);
+    assert.equal(result.planApprove, true);
+    assert.equal(result.planReject, true);
+    assert.equal(result.prompt, "retry it");
+  });
+
+  it("parses plan edit/history/archive flags", () => {
+    const result = parseCliArgs([
+      "--plan-edit",
+      "--plan-set-file",
+      "plan.md",
+      "--plan-history",
+      "--plan-archive",
+      "ignored prompt",
+    ]);
+    assert.equal(result.planEdit, true);
+    assert.equal(result.planSetFile, "plan.md");
+    assert.equal(result.planHistory, true);
+    assert.equal(result.planArchive, true);
+  });
+
+  it("parses --plan-set-file= syntax", () => {
+    const result = parseCliArgs(["--plan-set-file=./plans/x.md"]);
+    assert.equal(result.planSetFile, "./plans/x.md");
+    assert.equal(result.planEdit, false);
+  });
+
+  it("throws when --plan-set-file has no path", () => {
+    assert.throws(
+      () => parseCliArgs(["--plan-set-file"]),
+      /--plan-set-file requires a path/,
+    );
+  });
+
+  it("defaults new plan flags to false", () => {
+    const result = parseCliArgs(["hello"]);
+    assert.equal(result.planRetry, false);
+    assert.equal(result.planForce, false);
+    assert.equal(result.planShow, false);
+    assert.equal(result.planApprove, false);
+    assert.equal(result.planReject, false);
+    assert.equal(result.planEdit, false);
+    assert.equal(result.planSetFile, undefined);
+    assert.equal(result.planHistory, false);
+    assert.equal(result.planArchive, false);
+  });
+
   it("throws for invalid mode", () => {
     assert.throws(() => parseCliArgs(["--mode", "invalid"]), /Invalid mode/);
     assert.throws(() => parseCliArgs(["--mode"]), /--mode requires an argument/);

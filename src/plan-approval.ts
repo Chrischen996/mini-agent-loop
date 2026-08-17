@@ -11,6 +11,7 @@ import { createInterface } from "node:readline";
 import type { PlanSummary } from "./plan-formatter.ts";
 import { formatPlanPreview, parsePlan } from "./plan-formatter.ts";
 import type { PlanFile } from "./plan-persist.ts";
+import { planDocumentToSummary, type PlanDocument } from "./plan/index.ts";
 
 export type ApprovalDecision =
   | { kind: "approve" }
@@ -77,4 +78,11 @@ export type PlanWorkflowResult =
  */
 export function planFileToSummary(plan: PlanFile): PlanSummary {
   return parsePlan(plan.prompt, plan.plan);
+}
+
+/**
+ * Format a PlanDocument into a PlanSummary for display.
+ */
+export function planDocumentToApprovalSummary(doc: PlanDocument): PlanSummary {
+  return planDocumentToSummary(doc);
 }

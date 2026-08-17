@@ -79,6 +79,18 @@ import {
   MAX_TUI_IMAGES,
   readClipboardImage,
 } from "./image-attachments.ts";
+import {
+  PLAN_ONLY_SUFFIX,
+  approveCurrentPlan,
+  archiveCurrentPlan,
+  createAndSavePlan,
+  formatPlanDocumentPreview,
+  listPlanHistory,
+  loadPlanDocument,
+  markPlanExecutionResult,
+  preparePlanForExecution,
+  rejectCurrentPlan,
+} from "../plan/index.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
@@ -275,6 +287,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const abortRef = useRef<AbortController>(new AbortController());
   const permissionManagerRef = useRef<PermissionManager | null>(null);
   const permissionTurnRef = useRef<PermissionTurnContext | null>(null);
+  const planCaptureRef = useRef<{ prompt: string } | null>(null);
+  const execCaptureRef = useRef<{ mode: "run" | "retry" } | null>(null);
   const pendingPermissionRef = useRef(false);
   pendingPermissionRef.current = Boolean(state.pendingPermission);
   // Profile state
@@ -983,6 +997,161 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
 
+    // ── Plan workflow slash commands ───────────────────────────────────────
+    if (trimmed === "/plan-show") {
+      setInput("");
+      try {
+        const doc = await loadPlanDocument(cwd);
+        if (!doc) {
+          dispatch({ type: "ADD_NOTICE", title: "计划", text: "当前没有保存的计划。使用 /plan <任务> 生成。" });
+        } else {
+          dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
+        }
+      } catch (err) {
+        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+
+    if (trimmed === "/plan-approve") {
+      setInput("");
+      try {
+        const doc = await approveCurrentPlan(cwd, "user");
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "计划已批准",
+          text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}`,
+        });
+      } catch (err) {
+        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+
+    if (trimmed === "/plan-reject") {
+      setInput("");
+      try {
+        const doc = await rejectCurrentPlan(cwd);
+        dispatch({ type: "ADD_NOTICE", title: "计划已拒绝", text: `id=${doc.id} status=${doc.status}` });
+      } catch (err) {
+        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+
+    if (trimmed === "/plan-history") {
+      setInput("");
+      try {
+        const history = await listPlanHistory(cwd);
+        if (history.length === 0) {
+          dispatch({ type: "ADD_NOTICE", title: "计划历史", text: "尚无归档计划。" });
+        } else {
+          const lines = history.map((doc) => {
+            const promptSlice = doc.prompt.length > 60 ? `${doc.prompt.slice(0, 60)}…` : doc.prompt;
+            return `${doc.id}  ${doc.status.padEnd(10)}  ${doc.updatedAt}  ${promptSlice}`;
+          });
+          dispatch({ type: "ADD_NOTICE", title: "计划历史", text: lines.join("\n") });
+        }
+      } catch (err) {
+        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+
+    if (trimmed === "/plan-archive") {
+      setInput("");
+      try {
+        const { archivedPath, document } = await archiveCurrentPlan(cwd);
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "计划已归档",
+          text: `id=${document.id}\npath=${archivedPath}`,
+        });
+      } catch (err) {
+        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+
+    // Plan generation / execution may fall through into the normal agent turn.
+    // These overrides let slash commands reuse the existing run path.
+    let planTurnOverride: {
+      displayText: string;
+      prompt: string;
+      forceMode?: PermissionMode;
+      restoreMode?: PermissionMode;
+    } | null = null;
+
+    // /plan [task] — generate a plan via agent turn in plan mode
+    const planMatch = trimmed.match(/^\/plan(?:\s+(.*))?$/i);
+    if (planMatch && !trimmed.startsWith("/plan-")) {
+      const task = (planMatch[1] ?? "").trim();
+      if (!task) {
+        setInput("");
+        try {
+          const doc = await loadPlanDocument(cwd);
+          if (doc) {
+            dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
+          } else {
+            dispatch({ type: "ADD_NOTICE", title: "计划", text: "用法: /plan <任务>" });
+          }
+        } catch (err) {
+          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+        }
+        return;
+      }
+
+      planCaptureRef.current = { prompt: task };
+      execCaptureRef.current = null;
+      const permissionManager = getPermissionManager();
+      if (permissionManager.getMode() !== "plan") {
+        permissionManager.setMode("plan");
+        dispatch({ type: "SET_PERMISSION_MODE", mode: "plan" });
+      }
+      planTurnOverride = {
+        displayText: `/plan ${task}`,
+        prompt: task + PLAN_ONLY_SUFFIX,
+        forceMode: "plan",
+      };
+    }
+
+    // /plan-run and /plan-retry — execute approved plan in bypass mode
+    if (!planTurnOverride && (trimmed === "/plan-run" || trimmed === "/plan-retry")) {
+      const isRetry = trimmed === "/plan-retry";
+      let executionPromptSuffix: string;
+      try {
+        const prepared = await preparePlanForExecution(cwd, {
+          yes: false,
+          workspaceRoot: cwd,
+        });
+        executionPromptSuffix = prepared.executionPromptSuffix;
+        dispatch({
+          type: "ADD_NOTICE",
+          title: isRetry ? "重试计划" : "执行计划",
+          text: `id=${prepared.document.id} status=executing\nprompt: ${prepared.document.prompt}`,
+        });
+      } catch (err) {
+        setInput("");
+        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+
+      execCaptureRef.current = { mode: isRetry ? "retry" : "run" };
+      planCaptureRef.current = null;
+      const permissionManager = getPermissionManager();
+      const previousMode = permissionManager.getMode();
+      if (previousMode !== "bypass") {
+        permissionManager.setMode("bypass");
+        dispatch({ type: "SET_PERMISSION_MODE", mode: "bypass" });
+      }
+      planTurnOverride = {
+        displayText: trimmed,
+        prompt: `Execute the approved plan.${executionPromptSuffix}`,
+        forceMode: "bypass",
+        restoreMode: previousMode,
+      };
+    }
+
     // /profiles: show profile list
     if (/^\/profiles?$/i.test(trimmed)) {
       await openProfileList();
@@ -1034,13 +1203,15 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
 
-    const pendingImgs = [...pendingImagesRef.current];
-    if (!trimmed && pendingImgs.length === 0) {
+    const pendingImgs = planTurnOverride ? [] : [...pendingImagesRef.current];
+    if (!planTurnOverride && !trimmed && pendingImgs.length === 0) {
       setInput("");
       return;
     }
-    const prompt = trimmed || DEFAULT_IMAGE_PROMPT;
-    const parsedThinking = parseThinkingIntensityPrompt(prompt);
+    const prompt = planTurnOverride?.prompt ?? (trimmed || DEFAULT_IMAGE_PROMPT);
+    const parsedThinking = planTurnOverride
+      ? { intensity: undefined as undefined }
+      : parseThinkingIntensityPrompt(prompt);
     let turnLlm = parsedThinking.intensity
       ? buildIntenseLlm(llm, parsedThinking.intensity)
       : llm;
@@ -1056,9 +1227,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
     setInput("");
     pendingImagesRef.current = [];
-    if (pendingImgs.length > 0) dispatch({ type: "CLEAR_PENDING_IMAGES" });
+    if (state.pendingImages.length > 0) dispatch({ type: "CLEAR_PENDING_IMAGES" });
     abortRef.current = new AbortController();
     const permissionManager = getPermissionManager();
+    if (planTurnOverride?.forceMode && permissionManager.getMode() !== planTurnOverride.forceMode) {
+      permissionManager.setMode(planTurnOverride.forceMode);
+      dispatch({ type: "SET_PERMISSION_MODE", mode: planTurnOverride.forceMode });
+    }
     const permissionTurn = permissionManager.beginTurn(
       permissionSessionId,
       (request) => dispatch({ type: "LOOP_EVENT", event: { type: "permission_required", request } }),
@@ -1066,24 +1241,38 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     );
     permissionTurnRef.current = permissionTurn;
     // Collapse multi-line pastes into a summary for display, but keep full text for model context.
-    const normalizedPrompt = prompt.replace(/\r\n/g, '\n');
-    const isMultiLine = normalizedPrompt.includes('\n');
+    const displaySource = planTurnOverride?.displayText ?? prompt;
+    const normalizedPrompt = displaySource.replace(/\r\n/g, '\n');
+    const isMultiLine = !planTurnOverride && normalizedPrompt.includes('\n');
     const lineCount = isMultiLine ? normalizedPrompt.split('\n').length : 1;
     // Count graphemes properly (emoji = 1 char, not 2 UTF-16 units)
     const charCount = [...normalizedPrompt].length;
-    const displayText = isMultiLine
-      ? `[已复制 ${lineCount} 行 / ${charCount} 字]`
-      : undefined;
-    dispatch({ type: "USER_MESSAGE", text: prompt, ...(displayText !== undefined ? { displayText } : {}), images: pendingImgs });
+    const displayText = planTurnOverride
+      ? planTurnOverride.displayText
+      : isMultiLine
+        ? `[已复制 ${lineCount} 行 / ${charCount} 字]`
+        : undefined;
+    dispatch({
+      type: "USER_MESSAGE",
+      text: planTurnOverride ? planTurnOverride.displayText : prompt,
+      ...(displayText !== undefined && !planTurnOverride ? { displayText } : {}),
+      images: pendingImgs,
+    });
 
     const streamBuffer = streamBufferRef.current!;
     const runId = streamBuffer.start();
     const MAX_AUTO_CONTINUES = 5;
     let autoContinueCount = 0;
-    let currentUserText = prompt.replace(/@\S+/g, "").replace(/\s{2,}/g, " ").trim();
-    const thinkingMode = parsedThinking.intensity
-      ? "fixed"
-      : parseThinkingCommandMode(prompt) ?? loadThinkingModeFromEnv();
+    let currentUserText = planTurnOverride
+      ? prompt
+      : prompt.replace(/@\S+/g, "").replace(/\s{2,}/g, " ").trim();
+    const thinkingMode = planTurnOverride
+      ? loadThinkingModeFromEnv()
+      : parsedThinking.intensity
+        ? "fixed"
+        : parseThinkingCommandMode(prompt) ?? loadThinkingModeFromEnv();
+    let turnSucceeded = false;
+    let turnErrorMessage: string | undefined;
 
     const onLoopEvent = (event: LoopEvent) => {
       if (event.type === "thinking_policy") {
@@ -1108,7 +1297,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     };
 
     try {
-      let currentUserContent = await resolveAtRefs(prompt, permissionTurn);
+      let currentUserContent = planTurnOverride
+        ? prompt
+        : await resolveAtRefs(prompt, permissionTurn);
       if (imageParts.length > 0) {
         const contentParts = typeof currentUserContent === "string"
           ? [{ type: "text" as const, text: currentUserContent }]
@@ -1136,6 +1327,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             onEvent: onLoopEvent,
           });
           streamBuffer.finish(runId);
+          turnSucceeded = true;
           break;
         } catch (err) {
           if (err instanceof MaxTurnsExceededError) {
@@ -1143,6 +1335,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             autoContinueCount++;
             if (autoContinueCount >= MAX_AUTO_CONTINUES || permissionTurn.signal.aborted) {
               streamBuffer.finish(runId);
+              turnErrorMessage = permissionTurn.signal.aborted
+                ? "aborted"
+                : `已达到自动续跑上限 (${MAX_AUTO_CONTINUES} 次)`;
               if (permissionTurn.signal.aborted) {
                 const reason = permissionTurn.signal.reason;
                 dispatch({
@@ -1158,7 +1353,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                     : { type: "aborted", messages: historyRef.current },
                 });
               } else {
-                dispatch({ type: "LOOP_EVENT", event: { type: "error", message: `已达到自动续跑上限 (${MAX_AUTO_CONTINUES} 次)` } });
+                dispatch({ type: "LOOP_EVENT", event: { type: "error", message: turnErrorMessage } });
               }
               break;
             }
@@ -1172,7 +1367,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             // turn starts from the known state instead of losing the streamed output.
             historyRef.current = err.messages;
             streamBuffer.finish(runId);
-            dispatch({ type: "LOOP_EVENT", event: { type: "error", message: `LLM timeout — partial response saved (${err.partialContent?.substring(0, 80) || ""})` } });
+            turnErrorMessage = `LLM timeout — partial response saved (${err.partialContent?.substring(0, 80) || ""})`;
+            dispatch({ type: "LOOP_EVENT", event: { type: "error", message: turnErrorMessage } });
             break;
           }
           throw err;
@@ -1180,6 +1376,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       }
     } catch (err) {
       streamBuffer.finish(runId);
+      turnErrorMessage = err instanceof Error ? err.message : String(err);
       if (err instanceof PermissionModeChangedError || permissionTurn.signal.aborted) {
         const reason = permissionTurn.signal.reason;
         dispatch({
@@ -1195,11 +1392,95 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             : { type: "aborted", messages: historyRef.current },
         });
       } else {
-        dispatch({ type: "LOOP_EVENT", event: { type: "error", message: err instanceof Error ? err.message : String(err) } });
+        dispatch({ type: "LOOP_EVENT", event: { type: "error", message: turnErrorMessage } });
       }
     } finally {
       if (permissionTurnRef.current === permissionTurn) permissionTurnRef.current = null;
       permissionTurn.close();
+
+      // Restore permission mode after plan execution turns.
+      if (planTurnOverride?.restoreMode !== undefined) {
+        const restore = planTurnOverride.restoreMode;
+        if (permissionManager.getMode() !== restore) {
+          permissionManager.setMode(restore);
+          dispatch({ type: "SET_PERMISSION_MODE", mode: restore });
+        }
+      }
+
+      // After a /plan generation turn, persist the assistant answer as a plan document.
+      if (planCaptureRef.current) {
+        const capture = planCaptureRef.current;
+        planCaptureRef.current = null;
+        if (turnSucceeded) {
+          const lastAssistant = [...historyRef.current].reverse().find((m) => m.role === "assistant");
+          const answer = lastAssistant && lastAssistant.role === "assistant" ? lastAssistant.content : "";
+          if (answer.trim()) {
+            try {
+              const doc = await createAndSavePlan(cwd, capture.prompt, answer);
+              dispatch({
+                type: "ADD_NOTICE",
+                title: "计划已保存",
+                text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}\n\n使用 /plan-approve 批准，然后 /plan-run 执行。`,
+              });
+            } catch (err) {
+              dispatch({
+                type: "ADD_NOTICE",
+                title: "计划保存失败",
+                text: err instanceof Error ? err.message : String(err),
+              });
+            }
+          } else {
+            dispatch({ type: "ADD_NOTICE", title: "计划", text: "Agent 未返回可保存的计划内容。" });
+          }
+        }
+      }
+
+      // After a /plan-run or /plan-retry turn, mark execution result.
+      if (execCaptureRef.current) {
+        execCaptureRef.current = null;
+        try {
+          if (turnSucceeded) {
+            const lastAssistant = [...historyRef.current].reverse().find((m) => m.role === "assistant");
+            const summary =
+              lastAssistant && lastAssistant.role === "assistant"
+                ? String(lastAssistant.content).slice(0, 500)
+                : undefined;
+            const completed = await markPlanExecutionResult(cwd, {
+              ok: true,
+              summary,
+              workspaceRoot: cwd,
+            });
+            const audit = completed.execution?.auditReport
+              ? `\n${completed.execution.auditReport.slice(0, 400)}`
+              : "";
+            dispatch({
+              type: "ADD_NOTICE",
+              title: "计划执行完成",
+              text: `id=${completed.id} status=${completed.status}${audit}`,
+            });
+          } else {
+            const failed = await markPlanExecutionResult(cwd, {
+              ok: false,
+              error: turnErrorMessage ?? "execution failed",
+              workspaceRoot: cwd,
+            });
+            const audit = failed.execution?.auditReport
+              ? `\n${failed.execution.auditReport.slice(0, 400)}`
+              : "";
+            dispatch({
+              type: "ADD_NOTICE",
+              title: "计划执行失败",
+              text: `id=${failed.id} status=${failed.status}\n${turnErrorMessage ?? ""}${audit}`,
+            });
+          }
+        } catch (err) {
+          dispatch({
+            type: "ADD_NOTICE",
+            title: "计划结果记录失败",
+            text: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
     }
   }, [state.busy, acMode, modelSetup, pendingProfileSetup, profileListState, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup, openProfileList, getPermissionManager, addPendingImage, handlePasteImage, conversationId, cwd]);
 

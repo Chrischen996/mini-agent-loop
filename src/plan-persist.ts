@@ -1,31 +1,23 @@
 /**
- * Plan persistence — saves agent plans to disk for the two-stage
- * plan-then-execute workflow.
+ * Plan persistence — compatibility layer over the plan workflow kernel.
  *
  * Stage 1 (--plan): agent runs in plan mode, output + metadata saved
  * Stage 2 (--plan-execute): reads saved plan, runs in bypass mode with plan context
  */
 
-import { readFile, writeFile, existsSync } from "node:fs";
-import { readFile as readFileAsync, writeFile as writeFileAsync } from "node:fs/promises";
 import path from "node:path";
+import {
+  approveCurrentPlan,
+  clearPlanDocument,
+  createAndSavePlan,
+  documentToLegacyPlanFile,
+  LEGACY_PLAN_FILENAME,
+  loadPlanDocument,
+  rejectCurrentPlan,
+  type PlanFile,
+} from "./plan/index.ts";
 
-export type PlanFile = {
-  version: 1;
-  prompt: string;
-  plan: string;
-  /** Approval status: "pending" | "approved" | "rejected" */
-  approval: "pending" | "approved" | "rejected";
-  /** Approved-by: "user" | "auto--yes" */
-  approvedBy?: string;
-  /** Timestamp of last modification */
-  updatedAt: string;
-  mode: "plan";
-  cwd: string;
-  timestamp: string;
-};
-
-const PLAN_FILENAME = ".mini-agent-plan.json";
+export type { PlanFile };
 
 export async function savePlan(
   cwd: string,
@@ -33,58 +25,40 @@ export async function savePlan(
   plan: string,
   options: { approval?: PlanFile["approval"]; approvedBy?: string } = {},
 ): Promise<string> {
-  const planPath = path.join(cwd, PLAN_FILENAME);
-  const now = new Date().toISOString();
-  const planFile: PlanFile = {
-    version: 1,
-    prompt,
-    plan,
-    approval: options.approval ?? "pending",
-    approvedBy: options.approvedBy,
-    updatedAt: now,
-    mode: "plan",
-    cwd,
-    timestamp: now,
-  };
-  await writeFileAsync(planPath, JSON.stringify(planFile, null, 2), "utf8");
-  return planPath;
+  const approval = options.approval ?? "pending";
+  await createAndSavePlan(cwd, prompt, plan, {
+    autoApprove: approval === "approved",
+    approvedBy: options.approvedBy ?? (approval === "approved" ? "auto" : undefined),
+  });
+
+  // If caller requested rejected (unusual), set it after create
+  if (approval === "rejected") {
+    await rejectCurrentPlan(cwd);
+  } else if (approval === "approved" && options.approvedBy) {
+    // ensure approvedBy is exactly what caller passed
+    await approveCurrentPlan(cwd, options.approvedBy);
+  }
+
+  // Tests assert the returned path ends with the legacy filename
+  return path.join(cwd, LEGACY_PLAN_FILENAME);
 }
 
 /** Mark a plan as approved by a user. */
 export async function approvePlanAt(cwd: string, by: string): Promise<void> {
-  const plan = await loadPlan(cwd);
-  if (!plan) throw new Error("No plan found to approve");
-  plan.approval = "approved";
-  plan.approvedBy = by;
-  plan.updatedAt = new Date().toISOString();
-  const planPath = path.join(cwd, PLAN_FILENAME);
-  await writeFileAsync(planPath, JSON.stringify(plan, null, 2), "utf8");
+  await approveCurrentPlan(cwd, by);
 }
 
 /** Mark a plan as rejected. */
 export async function rejectPlanAt(cwd: string): Promise<void> {
-  const plan = await loadPlan(cwd);
-  if (!plan) throw new Error("No plan found to reject");
-  plan.approval = "rejected";
-  plan.updatedAt = new Date().toISOString();
-  const planPath = path.join(cwd, PLAN_FILENAME);
-  await writeFileAsync(planPath, JSON.stringify(plan, null, 2), "utf8");
+  await rejectCurrentPlan(cwd);
 }
 
 export async function loadPlan(cwd: string): Promise<PlanFile | null> {
-  const planPath = path.join(cwd, PLAN_FILENAME);
-  if (!existsSync(planPath)) return null;
-  try {
-    const raw = await readFileAsync(planPath, "utf8");
-    return JSON.parse(raw) as PlanFile;
-  } catch {
-    return null;
-  }
+  const doc = await loadPlanDocument(cwd);
+  if (!doc) return null;
+  return documentToLegacyPlanFile(doc);
 }
 
 export async function clearPlan(cwd: string): Promise<void> {
-  const planPath = path.join(cwd, PLAN_FILENAME);
-  if (existsSync(planPath)) {
-    await writeFileAsync(planPath, "", "utf8");
-  }
+  await clearPlanDocument(cwd);
 }
