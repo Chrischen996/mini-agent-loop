@@ -67,6 +67,11 @@ import {
 import { loadThinkingModeFromEnv, type ThinkingMode } from "./thinking-policy.ts";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
 import { PermissionManager, isPermissionMode, type PermissionDecision, type PermissionMode } from "./permissions.ts";
+import { planManager } from "./plan-act/plan-manager.ts";
+import { validatePhaseTransition } from "./plan-act/state-machine.ts";
+import { planGenerator } from "./plan-act/plan-generator.ts";
+import type { SessionPhase, ExecutionPlan } from "./plan-act/types.ts";
+import { PlanDocument, loadPlanDocument, createAndSavePlan, approveCurrentPlan, rejectCurrentPlan, editCurrentPlan, archiveCurrentPlan, listPlanHistory, preparePlanForExecution, markPlanExecutionResult, PLAN_ONLY_SUFFIX } from "./plan/index.ts";
 import { GitWorkflow } from "./git/workflow.ts";
 import { formatValidationReport, runValidation, type ValidationStepName } from "./validation.ts";
 
@@ -129,6 +134,14 @@ type Session = {
   permissionManager: PermissionManager;
   parentSessionId?: string;
   forkedFromMessage?: number;
+  /** Currently resolved skill names for this session. */
+  skillNames?: string[];
+  /** Current Plan-Act workflow phase. */
+  phase?: import('./plan-act/types.js').SessionPhase;
+  /** Currently active execution plan. */
+  currentPlan?: import('./plan-act/types.js').ExecutionPlan;
+  /** Plan history for this session. */
+  planHistory?: import('./plan-act/types.js').ExecutionPlan[];
 };
 
 export type AgentServerOptions = {
@@ -304,9 +317,7 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         } : {}),
       };
     case "plan_act_event":
-      return { type: "plan_act_event", event: safePlanActEvent(event.event) };
-    case "plan_act_event":
-      return { type: "plan_act_event", eventType: event.event.type, ...event.event };
+      return { eventType: event.event.type, ...event.event };
     case "done":
       return { type: "done", messageCount: event.messages.length };
     case "model_switched":
@@ -598,7 +609,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     ...loadSkillNamesFromEnv(),
   ]);
   const resolveSessionSkillNames = (session: Session): string[] =>
-    activateSkillNames(session.skillNames, skillRegistry).activeNames;
+    activateSkillNames(session.skillNames ?? [], skillRegistry).activeNames;
   const skillDiscovery = discoverWorkspaceSkills(workspace, skillRegistry, options.skillHome);
   const envPermissionMode = process.env.MINI_AGENT_PERMISSION_MODE;
   // All entry points use plan unless an explicit mode is configured.
@@ -1125,7 +1136,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(400).json({ error: "phase is required" });
       return;
     }
-    const result = validatePhaseTransition(session.phase, targetPhase, request.body);
+    const result = validatePhaseTransition(session.phase ?? "planning", targetPhase, request.body);
     if (!result.allowed) {
       response.status(400).json({ error: result.reason });
       return;
@@ -1159,7 +1170,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     session.currentPlan = plan;
-    session.planHistory.push(plan);
+    session.planHistory = session.planHistory ?? []; session.planHistory.push(plan);
     session.phase = "review";
     await saveSession(session);
     response.status(201).json(plan);
@@ -1792,7 +1803,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(404).json({ error: "Session not found" });
       return;
     }
-    const activation = activateSkillNames(session.skillNames, skillRegistry);
+    const activation = activateSkillNames(session.skillNames ?? [], skillRegistry);
     response.json({
       available: activation.available.map((skill) => ({
         name: skill.name,
@@ -1820,7 +1831,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     };
     const requested = Array.isArray(body.skillNames)
       ? body.skillNames.filter((name): name is string => typeof name === "string")
-      : session.skillNames;
+      : (session.skillNames ?? []);
     const add = Array.isArray(body.add)
       ? body.add.filter((name): name is string => typeof name === "string")
       : [];

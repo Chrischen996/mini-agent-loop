@@ -162,7 +162,7 @@ export class PlanExecutor {
     }
 
     // Set execution mode
-    const executionMode = plan.executionMode ?? "auto";
+    const executionMode = (plan.executionMode ?? "bypass") as import("../permissions.js").PermissionMode;
     this.permissionManager.setMode(executionMode);
 
     // Begin permission turn

@@ -166,6 +166,12 @@ export type AgentLoopOptions = {
    * in the public tool args schema.
    */
   _parentHistory?: AgentMessage[];
+  /** Optional agents.md content to inject into system prompt. */
+  agentsMd?: string;
+  /** Current Plan-Act workflow phase. */
+  sessionPhase?: import('./plan-act/types.js').SessionPhase;
+  /** Callback for plan-related events. */
+  onPlanEvent?: (event: import('./plan-act/types.js').PlanActEvent) => void;
 };
 
 export type AgentRuntimeRef = {

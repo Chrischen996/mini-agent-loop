@@ -202,13 +202,14 @@ export function createInitialState(modelName: string): TuiState {
     contextTokens: 0,
     cacheReadTokens: undefined,
     thinkingMode: "summary",
-    permissionMode: "auto",
+    permissionMode: "plan",
     pendingPermission: undefined,
     expandedThinking: [],
     focusedMessageIndex: -1,
     pendingImages: [],
     contextCompactions: [],
     scrollOffset: 0,
+    phase: "planning",
   };
 }
 
