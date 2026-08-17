@@ -6,6 +6,7 @@ import { imagePart, textPart } from "./content.ts";
 import { loadLlmConfigFromEnv } from "./llm/index.ts";
 import { MaxTurnsExceededError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
 import { loadAgentsMd } from "./agents-md.ts";
+import { savePlan, loadPlan, clearPlan } from "./plan-persist.ts";
 import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
@@ -116,6 +117,7 @@ export function parseCliArgs(argv: string[]): {
   let allowMcpTools = false;
   let mode: PermissionMode = "auto";
   let planOnly = false;
+  let planExecute = false;
   const validTools = new Set<ToolName>([
     "read", "bash", "edit", "write", "grep", "find", "ls",
     "codebase_open", "codebase_search", "codebase_read", "codebase_explain",
@@ -148,6 +150,10 @@ export function parseCliArgs(argv: string[]): {
     }
     if (arg === "--plan") {
       planOnly = true;
+      continue;
+    }
+    if (arg === "--plan-execute") {
+      planExecute = true;
       continue;
     }
     if (arg === "--mode") {
@@ -196,7 +202,7 @@ export function parseCliArgs(argv: string[]): {
     rest.push(arg);
   }
 
-  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools, allowMcpTools, mode, planOnly };
+  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools, allowMcpTools, mode, planOnly, planExecute };
 }
 
 async function loadImagePart(
@@ -238,7 +244,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { prompt: rawPrompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools, mode, planOnly } = parsed;
+  const { prompt: rawPrompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools, mode, planOnly, planExecute } = parsed;
   const thinking = parseThinkingIntensityPrompt(rawPrompt);
   const prompt = thinking.prompt;
   if (!prompt && imagePaths.length === 0) {
@@ -252,10 +258,22 @@ async function main(): Promise<void> {
   const agentsMd = await loadAgentsMd(cwd);
 
   // --plan flag: force plan mode and append plan-only instruction
-  const effectiveMode = planOnly ? "plan" : mode;
-  const planSuffix = planOnly
+  const effectiveMode = planOnly ? "plan" : planExecute ? "bypass" : mode;
+  let planSuffix = planOnly
     ? "\n\n⚠️ PLAN-ONLY MODE: produce a detailed execution plan only. Do NOT call write/edit/bash tools. Output your plan as markdown and stop."
     : "";
+
+  // --plan-execute: load saved plan and prepend to prompt
+  if (planExecute) {
+    const savedPlan = await loadPlan(cwd);
+    if (!savedPlan) {
+      console.error("No saved plan found. Run with --plan first.");
+      process.exit(1);
+    }
+    planSuffix = `\n\n## Saved Plan (approved)\n${savedPlan.plan}\n\nExecute the above plan. Do not deviate from it.`;
+    console.error(`[plan] loaded plan for: ${savedPlan.prompt}`);
+    await clearPlan(cwd);
+  }
   const llm = loadLlmConfigFromEnv();
   const requestLlm = thinking.intensity
     ? buildIntenseLlm(llm, thinking.intensity)
@@ -387,7 +405,20 @@ async function main(): Promise<void> {
     .find((m) => m.role === "assistant");
 
   if (lastAssistant && lastAssistant.role === "assistant") {
-    console.log(lastAssistant.content);
+    const answer = typeof lastAssistant.content === "string"
+      ? lastAssistant.content
+      : lastAssistant.content.map((p: any) => p.type === "text" ? p.text : "").join("");
+
+    // --plan: save the generated plan to disk for later execution
+    if (planOnly) {
+      const planPath = await savePlan(cwd, prompt, answer);
+      console.log(answer);
+      console.error(`\n[plan] saved to ${planPath}`);
+      console.error("Run again with --plan-execute to execute this plan.");
+      return;
+    }
+
+    console.log(answer);
   } else {
     console.error("No assistant message produced.");
     process.exit(1);
