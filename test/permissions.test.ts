@@ -15,31 +15,32 @@ const writeTool: Tool = {
 };
 
 describe("PermissionManager", () => {
-  it("pauses a write tool until allowed", async () => {
+  it("defaults to plan mode and hard-denies writes without interactive approval", async () => {
     const manager = new PermissionManager();
-    let requestId = "";
-    const pending = manager.authorize("session", writeTool, { path: "a.txt" }, undefined, (request) => {
-      requestId = request.id;
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.ok(requestId);
-    assert.equal(manager.resolve("session", requestId, "allow"), true);
-    await pending;
+    assert.equal(manager.getMode(), "plan");
+    const events: Array<{ type: string; id: string }> = [];
+    manager.onPermissionEvent = (event) => {
+      events.push({ type: event.type, id: event.request.id });
+    };
+    await assert.rejects(
+      manager.authorize("session", writeTool, { path: "a.txt" }, undefined, () => {
+        throw new Error("plan mode must not open interactive approval");
+      }),
+      /Permission denied.*plan mode/,
+    );
+    assert.equal(events.length, 2);
+    assert.equal(events[0]?.type, "request");
+    assert.equal(events[1]?.type, "deny");
+    // No pending request can be resolved into execution.
+    assert.equal(manager.resolve("session", events[0]!.id, "allow"), false);
   });
 
-  it("automatically allows read-only tools and rejects denial", async () => {
+  it("automatically allows read-only tools in plan mode", async () => {
     const manager = new PermissionManager();
     const readTool = { ...writeTool, name: "read" };
     await manager.authorize("session", readTool, {}, undefined, () => {
       throw new Error("read should not request permission");
     });
-    let requestId = "";
-    const pending = manager.authorize("session", writeTool, {}, undefined, (request) => {
-      requestId = request.id;
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(manager.resolve("session", requestId, "deny"), true);
-    await assert.rejects(pending, /Permission denied/);
   });
 
   it("automatically allows read-only codebase operations after opening a handle", async () => {
@@ -61,61 +62,45 @@ describe("PermissionManager", () => {
     await new PermissionManager("plan").authorize("session", webTool, { query: "test" }, undefined, () => {
       throw new Error("plan web search should not request approval");
     });
-    await new PermissionManager("auto").authorize("session", webTool, { query: "test" }, undefined, () => {
-      throw new Error("auto web search should not request approval");
+    await new PermissionManager("bypass").authorize("session", webTool, { query: "test" }, undefined, () => {
+      throw new Error("bypass web search should not request approval");
     });
-
-    const manual = new PermissionManager("manual");
-    let requestId = "";
-    const pending = manual.authorize("session", webTool, { query: "test" }, undefined, (request) => {
-      requestId = request.id;
-      assert.equal(request.risk, "medium");
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.ok(requestId);
-    manual.resolve("session", requestId, "deny");
-    await assert.rejects(pending, /Permission denied/);
   });
 
-  it("keeps codebase_open behind a medium-risk approval", async () => {
-    const manager = new PermissionManager();
-    let requestId = "";
-    const pending = manager.authorize(
+  it("allows codebase_open in plan mode as a local read-oriented tool", async () => {
+    const manager = new PermissionManager("plan");
+    await manager.authorize(
       "session",
       { ...writeTool, name: "codebase_open" },
       { repository: "octo/project" },
       undefined,
-      (request) => {
-        requestId = request.id;
-        assert.equal(request.risk, "medium");
+      () => {
+        throw new Error("codebase_open should not request permission in plan mode");
       },
     );
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.ok(requestId);
-    manager.resolve("session", requestId, "deny");
-    await assert.rejects(pending, /Permission denied/);
   });
 
   it("never auto-allows an MCP tool based on its name or annotations", async () => {
-    const manager = new PermissionManager();
+    const manager = new PermissionManager("plan");
     const remoteRead: Tool = {
       ...writeTool,
       name: "read",
       source: { kind: "mcp", serverId: "remote", toolName: "read" },
       annotations: { readOnlyHint: true },
     };
-    let requestId = "";
-    let seenRisk = "";
-    const pending = manager.authorize("session", remoteRead, {}, undefined, (request) => {
-      requestId = request.id;
-      seenRisk = request.risk;
-      assert.deepEqual(request.source, remoteRead.source);
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.ok(requestId);
-    assert.equal(seenRisk, "high");
-    manager.resolve("session", requestId, "deny");
-    await assert.rejects(pending, /Permission denied/);
+    const events: Array<{ type: string; risk: string }> = [];
+    manager.onPermissionEvent = (event) => {
+      events.push({ type: event.type, risk: event.request.risk });
+    };
+    await assert.rejects(
+      manager.authorize("session", remoteRead, {}, undefined, () => {
+        throw new Error("plan mode must not open interactive approval");
+      }),
+      /Permission denied.*plan mode/,
+    );
+    assert.equal(events[0]?.type, "request");
+    assert.equal(events[0]?.risk, "high");
+    assert.equal(events[1]?.type, "deny");
   });
 
   it("bypass mode allows MCP tools through the shared policy", async () => {
@@ -214,98 +199,6 @@ describe("PermissionManager", () => {
       });
     });
 
-    it("manual mode: requires approval for every tool including read", async () => {
-      const manager = new PermissionManager("manual");
-      const readToolMock = { ...writeTool, name: "read" };
-      const writeToolMock = { ...writeTool, name: "write" };
-      const bashToolMock = { ...writeTool, name: "bash" };
-
-      let readRequestId = "";
-      const readPending = manager.authorize("session", readToolMock, { path: "test.txt" }, undefined, (request) => {
-        readRequestId = request.id;
-        assert.equal(request.risk, "medium");
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.ok(readRequestId);
-      manager.resolve("session", readRequestId, "allow");
-      await readPending;
-
-      let writeRequestId = "";
-      const writePending = manager.authorize("session", writeToolMock, { path: "test.txt", content: "hello" }, undefined, (request) => {
-        writeRequestId = request.id;
-        assert.equal(request.risk, "medium");
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.ok(writeRequestId);
-      manager.resolve("session", writeRequestId, "deny");
-      await assert.rejects(writePending, /Permission denied/);
-
-      let bashRequestId = "";
-      const bashPending = manager.authorize("session", bashToolMock, { command: "echo hello" }, undefined, (request) => {
-        bashRequestId = request.id;
-        assert.equal(request.risk, "medium");
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.ok(bashRequestId);
-      manager.resolve("session", bashRequestId, "allow");
-      await bashPending;
-    });
-
-    it("auto mode: allows read-only tools automatically", async () => {
-      const manager = new PermissionManager("auto");
-      const readToolMock = { ...writeTool, name: "read" };
-      const grepToolMock = { ...writeTool, name: "grep" };
-
-      await manager.authorize("session", readToolMock, { path: "test.txt" }, undefined, () => {
-        throw new Error("read should auto-allow in auto mode");
-      });
-      await manager.authorize("session", grepToolMock, { pattern: "test" }, undefined, () => {
-        throw new Error("grep should auto-allow in auto mode");
-      });
-    });
-
-    it("auto mode: requests permission for write and bash tools", async () => {
-      const manager = new PermissionManager("auto");
-      const writeToolMock = { ...writeTool, name: "write" };
-      const bashToolMock = { ...writeTool, name: "bash" };
-
-      let writeRequestId = "";
-      const writePending = manager.authorize("session", writeToolMock, { path: "test.txt", content: "hello" }, undefined, (request) => {
-        writeRequestId = request.id;
-        assert.equal(request.risk, "medium");
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.ok(writeRequestId);
-      manager.resolve("session", writeRequestId, "deny");
-      await assert.rejects(writePending, /Permission denied/);
-
-      let bashRequestId = "";
-      const bashPending = manager.authorize("session", bashToolMock, { command: "echo hello" }, undefined, (request) => {
-        bashRequestId = request.id;
-        assert.equal(request.risk, "medium");
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.ok(bashRequestId);
-      manager.resolve("session", bashRequestId, "allow");
-      await bashPending;
-    });
-
-    it("auto mode: marks dangerous bash commands as high risk", async () => {
-      const manager = new PermissionManager("auto");
-      const bashToolMock = { ...writeTool, name: "bash" };
-
-      let seenRisk = "";
-      let bashRequestId = "";
-      const pending = manager.authorize("session", bashToolMock, { command: "rm -rf /" }, undefined, (request) => {
-        bashRequestId = request.id;
-        seenRisk = request.risk;
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.equal(seenRisk, "high");
-      manager.resolve("session", bashRequestId, "deny");
-      await assert.rejects(pending, /Permission denied/);
-    });
-
     it("can switch modes dynamically", async () => {
       const manager = new PermissionManager("plan");
       const writeToolMock = { ...writeTool, name: "write" };
@@ -327,80 +220,38 @@ describe("PermissionManager", () => {
       });
     });
 
-    it("does not reuse an approval after switching modes", async () => {
-      const manager = new PermissionManager("auto");
-      let requestId = "";
-      const args = { path: "same.txt", content: "hello" };
-      const first = manager.authorize("session", writeTool, args, undefined, (request) => {
-        requestId = request.id;
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      manager.resolve("session", requestId, "allow");
-      await first;
-
-      manager.setMode("manual");
-      requestId = "";
-      const second = manager.authorize("session", writeTool, args, undefined, (request) => {
-        requestId = request.id;
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.ok(requestId);
-      manager.resolve("session", requestId, "deny");
-      await assert.rejects(second, /Permission denied/);
-    });
-
-    it("does not reuse a local approval for an MCP tool with the same name and args", async () => {
-      const manager = new PermissionManager("auto");
-      const args = { path: "same.txt", content: "hello" };
-      let localRequestId = "";
-      const local = manager.authorize("source", writeTool, args, undefined, (request) => {
-        localRequestId = request.id;
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      manager.resolve("source", localRequestId, "allow");
-      await local;
-
-      let remoteRequestId = "";
-      const remote = manager.authorize("source", {
-        ...writeTool,
-        source: { kind: "mcp", serverId: "remote", toolName: "write" },
-      }, args, undefined, (request) => {
-        remoteRequestId = request.id;
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.ok(remoteRequestId);
-      manager.resolve("source", remoteRequestId, "deny");
-      await assert.rejects(remote, /Permission denied/);
-    });
-
     it("serializes and deserializes state correctly", async () => {
-      const manager = new PermissionManager("auto");
-      let requestId = "";
-      const pending = manager.authorize("session", writeTool, { path: "test.txt", content: "hello" }, undefined, (request) => {
-        requestId = request.id;
+      const manager = new PermissionManager("bypass");
+      await manager.authorize("session", writeTool, { path: "test.txt", content: "hello" }, undefined, () => {
+        throw new Error("bypass should not request approval");
       });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.ok(requestId);
-      manager.resolve("session", requestId, "allow");
-      await pending;
 
       const serialized = manager.serialize();
       const parsed = JSON.parse(serialized);
-      assert.equal(parsed.mode, "auto");
-      assert.equal(parsed.approved.length, 1);
+      assert.equal(parsed.mode, "bypass");
 
       const manager3 = new PermissionManager("plan");
       manager3.deserialize(serialized);
-      assert.equal(manager3.getMode(), "auto");
+      assert.equal(manager3.getMode(), "bypass");
       await manager3.authorize("session", writeTool, { path: "test.txt", content: "hello" }, undefined, () => {
-        throw new Error("serialized approval should allow the same write tool without prompting");
+        throw new Error("deserialized bypass mode should allow write without prompting");
       });
     });
 
+    it("maps unknown deserialized modes to plan", () => {
+      const manager = new PermissionManager("bypass");
+      manager.deserialize(JSON.stringify({ mode: "manual", approved: [] }));
+      assert.equal(manager.getMode(), "plan");
+
+      manager.setMode("bypass");
+      manager.deserialize(JSON.stringify({ mode: "auto", approved: [] }));
+      assert.equal(manager.getMode(), "plan");
+    });
+
     it("handles invalid deserialization gracefully", () => {
-      const manager = new PermissionManager("auto");
+      const manager = new PermissionManager("plan");
       manager.deserialize("invalid json");
-      assert.equal(manager.getMode(), "auto");
+      assert.equal(manager.getMode(), "plan");
     });
 
     it("calls onPermissionEvent callback for all events", async () => {
@@ -435,7 +286,7 @@ describe("PermissionManager", () => {
       assert.equal(planEvents[1]?.type, "deny");
     });
 
-    it("enforces the complete four-mode matrix through one turn context", async () => {
+    it("enforces the plan/bypass matrix through one turn context", async () => {
       const makeTool = (kind: "read" | "write" | "bash" | "mcp"): Tool => {
         if (kind === "bash") return { ...writeTool, name: "bash" };
         if (kind === "mcp") {
@@ -454,14 +305,6 @@ describe("PermissionManager", () => {
         { mode: "plan", kind: "bash", args: { command: "printf ok" }, outcome: "allow" },
         { mode: "plan", kind: "bash", args: { command: "rm -rf /tmp/x" }, outcome: "deny" },
         { mode: "plan", kind: "mcp", args: {}, outcome: "deny" },
-        { mode: "manual", kind: "read", args: {}, outcome: "allow" },
-        { mode: "manual", kind: "write", args: {}, outcome: "allow" },
-        { mode: "manual", kind: "bash", args: { command: "printf ok" }, outcome: "allow" },
-        { mode: "manual", kind: "mcp", args: {}, outcome: "allow" },
-        { mode: "auto", kind: "read", args: {}, outcome: "allow" },
-        { mode: "auto", kind: "write", args: {}, outcome: "allow" },
-        { mode: "auto", kind: "bash", args: { command: "printf ok" }, outcome: "allow" },
-        { mode: "auto", kind: "mcp", args: {}, outcome: "allow" },
         { mode: "bypass", kind: "read", args: {}, outcome: "allow" },
         { mode: "bypass", kind: "write", args: {}, outcome: "allow" },
         { mode: "bypass", kind: "bash", args: { command: "rm -rf /tmp/x" }, outcome: "allow" },
@@ -473,15 +316,14 @@ describe("PermissionManager", () => {
         const tool = makeTool(testCase.kind);
         let executions = 0;
         const executable = { ...tool, execute: async () => { executions += 1; return { content: "ok" }; } };
-        let requestId = "";
-        const turn = manager.beginTurn("matrix", (request) => { requestId = request.id; });
+        const turn = manager.beginTurn("matrix", () => {
+          throw new Error(`${testCase.mode}/${testCase.kind} must not open interactive approval`);
+        });
         const pending = turn.execute(executable, testCase.args);
         const settled = pending.then(
           () => ({ ok: true as const }),
           (error: unknown) => ({ ok: false as const, error }),
         );
-        await new Promise((resolve) => setImmediate(resolve));
-        if (requestId) manager.resolve("matrix", requestId, testCase.outcome);
 
         if (testCase.outcome === "allow") {
           const result = await settled;
@@ -513,30 +355,8 @@ describe("PermissionManager", () => {
       turn.close();
     });
 
-    it("cancels pending approval atomically and prevents the stale tool from starting", async () => {
-      const manager = new PermissionManager("auto");
-      let requestId = "";
-      let executions = 0;
-      const turn = manager.beginTurn("switch", (request) => { requestId = request.id; });
-      const pending = turn.execute({ ...writeTool, execute: async () => { executions += 1; return { content: "stale" }; } }, { path: "stale.txt" });
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.ok(requestId);
-      const change = manager.setMode("bypass");
-      assert.deepEqual(change, {
-        changed: true,
-        previousMode: "auto",
-        mode: "bypass",
-        previousRevision: 0,
-        revision: 1,
-        interrupted: true,
-      });
-      await assert.rejects(pending, (error: unknown) => error instanceof PermissionModeChangedError);
-      assert.equal(executions, 0);
-      turn.close();
-    });
-
     it("cancels an in-flight tool and rejects its late result after a mode switch", async () => {
-      const manager = new PermissionManager("auto");
+      const manager = new PermissionManager("bypass");
       let toolSignal: AbortSignal | undefined;
       let release: (() => void) | undefined;
       const turn = manager.beginTurn("in-flight", () => {});
@@ -551,7 +371,7 @@ describe("PermissionManager", () => {
       }, {});
       await new Promise((resolve) => setImmediate(resolve));
       assert.ok(toolSignal);
-      manager.setMode("manual");
+      manager.setMode("plan");
       assert.equal(toolSignal?.aborted, true);
       release?.();
       await assert.rejects(pending, (error: unknown) => error instanceof PermissionModeChangedError);
@@ -559,12 +379,58 @@ describe("PermissionManager", () => {
     });
 
     it("does not interrupt an active turn when setting the same mode", async () => {
-      const manager = new PermissionManager("auto");
+      const manager = new PermissionManager("plan");
       const turn = manager.beginTurn("same", () => {});
-      const change = manager.setMode("auto");
+      const change = manager.setMode("plan");
       assert.equal(change.changed, false);
       assert.equal(change.interrupted, false);
       assert.equal(turn.signal.aborted, false);
+      turn.close();
+    });
+
+    it("interrupts an active turn when switching plan ↔ bypass", async () => {
+      const manager = new PermissionManager("plan");
+      let executions = 0;
+      const turn = manager.beginTurn("switch", () => {});
+      // Start a slow allow-listed tool so the mode switch can abort it.
+      const pending = turn.execute({
+        ...writeTool,
+        name: "read",
+        execute: async (_args, signal) => {
+          await new Promise<void>((resolve, reject) => {
+            if (signal?.aborted) {
+              reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+              return;
+            }
+            const onAbort = () => {
+              signal?.removeEventListener("abort", onAbort);
+              reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+            };
+            signal?.addEventListener("abort", onAbort, { once: true });
+            setTimeout(() => {
+              signal?.removeEventListener("abort", onAbort);
+              executions += 1;
+              resolve();
+            }, 50);
+          });
+          return { content: "stale" };
+        },
+      }, {});
+      await new Promise((resolve) => setImmediate(resolve));
+      const change = manager.setMode("bypass");
+      assert.deepEqual(change, {
+        changed: true,
+        previousMode: "plan",
+        mode: "bypass",
+        previousRevision: 0,
+        revision: 1,
+        interrupted: true,
+      });
+      await assert.rejects(pending, (error: unknown) =>
+        error instanceof PermissionModeChangedError ||
+        (error instanceof Error && error.name === "AbortError"),
+      );
+      assert.equal(executions, 0);
       turn.close();
     });
   });

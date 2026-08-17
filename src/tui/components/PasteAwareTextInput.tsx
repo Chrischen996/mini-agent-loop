@@ -19,6 +19,7 @@ function splitLines(text: string): string[] {
 type PasteAwareTextInputProps = React.ComponentProps<typeof TextInput> & {
   onPasteImage: () => unknown | Promise<unknown>;
   pasteEnabled?: boolean;
+  onTab?: (input: string) => void;
 };
 
 export function PasteAwareTextInput({
@@ -27,6 +28,7 @@ export function PasteAwareTextInput({
   onPasteImage,
   pasteEnabled = true,
   focus = true,
+  onTab,
   ...props
 }: PasteAwareTextInputProps): React.ReactElement {
   const valueRef = useRef(value);
@@ -85,6 +87,18 @@ export function PasteAwareTextInput({
       </Box>
     );
   }
+
+  // Intercept Tab for @file autocomplete — ink-text-input swallows Tab,
+  // so we catch it here before the inner component sees it.
+  useInput(
+    (_input, key) => {
+      if (!key.tab || key.shift) return;
+      const current = valueRef.current;
+      if (!/@/.test(current)) return;
+      onTab?.(current);
+    },
+    { isActive: focus },
+  );
 
   // For single-line or editing state, use ink-text-input
   return (

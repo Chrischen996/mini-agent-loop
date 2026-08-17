@@ -200,6 +200,26 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         isError: Boolean(event.result.isError),
         preview: contentAsString(event.result.content).slice(0, 500),
       };
+    case "auto_subagent":
+      return {
+        type: "auto_subagent",
+        shouldDelegate: event.shouldDelegate,
+        executed: event.executed,
+        coordinatorMode: event.coordinatorMode,
+        score: event.score,
+        profile: event.profile,
+        reasons: event.reasons.slice(0, 12),
+      };
+    case "coordinator_mode":
+      return {
+        type: "coordinator_mode",
+        active: event.active,
+        profile: event.profile,
+        preflightExecuted: event.preflightExecuted,
+        maxDirectExploration: event.maxDirectExploration,
+        directExplorationUsed: event.directExplorationUsed,
+        reasons: event.reasons.slice(0, 12),
+      };
     case "thinking_policy":
       return {
         type: "thinking_policy",
@@ -513,9 +533,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
   const workspace = path.resolve(options.workspace ?? process.cwd());
   const sessions = new Map<string, Session>();
   const envPermissionMode = process.env.MINI_AGENT_PERMISSION_MODE;
-  // All entry points use auto unless an explicit mode is configured.
+  // All entry points use plan unless an explicit mode is configured.
   const defaultPermissionMode: PermissionMode = options.permissionMode
-    ?? (isPermissionMode(envPermissionMode) ? envPermissionMode : "auto");
+    ?? (isPermissionMode(envPermissionMode) ? envPermissionMode : "plan");
   const dataRoot = path.resolve(options.dataDir ?? path.join(os.homedir(), ".mini-agent"));
   const codebaseEnabled = options.codebaseEnabled ?? process.env.EXTERNAL_CODEBASE_ENABLED !== "0";
   const codebaseStore = options.codebaseStore ?? (codebaseEnabled ? createRepositoryStoreFromEnv(path.join(dataRoot, "codebases")) : undefined);
@@ -968,7 +988,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
     const mode = request.body?.mode;
     if (!isPermissionMode(mode)) {
-      response.status(400).json({ error: "mode must be plan, manual, auto, or bypass" });
+      response.status(400).json({ error: "mode must be plan or bypass" });
       return;
     }
     const change = session.permissionManager.setMode(mode);

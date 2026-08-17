@@ -64,6 +64,15 @@ export async function registerSkillsFromDirectory(
 }
 
 /**
+ * Auto-discover skills from .grok/skills/ in the given directory.
+ * Returns the discovered skills without registering them (call registerSkillsFromDirectory to register).
+ */
+export async function discoverGrokSkills(cwd: string, registry: SkillRegistry = defaultSkillRegistry): Promise<Skill[]> {
+  const grokSkillsDir = path.join(cwd, ".grok", "skills");
+  return registerSkillsFromDirectory(grokSkillsDir, registry);
+}
+
+/**
  * Helper to create a simple skill with just a system prompt fragment.
  */
 export function createPromptSkill(

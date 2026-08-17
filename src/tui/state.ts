@@ -79,6 +79,8 @@ export type TuiState = {
   toolCards: ToolCardState[];
   streamingText: string;
   streamingReasoning: string;
+  /** Track context compaction events for /context command. */
+  contextCompactions: { before: number; after: number; reason: string; turn: number }[];
   busy: boolean;
   status: string;
   modelName: string;
@@ -191,11 +193,12 @@ export function createInitialState(modelName: string): TuiState {
     contextTokens: 0,
     cacheReadTokens: undefined,
     thinkingMode: "summary",
-    permissionMode: "auto",
+    permissionMode: "plan",
     pendingPermission: undefined,
     expandedThinking: [],
     focusedMessageIndex: -1,
     pendingImages: [],
+    contextCompactions: [],
     scrollOffset: 0,
   };
 }
@@ -289,11 +292,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
 
     case "TOGGLE_PERMISSION_MODE": {
       const current = PERMISSION_MODES.indexOf(state.permissionMode);
-      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "auto";
-      const modeLabel =
-        next === "plan" ? "计划" :
-        next === "manual" ? "手动" :
-        next === "auto" ? "自动" : "绕过";
+      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
+      const modeLabel = next === "plan" ? "计划" : "绕过";
       return {
         ...state,
         permissionMode: next,
@@ -302,10 +302,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     }
 
     case "SET_PERMISSION_MODE": {
-      const modeLabel =
-        action.mode === "plan" ? "计划" :
-        action.mode === "manual" ? "手动" :
-        action.mode === "auto" ? "自动" : "绕过";
+      const modeLabel = action.mode === "plan" ? "计划" : "绕过";
       return {
         ...state,
         permissionMode: action.mode,
@@ -430,6 +427,24 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             contextTokens: event.afterTokens,
             status: `上下文已压缩 ${event.beforeTokens} → ${event.afterTokens} tokens`,
+          };
+
+        case "auto_subagent":
+          return {
+            ...state,
+            status: event.executed
+              ? `自动子 agent 已启动 (${event.profile}, score=${event.score})`
+              : event.shouldDelegate
+                ? `建议委托子 agent (${event.profile}, score=${event.score})`
+                : `不自动委托 (score=${event.score})`,
+          };
+
+        case "coordinator_mode":
+          return {
+            ...state,
+            status: event.active
+              ? `编排模式: ${event.profile} (探索 ${event.directExplorationUsed}/${event.maxDirectExploration})`
+              : "编排模式已关闭",
           };
 
         case "thinking_policy":

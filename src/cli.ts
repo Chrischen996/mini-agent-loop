@@ -5,6 +5,10 @@ import path from "node:path";
 import { imagePart, textPart } from "./content.ts";
 import { loadLlmConfigFromEnv } from "./llm/index.ts";
 import { MaxTurnsExceededError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
+import { loadAgentsMd } from "./agents-md.ts";
+import { savePlan, loadPlan, clearPlan, approvePlanAt } from "./plan-persist.ts";
+import { parsePlan, formatPlanPreview, type PlanSummary } from "./plan-formatter.ts";
+import { approvePlan, type ApprovalDecision } from "./plan-approval.ts";
 import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
@@ -63,6 +67,16 @@ function logEvent(event: LoopEvent): void {
       );
       break;
     }
+    case "auto_subagent":
+      console.error(
+        `[auto_subagent] shouldDelegate=${event.shouldDelegate} executed=${event.executed} coordinator=${event.coordinatorMode} score=${event.score} profile=${event.profile} reasons=${event.reasons.join(",")}`,
+      );
+      break;
+    case "coordinator_mode":
+      console.error(
+        `[coordinator] active=${event.active} profile=${event.profile} preflight=${event.preflightExecuted} explore=${event.directExplorationUsed}/${event.maxDirectExploration} reasons=${event.reasons.join(",")}`,
+      );
+      break;
     case "thinking_policy":
       console.error(`[thinking] mode=adaptive phase=${event.phase} level=${event.level} reasons=${event.reasons.join(",")}`);
       break;
@@ -107,13 +121,19 @@ export function parseCliArgs(argv: string[]): {
   excludeTools?: ToolName[];
   allowMcpTools: boolean;
   mode: PermissionMode;
+  planOnly: boolean;
+  planExecute: boolean;
+  planYes: boolean;
 } {
   const imagePaths: string[] = [];
   const rest: string[] = [];
   let tools: ToolName[] | undefined;
   let excludeTools: ToolName[] | undefined;
   let allowMcpTools = false;
-  let mode: PermissionMode = "auto";
+  let mode: PermissionMode = "plan";
+  let planOnly = false;
+  let planExecute = false;
+  let planYes = false;
   const validTools = new Set<ToolName>([
     "read", "bash", "edit", "write", "grep", "find", "ls",
     "codebase_open", "codebase_search", "codebase_read", "codebase_explain",
@@ -144,24 +164,36 @@ export function parseCliArgs(argv: string[]): {
       allowMcpTools = true;
       continue;
     }
+    if (arg === "--plan") {
+      planOnly = true;
+      continue;
+    }
+    if (arg === "--plan-execute") {
+      planExecute = true;
+      continue;
+    }
+    if (arg === "--yes") {
+      planYes = true;
+      continue;
+    }
     if (arg === "--mode") {
       const next = argv[i + 1];
       if (!next || next.startsWith("--")) {
-        throw new Error("--mode requires an argument: plan, manual, auto, or bypass");
+        throw new Error("--mode requires an argument: plan or bypass");
       }
       if (!isPermissionMode(next)) {
-        throw new Error("Invalid mode: use 'plan', 'manual', 'auto', or 'bypass'");
+        throw new Error("Invalid mode: use 'plan' or 'bypass'");
       }
-      mode = next as PermissionMode;
+      mode = next;
       i += 1;
       continue;
     }
     if (arg.startsWith("--mode=")) {
       const value = arg.slice("--mode=".length);
       if (!isPermissionMode(value)) {
-        throw new Error("Invalid mode: use 'plan', 'manual', 'auto', or 'bypass'");
+        throw new Error("Invalid mode: use 'plan' or 'bypass'");
       }
-      mode = value as PermissionMode;
+      mode = value;
       continue;
     }
     if (arg.startsWith("--image=")) {
@@ -190,7 +222,7 @@ export function parseCliArgs(argv: string[]): {
     rest.push(arg);
   }
 
-  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools, allowMcpTools, mode };
+  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools, allowMcpTools, mode, planOnly, planExecute, planYes };
 }
 
 async function loadImagePart(
@@ -232,7 +264,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { prompt: rawPrompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools, mode } = parsed;
+  const { prompt: rawPrompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools, mode, planOnly, planExecute, planYes } = parsed;
   const thinking = parseThinkingIntensityPrompt(rawPrompt);
   const prompt = thinking.prompt;
   if (!prompt && imagePaths.length === 0) {
@@ -243,6 +275,47 @@ async function main(): Promise<void> {
   }
 
   const cwd = process.cwd();
+  const agentsMd = await loadAgentsMd(cwd);
+
+  // --plan flag: force plan mode and append plan-only instruction
+  const effectiveMode = planOnly ? "plan" : planExecute ? "bypass" : mode;
+  let planSuffix = planOnly
+    ? "\n\n⚠️ PLAN-ONLY MODE: produce a detailed execution plan only. Do NOT call write/edit/bash tools. Output your plan as markdown and stop."
+    : "";
+
+  // --plan-execute: load saved plan, verify approval, prepend to prompt
+  if (planExecute) {
+    const savedPlan = await loadPlan(cwd);
+    if (!savedPlan) {
+      console.error("No saved plan found. Run with --plan first.");
+      process.exit(1);
+    }
+    if (savedPlan.approval === "rejected") {
+      console.error("[plan] REJECTED — cannot execute a rejected plan.");
+      process.exit(1);
+    }
+    if (savedPlan.approval !== "approved" && !planYes) {
+      // Auto-approve if --yes flag is set, otherwise require explicit approval
+      const summary = parsePlan(savedPlan.prompt, savedPlan.plan);
+      console.error("[plan] Plan exists but not approved. Run with --plan first to generate, or add --yes to auto-approve.");
+      console.error(formatPlanPreview(summary));
+      console.error("");
+      console.error("Approve? (y/n): ");
+      const rl = await import("node:readline").then((m) => m.createInterface({ input: process.stdin, output: process.stdout }));
+      const answer = await new Promise<string>((resolve) => {
+        rl.question("  > ", (a) => { rl.close(); resolve(a.trim().toLowerCase()); });
+      });
+      if (answer !== "y" && answer !== "yes") {
+        console.error("[plan] Execution cancelled by user.");
+        process.exit(0);
+      }
+      await approvePlanAt(cwd, "user");
+      console.error("[plan] Approved.");
+    }
+    planSuffix = `\n\n## Saved Plan (approved)\n${savedPlan.plan}\n\nExecute the above plan. Do not deviate from it.`;
+    console.error(`[plan] loaded plan for: ${savedPlan.prompt}`);
+    await clearPlan(cwd);
+  }
   const llm = loadLlmConfigFromEnv();
   const requestLlm = thinking.intensity
     ? buildIntenseLlm(llm, thinking.intensity)
@@ -297,19 +370,15 @@ async function main(): Promise<void> {
   }
   console.error(`[deepwiki] enabled=${codebaseRuntime.deepWikiEnabled}`);
 
-  const permissionManager = new PermissionManager(mode);
+  const permissionManager = new PermissionManager(effectiveMode);
   let permissionTurn: PermissionTurnContext | undefined;
   const onPermissionRequest = (request: PermissionRequest) => {
       console.error(
         `[permission] mode=${permissionTurn?.mode ?? mode} tool=${request.tool} risk=${request.risk} request_id=${request.id}`,
       );
-      if (permissionTurn?.mode === "manual" || permissionTurn?.mode === "auto") {
-        // Non-interactive CLI cannot prompt. Deny immediately instead of hanging.
-        permissionManager.resolve("cli_session", request.id, "deny");
-        console.error(
-          `[permission] denied in non-interactive CLI; use TUI/Web or --mode=bypass for unattended runs`,
-        );
-      }
+      // plan/bypass never open interactive pending approvals. If a stale pending
+      // request surfaces, deny it so the non-interactive CLI cannot hang.
+      permissionManager.resolve("cli_session", request.id, "deny");
   };
 
   // ── Add subagent tool if enabled ────────────────────────────────────────────
@@ -341,11 +410,11 @@ async function main(): Promise<void> {
   }
 
   let messages;
-  console.error(`[config] mode=${mode}`);
+  console.error(`[config] mode=${effectiveMode}`);
   const activePermissionTurn = permissionManager.beginTurn("cli_session", onPermissionRequest);
   permissionTurn = activePermissionTurn;
   try {
-    messages = await runAgentLoop(prompt || "Please analyze the attached image(s).", {
+    messages = await runAgentLoop(prompt + planSuffix || "Please analyze the attached image(s).", {
       llm: requestLlm,
       tools,
       autoSubagent: loadAutoSubagentOptionsFromEnv(),
@@ -358,6 +427,7 @@ async function main(): Promise<void> {
       thinkingMode,
       runtimeRef: parentRuntime,
       onEvent: logEvent,
+      agentsMd,
     });
   } catch (error) {
     if (!(error instanceof MaxTurnsExceededError)) throw error;
@@ -373,7 +443,34 @@ async function main(): Promise<void> {
     .find((m) => m.role === "assistant");
 
   if (lastAssistant && lastAssistant.role === "assistant") {
-    console.log(lastAssistant.content);
+    // AssistantMessage.content is always a string in the current contract.
+    const answer = lastAssistant.content;
+
+    // --plan: save the generated plan to disk, show preview, ask for approval
+    if (planOnly) {
+      const planPath = await savePlan(cwd, prompt, answer, { approval: "pending" });
+      console.log(answer);
+      console.error(`\n[plan] saved to ${planPath}`);
+
+      // Show formatted preview
+      const summary = parsePlan(prompt, answer);
+      console.error(formatPlanPreview(summary));
+
+      if (planYes) {
+        // Auto-approve in --yes mode
+        await approvePlanAt(cwd, "auto--yes");
+        console.error("[plan] auto-approved (--yes flag).");
+        console.error("Run again with --plan-execute to execute this plan.");
+      } else {
+        console.error("");
+        console.error("Plan saved. Review the summary above, then run:");
+        console.error("  npx mini-agent-loop --plan-execute \"execute the plan\"");
+        console.error("Or auto-approve with: --plan --yes");
+      }
+      return;
+    }
+
+    console.log(answer);
   } else {
     console.error("No assistant message produced.");
     process.exit(1);

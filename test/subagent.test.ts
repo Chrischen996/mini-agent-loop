@@ -166,7 +166,25 @@ describe("createSubagentTool", () => {
 
       const result = await tool.execute({ task: "What is the answer?" });
       assert.equal(result.isError, undefined);
-      assert.equal(contentAsString(result.content), "The answer is 42.");
+      const text = contentAsString(result.content);
+      assert.ok(text.includes("The answer is 42."), `expected answer in result, got: ${text}`);
+      assert.ok(text.startsWith("— Sub-agent exec summary:"), `expected summary prefix, got: ${text.slice(0, 60)}`);
+    });
+
+    it("prepends an execution summary to the sub-agent result", async () => {
+      const events: SubagentEvent[] = [];
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        onSubagentEvent: (event) => events.push(event),
+        chat: createImmediateChat("The final answer."),
+      });
+
+      const result = await tool.execute({ task: "summarize this" });
+      const text = contentAsString(result.content);
+      assert.ok(text.startsWith("— Sub-agent exec summary:"), `expected exec summary prefix, got: ${text.slice(0, 80)}`);
+      assert.ok(text.includes("1 turn(s)"), `expected turn count in summary, got: ${text}`);
+      assert.ok(text.includes("The final answer."), "original answer should follow the summary");
     });
 
     it("sub-agent can use tools from the parent and return a result", async () => {
@@ -179,7 +197,8 @@ describe("createSubagentTool", () => {
 
       const result = await tool.execute({ task: "echo hello" });
       assert.equal(result.isError, undefined);
-      assert.equal(contentAsString(result.content), "Echo test complete.");
+      const text = contentAsString(result.content);
+      assert.ok(text.includes("Echo test complete."), `expected answer in result, got: ${text}`);
     });
 
     it("returns isError when sub-agent produces no usable answer", async () => {
@@ -230,7 +249,8 @@ describe("createSubagentTool", () => {
 
       const result = await tool.execute({ task: "within depth" });
       assert.equal(result.isError, undefined);
-      assert.equal(contentAsString(result.content), "depth ok");
+      const text = contentAsString(result.content);
+      assert.ok(text.includes("depth ok"), `expected answer in result, got: ${text}`);
     });
 
     it("does not add nested subagent tool when child depth equals maxDepth", async () => {
@@ -377,8 +397,8 @@ describe("createSubagentTool", () => {
     });
 
     it("profile maxTurns overrides default", async () => {
-      // Use an infinite-loop chat. The researcher profile has maxTurns=8;
-      // the subagent should hit MaxTurnsExceededError, caught internally.
+      // Use an infinite-loop chat. This fixture researcher profile has maxTurns=8;
+      // the subagent should hit MaxTurnsExceededError, then return partial progress.
       let toolCalls = 0;
       const infiniteChat: ChatFn = async () => {
         toolCalls += 1;
@@ -386,7 +406,7 @@ describe("createSubagentTool", () => {
           role: "assistant",
           content: "",
           toolCalls: [
-            { id: `call_${toolCalls}`, name: "echo", arguments: { message: "loop" } },
+            { id: `call_${toolCalls}`, name: "echo", arguments: { message: `loop-${toolCalls}` } },
           ],
         };
       };
@@ -399,8 +419,12 @@ describe("createSubagentTool", () => {
       });
 
       const result = await tool.execute({ task: "run", profile: "researcher" });
-      assert.equal(result.isError, true);
-      assert.ok(contentAsString(result.content).includes("Sub-agent failed"));
+      // Recoverable partial progress is no longer a hard failure.
+      assert.notEqual(result.isError, true);
+      const text = contentAsString(result.content);
+      assert.ok(text.includes("Partial result") || text.includes("maxTurns"), text);
+      assert.ok(text.includes("Recovered recent tool output") || text.includes("loop-"), text);
+      assert.ok(toolCalls >= 8, `Expected to consume researcher maxTurns, got ${toolCalls}`);
     });
 
     it("ad-hoc maxTurns overrides profile maxTurns", async () => {
@@ -423,14 +447,15 @@ describe("createSubagentTool", () => {
         chat: infiniteChat,
       });
 
-      // researcher profile has maxTurns=8, but we override with 2
+      // researcher profile has maxTurns=12, but we override with 2
       const result = await tool.execute({
         task: "run",
         profile: "researcher",
         maxTurns: 2,
       });
-      assert.equal(result.isError, true);
+      assert.notEqual(result.isError, true);
       assert.ok(toolCalls <= 3, `Expected ≤3 chat calls with maxTurns=2, got ${toolCalls}`);
+      assert.ok(contentAsString(result.content).includes("Partial result"));
     });
 
     it("unknown profile falls back to default config", async () => {
@@ -709,8 +734,7 @@ describe("createSubagentTool", () => {
 
       const result = await tool.execute({ task: "aborted task" });
       // With a pre-aborted signal, the loop returns early (no assistant message).
-      // extractFinalAnswer returns "" → isError: true "no final answer"
-      // OR the loop may not call the chat at all.
+      // extractBestAnswer finds nothing recoverable → isError: true "no final answer".
       assert.equal(result.isError, true);
       assert.ok(!chatCalled, "chat should not be called when signal is pre-aborted");
     });
@@ -937,16 +961,41 @@ describe("createSubagentTool", () => {
 
     it("inherits the exact parent permission turn in nested tool execution", async () => {
       const { runAgentLoop } = await import("../src/loop.ts");
-      const manager = new PermissionManager("manual");
-      const requests: string[] = [];
-      const permissionTurn = manager.beginTurn("subagent-parent", (request) => {
-        requests.push(request.tool);
-        manager.resolve("subagent-parent", request.id, "allow");
+      // Current permission policy auto-allows safe tools and hard-denies writes outside
+      // bypass. Use a write-like nested tool so we can observe the shared parent turn.
+      let writeExecuted = false;
+      const writeTool: Tool = {
+        name: "write",
+        description: "writes a file",
+        parameters: {
+          type: "object",
+          properties: {
+            path: { type: "string" },
+            content: { type: "string" },
+          },
+          required: ["path", "content"],
+        },
+        execute: async (args) => {
+          writeExecuted = true;
+          return { content: `wrote ${args.path}` };
+        },
+      };
+      const manager = new PermissionManager("plan");
+      const audited: string[] = [];
+      manager.onPermissionEvent = (event) => {
+        audited.push(`${event.type}:${event.request.tool}`);
+      };
+      const permissionTurn = manager.beginTurn("subagent-parent", () => {
+        // Current authorize path does not open interactive approvals for writes.
       });
       const subagentTool = createSubagentTool({
         parentLlm: dummyLlm,
-        parentTools: [createEchoTool()],
-        chat: createToolThenAnswerChat("echo", { message: "nested" }, "nested done"),
+        parentTools: [writeTool],
+        chat: createToolThenAnswerChat(
+          "write",
+          { path: "nested.txt", content: "hi" },
+          "nested done",
+        ),
         permissionTurn,
       });
       let parentCalls = 0;
@@ -961,13 +1010,22 @@ describe("createSubagentTool", () => {
               ? {
                   role: "assistant",
                   content: "",
-                  toolCalls: [{ id: "parent-subagent", name: "subagent", arguments: { task: "echo nested" } }],
+                  toolCalls: [{ id: "parent-subagent", name: "subagent", arguments: { task: "write nested" } }],
                 }
               : { role: "assistant", content: "parent done" };
           },
         });
         assert.equal(messages.at(-1)?.role, "assistant");
-        assert.deepEqual(requests, ["subagent", "echo"]);
+        // Nested write must go through the parent permission turn and be denied.
+        assert.equal(writeExecuted, false);
+        assert.ok(audited.some((item) => item === "request:write"));
+        assert.ok(audited.some((item) => item === "deny:write"));
+        const toolMsg = messages.find((message) => message.role === "tool");
+        assert.ok(toolMsg && toolMsg.role === "tool");
+        if (toolMsg?.role === "tool") {
+          // Subagent may recover partial progress (tool error text) without hard-failing.
+          assert.match(contentAsString(toolMsg.content), /Permission denied for tool: write|Partial result|nested done/);
+        }
       } finally {
         permissionTurn.close();
       }

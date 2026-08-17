@@ -271,7 +271,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   // Bump to remount the text input so ink-text-input resets cursorOffset to value.length
   // after programmatic completions (Tab @file / slash commands).
   const [inputEpoch, setInputEpoch] = useState(0);
-  const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "auto"));
+  const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "plan"));
   const abortRef = useRef<AbortController>(new AbortController());
   const permissionManagerRef = useRef<PermissionManager | null>(null);
   const permissionTurnRef = useRef<PermissionTurnContext | null>(null);
@@ -298,7 +298,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const permissionSessionId = "tui_session";
 
   const getPermissionManager = useCallback(() => {
-    return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("auto"));
+    return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("plan"));
   }, []);
 
   const addPendingImage = useCallback((image: ImageAttachment): boolean => {
@@ -480,6 +480,21 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     clearAc();
   }, [fileCandidates, clearAc, resetInputCursorToEnd]);
 
+  // Intercept Tab at input to immediately show file autocomplete
+  const handleTabAt = useCallback((inputVal: string) => {
+    const trigger = extractFileAcTrigger(inputVal);
+    if (!trigger) return;
+    fileTriggerRef.current = trigger;
+    setFileFragment(trigger.fragment);
+    setCmdCandidates([]);
+    setAcMode("file");
+    if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
+    acDebounceRef.current = setTimeout(async () => {
+      const candidates = await listCandidates(cwd, trigger.fragment);
+      setFileCandidates(candidates);
+    }, 0);
+  }, [cwd]);
+
   const openModelPicker = useCallback((query = "") => {
     const choices = modelChoices(query);
     setModelQuery(query);
@@ -621,7 +636,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       suppressInputEchoRef.current = true;
       const permissionManager = getPermissionManager();
       const current = PERMISSION_MODES.indexOf(permissionManager.getMode());
-      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "auto";
+      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
       permissionManager.setMode(next);
       dispatch({ type: "SET_PERMISSION_MODE", mode: next });
       return;
@@ -911,6 +926,27 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       setConversationId(randomUUID());
       return;
     }
+    if (trimmed === "/context") {
+      const compactions = state.contextCompactions;
+      const tokenEst = state.contextTokens;
+      const ctxWindow = modelContextWindows[state.modelName] ?? llm.contextWindow ?? 128000;
+      const pct = ctxWindow > 0 ? Math.round(tokenEst / ctxWindow * 100) : 0;
+      const lines = [
+        `上下文统计: ${tokenEst} / ${ctxWindow} tokens (${pct}%)`,
+        '',
+      ];
+      if (compactions.length === 0) {
+        lines.push('尚无压缩记录（上下文未超过阈值）');
+      } else {
+        lines.push(`已压缩 ${compactions.length} 次:`);
+        for (const c of compactions.slice(-5)) {
+          lines.push(`  turn${c.turn}: ${c.before} → ${c.after} (${c.reason})`);
+        }
+      }
+      dispatch({ type: "ADD_NOTICE", title: "上下文统计", text: lines.join("\n") });
+      setInput("");
+      return;
+    }
 
     if (/^\/paste-image$/i.test(trimmed)) {
       setInput("");
@@ -1044,7 +1080,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const runId = streamBuffer.start();
     const MAX_AUTO_CONTINUES = 5;
     let autoContinueCount = 0;
-    let currentUserText = prompt;
+    let currentUserText = prompt.replace(/@\S+/g, "").replace(/\s{2,}/g, " ").trim();
     const thinkingMode = parsedThinking.intensity
       ? "fixed"
       : parseThinkingCommandMode(prompt) ?? loadThinkingModeFromEnv();
@@ -1053,6 +1089,20 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       if (event.type === "thinking_policy") {
         turnLlm = withThinkingLevel(turnLlm, event.level);
         setLlm(turnLlm);
+      } else if (event.type === "auto_subagent") {
+        const status = event.executed
+          ? `自动子 agent 已启动 (${event.profile}, score=${event.score})`
+          : event.shouldDelegate
+            ? `建议委托子 agent (${event.profile}, score=${event.score})`
+            : `不自动委托 (score=${event.score})`;
+        dispatch({ type: "SET_STATUS", status });
+      } else if (event.type === "coordinator_mode") {
+        dispatch({
+          type: "SET_STATUS",
+          status: event.active
+            ? `编排模式: ${event.profile} (探索 ${event.directExplorationUsed}/${event.maxDirectExploration})`
+            : "编排模式已关闭",
+        });
       }
       streamBuffer.handle(runId, event);
     };
@@ -1065,6 +1115,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           : currentUserContent;
         currentUserContent = [...contentParts, ...imageParts];
       }
+
 
       // Auto-continue loop: re-invoke runAgentTurn when maxTurns is exceeded.
       while (true) {
@@ -1299,6 +1350,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               value={input}
               onChange={setInputSafe}
               onPasteImage={handlePasteImage}
+              onTab={handleTabAt}
               pasteEnabled={!state.pendingPermission}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {

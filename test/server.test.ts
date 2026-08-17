@@ -22,7 +22,7 @@ describe("agent server", () => {
       llm,
       tools: [],
       chat: async () => ({ role: "assistant", content: "ok" }),
-      permissionMode: "auto",
+      permissionMode: "plan",
     });
     const globalMode = await request(app).get("/api/permission-mode");
     assert.equal(globalMode.status, 404);
@@ -31,16 +31,20 @@ describe("agent server", () => {
     const sessionId = (created.body as { id: string }).id;
     const sessionMode = await request(app).get(`/api/sessions/${sessionId}/permission-mode`);
     assert.equal(sessionMode.status, 200);
-    assert.equal((sessionMode.body as { mode: string }).mode, "auto");
+    assert.equal((sessionMode.body as { mode: string }).mode, "plan");
     const changed = await request(app)
       .put(`/api/sessions/${sessionId}/permission-mode`)
-      .send({ mode: "manual" });
+      .send({ mode: "bypass" });
     assert.equal(changed.status, 200);
-    assert.equal((changed.body as { mode: string }).mode, "manual");
+    assert.equal((changed.body as { mode: string }).mode, "bypass");
     const invalid = await request(app)
       .put(`/api/sessions/${sessionId}/permission-mode`)
-      .send({ mode: "unknown" });
+      .send({ mode: "manual" });
     assert.equal(invalid.status, 400);
+    const alsoInvalid = await request(app)
+      .put(`/api/sessions/${sessionId}/permission-mode`)
+      .send({ mode: "unknown" });
+    assert.equal(alsoInvalid.status, 400);
     const decision = await request(app)
       .post(`/api/sessions/${sessionId}/permissions/request-id`)
       .send({ decision: "allow" });
@@ -65,7 +69,7 @@ describe("agent server", () => {
     const app = createAgentServer({
       llm,
       tools: [writeTool],
-      permissionMode: "auto",
+      permissionMode: "plan",
       dataDir,
       chat: async (_config, messages) => {
         modelCalls += 1;
@@ -120,7 +124,7 @@ describe("agent server", () => {
       assert.equal(changed.status, 200);
       assert.deepEqual(changed.body, {
         mode: "bypass",
-        previousMode: "auto",
+        previousMode: "plan",
         changed: true,
         interrupted: true,
       });
@@ -131,7 +135,7 @@ describe("agent server", () => {
       const interruptedEvents = interrupted.text.trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
       const aborted = interruptedEvents.find((event) => event.type === "aborted");
       assert.equal(aborted?.reason, "permission_mode_changed");
-      assert.equal(aborted?.previousMode, "auto");
+      assert.equal(aborted?.previousMode, "plan");
       assert.equal(aborted?.permissionMode, "bypass");
       assert.equal(executions, 0);
 
@@ -140,7 +144,7 @@ describe("agent server", () => {
         .field("prompt", "continue");
       assert.equal(next.status, 200);
       assert.match(nextSystemPrompt, /mode=bypass/);
-      assert.doesNotMatch(nextSystemPrompt, /mode=auto/);
+      assert.doesNotMatch(nextSystemPrompt, /mode=plan/);
       assert.equal(executions, 1);
 
       const restoredApp = createAgentServer({ llm, tools: [], chat: async () => ({ role: "assistant", content: "unused" }), dataDir });
