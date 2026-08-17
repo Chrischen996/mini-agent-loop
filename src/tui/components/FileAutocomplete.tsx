@@ -29,6 +29,8 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "plan-retry", usage: "/plan-retry",       description: "重试失败的计划" },
   { name: "plan-history", usage: "/plan-history",   description: "列出计划历史" },
   { name: "plan-archive", usage: "/plan-archive",   description: "归档当前计划" },
+  { name: "skill", usage: "/skill [on|off|list|clear] [name]", description: "查看或切换当前会话 Skills" },
+  { name: "skills", usage: "/skills [on|off|list|clear] [name]", description: "查看或切换当前会话 Skills" },
   { name: "help",  usage: "/help",                  description: "显示帮助" },
   { name: "exit",  usage: "/exit",                  description: "退出" },
 ];

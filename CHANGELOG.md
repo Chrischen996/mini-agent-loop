@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Workspace skill discovery (`skills/`, `.grok/skills/`, `.claude/skills/`, plus user-level skill dirs) and `MINI_AGENT_SKILLS` activation for CLI, TUI, and Web
+- Progressive official-skill loading: catalog metadata first, full `SKILL.md` plus scripts/references only after activation
+- TUI `/skill` command and session skill APIs
 - Model catalog entries for `xai/grok-4.6`, `google/gemini-3.6-flash`, and `google/gemini-3.7-flash` (plus matching `google-vertex` Flash ids)
 - Core agent loop implementation with OpenAI-compatible API support
 - Tool system with argument validation and error handling

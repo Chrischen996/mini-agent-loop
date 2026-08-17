@@ -46,6 +46,15 @@ import {
   type SubagentProfile,
 } from "./subagent/index.ts";
 import {
+  activateSkillNames,
+  defaultSkillRegistry,
+  discoverWorkspaceSkills,
+  loadSkillNamesFromEnv,
+  uniqueSkillNames,
+  type Skill,
+  type SkillRegistry,
+} from "./skills/index.ts";
+import {
   listWorkspaceDirectory,
   validateReferencedPaths,
 } from "./workspace.ts";
@@ -133,6 +142,7 @@ type Session = {
   permissionManager: PermissionManager;
   parentSessionId?: string;
   forkedFromMessage?: number;
+  skillNames: string[];
 };
 
 export type AgentServerOptions = {
@@ -175,6 +185,14 @@ export type AgentServerOptions = {
   maxThinkingEscalations?: number;
   /** Default permission mode for new and restored Web sessions. */
   permissionMode?: PermissionMode;
+  /** Skills to register before serving requests. */
+  skills?: Skill[];
+  /** Skill names to activate for new sessions. Combined with MINI_AGENT_SKILLS. */
+  skillNames?: string[];
+  /** Skill registry used for discovery and name resolution. */
+  skillRegistry?: SkillRegistry;
+  /** Optional home directory used when discovering user-level skills. */
+  skillHome?: string;
 };
 
 function safeMessage(message: AgentMessage): Record<string, unknown> {
@@ -581,6 +599,17 @@ async function parseMessageRequest(
 export function createAgentServer(options: AgentServerOptions): Express {
   const workspace = path.resolve(options.workspace ?? process.cwd());
   const sessions = new Map<string, Session>();
+  const skillRegistry = options.skillRegistry ?? defaultSkillRegistry;
+  if (options.skills) {
+    for (const skill of options.skills) skillRegistry.register(skill);
+  }
+  const defaultSkillNames = uniqueSkillNames([
+    ...(options.skillNames ?? []),
+    ...loadSkillNamesFromEnv(),
+  ]);
+  const resolveSessionSkillNames = (session: Session): string[] =>
+    activateSkillNames(session.skillNames, skillRegistry).activeNames;
+  const skillDiscovery = discoverWorkspaceSkills(workspace, skillRegistry, options.skillHome);
   const envPermissionMode = process.env.MINI_AGENT_PERMISSION_MODE;
   // All entry points use plan unless an explicit mode is configured.
   const defaultPermissionMode: PermissionMode = options.permissionMode
@@ -630,6 +659,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         thinkingMode: persisted.thinkingMode,
         parentSessionId: persisted.parentSessionId,
         forkedFromMessage: persisted.forkedFromMessage,
+        skillNames: [...defaultSkillNames],
       };
       // Restore the model choice first, then apply the persisted effort level
       // even when the session stayed on the server default model.
@@ -664,7 +694,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
   app.disable("x-powered-by");
   app.use(express.json());
   app.use((_request, _response, next) => {
-    void restorePromise.then(() => next()).catch(next);
+    void Promise.all([restorePromise, skillDiscovery]).then(() => next()).catch(next);
   });
 
   app.get("/api/health", (_request, response) => response.json({ ok: true }));
@@ -705,6 +735,13 @@ export function createAgentServer(options: AgentServerOptions): Express {
       },
       permissionMode: defaultPermissionMode,
       activeProfile: activeProfileName,
+      skills: {
+        available: skillRegistry.list().map((skill) => ({
+          name: skill.name,
+          description: skill.description,
+        })),
+        active: activateSkillNames(defaultSkillNames, skillRegistry).activeNames,
+      },
     });
   });
 
@@ -924,6 +961,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       busy: false,
       thinkingMode: options.thinkingMode ?? loadThinkingModeFromEnv(),
       permissionManager: new PermissionManager(defaultPermissionMode),
+      skillNames: [...defaultSkillNames],
     };
     sessions.set(id, session);
     await sessionStore.create(persistedSession(session));
@@ -965,6 +1003,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       permissionManager: new PermissionManager(parent.permissionManager.getMode()),
       parentSessionId: parent.id,
       forkedFromMessage: safeMessageIndex,
+      skillNames: [...parent.skillNames],
     };
     sessions.set(id, child);
     await sessionStore.create(persistedSession(child));
@@ -1253,6 +1292,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
             thinkingMode: session.thinkingMode ?? options.thinkingMode ?? loadThinkingModeFromEnv(),
             maxThinkingEscalations: options.maxThinkingEscalations,
             runtimeRef: parentRuntime,
+            skillNames: resolveSessionSkillNames(session),
+            skillRegistry,
             prepareNextTurn: async (context) => {
               const update = await options.prepareNextTurn?.(context);
               if (update?.llm) {
@@ -1423,6 +1464,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
           thinkingMode: session.thinkingMode ?? options.thinkingMode ?? loadThinkingModeFromEnv(),
           maxThinkingEscalations: options.maxThinkingEscalations,
           runtimeRef: parentRuntime,
+          skillNames: resolveSessionSkillNames(session),
+          skillRegistry,
           prepareNextTurn: async (context) => {
             const update = await options.prepareNextTurn?.(context);
             if (update?.llm) {
@@ -1548,9 +1591,66 @@ export function createAgentServer(options: AgentServerOptions): Express {
       thinkingLevel: effectiveLlm.thinkingLevel ?? (effectiveLlm.reasoning ? "medium" : "off"),
       contextWindow: resolved.contextWindow,
       capabilities: effectiveLlm.capabilities,
+      skillNames: resolveSessionSkillNames(session),
       messages: session.messages
         .filter((message) => message.role !== "system")
         .map(safeMessage),
+    });
+  });
+
+  app.get("/api/sessions/:id/skills", (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const activation = activateSkillNames(session.skillNames, skillRegistry);
+    response.json({
+      available: activation.available.map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+      })),
+      active: activation.activeNames,
+      missing: activation.missingNames,
+    });
+  });
+
+  app.put("/api/sessions/:id/skills", (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    if (session.busy) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
+    const body = (request.body ?? {}) as {
+      skillNames?: unknown;
+      add?: unknown;
+      remove?: unknown;
+    };
+    const requested = Array.isArray(body.skillNames)
+      ? body.skillNames.filter((name): name is string => typeof name === "string")
+      : session.skillNames;
+    const add = Array.isArray(body.add)
+      ? body.add.filter((name): name is string => typeof name === "string")
+      : [];
+    const remove = new Set(
+      Array.isArray(body.remove)
+        ? body.remove.filter((name): name is string => typeof name === "string")
+        : [],
+    );
+    const merged = uniqueSkillNames([...requested, ...add]).filter((name) => !remove.has(name));
+    const activation = activateSkillNames(merged, skillRegistry);
+    session.skillNames = activation.activeNames;
+    response.json({
+      available: activation.available.map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+      })),
+      active: activation.activeNames,
+      missing: activation.missingNames,
     });
   });
 
@@ -1725,6 +1825,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
             thinkingMode: input.thinkingMode ?? session.thinkingMode ?? options.thinkingMode ?? loadThinkingModeFromEnv(),
             maxThinkingEscalations: options.maxThinkingEscalations,
             runtimeRef: parentRuntime,
+            skillNames: resolveSessionSkillNames(session),
+            skillRegistry,
             prepareNextTurn: async (context) => {
               const update = await options.prepareNextTurn?.(context);
               if (update?.llm) {

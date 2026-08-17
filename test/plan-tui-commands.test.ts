@@ -34,4 +34,15 @@ describe("TUI plan slash commands", () => {
     const run = SLASH_COMMANDS.find((cmd) => cmd.name === "plan-run");
     assert.equal(run?.usage, "/plan-run");
   });
+
+  it("registers skill commands before help", () => {
+    const helpIndex = names.indexOf("help");
+    const skillIndex = names.indexOf("skill");
+    const skillsIndex = names.indexOf("skills");
+    assert.ok(skillIndex >= 0 && skillsIndex >= 0);
+    assert.ok(skillIndex < helpIndex);
+    assert.ok(skillsIndex < helpIndex);
+    const skill = SLASH_COMMANDS.find((cmd) => cmd.name === "skill");
+    assert.equal(skill?.usage, "/skill [on|off|list|clear] [name]");
+  });
 });

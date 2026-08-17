@@ -638,10 +638,15 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
           maxThinkingEscalations: effectiveMaxEscalations,
           // ── Pass through context policy if provided ─────────────
           ...(effectiveContextPolicy ? { context: effectiveContextPolicy } : {}),
-          // ── Pass through skill names if provided ────────────────
-          ...(args.skillNames && args.skillNames.length > 0
-            ? { skillNames: args.skillNames }
-            : {}),
+          // ── Pass through explicit skill names, otherwise inherit parent ──
+          ...(() => {
+            const inheritedSkillNames = args.skillNames?.length
+              ? args.skillNames
+              : parentRuntime?.skillNames;
+            return inheritedSkillNames && inheritedSkillNames.length > 0
+              ? { skillNames: inheritedSkillNames }
+              : {};
+          })(),
           // ── Inherit parent history when requested ───────────────
           ...(inheritedParentHistory ? { _parentHistory: inheritedParentHistory } : {}),
           runtimeRef: childRuntimeRef,

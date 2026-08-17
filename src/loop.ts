@@ -58,6 +58,7 @@ import type {
 import { validateToolArgs } from "./validate.ts";
 import type { Skill, SkillRegistry } from "./skills/types.ts";
 import { defaultSkillRegistry } from "./skills/registry.ts";
+import { formatActivatedSkillPrompt, formatSkillCatalog } from "./skills/index.ts";
 import { loadAgentsMd } from "./agents-md.ts";
 import { formatValidationReport, runValidation } from "./validation.ts";
 import { GitWorkflow } from "./git/workflow.ts";
@@ -175,6 +176,8 @@ export type AgentRuntimeRef = {
   thinkingMode?: ThinkingMode;
   maxThinkingEscalations?: number;
   context?: ContextManagerOptions;
+  /** Currently resolved skill names for this loop, inherited by nested subagents. */
+  skillNames?: string[];
 };
 
 export type LoopEvent =
@@ -560,10 +563,16 @@ async function runAgentTurnInternal(
   const resolvedFromNames = skillRegistry.resolve(skillNames);
   const activeSkills: Skill[] = [...skills, ...resolvedFromNames];
 
-  // Merge skill-provided system prompt fragments
-  const skillPromptFragments = activeSkills
-    .map((s) => s.systemPromptFragment)
-    .filter((f): f is string => Boolean(f));
+  // Merge skill-provided system prompt fragments.
+  // Discovered-but-inactive skills only contribute a short catalog.
+  // Activated skills get the full instructions plus resource paths.
+  const catalogSkills = skillRegistry.list().filter(
+    (skill) => !activeSkills.some((active) => active.name === skill.name),
+  );
+  const skillPromptFragments = [
+    formatSkillCatalog(catalogSkills),
+    ...activeSkills.map((skill) => formatActivatedSkillPrompt(skill)),
+  ].filter(Boolean);
 
   // Merge skill-provided tools
   const skillTools: Tool[] = activeSkills.flatMap((s) =>
@@ -722,6 +731,7 @@ async function runAgentTurnInternal(
     runtimeRef.thinkingMode = effectiveThinkingMode;
     runtimeRef.maxThinkingEscalations = maxThinkingEscalations;
     runtimeRef.context = currentContext;
+    runtimeRef.skillNames = activeSkills.map((skill) => skill.name);
   };
   syncRuntimeRef();
 

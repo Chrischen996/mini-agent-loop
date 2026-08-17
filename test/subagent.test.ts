@@ -877,6 +877,25 @@ describe("createSubagentTool", () => {
       assert.deepEqual(events.filter((event) => event.type === "subagent_start").map((event) => event.runtime.thinkingMode), ["fixed", "adaptive"]);
     });
 
+    it("inherits parent skill names when the child does not override them", async () => {
+      const { defaultSkillRegistry, createPromptSkill } = await import("../src/skills/index.ts");
+      defaultSkillRegistry.register(createPromptSkill("research", "Research helper", "Always cite evidence."));
+      const parentRuntime: AgentRuntimeRef = { skillNames: ["research"] };
+      let capturedSystem = "";
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        parentRuntime,
+        chat: async (_config, messages) => {
+          capturedSystem = contentAsString(messages.find((message) => message.role === "system")?.content ?? "");
+          return { role: "assistant", content: "ok" };
+        },
+      });
+      const result = await tool.execute({ task: "child task" });
+      assert.equal(result.isError, undefined);
+      assert.match(capturedSystem, /Always cite evidence/);
+    });
+
     it("rejects an invalid model override even when a profile has an LLM", async () => {
       let chatCalled = false;
       const tool = createSubagentTool({

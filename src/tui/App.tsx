@@ -72,7 +72,15 @@ import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./l
 import { estimateViewportContentHeight } from "./message-viewport.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
-import { PasteAwareTextInput } from "./components/PasteAwareTextInput.tsx";
+import { PromptInput } from "./components/PromptInput.tsx";
+import {
+  extractFileAcTrigger,
+  parseAtRefs,
+  sanitizeInput,
+  type FileAcTrigger,
+  shouldAcceptAutocompleteOnEnter,
+  type AcMode,
+} from "./input-utils.ts";
 import {
   imageAttachmentToPart,
   loadImageAttachment,
@@ -91,6 +99,12 @@ import {
   preparePlanForExecution,
   rejectCurrentPlan,
 } from "../plan/index.ts";
+import {
+  applySkillCommand,
+  defaultSkillRegistry,
+  discoverWorkspaceSkills,
+  loadSkillNamesFromEnv,
+} from "../skills/index.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
@@ -163,8 +177,6 @@ const PATH_COMMANDS = new Set(["read", "ls", "find", "grep"]);
 
 // ─── autocomplete modes ──────────────────────────────────────────────────────
 
-type AcMode = "command" | "file" | "model" | "model-picker" | "model-setup" | "profile-name" | "profile-list" | null;
-
 type ModelSetupState = {
   model: ModelRef;
   baseUrl: string;
@@ -177,28 +189,6 @@ type ProfileListState = {
   profiles: ReturnType<typeof listProfiles>;
   selectedIndex: number;
 };
-
-type FileAcTrigger = {
-  fragment: string;
-  replaceFn: (chosen: string) => string;
-};
-
-function extractFileAcTrigger(input: string): FileAcTrigger | null {
-  // @file reference at end
-  const atMatch = input.match(/@([\w./\\-]*)$/);
-  if (atMatch) {
-    const fragment = atMatch[1];
-    return { fragment, replaceFn: (chosen) => input.replace(/@[\w./\\-]*$/, `@${chosen}`) };
-  }
-  // /read <path> or /ls <path> at end
-  const slashMatch = input.match(/^\/(read|ls|find|grep)\s+([\w./\\-]*)$/i);
-  if (slashMatch) {
-    const cmd = slashMatch[1];
-    const fragment = slashMatch[2];
-    return { fragment, replaceFn: (chosen) => input.replace(/(\/(?:read|ls|find|grep)\s+)[\w./\\-]*$/i, `/${cmd} ${chosen}`) };
-  }
-  return null;
-}
 
 // ─── file listing ────────────────────────────────────────────────────────────
 
@@ -224,13 +214,6 @@ async function listCandidates(cwd: string, fragment: string): Promise<string[]> 
   } catch { return []; }
 }
 
-// ─── @file resolver ──────────────────────────────────────────────────────────
-
-function parseAtRefs(input: string): string[] {
-  const matches = input.match(/@([\w./\\-]+)/g);
-  return matches ? matches.map((m) => m.slice(1)) : [];
-}
-
 // ─── main app ────────────────────────────────────────────────────────────────
 
 export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement {
@@ -245,6 +228,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   llmRef.current = llm;
   const vision = loadVisionConfigFromEnv();
   const autoSubagent = useMemo(() => loadAutoSubagentOptionsFromEnv(), []);
+  const [skillNames, setSkillNames] = useState<string[]>(() => loadSkillNamesFromEnv());
+  const skillNamesRef = useRef(skillNames);
+  skillNamesRef.current = skillNames;
   const allToolsRef = useRef<ToolProvider>(allTools ?? createAllTools(cwd));
   const agentToolsRef = useRef<ToolProvider>(agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
 
@@ -346,12 +332,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   const setInputSafe = useCallback((value: string) => {
     if (pendingPermissionRef.current) return;
-    if (suppressInputEchoRef.current) {
-      suppressInputEchoRef.current = false;
-      return;
-    }
-    // Drop control characters that terminals may inject with Ctrl/Alt combos.
-    setInput(value.replace(/[\u0000-\u001F\u007F]/g, ""));
+    // PromptInput ignores Ctrl/Meta chords, so do not swallow the next character.
+    suppressInputEchoRef.current = false;
+    setInput(sanitizeInput(value));
   }, []);
 
   // ── autocomplete state ───────────────────────────────────────────────────
@@ -397,6 +380,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   useEffect(() => {
     loadProfileStore().then(setProfileStore).catch(() => { /* non-fatal */ });
   }, []);
+
+  useEffect(() => {
+    void discoverWorkspaceSkills(cwd).catch(() => { /* non-fatal */ });
+  }, [cwd]);
 
   // Watch input → update autocomplete
   useEffect(() => {
@@ -496,6 +483,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   // Intercept Tab at input to immediately show file autocomplete
   const handleTabAt = useCallback((inputVal: string) => {
+    // App.useInput already owns Tab while a picker is open.
+    if (acMode === "file" || acMode === "command" || acMode === "model" || acMode === "model-picker") {
+      return;
+    }
     const trigger = extractFileAcTrigger(inputVal);
     if (!trigger) return;
     fileTriggerRef.current = trigger;
@@ -507,7 +498,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       const candidates = await listCandidates(cwd, trigger.fragment);
       setFileCandidates(candidates);
     }, 0);
-  }, [cwd]);
+  }, [acMode, cwd]);
 
   const openModelPicker = useCallback((query = "") => {
     const choices = modelChoices(query);
@@ -997,6 +988,18 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
 
+    const skillCommand = applySkillCommand(trimmed, skillNamesRef.current);
+    if (skillCommand) {
+      setSkillNames(skillCommand.activation.activeNames);
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "Skills",
+        text: skillCommand.message,
+      });
+      setInput("");
+      return;
+    }
+
     // ── Plan workflow slash commands ───────────────────────────────────────
     if (trimmed === "/plan-show") {
       setInput("");
@@ -1324,6 +1327,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
             thinkingMode,
             runtimeRef: subagentRuntimeRef.current,
+            skillNames: skillNamesRef.current,
+            skillRegistry: defaultSkillRegistry,
             onEvent: onLoopEvent,
           });
           streamBuffer.finish(runId);
@@ -1626,20 +1631,37 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         <Box paddingX={1} gap={1} flexShrink={0}>
           <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : ">"}</Text>
           <Box flexGrow={1} minWidth={0}>
-            <PasteAwareTextInput
+            <PromptInput
               key={inputEpoch}
               value={input}
               onChange={setInputSafe}
               onPasteImage={handlePasteImage}
               onTab={handleTabAt}
               pasteEnabled={!state.pendingPermission}
+              focus={!state.pendingPermission}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {
-                if ((acMode === "model" || acMode === "model-picker") && modelCandidates[acIndex]) {
-                  selectModel(modelCandidates[acIndex]!);
-                } else {
-                  void handleSubmit(val);
+                if (shouldAcceptAutocompleteOnEnter(acMode)) {
+                  if (acMode === "command") {
+                    acceptCommand(acIndex);
+                    return;
+                  }
+                  if (acMode === "file") {
+                    acceptFile(acIndex);
+                    return;
+                  }
+                  const chosen = modelCandidates[acIndex];
+                  if (chosen) {
+                    if (acMode === "model-picker") selectModel(chosen);
+                    else {
+                      setInput(`/model ${chosen}`);
+                      resetInputCursorToEnd();
+                      clearAc();
+                    }
+                    return;
+                  }
                 }
+                void handleSubmit(val);
               }}
               placeholder={
                 state.busy ? "运行中，可输入消息并排队"

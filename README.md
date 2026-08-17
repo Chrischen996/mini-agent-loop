@@ -132,9 +132,9 @@ export MINI_AGENT_AUTO_SUBAGENT=0
 Skills can be activated for CLI, TUI, and Web sessions with
 `MINI_AGENT_SKILLS=skill-a,skill-b`. Programmatic callers can pass `skills`,
 `skillNames`, and `skillRegistry` to the agent loop or server options.
-At startup, the CLI, TUI, and Web server automatically discover
-`skills/<directory>/SKILL.md` files in the workspace and register them. A file
-may use optional frontmatter:
+At startup, the CLI, TUI, and Web server automatically discover official-style
+`SKILL.md` packages from `skills/`, `.grok/skills/`, `.claude/skills/`,
+`~/.grok/skills/`, and `~/.claude/skills/`. A file may use optional frontmatter:
 
 ```markdown
 ---
@@ -145,6 +145,12 @@ Read the relevant source files before answering.
 ```
 
 Without frontmatter, the directory name is used as the Skill name.
+Discovered skills only contribute their `name` and `description` until they are
+activated. Activation injects the `SKILL.md` body and, when present, the skill
+directory plus `scripts/` and `references/` filenames. The model can then use
+`read` or `bash` to open those files. Scripts are never executed automatically.
+
+In the TUI, `/skill` (alias `/skills`) lists discovered skills and can enable, disable, or clear them for the current session. The HTTP server exposes `GET/PUT /api/sessions/:id/skills`.
 
 The vision variables are optional. For the generic provider, the three
 `VISION_API_KEY`, `VISION_BASE_URL`, and `VISION_MODEL` values must be set

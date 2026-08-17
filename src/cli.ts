@@ -9,6 +9,11 @@ import { loadLlmConfigFromEnv } from "./llm/index.ts";
 import { MaxTurnsExceededError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
 import { loadAgentsMd } from "./agents-md.ts";
 import {
+  defaultSkillRegistry,
+  discoverWorkspaceSkills,
+  loadSkillNamesFromEnv,
+} from "./skills/index.ts";
+import {
   PLAN_ONLY_SUFFIX,
   approveCurrentPlan,
   archiveCurrentPlan,
@@ -387,6 +392,14 @@ async function main(): Promise<void> {
   const thinking = parseThinkingIntensityPrompt(rawPrompt);
   const prompt = thinking.prompt;
   const cwd = process.cwd();
+  const discoveredSkills = await discoverWorkspaceSkills(cwd);
+  const skillNames = loadSkillNamesFromEnv();
+  if (discoveredSkills.skills.length > 0) {
+    console.error(`[skills] discovered=${discoveredSkills.skills.map((skill) => skill.name).join(",")}`);
+  }
+  if (skillNames.length > 0) {
+    console.error(`[skills] active=${skillNames.join(",")}`);
+  }
 
   // Early plan commands that do not need the LLM
   if (planShow) {
@@ -644,6 +657,8 @@ async function main(): Promise<void> {
       runtimeRef: parentRuntime,
       onEvent: logEvent,
       agentsMd,
+      skillNames,
+      skillRegistry: defaultSkillRegistry,
     });
     if (trackingExecution) {
       const last = [...messages].reverse().find((m) => m.role === "assistant");

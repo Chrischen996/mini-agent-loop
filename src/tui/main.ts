@@ -30,6 +30,12 @@ import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 import { createSubagentTool, createSubagentBatchTool, defaultProfiles } from "../subagent/index.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
 import {
+  applySkillCommand,
+  defaultSkillRegistry,
+  discoverWorkspaceSkills,
+  loadSkillNamesFromEnv,
+} from "../skills/index.ts";
+import {
   buildLegacyCursorOutput,
   buildLegacyFrameLines,
   buildLegacyFrameOutput,
@@ -126,6 +132,8 @@ async function main(): Promise<void> {
   let activeLlm = loadLlmConfigFromEnv();
   const vision = loadVisionConfigFromEnv();
   const autoSubagent = loadAutoSubagentOptionsFromEnv();
+  await discoverWorkspaceSkills(cwd);
+  let activeSkillNames = loadSkillNamesFromEnv();
   const state: TuiState = {
     history: createAgentHistory(undefined, "plan"),
     streamingText: "",
@@ -246,6 +254,16 @@ async function main(): Promise<void> {
       render(state);
       return;
     }
+    const skillCommand = applySkillCommand(text, activeSkillNames);
+    if (skillCommand) {
+      activeSkillNames = skillCommand.activation.activeNames;
+      state.status = skillCommand.activation.activeNames.length > 0
+        ? `Skills: ${skillCommand.activation.activeNames.join(", ")}`
+        : "Skills: (none)";
+      state.pendingUser = undefined;
+      render(state);
+      return;
+    }
 
     state.input = "";
     cursorCol = 0;
@@ -289,6 +307,8 @@ async function main(): Promise<void> {
         autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
         thinkingMode,
         runtimeRef: parentRuntime,
+        skillNames: activeSkillNames,
+        skillRegistry: defaultSkillRegistry,
         onEvent: (event) => {
           handleEvent(state, event);
           if (event.type === "thinking_policy") {
