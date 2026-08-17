@@ -6,8 +6,13 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { decideAutoSubagent } from "../src/subagent/auto.ts";
+import {
+  buildCoordinatorPromptFragment,
+  buildPreflightTask,
+  decideAutoSubagent,
+} from "../src/subagent/auto.ts";
 import { defaultProfiles, researcherProfile, coderProfile, reviewerProfile } from "../src/subagent/profiles.ts";
+import { buildSystemPrompt } from "../src/loop.ts";
 
 describe("subagent delegation improvements", () => {
   describe("auto-preflight decision triggers", () => {
@@ -15,14 +20,24 @@ describe("subagent delegation improvements", () => {
       const text = "请帮我分析这个项目的代码结构，然后创建一个新组件，最后运行测试";
       const decision = decideAutoSubagent(text);
       assert.ok(decision.shouldDelegate, "should delegate multi-step code task");
-      assert.ok(decision.score >= 3, `score ${decision.score} should be >= 3`);
+      assert.ok(decision.coordinatorMode, "should enter coordinator mode");
+      assert.ok(decision.score >= 2, `score ${decision.score} should be >= 2`);
+      assert.equal(decision.profile, "coder");
     });
 
     it("scores high for investigation/review tasks", () => {
-      // Must hit 2+ patterns to reach minScore=3: investigation + code + multi-step
+      // Must hit enough patterns to reach minScore=2: investigation + code + multi-step
       const text = "请帮我分析这个项目的主模块，然后排查潜在的 bugs 并给出改进建议";
       const decision = decideAutoSubagent(text);
       assert.ok(decision.shouldDelegate, `should delegate investigation task, got score=${decision.score} reasons=${JSON.stringify(decision.reasons)}`);
+      assert.equal(decision.profile, "researcher");
+    });
+
+    it("picks reviewer for pure review requests", () => {
+      const text = "请对这个项目的主模块做代码审查，检查潜在问题并给出建议";
+      const decision = decideAutoSubagent(text);
+      assert.ok(decision.shouldDelegate, `score=${decision.score} reasons=${JSON.stringify(decision.reasons)}`);
+      assert.equal(decision.profile, "reviewer");
     });
 
     it("does not trigger for simple single-step tasks", () => {
@@ -46,27 +61,68 @@ describe("subagent delegation improvements", () => {
     });
   });
 
+  describe("system prompt encourages orchestration", () => {
+    it("mentions orchestrator preference and subagent tools", () => {
+      const prompt = buildSystemPrompt("bypass");
+      assert.match(prompt, /primarily an orchestrator/i);
+      assert.match(prompt, /subagent_batch/);
+      assert.match(prompt, /MANDATORY for multi-step tasks/);
+      assert.match(prompt, /you MUST delegate/i);
+    });
+
+    it("builds an active coordinator fragment with exploration budget", () => {
+      const fragment = buildCoordinatorPromptFragment({
+        profile: "coder",
+        preflightExecuted: true,
+        maxDirectExploration: 2,
+      });
+      assert.match(fragment, /Active Coordinator Mode/);
+      assert.match(fragment, /coder/);
+      assert.match(fragment, /at most 2 direct exploration/);
+      assert.match(fragment, /subagent_batch/);
+    });
+
+    it("builds a focused preflight task for each profile", () => {
+      const research = buildPreflightTask("分析这个仓库结构", "researcher");
+      assert.match(research, /researcher subagent/i);
+      assert.match(research, /plain-text findings summary/i);
+      assert.match(research, /分析这个仓库结构/);
+
+      const code = buildPreflightTask("实现一个新模块", "coder");
+      assert.match(code, /coder subagent/i);
+      assert.match(code, /files changed/i);
+
+      const review = buildPreflightTask("审查主模块", "reviewer");
+      assert.match(review, /reviewer subagent/i);
+      assert.match(review, /review summary/i);
+    });
+  });
+
   describe("profiles are well-configured", () => {
     it("has exactly 3 built-in profiles", () => {
       assert.equal(defaultProfiles.length, 3);
     });
 
-    it("researcher profile has correct tools", () => {
-      assert.ok(researcherProfile.allowedTools.includes("read"));
-      assert.ok(researcherProfile.allowedTools.includes("grep"));
-      assert.ok(!researcherProfile.allowedTools.includes("write"));
-      assert.ok(!researcherProfile.allowedTools.includes("edit"));
+    it("researcher profile has correct tools and a higher turn budget", () => {
+      const tools = researcherProfile.allowedTools ?? [];
+      assert.ok(tools.includes("read"));
+      assert.ok(tools.includes("grep"));
+      assert.ok(!tools.includes("write"));
+      assert.ok(!tools.includes("edit"));
+      assert.ok((researcherProfile.maxTurns ?? 0) >= 12);
     });
 
     it("coder profile has write/edit tools", () => {
-      assert.ok(coderProfile.allowedTools.includes("write"));
-      assert.ok(coderProfile.allowedTools.includes("edit"));
-      assert.ok(coderProfile.allowedTools.includes("read"));
+      const tools = coderProfile.allowedTools ?? [];
+      assert.ok(tools.includes("write"));
+      assert.ok(tools.includes("edit"));
+      assert.ok(tools.includes("read"));
     });
 
     it("reviewer profile is read-only", () => {
-      assert.ok(!reviewerProfile.allowedTools.includes("write"));
-      assert.ok(!reviewerProfile.allowedTools.includes("edit"));
+      const tools = reviewerProfile.allowedTools ?? [];
+      assert.ok(!tools.includes("write"));
+      assert.ok(!tools.includes("edit"));
     });
   });
 });

@@ -86,6 +86,18 @@ function handleEvent(state: TuiState, event: LoopEvent): void {
       state.status = event.result.isError ? `${event.call.name} 执行失败` : `${event.call.name} 已完成`;
       break;
     }
+    case "auto_subagent":
+      state.status = event.executed
+        ? `自动子 agent 已启动 (${event.profile}, score=${event.score})`
+        : event.shouldDelegate
+          ? `建议委托子 agent (${event.profile}, score=${event.score})`
+          : `不自动委托 (score=${event.score})`;
+      break;
+    case "coordinator_mode":
+      state.status = event.active
+        ? `编排模式: ${event.profile} (探索 ${event.directExplorationUsed}/${event.maxDirectExploration})`
+        : "编排模式已关闭";
+      break;
     case "thinking_policy":
       state.status = `自适应思考: ${thinkingLevelToDisplay(event.level)} (${event.reasons.join(", ")})`;
       state.thinkingLevel = event.level;
@@ -115,14 +127,14 @@ async function main(): Promise<void> {
   const vision = loadVisionConfigFromEnv();
   const autoSubagent = loadAutoSubagentOptionsFromEnv();
   const state: TuiState = {
-    history: createAgentHistory(undefined, "auto"),
+    history: createAgentHistory(undefined, "plan"),
     streamingText: "",
     tools: [],
     busy: false,
     input: "",
     pendingUser: undefined,
     status: "就绪",
-    permissionMode: "auto" as PermissionMode,
+    permissionMode: "plan" as PermissionMode,
     thinkingLevel: activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off"),
   };
   const permissionManager = new PermissionManager(state.permissionMode);
@@ -323,7 +335,7 @@ async function main(): Promise<void> {
     }
     if (inputChunk.includes("\u001b[Z")) {
       const current = PERMISSION_MODES.indexOf(state.permissionMode);
-      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "auto";
+      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
       permissionManager.setMode(next);
       state.permissionMode = permissionManager.getMode();
       state.status = `权限模式: ${next}`;

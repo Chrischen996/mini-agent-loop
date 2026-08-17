@@ -19,7 +19,12 @@
 import { randomUUID } from "node:crypto";
 import { contentAsString } from "../content.ts";
 import { switchLlmModel, type LlmConfig } from "../llm/index.ts";
-import { runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "../loop.ts";
+import {
+  MaxTurnsExceededError,
+  runAgentLoop,
+  type AgentRuntimeRef,
+  type LoopEvent,
+} from "../loop.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
 import type {
   SubagentArgs,
@@ -32,19 +37,30 @@ import type {
 } from "./types.ts";
 import type { PermissionTurnContext } from "../permissions.ts";
 import type { ThinkingMode } from "../thinking-policy.ts";
+import type { AgentMessage, AssistantMessage, ToolResultMessage } from "../types.ts";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const DEFAULT_MAX_TURNS = 5;
+const DEFAULT_MAX_TURNS = 8;
 const DEFAULT_MAX_DEPTH = 3;
 const DEFAULT_MAX_CONCURRENCY_BATCH = 0; // 0 = unlimited (all concurrent)
 const SUBAGENT_TOOL_NAME = "subagent";
+const MAX_PARTIAL_TOOL_SNIPPETS = 4;
+const MAX_PARTIAL_TOOL_CHARS = 400;
 
 const DEFAULT_SUBAGENT_SYSTEM_PROMPT = [
   "You are a focused sub-agent. Complete the given task precisely and return a clear, concise result.",
   "Do not ask follow-up questions — work with the information provided.",
-  "When you have finished the task, respond with your final answer directly.",
+  "When you have finished the task, respond with your final answer as plain text.",
+  "Important: always end with a non-empty text answer. Tool calls alone are not enough.",
 ].join("\n");
+
+type ExtractedAnswer = {
+  text: string;
+  /** True when we had to synthesize/fallback instead of a clean final assistant answer. */
+  partial: boolean;
+  source: "assistant" | "tool_results" | "none";
+};
 
 // ─── Global cross-batch concurrency limiter ────────────────────────────────────
 let _globalActiveCount = 0;
@@ -130,19 +146,93 @@ function buildChildTools(
 }
 
 /**
- * Extract the final assistant text from the completed message list.
- * Walks backward to find the last assistant message.
+ * Extract the best available answer from a completed (or partial) message list.
+ * Prefers the last non-empty assistant text; falls back to recent tool outputs
+ * so maxTurns / empty-final-answer cases still return usable progress.
  */
-function extractFinalAnswer(
-  messages: import("../types.ts").AgentMessage[],
-): string {
+function extractBestAnswer(messages: AgentMessage[]): ExtractedAnswer {
+  // Prefer the latest non-empty assistant text, not merely the last assistant
+  // message (which may be a tool-call-only turn with empty content).
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]!;
-    if (msg.role === "assistant") {
-      return contentAsString(msg.content);
+    if (msg.role !== "assistant") continue;
+    const text = contentAsString(msg.content).trim();
+    if (text.length > 0) {
+      return { text, partial: false, source: "assistant" };
     }
   }
-  return "";
+
+  const toolSnippets: string[] = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]!;
+    if (msg.role !== "tool") continue;
+    const toolMsg = msg as ToolResultMessage;
+    const body = contentAsString(toolMsg.content).trim();
+    if (!body) continue;
+    const clipped =
+      body.length > MAX_PARTIAL_TOOL_CHARS
+        ? `${body.slice(0, MAX_PARTIAL_TOOL_CHARS)}…`
+        : body;
+    const flag = toolMsg.isError ? "error" : "ok";
+    toolSnippets.push(`- ${toolMsg.name} [${flag}]: ${clipped}`);
+    if (toolSnippets.length >= MAX_PARTIAL_TOOL_SNIPPETS) break;
+  }
+
+  if (toolSnippets.length > 0) {
+    return {
+      text: [
+        "No final assistant summary was produced. Recovered recent tool output:",
+        ...toolSnippets.reverse(),
+      ].join("\n"),
+      partial: true,
+      source: "tool_results",
+    };
+  }
+
+  // Last resort: mention tool-call-only assistant turns so the parent knows work happened.
+  const toolOnlyTurns = messages.filter(
+    (msg): msg is AssistantMessage =>
+      msg.role === "assistant" && Boolean(msg.toolCalls?.length),
+  ).length;
+  if (toolOnlyTurns > 0) {
+    return {
+      text: `Sub-agent made ${toolOnlyTurns} tool-calling turn(s) but produced no textual answer or tool output to recover.`,
+      partial: true,
+      source: "none",
+    };
+  }
+
+  return { text: "", partial: true, source: "none" };
+}
+
+function countTurns(messages: AgentMessage[]): number {
+  return messages.filter((message) => message.role === "assistant").length;
+}
+
+function countToolCalls(messages: AgentMessage[]): number {
+  return messages.reduce((sum, message) => {
+    if (message.role !== "assistant") return sum;
+    return sum + (message.toolCalls?.length ?? 0);
+  }, 0);
+}
+
+function formatExecSummary(input: {
+  turns: number;
+  toolCallCount: number;
+  tokens: number;
+  errorCount: number;
+  modelFallback: boolean;
+  partial?: boolean;
+}): string {
+  const bits = [
+    `${input.turns} turn(s)`,
+    `${input.toolCallCount} tool call(s)`,
+    `~${input.tokens} tokens`,
+  ];
+  if (input.errorCount > 0) bits.push(`${input.errorCount} error(s)`);
+  if (input.modelFallback) bits.push("model fallback");
+  if (input.partial) bits.push("partial result");
+  return `— Sub-agent exec summary: ${bits.join(", ")}`;
 }
 
 /**
@@ -527,8 +617,9 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
       const errors: Array<{ message: string; kind: ErrorKind }> = [];
 
       // ── Run the nested loop ─────────────────────────────────────
-      let finalMessages: import("../types.ts").AgentMessage[];
+      let finalMessages: AgentMessage[] = [];
       let success = true;
+      let hitMaxTurns = false;
 
       try {
         finalMessages = await runAgentLoop(args.task, {
@@ -574,6 +665,13 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
             if (event.type === "error") {
               errors.push({ message: event.message, kind: "api" });
             }
+            if (event.type === "max_turns") {
+              hitMaxTurns = true;
+              errors.push({
+                message: `maxTurns exceeded (${event.maxTurns})`,
+                kind: "max_turns",
+              });
+            }
 
             onSubagentEvent?.({
               type: "subagent_event",
@@ -584,41 +682,52 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
           },
         });
       } catch (err) {
-        success = false;
-        const errorMessage =
-          err instanceof Error ? err.message : String(err);
-
-        // Classify the error kind
-        const isTimeout = timeoutController?.signal.aborted === true;
-        const isMaxTurns = err instanceof Error && err.name === "MaxTurnsExceededError";
-
-        if (isTimeout) {
-          errors.push({ message: "Sub-agent timeout exceeded", kind: "timeout" });
-        } else if (isMaxTurns) {
-          errors.push({ message: errorMessage, kind: "max_turns" });
+        // maxTurns is partial success when we already have messages/progress.
+        if (err instanceof MaxTurnsExceededError || (err instanceof Error && err.name === "MaxTurnsExceededError")) {
+          hitMaxTurns = true;
+          finalMessages = err instanceof MaxTurnsExceededError
+            ? err.messages
+            : ((err as { messages?: AgentMessage[] }).messages ?? []);
+          if (!errors.some((item) => item.kind === "max_turns")) {
+            errors.push({
+              message: err instanceof Error ? err.message : String(err),
+              kind: "max_turns",
+            });
+          }
         } else {
-          errors.push({ message: errorMessage, kind: "api" });
+          success = false;
+          const errorMessage =
+            err instanceof Error ? err.message : String(err);
+
+          // Classify the error kind
+          const isTimeout = timeoutController?.signal.aborted === true;
+
+          if (isTimeout) {
+            errors.push({ message: "Sub-agent timeout exceeded", kind: "timeout" });
+          } else {
+            errors.push({ message: errorMessage, kind: "api" });
+          }
+
+          onSubagentEvent?.({
+            type: "subagent_end",
+            id: invocationId,
+            result: "",
+            success: false,
+            depth,
+            turns: 0,
+            totalTokens: accumulatedTokens,
+            runtime: runtimeInfo,
+            errors,
+            autoDelegationInherited: false, // auto-delegation is deliberately not inherited
+          });
+
+          return {
+            content: isTimeout
+              ? `Sub-agent timed out after ${timeout}ms. Consider increasing the timeout or simplifying the task.`
+              : `Sub-agent failed: ${errorMessage}`,
+            isError: true,
+          };
         }
-
-        onSubagentEvent?.({
-          type: "subagent_end",
-          id: invocationId,
-          result: "",
-          success: false,
-          depth,
-          turns: 0,
-          totalTokens: accumulatedTokens,
-          runtime: runtimeInfo,
-          errors,
-          autoDelegationInherited: false, // auto-delegation is deliberately not inherited
-        });
-
-        return {
-          content: isTimeout
-            ? `Sub-agent timed out after ${timeout}ms. Consider increasing the timeout or simplifying the task.`
-            : `Sub-agent failed: ${errorMessage}`,
-          isError: true,
-        };
       } finally {
         // Clean up timeout and signal listeners
         if (timeoutId !== undefined) clearTimeout(timeoutId);
@@ -639,7 +748,7 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
           result: "",
           success: false,
           depth,
-          turns: 0,
+          turns: countTurns(finalMessages ?? []),
           totalTokens: accumulatedTokens,
           runtime: runtimeInfo,
           errors: [{ message: "Sub-agent timeout exceeded", kind: "timeout" }],
@@ -651,22 +760,19 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
         };
       }
 
-      // ── Extract result ──────────────────────────────────────────
-      const finalAnswer = extractFinalAnswer(finalMessages);
-      // Count turns (assistant messages = turns)
-      const turns = finalMessages.filter((m) => m.role === "assistant").length;
-      // Count total tool calls across all assistant messages
-      const toolCallCount = finalMessages.reduce(
-        (sum, m) => sum + (m.role === "assistant" && Array.isArray((m as import("../types.ts").AssistantMessage).toolCalls)
-          ? (m as import("../types.ts").AssistantMessage).toolCalls!.length
-          : 0),
-        0,
-      );
+      // ── Extract best available result (including partial progress) ─
+      const extracted = extractBestAnswer(finalMessages ?? []);
+      const turns = countTurns(finalMessages ?? []);
+      const toolCallCount = countToolCalls(finalMessages ?? []);
+      const partial = extracted.partial || hitMaxTurns;
+      // Partial progress is still useful to the parent; only hard-fail when
+      // we truly recovered nothing.
+      success = extracted.text.length > 0;
 
       onSubagentEvent?.({
         type: "subagent_end",
         id: invocationId,
-        result: finalAnswer,
+        result: extracted.text,
         success,
         depth,
         turns,
@@ -676,20 +782,45 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
         autoDelegationInherited: false, // auto-delegation is intentionally isolated per subagent
       });
 
-      if (!finalAnswer) {
+      if (!extracted.text) {
         return {
-          content: "Sub-agent completed but produced no final answer.",
+          content: hitMaxTurns
+            ? `Sub-agent stopped after maxTurns=${maxTurns} without recoverable progress. Narrow the task or raise maxTurns.`
+            : "Sub-agent completed but produced no final answer.",
           isError: true,
         };
       }
 
-      // Append execution summary so the parent LLM can learn from delegation outcomes
-      const summaryLines = [
-        `— Sub-agent exec summary: ${turns} turn(s), ${toolCallCount} tool call(s), ~${accumulatedTokens} tokens${errors.length > 0 ? ` · ${errors.length} error(s)` : ""}${!modelSwitchSucceeded && args.model ? " · model fallback" : ""}`,
-        "",
-      ].join("");
+      const headerBits: string[] = [];
+      if (hitMaxTurns) {
+        headerBits.push(
+          `Partial result: stopped at maxTurns=${maxTurns}. Continue from this progress or spawn another focused subagent.`,
+        );
+      } else if (extracted.partial) {
+        headerBits.push(
+          "Partial result: no clean final summary was produced; recovered the best available progress below.",
+        );
+      }
 
-      return { content: summaryLines + finalAnswer };
+      const summary = formatExecSummary({
+        turns,
+        toolCallCount,
+        tokens: accumulatedTokens,
+        errorCount: errors.length,
+        modelFallback: !modelSwitchSucceeded && Boolean(args.model),
+        partial,
+      });
+
+      const content = [
+        ...headerBits,
+        summary,
+        "",
+        extracted.text,
+      ].join("\n");
+
+      // Recoverable partial results are returned without isError so the parent
+      // keeps coordinating instead of treating the whole delegation as failed.
+      return { content };
     },
   };
 }

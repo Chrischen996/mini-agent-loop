@@ -23,6 +23,7 @@ export const researcherProfile: SubagentProfile = {
     "- Summarize your findings clearly and concisely.",
     "- Include file paths and line numbers when referencing specific code.",
     "- If the information cannot be found, say so explicitly.",
+    "- Always finish with a plain-text findings summary (tool calls alone are not enough).",
   ].join("\n"),
   allowedTools: [
     "read",
@@ -35,7 +36,7 @@ export const researcherProfile: SubagentProfile = {
     "codebase_read",
     "codebase_explain",
   ],
-  maxTurns: 8,
+  maxTurns: 12,
 };
 
 // ─── Coder ───────────────────────────────────────────────────────────────────
@@ -53,6 +54,7 @@ export const coderProfile: SubagentProfile = {
     "- Keep changes minimal and focused on the assigned task.",
     "- Do NOT run tests or linters — the parent agent will handle verification.",
     "- When done, briefly describe what you changed and why.",
+    "- Always finish with a short plain-text summary of files changed.",
   ].join("\n"),
   allowedTools: [
     "read",
@@ -63,7 +65,7 @@ export const coderProfile: SubagentProfile = {
     "ls",
     "bash",
   ],
-  maxTurns: 10,
+  maxTurns: 15,
 };
 
 // ─── Reviewer ────────────────────────────────────────────────────────────────
@@ -82,6 +84,7 @@ export const reviewerProfile: SubagentProfile = {
     "- Structure your review with clear categories (bugs, improvements, style).",
     "- Rate severity: 🔴 critical, 🟡 warning, 🔵 suggestion.",
     "- Be specific — reference file paths and line numbers.",
+    "- Always finish with a plain-text review summary.",
   ].join("\n"),
   allowedTools: [
     "read",
@@ -92,7 +95,7 @@ export const reviewerProfile: SubagentProfile = {
     "codebase_read",
     "codebase_explain",
   ],
-  maxTurns: 6,
+  maxTurns: 10,
 };
 
 // ─── All built-in profiles ───────────────────────────────────────────────────

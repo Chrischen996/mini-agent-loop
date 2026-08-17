@@ -45,7 +45,7 @@ describe("decideAutoSubagent", () => {
 
   it("returns profile recommendation", () => {
     const result = decideAutoSubagent("Implement a new API endpoint");
-    assert.equal(result.profile, "researcher"); // default
+    assert.equal(result.profile, "coder");
   });
 
   it("uses custom profile when provided", () => {

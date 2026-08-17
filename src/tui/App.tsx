@@ -268,7 +268,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const promptQueueRef = useRef<string[]>([]);
   const [queuedCount, setQueuedCount] = useState(0);
   const [input, setInput] = useState("");
-  const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "auto"));
+  const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "plan"));
   const abortRef = useRef<AbortController>(new AbortController());
   const permissionManagerRef = useRef<PermissionManager | null>(null);
   const permissionTurnRef = useRef<PermissionTurnContext | null>(null);
@@ -295,7 +295,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const permissionSessionId = "tui_session";
 
   const getPermissionManager = useCallback(() => {
-    return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("auto"));
+    return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("plan"));
   }, []);
 
   const addPendingImage = useCallback((image: ImageAttachment): boolean => {
@@ -624,7 +624,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       suppressInputEchoRef.current = true;
       const permissionManager = getPermissionManager();
       const current = PERMISSION_MODES.indexOf(permissionManager.getMode());
-      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "auto";
+      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
       permissionManager.setMode(next);
       dispatch({ type: "SET_PERMISSION_MODE", mode: next });
       return;
@@ -1073,6 +1073,20 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       if (event.type === "thinking_policy") {
         turnLlm = withThinkingLevel(turnLlm, event.level);
         setLlm(turnLlm);
+      } else if (event.type === "auto_subagent") {
+        const status = event.executed
+          ? `自动子 agent 已启动 (${event.profile}, score=${event.score})`
+          : event.shouldDelegate
+            ? `建议委托子 agent (${event.profile}, score=${event.score})`
+            : `不自动委托 (score=${event.score})`;
+        dispatch({ type: "SET_STATUS", status });
+      } else if (event.type === "coordinator_mode") {
+        dispatch({
+          type: "SET_STATUS",
+          status: event.active
+            ? `编排模式: ${event.profile} (探索 ${event.directExplorationUsed}/${event.maxDirectExploration})`
+            : "编排模式已关闭",
+        });
       }
       streamBuffer.handle(runId, event);
     };

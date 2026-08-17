@@ -84,7 +84,7 @@ describe("parseCliArgs", () => {
   it("returns empty prompt for no arguments", () => {
     const result = parseCliArgs([]);
     assert.equal(result.prompt, "");
-    assert.equal(result.mode, "auto"); // default mode
+    assert.equal(result.mode, "plan"); // default mode
   });
 
   it("parses --mode flag", () => {
@@ -98,20 +98,20 @@ describe("parseCliArgs", () => {
     assert.equal(result.mode, "bypass");
   });
 
-  it("parses --mode=manual", () => {
-    const result = parseCliArgs(["--mode=manual", "do something"]);
-    assert.equal(result.mode, "manual");
+  it("rejects legacy manual/auto modes", () => {
+    assert.throws(() => parseCliArgs(["--mode=manual", "do something"]), /Invalid mode/);
+    assert.throws(() => parseCliArgs(["--mode", "auto", "do something"]), /Invalid mode/);
   });
 
-  it("defaults to auto mode when not specified", () => {
+  it("defaults to plan mode when not specified", () => {
     const result = parseCliArgs(["hello world"]);
-    assert.equal(result.mode, "auto");
+    assert.equal(result.mode, "plan");
     assert.equal(result.planOnly, false);
   });
 
   it("sets planOnly when --plan flag is present", () => {
     const result = parseCliArgs(["--plan", "write a plan"]);
-    assert.equal(result.mode, "auto");
+    assert.equal(result.mode, "plan");
     assert.equal(result.planOnly, true);
     assert.equal(result.planExecute, false);
     assert.equal(result.prompt, "write a plan");
@@ -154,6 +154,6 @@ describe("CLI smoke test", () => {
     assert.equal(result.tools, undefined);
     assert.equal(result.excludeTools, undefined);
     assert.equal(result.allowMcpTools, false);
-    assert.equal(result.mode, "auto");
+    assert.equal(result.mode, "plan");
   });
 });

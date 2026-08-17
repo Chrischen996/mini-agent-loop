@@ -67,6 +67,16 @@ function logEvent(event: LoopEvent): void {
       );
       break;
     }
+    case "auto_subagent":
+      console.error(
+        `[auto_subagent] shouldDelegate=${event.shouldDelegate} executed=${event.executed} coordinator=${event.coordinatorMode} score=${event.score} profile=${event.profile} reasons=${event.reasons.join(",")}`,
+      );
+      break;
+    case "coordinator_mode":
+      console.error(
+        `[coordinator] active=${event.active} profile=${event.profile} preflight=${event.preflightExecuted} explore=${event.directExplorationUsed}/${event.maxDirectExploration} reasons=${event.reasons.join(",")}`,
+      );
+      break;
     case "thinking_policy":
       console.error(`[thinking] mode=adaptive phase=${event.phase} level=${event.level} reasons=${event.reasons.join(",")}`);
       break;
@@ -120,7 +130,7 @@ export function parseCliArgs(argv: string[]): {
   let tools: ToolName[] | undefined;
   let excludeTools: ToolName[] | undefined;
   let allowMcpTools = false;
-  let mode: PermissionMode = "auto";
+  let mode: PermissionMode = "plan";
   let planOnly = false;
   let planExecute = false;
   let planYes = false;
@@ -169,21 +179,21 @@ export function parseCliArgs(argv: string[]): {
     if (arg === "--mode") {
       const next = argv[i + 1];
       if (!next || next.startsWith("--")) {
-        throw new Error("--mode requires an argument: plan, manual, auto, or bypass");
+        throw new Error("--mode requires an argument: plan or bypass");
       }
       if (!isPermissionMode(next)) {
-        throw new Error("Invalid mode: use 'plan', 'manual', 'auto', or 'bypass'");
+        throw new Error("Invalid mode: use 'plan' or 'bypass'");
       }
-      mode = next as PermissionMode;
+      mode = next;
       i += 1;
       continue;
     }
     if (arg.startsWith("--mode=")) {
       const value = arg.slice("--mode=".length);
       if (!isPermissionMode(value)) {
-        throw new Error("Invalid mode: use 'plan', 'manual', 'auto', or 'bypass'");
+        throw new Error("Invalid mode: use 'plan' or 'bypass'");
       }
-      mode = value as PermissionMode;
+      mode = value;
       continue;
     }
     if (arg.startsWith("--image=")) {
@@ -366,13 +376,9 @@ async function main(): Promise<void> {
       console.error(
         `[permission] mode=${permissionTurn?.mode ?? mode} tool=${request.tool} risk=${request.risk} request_id=${request.id}`,
       );
-      if (permissionTurn?.mode === "manual" || permissionTurn?.mode === "auto") {
-        // Non-interactive CLI cannot prompt. Deny immediately instead of hanging.
-        permissionManager.resolve("cli_session", request.id, "deny");
-        console.error(
-          `[permission] denied in non-interactive CLI; use TUI/Web or --mode=bypass for unattended runs`,
-        );
-      }
+      // plan/bypass never open interactive pending approvals. If a stale pending
+      // request surfaces, deny it so the non-interactive CLI cannot hang.
+      permissionManager.resolve("cli_session", request.id, "deny");
   };
 
   // ── Add subagent tool if enabled ────────────────────────────────────────────
@@ -437,9 +443,8 @@ async function main(): Promise<void> {
     .find((m) => m.role === "assistant");
 
   if (lastAssistant && lastAssistant.role === "assistant") {
-    const answer = typeof lastAssistant.content === "string"
-      ? lastAssistant.content
-      : lastAssistant.content.map((p: any) => p.type === "text" ? p.text : "").join("");
+    // AssistantMessage.content is always a string in the current contract.
+    const answer = lastAssistant.content;
 
     // --plan: save the generated plan to disk, show preview, ask for approval
     if (planOnly) {
