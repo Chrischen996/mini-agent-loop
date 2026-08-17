@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Model catalog entries for `xai/grok-4.6`, `google/gemini-3.6-flash`, and `google/gemini-3.7-flash` (plus matching `google-vertex` Flash ids)
 - Core agent loop implementation with OpenAI-compatible API support
 - Tool system with argument validation and error handling
 - Multi-provider model support (OpenAI, DeepSeek, Gemini, Anthropic, etc.)

@@ -268,6 +268,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const promptQueueRef = useRef<string[]>([]);
   const [queuedCount, setQueuedCount] = useState(0);
   const [input, setInput] = useState("");
+  // Bump to remount the text input so ink-text-input resets cursorOffset to value.length
+  // after programmatic completions (Tab @file / slash commands).
+  const [inputEpoch, setInputEpoch] = useState(0);
   const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "auto"));
   const abortRef = useRef<AbortController>(new AbortController());
   const permissionManagerRef = useRef<PermissionManager | null>(null);
@@ -442,6 +445,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     return () => { if (acDebounceRef.current) clearTimeout(acDebounceRef.current); };
   }, [input, cwd, clearAc, acMode]);
 
+  // Force the input cursor to the end of the (new) value. ink-text-input keeps an
+  // internal cursorOffset and only clamps it when it exceeds the new length, so
+  // lengthening the string via Tab autocomplete leaves the caret mid-token.
+  const resetInputCursorToEnd = useCallback(() => {
+    setInputEpoch((n) => n + 1);
+  }, []);
+
   // Accept command candidate
   const acceptCommand = useCallback((idx: number) => {
     const cmd = cmdCandidates[idx];
@@ -454,10 +464,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       setInput(`/${cmd.name}`);
       clearAc();
     }
+    resetInputCursorToEnd();
     setAcMode(null);
     setCmdCandidates([]);
     setAcIndex(0);
-  }, [cmdCandidates, clearAc]);
+  }, [cmdCandidates, clearAc, resetInputCursorToEnd]);
 
   // Accept file candidate
   const acceptFile = useCallback((idx: number) => {
@@ -465,8 +476,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const chosen = fileCandidates[idx];
     if (!trigger || !chosen) return;
     setInput(trigger.replaceFn(chosen));
+    resetInputCursorToEnd();
     clearAc();
-  }, [fileCandidates, clearAc]);
+  }, [fileCandidates, clearAc, resetInputCursorToEnd]);
 
   const openModelPicker = useCallback((query = "") => {
     const choices = modelChoices(query);
@@ -759,7 +771,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       if (key.downArrow && len > 0) { setAcIndex((i) => (i + 1) % len); return; }
       if (key.tab) {
         const chosen = modelCandidates[acIndex];
-        if (chosen) { setInput(`/model ${chosen}`); clearAc(); }
+        if (chosen) {
+          setInput(`/model ${chosen}`);
+          resetInputCursorToEnd();
+          clearAc();
+        }
         return;
       }
       if (key.escape) { setInput(""); clearAc(); return; }
@@ -1279,6 +1295,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : ">"}</Text>
           <Box flexGrow={1} minWidth={0}>
             <PasteAwareTextInput
+              key={inputEpoch}
               value={input}
               onChange={setInputSafe}
               onPasteImage={handlePasteImage}
