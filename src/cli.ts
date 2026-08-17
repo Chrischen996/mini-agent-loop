@@ -5,6 +5,7 @@ import path from "node:path";
 import { imagePart, textPart } from "./content.ts";
 import { loadLlmConfigFromEnv } from "./llm/index.ts";
 import { MaxTurnsExceededError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
+import { loadAgentsMd } from "./agents-md.ts";
 import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
@@ -114,6 +115,7 @@ export function parseCliArgs(argv: string[]): {
   let excludeTools: ToolName[] | undefined;
   let allowMcpTools = false;
   let mode: PermissionMode = "auto";
+  let planOnly = false;
   const validTools = new Set<ToolName>([
     "read", "bash", "edit", "write", "grep", "find", "ls",
     "codebase_open", "codebase_search", "codebase_read", "codebase_explain",
@@ -142,6 +144,10 @@ export function parseCliArgs(argv: string[]): {
     }
     if (arg === "--allow-mcp-tools") {
       allowMcpTools = true;
+      continue;
+    }
+    if (arg === "--plan") {
+      planOnly = true;
       continue;
     }
     if (arg === "--mode") {
@@ -190,7 +196,7 @@ export function parseCliArgs(argv: string[]): {
     rest.push(arg);
   }
 
-  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools, allowMcpTools, mode };
+  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools, allowMcpTools, mode, planOnly };
 }
 
 async function loadImagePart(
@@ -232,7 +238,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { prompt: rawPrompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools, mode } = parsed;
+  const { prompt: rawPrompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools, mode, planOnly } = parsed;
   const thinking = parseThinkingIntensityPrompt(rawPrompt);
   const prompt = thinking.prompt;
   if (!prompt && imagePaths.length === 0) {
@@ -243,6 +249,13 @@ async function main(): Promise<void> {
   }
 
   const cwd = process.cwd();
+  const agentsMd = await loadAgentsMd(cwd);
+
+  // --plan flag: force plan mode and append plan-only instruction
+  const effectiveMode = planOnly ? "plan" : mode;
+  const planSuffix = planOnly
+    ? "\n\n⚠️ PLAN-ONLY MODE: produce a detailed execution plan only. Do NOT call write/edit/bash tools. Output your plan as markdown and stop."
+    : "";
   const llm = loadLlmConfigFromEnv();
   const requestLlm = thinking.intensity
     ? buildIntenseLlm(llm, thinking.intensity)
@@ -297,7 +310,7 @@ async function main(): Promise<void> {
   }
   console.error(`[deepwiki] enabled=${codebaseRuntime.deepWikiEnabled}`);
 
-  const permissionManager = new PermissionManager(mode);
+  const permissionManager = new PermissionManager(effectiveMode);
   let permissionTurn: PermissionTurnContext | undefined;
   const onPermissionRequest = (request: PermissionRequest) => {
       console.error(
@@ -341,11 +354,11 @@ async function main(): Promise<void> {
   }
 
   let messages;
-  console.error(`[config] mode=${mode}`);
+  console.error(`[config] mode=${effectiveMode}`);
   const activePermissionTurn = permissionManager.beginTurn("cli_session", onPermissionRequest);
   permissionTurn = activePermissionTurn;
   try {
-    messages = await runAgentLoop(prompt || "Please analyze the attached image(s).", {
+    messages = await runAgentLoop(prompt + planSuffix || "Please analyze the attached image(s).", {
       llm: requestLlm,
       tools,
       autoSubagent: loadAutoSubagentOptionsFromEnv(),
@@ -358,6 +371,7 @@ async function main(): Promise<void> {
       thinkingMode,
       runtimeRef: parentRuntime,
       onEvent: logEvent,
+      agentsMd,
     });
   } catch (error) {
     if (!(error instanceof MaxTurnsExceededError)) throw error;

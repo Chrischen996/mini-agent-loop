@@ -53,6 +53,7 @@ import type {
 import { validateToolArgs } from "./validate.ts";
 import type { Skill, SkillRegistry } from "./skills/types.ts";
 import { defaultSkillRegistry } from "./skills/registry.ts";
+import { loadAgentsMd } from "./agents-md.ts";
 import { formatValidationReport, runValidation } from "./validation.ts";
 import { GitWorkflow } from "./git/workflow.ts";
 
@@ -154,6 +155,12 @@ export type AgentLoopOptions = {
    * in the public tool args schema.
    */
   _parentHistory?: AgentMessage[];
+  /**
+   * Pre-loaded AGENTS.md content from the workspace root.
+   * If provided, it is prepended to the system prompt.
+   * Use `loadAgentsMd(cwd)` to get this value.
+   */
+  agentsMd?: string;
 };
 
 export type AgentRuntimeRef = {
@@ -261,8 +268,12 @@ function mergeLoopSignals(...signals: (AbortSignal | undefined)[]): {
   return { signal: controller.signal, cleanup: () => cleanups.forEach((remove) => remove()) };
 }
 
-export function buildSystemPrompt(mode?: PermissionMode): string {
-  const base = [
+export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string): string {
+  const parts: string[] = [];
+  if (agentsMd) {
+    parts.push(`# Repository Agent Instructions (from AGENTS.md)\n${agentsMd}\n`);
+  }
+  const base: string[] = [
     "You are a local file assistant that can read and write workspace files.",
   "Tools:",
   "- `read` — read workspace files by relative path (optional offset/limit for text; images return image content).",
@@ -347,13 +358,14 @@ export function buildSystemPrompt(mode?: PermissionMode): string {
   "- Use **bold** for important terms or file names",
   "- Use `code` for inline code, commands, or paths",
   "- Use ``` code blocks for multi-line code with language hints",
-  "- Use --- to separate major topics",
-  "- Keep paragraphs concise (2-3 sentences max)",
-];
+  "  - Use --- to separate major topics",
+  "  - Keep paragraphs concise (2-3 sentences max)",
+  ];
+  parts.push(base.join("\n"));
   const modeSuffix = mode !== undefined
     ? `${PERMISSION_MODE_MARKER}${MODE_SUFFIX[mode] ?? ""}`
     : "";
-  return base.join("\n") + modeSuffix;
+  return parts.join("\n") + modeSuffix;
 }
 
 const MAX_EMPTY_ASSISTANT_RESPONSES = 2;
@@ -369,8 +381,8 @@ export function createAgentHistory(
 }
 
 /** Get the default system prompt for a given permission mode. */
-export function getDefaultSystemPrompt(mode?: PermissionMode): string {
-  return buildSystemPrompt(mode);
+export function getDefaultSystemPrompt(mode?: PermissionMode, agentsMd?: string): string {
+  return buildSystemPrompt(mode, agentsMd);
 }
 
 async function applyPreprocessors(

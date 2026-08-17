@@ -106,6 +106,14 @@ describe("parseCliArgs", () => {
   it("defaults to auto mode when not specified", () => {
     const result = parseCliArgs(["hello world"]);
     assert.equal(result.mode, "auto");
+    assert.equal(result.planOnly, false);
+  });
+
+  it("sets planOnly when --plan flag is present", () => {
+    const result = parseCliArgs(["--plan", "write a plan"]);
+    assert.equal(result.mode, "auto");
+    assert.equal(result.planOnly, true);
+    assert.equal(result.prompt, "write a plan");
   });
 
   it("throws for invalid mode", () => {
