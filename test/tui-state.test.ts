@@ -80,10 +80,10 @@ describe("TUI sidebar state", () => {
 
   it("cycles permission mode with TOGGLE_PERMISSION_MODE", () => {
     let state = createInitialState("test-model");
-    // Default is auto; order is plan -> manual -> auto -> bypass
-    assert.equal(state.permissionMode, "auto");
+    // Default is plan; order is plan -> bypass
+    assert.equal(state.permissionMode, "plan");
 
-    // auto -> bypass
+    // plan -> bypass
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "bypass");
     assert.equal(state.status, "权限模式: 绕过");
@@ -92,21 +92,11 @@ describe("TUI sidebar state", () => {
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "plan");
     assert.equal(state.status, "权限模式: 计划");
-
-    // plan -> manual
-    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
-    assert.equal(state.permissionMode, "manual");
-    assert.equal(state.status, "权限模式: 手动");
-
-    // manual -> auto
-    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
-    assert.equal(state.permissionMode, "auto");
-    assert.equal(state.status, "权限模式: 自动");
   });
 
   it("preserves permission mode on RESET", () => {
     let state = createInitialState("test-model");
-    // auto -> bypass
+    // plan -> bypass
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "bypass");
 

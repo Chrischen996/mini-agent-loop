@@ -78,35 +78,63 @@ npm install
 | `DEEPWIKI_TIMEOUT_MS` | no | `30000` |
 | `DEEPWIKI_MAX_RESULT_BYTES` | no | `102400` |
 | `MINI_AGENT_MCP_CONFIG` | no | — |
-| `MINI_AGENT_PERMISSION_MODE` | no | `bypass` for Web server |
+| `MINI_AGENT_PERMISSION_MODE` | no | `plan` (or `bypass`) |
 | `MINI_AGENT_SUBAGENT` | no | `1` in CLI/server, TUI always on |
-| `MINI_AGENT_AUTO_SUBAGENT` | no | `0` (opt-in preflight) |
-| `MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE` | no | `3` |
-| `MINI_AGENT_AUTO_SUBAGENT_PROFILE` | no | `researcher` |
+| `MINI_AGENT_AUTO_SUBAGENT` | no | enabled by default; set `0`/`false`/`off` to disable |
+| `MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE` | no | `2` |
+| `MINI_AGENT_AUTO_SUBAGENT_PROFILE` | no | auto (`researcher`/`coder`/`reviewer`) |
 | `MINI_AGENT_AUTO_SUBAGENT_MODEL` | no | parent model |
 | `MINI_AGENT_AUTO_SUBAGENT_MAX_TURNS` | no | profile/default |
+| `MINI_AGENT_COORDINATOR_MODE` | no | `true` when auto-subagent is enabled |
+| `MINI_AGENT_MAX_DIRECT_EXPLORATION` | no | `2` parent read/grep/find/ls/codebase_* calls |
 | `MINI_AGENT_SKILLS` | no | comma-separated registered skill names |
 
 \* Real runs need at least one supported provider key.
 `/model` only lists
 models whose declared key is configured.
 
-### Optional automatic subagent preflight
+### Automatic subagent preflight
 
-The normal flow lets the model decide whether to emit a `subagent` tool call.
-For a deterministic code-level preflight, opt in with:
+CLI, TUI, and the HTTP server now enable a deterministic code-level preflight by
+default. The loop scores the first user request with explainable signals
+(multi-step language, code/workspace context, write/review intent, deep scope,
+web research, and explicit “delegate/subagent” wording). When the score reaches
+`MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE` (default `2`), it runs **one** subagent
+before the parent model call and injects the result into parent context.
+
+Profile selection is automatic unless you override it:
+
+- write/implement/refactor → `coder`
+- pure review/audit → `reviewer`
+- otherwise → `researcher`
+
+Simple single-step prompts (for example “读一下 package.json”) are intentionally
+not delegated. When a request is delegated, the parent also enters **coordinator
+mode**: it gets a stronger orchestrator prompt and may only make a small number
+of direct exploration tool calls (`read`/`grep`/`find`/`ls`/`codebase_*`) before
+further deep work must go through `subagent` / `subagent_batch`. The preflight
+uses a focused child task (not the raw user prompt blob) and returns recoverable
+partial progress when `maxTurns` is hit or no clean final summary is produced,
+instead of hard-failing the whole delegation. The preflight option is not
+propagated into nested subagents, so it does not recurse.
+
+To restore pure LLM-only delegation:
 
 ```bash
-export MINI_AGENT_AUTO_SUBAGENT=1
-export MINI_AGENT_AUTO_SUBAGENT_PROFILE=researcher  # optional
+export MINI_AGENT_AUTO_SUBAGENT=0
+# optional overrides when enabled:
+# export MINI_AGENT_AUTO_SUBAGENT_PROFILE=researcher
+# export MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE=2
+# export MINI_AGENT_COORDINATOR_MODE=0
+# export MINI_AGENT_MAX_DIRECT_EXPLORATION=2
 ```
 
 Skills can be activated for CLI, TUI, and Web sessions with
 `MINI_AGENT_SKILLS=skill-a,skill-b`. Programmatic callers can pass `skills`,
 `skillNames`, and `skillRegistry` to the agent loop or server options.
-At startup, the CLI, TUI, and Web server automatically discover
-`skills/<directory>/SKILL.md` files in the workspace and register them. A file
-may use optional frontmatter:
+At startup, the CLI, TUI, and Web server automatically discover official-style
+`SKILL.md` packages from `skills/`, `.grok/skills/`, `.claude/skills/`,
+`~/.grok/skills/`, and `~/.claude/skills/`. A file may use optional frontmatter:
 
 ```markdown
 ---
@@ -117,14 +145,12 @@ Read the relevant source files before answering.
 ```
 
 Without frontmatter, the directory name is used as the Skill name.
+Discovered skills only contribute their `name` and `description` until they are
+activated. Activation injects the `SKILL.md` body and, when present, the skill
+directory plus `scripts/` and `references/` filenames. The model can then use
+`read` or `bash` to open those files. Scripts are never executed automatically.
 
-The loop scores the initial request using explainable signals such as prompt
-length, multi-step language, code/workspace context, and investigation terms.
-When the score reaches `MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE`, it runs one
-subagent preflight before the parent model call, then returns the result to the
-parent context. The option is not propagated into nested subagents, so this
-does not recursively trigger automatic preflights. Leave the flag unset to
-keep the existing LLM-only delegation behavior.
+In the TUI, `/skill` (alias `/skills`) lists discovered skills and can enable, disable, or clear them for the current session. The HTTP server exposes `GET/PUT /api/sessions/:id/skills`.
 
 The vision variables are optional. For the generic provider, the three
 `VISION_API_KEY`, `VISION_BASE_URL`, and `VISION_MODEL` values must be set
@@ -425,9 +451,9 @@ npm start -- --allow-mcp-tools "使用已配置的远端工具查询数据"
 ```
 
 All clients use the same `PermissionManager` policy. In `bypass`, configured
-MCP tools run without an approval prompt. In `manual` and `auto`, MCP calls
-are approval requests; in `plan`, MCP calls are hard-denied because remote
-tool metadata cannot establish local read-only behavior. `/api/config` returns
+MCP tools run without an approval prompt. In `plan`, writes, dangerous shell,
+and MCP calls are hard-denied because plan mode is analysis-only (remote tool
+metadata cannot establish local read-only behavior). `/api/config` returns
 only sanitized server status metadata, never commands, arguments, or
 environment values.
 When a server advertises and sends `tools/list_changed`, the agent refreshes
@@ -448,11 +474,27 @@ GET    /api/workspace/list?path=   lazy directory listing (workspace sandbox)
 POST   /api/sessions
 GET    /api/sessions/:id
 GET    /api/sessions/:id/permission-mode
-PUT    /api/sessions/:id/permission-mode  { mode: plan|manual|auto|bypass }
+PUT    /api/sessions/:id/permission-mode  { mode: plan|bypass }
 POST   /api/sessions/:id/permissions/:requestId  { decision: allow|deny }
 DELETE /api/sessions/:id
 POST   /api/sessions/:id/messages  multipart(prompt, referencedPaths, images) -> NDJSON stream
+
+# Per-session plan workflow (stored under dataDir/session-plans/:id)
+GET    /api/sessions/:id/plan
+POST   /api/sessions/:id/plan                 { prompt, plan, autoApprove? }
+POST   /api/sessions/:id/plan/approve         { by? }
+POST   /api/sessions/:id/plan/reject
+POST   /api/sessions/:id/plan/edit            { plan }
+POST   /api/sessions/:id/plan/archive
+GET    /api/sessions/:id/plan/history
+POST   /api/sessions/:id/plan/generate        { prompt } -> { plan, answer }
+POST   /api/sessions/:id/plan/execute         { yes?, force? } -> NDJSON stream
+POST   /api/sessions/:id/plan/retry           { yes?, force? } -> NDJSON stream
 ```
+
+Plan execute/retry streams the usual agent NDJSON events plus:
+`plan_execution_started`, `plan_updated`, and `plan_execution_finished`.
+Session detail (`GET /api/sessions/:id`) includes `planStatus` when a plan exists.
 
 ## Terminal TUI
 
@@ -462,10 +504,8 @@ the local `/model` selector. Permission modes are cycled with `Shift+Tab`:
 
 | Mode | Executes tools? | Asks user? | Typical use |
 | --- | --- | --- | --- |
-| `plan` | Local read-only only; writes/dangerous shell/MCP hard-denied | No approval path | Risk analysis / planning |
-| `manual` | Yes, after explicit approval | Every tool call | Enterprise / high-control |
-| `auto` | Safe local reads auto-run; others need approval | Risky tools and MCP | Daily development |
-| `bypass` | Yes, including MCP | Never | CI / fully trusted runs |
+| `plan` (default) | Local read-only only; writes/dangerous shell/MCP hard-denied | No approval path | Risk analysis / planning |
+| `bypass` | Yes, including MCP | Never | Trusted local runs / CI |
 
 ```bash
 npm run tui
@@ -474,9 +514,36 @@ npm run tui
 Use `/model`, `/clear`, `/quit`, or `Ctrl+C` inside the terminal client. `/model`
 also accepts `--base-url`, `--api-key-env`, and temporary `--api-key` overrides. The
 previous dependency-free ANSI client remains available as `npm run tui:legacy`.
-CLI one-shot runs accept `--mode plan|manual|auto|bypass`. Non-interactive CLI
-cannot prompt, so `manual`/`auto` approval requests are denied immediately;
-use the TUI or `--mode=bypass` for unattended execution.
+TUI supports plan workflow slash commands: `/plan`, `/plan-show`, `/plan-approve`,
+`/plan-reject`, `/plan-run`, `/plan-retry`, `/plan-history`, `/plan-archive`.
+CLI one-shot runs accept `--mode plan|bypass` (default `plan`).
+`--plan` forces plan mode; `--plan-execute` loads a saved plan and runs it in
+`bypass`. Use `--mode=bypass` for unattended execution that may write files.
+
+### Plan workflow
+
+Plans are stored under `.mini-agent/plan/` (current + history archive).
+
+| Flag | Action |
+|------|--------|
+| `--plan` | Generate a plan only (no writes) |
+| `--plan --yes` | Generate and auto-approve |
+| `--plan-show` | Show current plan (metadata + preview) |
+| `--plan-approve` / `--plan-reject` | Approve or reject current plan |
+| `--plan-execute` / `--plan-retry` | Execute / retry a saved plan |
+| `--plan-force` | Force execution even if rejected/pending |
+| `--plan-edit` | Open `$EDITOR` / `$VISUAL` / `vi` on current plan markdown |
+| `--plan-set-file <path>` | Replace current plan markdown from a file |
+| `--plan-history` | List archived plans |
+| `--plan-archive` | Snapshot current plan into history |
+
+After execution, the workflow runs a **file audit** (git status/diff when available):
+planned vs changed files, unplanned edits, and inferred per-step status
+(`todo` / `doing` / `done` / `failed`). The audit is stored on the plan document
+and printed by CLI / TUI / server events.
+
+Successful `--plan-execute` runs auto-archive a completed copy to
+`.mini-agent/plan/history/<id>.json` (current plan is left in place).
 
 Thinking strength is configured independently from model selection. In either
 TUI, press `Ctrl+R` to cycle through all levels supported by the active model;
@@ -511,7 +578,7 @@ Coverage includes:
 - pluggable message preprocessing
 - batched vision analysis before text-only model calls
 - vision failure prevents an unsupported model from guessing
-- permission modes (`plan` / `manual` / `auto` / `bypass`)
+- permission modes (`plan` / `bypass`)
 
 ## Layout
 

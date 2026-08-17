@@ -54,8 +54,65 @@ describe("model selection", () => {
       [...new Set(getAvailableModels(env).map((model) => model.provider))],
       ["agnes-ai", "deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai", "tokenrouter"],
     );
-    assert.equal(getAllModels().length, 1078);
+    assert.equal(getAllModels().length, 1083);
     assert.ok(getAllModels().every((model) => model.contextWindow > 0 && model.maxTokens > 0));
+  });
+
+  it("registers Grok 4.6 and Gemini 3.6/3.7 Flash with documented metadata", () => {
+    const grok = getAllModels().find((model) => model.provider === "xai" && model.id === "grok-4.6");
+    assert.ok(grok);
+    assert.equal(grok.name, "Grok 4.6");
+    assert.equal(grok.baseUrl, "https://api.x.ai/v1");
+    assert.equal(grok.reasoning, true);
+    assert.deepEqual(grok.capabilities.input, ["text", "image"]);
+    assert.equal(grok.contextWindow, 500000);
+    assert.equal(grok.maxTokens, 500000);
+    assert.deepEqual(grok.cost, {
+      input: 2,
+      output: 6,
+      cacheRead: 0.5,
+      cacheWrite: 0,
+    });
+
+    for (const modelId of ["gemini-3.6-flash", "gemini-3.7-flash"] as const) {
+      const gemini = getAllModels().find((model) => model.provider === "google" && model.id === modelId);
+      assert.ok(gemini, `Expected google/${modelId}`);
+      assert.equal(gemini.baseUrl, "https://generativelanguage.googleapis.com/v1beta");
+      assert.equal(gemini.reasoning, true);
+      assert.deepEqual(gemini.capabilities.input, ["text", "image"]);
+      assert.equal(gemini.contextWindow, 1048576);
+      assert.equal(gemini.maxTokens, 65536);
+      assert.deepEqual(gemini.cost, {
+        input: 1.5,
+        output: 7.5,
+        cacheRead: 0.15,
+        cacheWrite: 0,
+      });
+      assert.deepEqual(gemini.thinkingLevelMap, { off: null });
+
+      const vertex = getAllModels().find(
+        (model) => model.provider === "google-vertex" && model.id === modelId,
+      );
+      assert.ok(vertex, `Expected google-vertex/${modelId}`);
+      assert.equal(vertex.api, "google-vertex");
+      assert.equal(vertex.contextWindow, 1048576);
+      assert.equal(vertex.maxTokens, 65536);
+
+      assert.equal(resolveModel(`google/${modelId}`).id, modelId);
+      assert.ok(searchModels(modelId).some((model) => model.provider === "google" && model.id === modelId));
+    }
+
+    assert.equal(
+      getAllModels().find((model) => model.provider === "google" && model.id === "gemini-3.6-flash")?.name,
+      "Gemini 3.6 Flash",
+    );
+    assert.equal(
+      getAllModels().find((model) => model.provider === "google" && model.id === "gemini-3.7-flash")?.name,
+      "Gemini 3.7 Flash",
+    );
+
+    assert.equal(resolveModel("xai/grok-4.6").id, "grok-4.6");
+    assert.ok(searchModels("grok-4.6").some((model) => model.provider === "xai" && model.id === "grok-4.6"));
   });
 
   it("registers both regional Kimi K3 models with their documented metadata", () => {

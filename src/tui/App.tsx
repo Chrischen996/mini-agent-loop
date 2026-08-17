@@ -74,13 +74,39 @@ import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./l
 import { estimateViewportContentHeight } from "./message-viewport.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
-import { PasteAwareTextInput } from "./components/PasteAwareTextInput.tsx";
+import { PromptInput } from "./components/PromptInput.tsx";
+import {
+  extractFileAcTrigger,
+  parseAtRefs,
+  sanitizeInput,
+  type FileAcTrigger,
+  shouldAcceptAutocompleteOnEnter,
+  type AcMode,
+} from "./input-utils.ts";
 import {
   imageAttachmentToPart,
   loadImageAttachment,
   MAX_TUI_IMAGES,
   readClipboardImage,
 } from "./image-attachments.ts";
+import {
+  PLAN_ONLY_SUFFIX,
+  approveCurrentPlan,
+  archiveCurrentPlan,
+  createAndSavePlan,
+  formatPlanDocumentPreview,
+  listPlanHistory,
+  loadPlanDocument,
+  markPlanExecutionResult,
+  preparePlanForExecution,
+  rejectCurrentPlan,
+} from "../plan/index.ts";
+import {
+  applySkillCommand,
+  defaultSkillRegistry,
+  discoverWorkspaceSkills,
+  loadSkillNamesFromEnv,
+} from "../skills/index.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
@@ -153,8 +179,6 @@ const PATH_COMMANDS = new Set(["read", "ls", "find", "grep"]);
 
 // ─── autocomplete modes ──────────────────────────────────────────────────────
 
-type AcMode = "command" | "file" | "model" | "model-picker" | "model-setup" | "profile-name" | "profile-list" | null;
-
 type ModelSetupState = {
   model: ModelRef;
   baseUrl: string;
@@ -167,28 +191,6 @@ type ProfileListState = {
   profiles: ReturnType<typeof listProfiles>;
   selectedIndex: number;
 };
-
-type FileAcTrigger = {
-  fragment: string;
-  replaceFn: (chosen: string) => string;
-};
-
-function extractFileAcTrigger(input: string): FileAcTrigger | null {
-  // @file reference at end
-  const atMatch = input.match(/@([\w./\\-]*)$/);
-  if (atMatch) {
-    const fragment = atMatch[1];
-    return { fragment, replaceFn: (chosen) => input.replace(/@[\w./\\-]*$/, `@${chosen}`) };
-  }
-  // /read <path> or /ls <path> at end
-  const slashMatch = input.match(/^\/(read|ls|find|grep)\s+([\w./\\-]*)$/i);
-  if (slashMatch) {
-    const cmd = slashMatch[1];
-    const fragment = slashMatch[2];
-    return { fragment, replaceFn: (chosen) => input.replace(/(\/(?:read|ls|find|grep)\s+)[\w./\\-]*$/i, `/${cmd} ${chosen}`) };
-  }
-  return null;
-}
 
 // ─── file listing ────────────────────────────────────────────────────────────
 
@@ -214,13 +216,6 @@ async function listCandidates(cwd: string, fragment: string): Promise<string[]> 
   } catch { return []; }
 }
 
-// ─── @file resolver ──────────────────────────────────────────────────────────
-
-function parseAtRefs(input: string): string[] {
-  const matches = input.match(/@([\w./\\-]+)/g);
-  return matches ? matches.map((m) => m.slice(1)) : [];
-}
-
 // ─── main app ────────────────────────────────────────────────────────────────
 
 export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement {
@@ -235,6 +230,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   llmRef.current = llm;
   const vision = loadVisionConfigFromEnv();
   const autoSubagent = useMemo(() => loadAutoSubagentOptionsFromEnv(), []);
+  const [skillNames, setSkillNames] = useState<string[]>(() => loadSkillNamesFromEnv());
+  const skillNamesRef = useRef(skillNames);
+  skillNamesRef.current = skillNames;
   const allToolsRef = useRef<ToolProvider>(allTools ?? createAllTools(cwd));
   const agentToolsRef = useRef<ToolProvider>(agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
 
@@ -281,10 +279,15 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const promptQueueRef = useRef<string[]>([]);
   const [queuedCount, setQueuedCount] = useState(0);
   const [input, setInput] = useState("");
-  const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "auto"));
+  // Bump to remount the text input so ink-text-input resets cursorOffset to value.length
+  // after programmatic completions (Tab @file / slash commands).
+  const [inputEpoch, setInputEpoch] = useState(0);
+  const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "plan"));
   const abortRef = useRef<AbortController>(new AbortController());
   const permissionManagerRef = useRef<PermissionManager | null>(null);
   const permissionTurnRef = useRef<PermissionTurnContext | null>(null);
+  const planCaptureRef = useRef<{ prompt: string } | null>(null);
+  const execCaptureRef = useRef<{ mode: "run" | "retry" } | null>(null);
   const pendingPermissionRef = useRef(false);
   pendingPermissionRef.current = Boolean(state.pendingPermission);
   // Profile state
@@ -308,7 +311,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const permissionSessionId = "tui_session";
 
   const getPermissionManager = useCallback(() => {
-    return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("auto"));
+    return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("plan"));
   }, []);
 
   const addPendingImage = useCallback((image: ImageAttachment): boolean => {
@@ -342,12 +345,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   const setInputSafe = useCallback((value: string) => {
     if (pendingPermissionRef.current) return;
-    if (suppressInputEchoRef.current) {
-      suppressInputEchoRef.current = false;
-      return;
-    }
-    // Drop control characters that terminals may inject with Ctrl/Alt combos.
-    setInput(value.replace(/[\u0000-\u001F\u007F]/g, ""));
+    // PromptInput ignores Ctrl/Meta chords, so do not swallow the next character.
+    suppressInputEchoRef.current = false;
+    setInput(sanitizeInput(value));
   }, []);
 
   // ── autocomplete state ───────────────────────────────────────────────────
@@ -393,6 +393,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   useEffect(() => {
     loadProfileStore().then(setProfileStore).catch(() => { /* non-fatal */ });
   }, []);
+
+  useEffect(() => {
+    void discoverWorkspaceSkills(cwd).catch(() => { /* non-fatal */ });
+  }, [cwd]);
 
   // Watch input → update autocomplete
   useEffect(() => {
@@ -455,6 +459,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     return () => { if (acDebounceRef.current) clearTimeout(acDebounceRef.current); };
   }, [input, cwd, clearAc, acMode]);
 
+  // Force the input cursor to the end of the (new) value. ink-text-input keeps an
+  // internal cursorOffset and only clamps it when it exceeds the new length, so
+  // lengthening the string via Tab autocomplete leaves the caret mid-token.
+  const resetInputCursorToEnd = useCallback(() => {
+    setInputEpoch((n) => n + 1);
+  }, []);
+
   // Accept command candidate
   const acceptCommand = useCallback((idx: number) => {
     const cmd = cmdCandidates[idx];
@@ -467,10 +478,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       setInput(`/${cmd.name}`);
       clearAc();
     }
+    resetInputCursorToEnd();
     setAcMode(null);
     setCmdCandidates([]);
     setAcIndex(0);
-  }, [cmdCandidates, clearAc]);
+  }, [cmdCandidates, clearAc, resetInputCursorToEnd]);
 
   // Accept file candidate
   const acceptFile = useCallback((idx: number) => {
@@ -478,8 +490,28 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const chosen = fileCandidates[idx];
     if (!trigger || !chosen) return;
     setInput(trigger.replaceFn(chosen));
+    resetInputCursorToEnd();
     clearAc();
-  }, [fileCandidates, clearAc]);
+  }, [fileCandidates, clearAc, resetInputCursorToEnd]);
+
+  // Intercept Tab at input to immediately show file autocomplete
+  const handleTabAt = useCallback((inputVal: string) => {
+    // App.useInput already owns Tab while a picker is open.
+    if (acMode === "file" || acMode === "command" || acMode === "model" || acMode === "model-picker") {
+      return;
+    }
+    const trigger = extractFileAcTrigger(inputVal);
+    if (!trigger) return;
+    fileTriggerRef.current = trigger;
+    setFileFragment(trigger.fragment);
+    setCmdCandidates([]);
+    setAcMode("file");
+    if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
+    acDebounceRef.current = setTimeout(async () => {
+      const candidates = await listCandidates(cwd, trigger.fragment);
+      setFileCandidates(candidates);
+    }, 0);
+  }, [acMode, cwd]);
 
   const openModelPicker = useCallback((query = "") => {
     const choices = modelChoices(query);
@@ -622,7 +654,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       suppressInputEchoRef.current = true;
       const permissionManager = getPermissionManager();
       const current = PERMISSION_MODES.indexOf(permissionManager.getMode());
-      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "auto";
+      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
       permissionManager.setMode(next);
       dispatch({ type: "SET_PERMISSION_MODE", mode: next });
       return;
@@ -786,7 +818,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       if (key.downArrow && len > 0) { setAcIndex((i) => (i + 1) % len); return; }
       if (key.tab) {
         const chosen = modelCandidates[acIndex];
-        if (chosen) { setInput(`/model ${chosen}`); clearAc(); }
+        if (chosen) {
+          setInput(`/model ${chosen}`);
+          resetInputCursorToEnd();
+          clearAc();
+        }
         return;
       }
       if (key.escape) { setInput(""); clearAc(); return; }
@@ -922,6 +958,27 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       setConversationId(randomUUID());
       return;
     }
+    if (trimmed === "/context") {
+      const compactions = state.contextCompactions;
+      const tokenEst = state.contextTokens;
+      const ctxWindow = modelContextWindows[state.modelName] ?? llm.contextWindow ?? 128000;
+      const pct = ctxWindow > 0 ? Math.round(tokenEst / ctxWindow * 100) : 0;
+      const lines = [
+        `上下文统计: ${tokenEst} / ${ctxWindow} tokens (${pct}%)`,
+        '',
+      ];
+      if (compactions.length === 0) {
+        lines.push('尚无压缩记录（上下文未超过阈值）');
+      } else {
+        lines.push(`已压缩 ${compactions.length} 次:`);
+        for (const c of compactions.slice(-5)) {
+          lines.push(`  turn${c.turn}: ${c.before} → ${c.after} (${c.reason})`);
+        }
+      }
+      dispatch({ type: "ADD_NOTICE", title: "上下文统计", text: lines.join("\n") });
+      setInput("");
+      return;
+    }
 
     if (/^\/paste-image$/i.test(trimmed)) {
       setInput("");
@@ -956,6 +1013,173 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       });
       setInput("");
       return;
+    }
+
+    const skillCommand = applySkillCommand(trimmed, skillNamesRef.current);
+    if (skillCommand) {
+      setSkillNames(skillCommand.activation.activeNames);
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "Skills",
+        text: skillCommand.message,
+      });
+      setInput("");
+      return;
+    }
+
+    // ── Plan workflow slash commands ───────────────────────────────────────
+    if (trimmed === "/plan-show") {
+      setInput("");
+      try {
+        const doc = await loadPlanDocument(cwd);
+        if (!doc) {
+          dispatch({ type: "ADD_NOTICE", title: "计划", text: "当前没有保存的计划。使用 /plan <任务> 生成。" });
+        } else {
+          dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
+        }
+      } catch (err) {
+        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+
+    if (trimmed === "/plan-approve") {
+      setInput("");
+      try {
+        const doc = await approveCurrentPlan(cwd, "user");
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "计划已批准",
+          text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}`,
+        });
+      } catch (err) {
+        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+
+    if (trimmed === "/plan-reject") {
+      setInput("");
+      try {
+        const doc = await rejectCurrentPlan(cwd);
+        dispatch({ type: "ADD_NOTICE", title: "计划已拒绝", text: `id=${doc.id} status=${doc.status}` });
+      } catch (err) {
+        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+
+    if (trimmed === "/plan-history") {
+      setInput("");
+      try {
+        const history = await listPlanHistory(cwd);
+        if (history.length === 0) {
+          dispatch({ type: "ADD_NOTICE", title: "计划历史", text: "尚无归档计划。" });
+        } else {
+          const lines = history.map((doc) => {
+            const promptSlice = doc.prompt.length > 60 ? `${doc.prompt.slice(0, 60)}…` : doc.prompt;
+            return `${doc.id}  ${doc.status.padEnd(10)}  ${doc.updatedAt}  ${promptSlice}`;
+          });
+          dispatch({ type: "ADD_NOTICE", title: "计划历史", text: lines.join("\n") });
+        }
+      } catch (err) {
+        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+
+    if (trimmed === "/plan-archive") {
+      setInput("");
+      try {
+        const { archivedPath, document } = await archiveCurrentPlan(cwd);
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "计划已归档",
+          text: `id=${document.id}\npath=${archivedPath}`,
+        });
+      } catch (err) {
+        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+
+    // Plan generation / execution may fall through into the normal agent turn.
+    // These overrides let slash commands reuse the existing run path.
+    let planTurnOverride: {
+      displayText: string;
+      prompt: string;
+      forceMode?: PermissionMode;
+      restoreMode?: PermissionMode;
+    } | null = null;
+
+    // /plan [task] — generate a plan via agent turn in plan mode
+    const planMatch = trimmed.match(/^\/plan(?:\s+(.*))?$/i);
+    if (planMatch && !trimmed.startsWith("/plan-")) {
+      const task = (planMatch[1] ?? "").trim();
+      if (!task) {
+        setInput("");
+        try {
+          const doc = await loadPlanDocument(cwd);
+          if (doc) {
+            dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
+          } else {
+            dispatch({ type: "ADD_NOTICE", title: "计划", text: "用法: /plan <任务>" });
+          }
+        } catch (err) {
+          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+        }
+        return;
+      }
+
+      planCaptureRef.current = { prompt: task };
+      execCaptureRef.current = null;
+      const permissionManager = getPermissionManager();
+      if (permissionManager.getMode() !== "plan") {
+        permissionManager.setMode("plan");
+        dispatch({ type: "SET_PERMISSION_MODE", mode: "plan" });
+      }
+      planTurnOverride = {
+        displayText: `/plan ${task}`,
+        prompt: task + PLAN_ONLY_SUFFIX,
+        forceMode: "plan",
+      };
+    }
+
+    // /plan-run and /plan-retry — execute approved plan in bypass mode
+    if (!planTurnOverride && (trimmed === "/plan-run" || trimmed === "/plan-retry")) {
+      const isRetry = trimmed === "/plan-retry";
+      let executionPromptSuffix: string;
+      try {
+        const prepared = await preparePlanForExecution(cwd, {
+          yes: false,
+          workspaceRoot: cwd,
+        });
+        executionPromptSuffix = prepared.executionPromptSuffix;
+        dispatch({
+          type: "ADD_NOTICE",
+          title: isRetry ? "重试计划" : "执行计划",
+          text: `id=${prepared.document.id} status=executing\nprompt: ${prepared.document.prompt}`,
+        });
+      } catch (err) {
+        setInput("");
+        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+
+      execCaptureRef.current = { mode: isRetry ? "retry" : "run" };
+      planCaptureRef.current = null;
+      const permissionManager = getPermissionManager();
+      const previousMode = permissionManager.getMode();
+      if (previousMode !== "bypass") {
+        permissionManager.setMode("bypass");
+        dispatch({ type: "SET_PERMISSION_MODE", mode: "bypass" });
+      }
+      planTurnOverride = {
+        displayText: trimmed,
+        prompt: `Execute the approved plan.${executionPromptSuffix}`,
+        forceMode: "bypass",
+        restoreMode: previousMode,
+      };
     }
 
     // /profiles: show profile list
@@ -1009,13 +1233,15 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
 
-    const pendingImgs = [...pendingImagesRef.current];
-    if (!trimmed && pendingImgs.length === 0) {
+    const pendingImgs = planTurnOverride ? [] : [...pendingImagesRef.current];
+    if (!planTurnOverride && !trimmed && pendingImgs.length === 0) {
       setInput("");
       return;
     }
-    const prompt = trimmed || DEFAULT_IMAGE_PROMPT;
-    const parsedThinking = parseThinkingIntensityPrompt(prompt);
+    const prompt = planTurnOverride?.prompt ?? (trimmed || DEFAULT_IMAGE_PROMPT);
+    const parsedThinking = planTurnOverride
+      ? { intensity: undefined as undefined }
+      : parseThinkingIntensityPrompt(prompt);
     let turnLlm = parsedThinking.intensity
       ? buildIntenseLlm(llm, parsedThinking.intensity)
       : llm;
@@ -1031,9 +1257,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
     setInput("");
     pendingImagesRef.current = [];
-    if (pendingImgs.length > 0) dispatch({ type: "CLEAR_PENDING_IMAGES" });
+    if (state.pendingImages.length > 0) dispatch({ type: "CLEAR_PENDING_IMAGES" });
     abortRef.current = new AbortController();
     const permissionManager = getPermissionManager();
+    if (planTurnOverride?.forceMode && permissionManager.getMode() !== planTurnOverride.forceMode) {
+      permissionManager.setMode(planTurnOverride.forceMode);
+      dispatch({ type: "SET_PERMISSION_MODE", mode: planTurnOverride.forceMode });
+    }
     const permissionTurn = permissionManager.beginTurn(
       permissionSessionId,
       (request) => dispatch({ type: "LOOP_EVENT", event: { type: "permission_required", request } }),
@@ -1041,41 +1271,72 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     );
     permissionTurnRef.current = permissionTurn;
     // Collapse multi-line pastes into a summary for display, but keep full text for model context.
-    const normalizedPrompt = prompt.replace(/\r\n/g, '\n');
-    const isMultiLine = normalizedPrompt.includes('\n');
+    const displaySource = planTurnOverride?.displayText ?? prompt;
+    const normalizedPrompt = displaySource.replace(/\r\n/g, '\n');
+    const isMultiLine = !planTurnOverride && normalizedPrompt.includes('\n');
     const lineCount = isMultiLine ? normalizedPrompt.split('\n').length : 1;
     // Count graphemes properly (emoji = 1 char, not 2 UTF-16 units)
     const charCount = [...normalizedPrompt].length;
-    const displayText = isMultiLine
-      ? `[已复制 ${lineCount} 行 / ${charCount} 字]`
-      : undefined;
-    dispatch({ type: "USER_MESSAGE", text: prompt, ...(displayText !== undefined ? { displayText } : {}), images: pendingImgs });
+    const displayText = planTurnOverride
+      ? planTurnOverride.displayText
+      : isMultiLine
+        ? `[已复制 ${lineCount} 行 / ${charCount} 字]`
+        : undefined;
+    dispatch({
+      type: "USER_MESSAGE",
+      text: planTurnOverride ? planTurnOverride.displayText : prompt,
+      ...(displayText !== undefined && !planTurnOverride ? { displayText } : {}),
+      images: pendingImgs,
+    });
 
     const streamBuffer = streamBufferRef.current!;
     const runId = streamBuffer.start();
     const MAX_AUTO_CONTINUES = 5;
     let autoContinueCount = 0;
-    let currentUserText = prompt;
-    const thinkingMode = parsedThinking.intensity
-      ? "fixed"
-      : parseThinkingCommandMode(prompt) ?? loadThinkingModeFromEnv();
+    let currentUserText = planTurnOverride
+      ? prompt
+      : prompt.replace(/@\S+/g, "").replace(/\s{2,}/g, " ").trim();
+    const thinkingMode = planTurnOverride
+      ? loadThinkingModeFromEnv()
+      : parsedThinking.intensity
+        ? "fixed"
+        : parseThinkingCommandMode(prompt) ?? loadThinkingModeFromEnv();
+    let turnSucceeded = false;
+    let turnErrorMessage: string | undefined;
 
     const onLoopEvent = (event: LoopEvent) => {
       if (event.type === "thinking_policy") {
         turnLlm = withThinkingLevel(turnLlm, event.level);
         setLlm(turnLlm);
+      } else if (event.type === "auto_subagent") {
+        const status = event.executed
+          ? `自动子 agent 已启动 (${event.profile}, score=${event.score})`
+          : event.shouldDelegate
+            ? `建议委托子 agent (${event.profile}, score=${event.score})`
+            : `不自动委托 (score=${event.score})`;
+        dispatch({ type: "SET_STATUS", status });
+      } else if (event.type === "coordinator_mode") {
+        dispatch({
+          type: "SET_STATUS",
+          status: event.active
+            ? `编排模式: ${event.profile} (探索 ${event.directExplorationUsed}/${event.maxDirectExploration})`
+            : "编排模式已关闭",
+        });
       }
       streamBuffer.handle(runId, event);
     };
 
     try {
-      let currentUserContent = await resolveAtRefs(prompt, permissionTurn);
+      let currentUserContent = planTurnOverride
+        ? prompt
+        : await resolveAtRefs(prompt, permissionTurn);
       if (imageParts.length > 0) {
         const contentParts = typeof currentUserContent === "string"
           ? [{ type: "text" as const, text: currentUserContent }]
           : currentUserContent;
         currentUserContent = [...contentParts, ...imageParts];
       }
+
 
       // Auto-continue loop: re-invoke runAgentTurn when maxTurns is exceeded.
       while (true) {
@@ -1093,9 +1354,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
             thinkingMode,
             runtimeRef: subagentRuntimeRef.current,
+            skillNames: skillNamesRef.current,
+            skillRegistry: defaultSkillRegistry,
             onEvent: onLoopEvent,
           });
           streamBuffer.finish(runId);
+          turnSucceeded = true;
           break;
         } catch (err) {
           if (err instanceof MaxTurnsExceededError) {
@@ -1103,6 +1367,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             autoContinueCount++;
             if (autoContinueCount >= MAX_AUTO_CONTINUES || permissionTurn.signal.aborted) {
               streamBuffer.finish(runId);
+              turnErrorMessage = permissionTurn.signal.aborted
+                ? "aborted"
+                : `已达到自动续跑上限 (${MAX_AUTO_CONTINUES} 次)`;
               if (permissionTurn.signal.aborted) {
                 const reason = permissionTurn.signal.reason;
                 dispatch({
@@ -1118,7 +1385,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                     : { type: "aborted", messages: historyRef.current },
                 });
               } else {
-                dispatch({ type: "LOOP_EVENT", event: { type: "error", message: `已达到自动续跑上限 (${MAX_AUTO_CONTINUES} 次)` } });
+                dispatch({ type: "LOOP_EVENT", event: { type: "error", message: turnErrorMessage } });
               }
               break;
             }
@@ -1132,7 +1399,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             // turn starts from the known state instead of losing the streamed output.
             historyRef.current = err.messages;
             streamBuffer.finish(runId);
-            dispatch({ type: "LOOP_EVENT", event: { type: "error", message: `LLM timeout — partial response saved (${err.partialContent?.substring(0, 80) || ""})` } });
+            turnErrorMessage = `LLM timeout — partial response saved (${err.partialContent?.substring(0, 80) || ""})`;
+            dispatch({ type: "LOOP_EVENT", event: { type: "error", message: turnErrorMessage } });
             break;
           }
           throw err;
@@ -1140,6 +1408,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       }
     } catch (err) {
       streamBuffer.finish(runId);
+      turnErrorMessage = err instanceof Error ? err.message : String(err);
       if (err instanceof PermissionModeChangedError || permissionTurn.signal.aborted) {
         const reason = permissionTurn.signal.reason;
         dispatch({
@@ -1155,11 +1424,95 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             : { type: "aborted", messages: historyRef.current },
         });
       } else {
-        dispatch({ type: "LOOP_EVENT", event: { type: "error", message: err instanceof Error ? err.message : String(err) } });
+        dispatch({ type: "LOOP_EVENT", event: { type: "error", message: turnErrorMessage } });
       }
     } finally {
       if (permissionTurnRef.current === permissionTurn) permissionTurnRef.current = null;
       permissionTurn.close();
+
+      // Restore permission mode after plan execution turns.
+      if (planTurnOverride?.restoreMode !== undefined) {
+        const restore = planTurnOverride.restoreMode;
+        if (permissionManager.getMode() !== restore) {
+          permissionManager.setMode(restore);
+          dispatch({ type: "SET_PERMISSION_MODE", mode: restore });
+        }
+      }
+
+      // After a /plan generation turn, persist the assistant answer as a plan document.
+      if (planCaptureRef.current) {
+        const capture = planCaptureRef.current;
+        planCaptureRef.current = null;
+        if (turnSucceeded) {
+          const lastAssistant = [...historyRef.current].reverse().find((m) => m.role === "assistant");
+          const answer = lastAssistant && lastAssistant.role === "assistant" ? lastAssistant.content : "";
+          if (answer.trim()) {
+            try {
+              const doc = await createAndSavePlan(cwd, capture.prompt, answer);
+              dispatch({
+                type: "ADD_NOTICE",
+                title: "计划已保存",
+                text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}\n\n使用 /plan-approve 批准，然后 /plan-run 执行。`,
+              });
+            } catch (err) {
+              dispatch({
+                type: "ADD_NOTICE",
+                title: "计划保存失败",
+                text: err instanceof Error ? err.message : String(err),
+              });
+            }
+          } else {
+            dispatch({ type: "ADD_NOTICE", title: "计划", text: "Agent 未返回可保存的计划内容。" });
+          }
+        }
+      }
+
+      // After a /plan-run or /plan-retry turn, mark execution result.
+      if (execCaptureRef.current) {
+        execCaptureRef.current = null;
+        try {
+          if (turnSucceeded) {
+            const lastAssistant = [...historyRef.current].reverse().find((m) => m.role === "assistant");
+            const summary =
+              lastAssistant && lastAssistant.role === "assistant"
+                ? String(lastAssistant.content).slice(0, 500)
+                : undefined;
+            const completed = await markPlanExecutionResult(cwd, {
+              ok: true,
+              summary,
+              workspaceRoot: cwd,
+            });
+            const audit = completed.execution?.auditReport
+              ? `\n${completed.execution.auditReport.slice(0, 400)}`
+              : "";
+            dispatch({
+              type: "ADD_NOTICE",
+              title: "计划执行完成",
+              text: `id=${completed.id} status=${completed.status}${audit}`,
+            });
+          } else {
+            const failed = await markPlanExecutionResult(cwd, {
+              ok: false,
+              error: turnErrorMessage ?? "execution failed",
+              workspaceRoot: cwd,
+            });
+            const audit = failed.execution?.auditReport
+              ? `\n${failed.execution.auditReport.slice(0, 400)}`
+              : "";
+            dispatch({
+              type: "ADD_NOTICE",
+              title: "计划执行失败",
+              text: `id=${failed.id} status=${failed.status}\n${turnErrorMessage ?? ""}${audit}`,
+            });
+          }
+        } catch (err) {
+          dispatch({
+            type: "ADD_NOTICE",
+            title: "计划结果记录失败",
+            text: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
     }
   }, [state.busy, acMode, modelSetup, pendingProfileSetup, profileListState, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup, openProfileList, getPermissionManager, addPendingImage, handlePasteImage, conversationId, cwd]);
 
@@ -1305,18 +1658,37 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         <Box paddingX={1} gap={1} flexShrink={0}>
           <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : ">"}</Text>
           <Box flexGrow={1} minWidth={0}>
-            <PasteAwareTextInput
+            <PromptInput
+              key={inputEpoch}
               value={input}
               onChange={setInputSafe}
               onPasteImage={handlePasteImage}
+              onTab={handleTabAt}
               pasteEnabled={!state.pendingPermission}
+              focus={!state.pendingPermission}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {
-                if ((acMode === "model" || acMode === "model-picker") && modelCandidates[acIndex]) {
-                  selectModel(modelCandidates[acIndex]!);
-                } else {
-                  void handleSubmit(val);
+                if (shouldAcceptAutocompleteOnEnter(acMode)) {
+                  if (acMode === "command") {
+                    acceptCommand(acIndex);
+                    return;
+                  }
+                  if (acMode === "file") {
+                    acceptFile(acIndex);
+                    return;
+                  }
+                  const chosen = modelCandidates[acIndex];
+                  if (chosen) {
+                    if (acMode === "model-picker") selectModel(chosen);
+                    else {
+                      setInput(`/model ${chosen}`);
+                      resetInputCursorToEnd();
+                      clearAc();
+                    }
+                    return;
+                  }
                 }
+                void handleSubmit(val);
               }}
               placeholder={
                 state.busy ? "运行中，可输入消息并排队"

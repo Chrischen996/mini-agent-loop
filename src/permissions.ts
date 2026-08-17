@@ -12,9 +12,9 @@ export type PermissionRequest = {
   source?: ToolSource;
 };
 
-export type PermissionMode = "plan" | "manual" | "auto" | "bypass";
+export type PermissionMode = "plan" | "bypass";
 
-export const PERMISSION_MODES: readonly PermissionMode[] = ["plan", "manual", "auto", "bypass"] as const;
+export const PERMISSION_MODES: readonly PermissionMode[] = ["plan", "bypass"] as const;
 
 export function isPermissionMode(value: unknown): value is PermissionMode {
   return typeof value === "string" && (PERMISSION_MODES as readonly string[]).includes(value);
@@ -88,25 +88,6 @@ function mergeAbortSignals(...signals: (AbortSignal | undefined)[]): {
   });
   return { signal: controller.signal, cleanup: () => listeners.forEach((remove) => remove()) };
 }
-
-const AUTO_ALLOWED = new Set([
-  "read",
-  "grep",
-  "find",
-  "ls",
-  "list",
-  "search",
-  "codebase_search",
-  "codebase_read",
-  "codebase_explain",
-  "web_search",
-  "fetch_content",
-  "get_search_content",
-  "source_check",
-  "git_status",
-  "git_diff",
-  "validate_workspace",
-]);
 
 const WRITE_TOOLS = new Set([
   "write",
@@ -341,45 +322,14 @@ export function getRiskLevel(
       return isDangerousBashCommand(command) ? "high" : "safe";
     }
     if (WRITE_TOOLS.has(tool.name)) return "high";
+    if (tool.source?.kind === "mcp") return "high";
     return "safe";
   }
 
   // Bypass mode: skip user approval but still respect path sandbox.
   // The actual path validation happens in tool implementations (read.ts, write.ts, etc.)
   // This function only determines if user approval is needed.
-  if (mode === "bypass") return "safe";
-
-  // Manual mode: every tool call requires an explicit decision.
-  if (mode === "manual") {
-    if (tool.name === "validate_workspace") return "medium";
-    if (tool.source?.kind === "mcp") return "high";
-    if (tool.name === "bash") {
-      const cmd = typeof args.command === "string" ? args.command : "";
-      return isDangerousBashCommand(cmd) ? "high" : "medium";
-    }
-    if (tool.name === "delete" || tool.name === "document_edit" || tool.name === "git_undo") return "high";
-    if (WRITE_TOOLS.has(tool.name)) return "medium";
-    if (AUTO_ALLOWED.has(tool.name)) return "medium";
-    return "medium";
-  }
-
-  // Auto mode: smart risk assessment.
-  // MCP tools are marked high by default, but can be configured as trusted.
-  if (tool.source?.kind === "mcp") {
-    // Check if this MCP tool has a trusted designation via annotations
-    const isTrusted = (tool.annotations as any)?.["x-trusted"] === true;
-    return isTrusted ? "medium" : "high";
-  }
-  if (tool.name === "bash") {
-    const cmd = typeof args.command === "string" ? args.command : "";
-    if (isDangerousBashCommand(cmd)) return "high";
-    return "medium";
-  }
-  if (tool.name === "validate_workspace") return "medium";
-  if (tool.name === "delete" || tool.name === "document_edit" || tool.name === "git_undo") return "high";
-  if (WRITE_TOOLS.has(tool.name)) return "medium";
-  if (AUTO_ALLOWED.has(tool.name)) return "safe";
-  return "medium";
+  return "safe";
 }
 
 export class PermissionManager {
@@ -392,7 +342,7 @@ export class PermissionManager {
   /** Optional callback for permission audit logging. */
   onPermissionEvent?: (event: { type: "request" | "allow" | "deny"; request: PermissionRequest }) => void;
 
-  constructor(mode: PermissionMode = "auto") {
+  constructor(mode: PermissionMode = "plan") {
     this.mode = mode;
   }
 
@@ -519,7 +469,7 @@ export class PermissionManager {
   deserialize(data: string): void {
     try {
       const parsed = JSON.parse(data) as { mode: unknown; approved: unknown };
-      const nextMode = isPermissionMode(parsed.mode) ? parsed.mode : "auto";
+      const nextMode = isPermissionMode(parsed.mode) ? parsed.mode : "plan";
       if (nextMode !== this.mode) this.setMode(nextMode);
       this.approved = new Set(
         Array.isArray(parsed.approved)
@@ -573,6 +523,9 @@ export class PermissionManager {
     onRequest: (request: PermissionRequest) => void,
   ): Promise<void> {
     this.assertRevision(mode, revision);
+    void signal;
+    void onRequest;
+
     // Bypass mode: auto-allow everything.
     if (mode === "bypass") {
       this.onPermissionEvent?.({
@@ -590,74 +543,31 @@ export class PermissionManager {
     }
 
     // Plan mode: analysis only. Never execute writes or dangerous shell.
-    if (mode === "plan") {
-      if (tool.source?.kind === "mcp") {
-        // MCP is always remote/untrusted, even when its advertised name is a
-        // local-looking tool such as `read` or `bash`.
-      } else if (tool.name === "bash") {
-        const command = typeof args.command === "string" ? args.command : "";
-        if (!isDangerousBashCommand(command)) return;
-      } else if (!WRITE_TOOLS.has(tool.name)) {
-        return;
-      }
-
-      const request: PermissionRequest = {
-        id: `perm_${randomUUID()}`,
-        sessionId,
-        tool: tool.name,
-        arguments: args,
-        risk: "high",
-        source: tool.source,
-      };
-      // Plan is analysis-only: audit the blocked call, but never open an
-      // interactive approval prompt that could be "allowed" into execution.
-      this.onPermissionEvent?.({ type: "request", request });
-      this.onPermissionEvent?.({ type: "deny", request });
-      throw new Error(
-        `Permission denied for tool: ${tool.name} (plan mode is analysis-only; switch to manual/auto/bypass to execute)`,
-      );
-    }
-
-    // Manual and auto both use risk assessment, but manual never auto-allows.
-    const risk = getRiskLevel(tool, args, mode);
-    if (mode === "auto" && risk === "safe" && AUTO_ALLOWED.has(tool.name) && tool.source?.kind !== "mcp") {
-      this.onPermissionEvent?.({
-        type: "allow",
-        request: {
-          id: `perm_${randomUUID()}`,
-          sessionId,
-          tool: tool.name,
-          arguments: args,
-          risk: "safe",
-          source: tool.source,
-        },
-      });
+    if (tool.source?.kind === "mcp") {
+      // MCP is always remote/untrusted, even when its advertised name is a
+      // local-looking tool such as `read` or `bash`.
+    } else if (tool.name === "bash") {
+      const command = typeof args.command === "string" ? args.command : "";
+      if (!isDangerousBashCommand(command)) return;
+    } else if (!WRITE_TOOLS.has(tool.name) && tool.name !== "validate_workspace") {
       return;
     }
-    if (signal?.aborted) throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
-    const key = this.key(sessionId, tool, args);
-    if (mode === "auto" && this.approved.has(key)) return;
+
     const request: PermissionRequest = {
       id: `perm_${randomUUID()}`,
       sessionId,
       tool: tool.name,
       arguments: args,
-      risk: risk === "safe" ? "medium" : risk,
+      risk: "high",
       source: tool.source,
     };
+    // Plan is analysis-only: audit the blocked call, but never open an
+    // interactive approval prompt that could be "allowed" into execution.
     this.onPermissionEvent?.({ type: "request", request });
-    return await new Promise<void>((resolve, reject) => {
-      const abort = () => {
-        this.pending.delete(request.id);
-        cleanup();
-        const reason = signal?.reason;
-        reject(reason instanceof Error ? reason : Object.assign(new Error("Operation aborted"), { name: "AbortError" }));
-      };
-      const cleanup = () => signal?.removeEventListener("abort", abort);
-      this.pending.set(request.id, { request, key, revision, resolve, reject, cleanup });
-      signal?.addEventListener("abort", abort, { once: true });
-      onRequest(request);
-    });
+    this.onPermissionEvent?.({ type: "deny", request });
+    throw new Error(
+      `Permission denied for tool: ${tool.name} (plan mode is analysis-only; switch to bypass to execute)`,
+    );
   }
 
   resolve(sessionId: string, requestId: string, decision: PermissionDecision): boolean {
@@ -667,7 +577,7 @@ export class PermissionManager {
     this.pending.delete(requestId);
     pending.cleanup?.();
     if (decision === "allow") {
-      if (this.mode === "auto") this.approved.add(pending.key);
+      this.approved.add(pending.key);
       this.onPermissionEvent?.({ type: "allow", request: pending.request });
       pending.resolve();
     } else {

@@ -34,7 +34,13 @@
 export { createSubagentTool, createSubagentBatchTool } from "./tool.ts";
 
 export {
+  buildCoordinatorPromptFragment,
+  buildPreflightTask,
   decideAutoSubagent,
+  DEFAULT_MAX_DIRECT_EXPLORATION,
+  DEFAULT_MIN_SCORE,
+  DELEGATION_TOOL_NAMES,
+  EXPLORATION_TOOL_NAMES,
   loadAutoSubagentOptionsFromEnv,
 } from "./auto.ts";
 

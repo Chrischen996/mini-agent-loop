@@ -687,19 +687,20 @@ describe("runAgentTurn", () => {
     assert.ok((systemMsg.content as string).includes("custom system"));
   });
 
-  it("does not inject plan mode notice in auto mode", async () => {
+  it("does not inject plan mode notice in bypass mode", async () => {
     const chat = async () => ({ role: "assistant" as const, content: "ok" });
-    const history = createAgentHistory("custom system", "auto");
+    const history = createAgentHistory("custom system", "bypass");
     const messages = await runAgentTurn(history, "write a file", {
       llm: dummyLlm,
       tools: [],
       chat,
-      permissionMode: "auto",
+      permissionMode: "bypass",
     });
     const systemMsg = messages.find((m) => m.role === "system");
     assert.ok(systemMsg);
     assert.ok(typeof systemMsg.content === "string");
     assert.ok(!(systemMsg.content as string).includes("计划模式"));
+    assert.ok((systemMsg.content as string).includes("绕过模式"));
   });
 
   it("does not duplicate plan mode notice on subsequent turns", async () => {
@@ -740,17 +741,17 @@ describe("runAgentTurn", () => {
     const prompt = buildSystemPrompt("plan");
     assert.ok(prompt.includes("Permission Mode Awareness"));
     assert.ok(prompt.includes("plan mode"));
-    assert.ok(prompt.includes("manual mode"));
-    assert.ok(prompt.includes("auto mode"));
     assert.ok(prompt.includes("bypass mode"));
+    assert.ok(!prompt.includes("manual mode"));
+    assert.ok(!prompt.includes("auto mode"));
     assert.ok(prompt.includes("无权限改代码"));
-    for (const mode of ["plan", "manual", "auto", "bypass"]) {
-      assert.ok(buildSystemPrompt(mode as "plan" | "manual" | "auto" | "bypass").includes(`mode=${mode}`));
+    for (const mode of ["plan", "bypass"] as const) {
+      assert.ok(buildSystemPrompt(mode).includes(`mode=${mode}`));
     }
   });
 
   it("uses one permission snapshot for the prompt and tools across a mode switch", async () => {
-    const manager = new PermissionManager("auto");
+    const manager = new PermissionManager("plan");
     let releaseModel: (() => void) | undefined;
     let toolExecutions = 0;
     let firstSystemPrompt = "";
@@ -764,7 +765,7 @@ describe("runAgentTurn", () => {
       },
     };
     const firstTurn = manager.beginTurn("loop-switch", () => {});
-    const firstRun = runAgentTurn(createAgentHistory(undefined, "auto"), "make a change", {
+    const firstRun = runAgentTurn(createAgentHistory(undefined, "plan"), "make a change", {
       llm: dummyLlm,
       tools: [writeTool],
       permissionTurn: firstTurn,
@@ -780,7 +781,7 @@ describe("runAgentTurn", () => {
       },
     });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.match(firstSystemPrompt, /mode=auto/);
+    assert.match(firstSystemPrompt, /mode=plan/);
     manager.setMode("bypass");
     releaseModel?.();
     const aborted = await firstRun;
@@ -801,7 +802,7 @@ describe("runAgentTurn", () => {
       },
     });
     assert.match(nextSystemPrompt, /mode=bypass/);
-    assert.doesNotMatch(nextSystemPrompt, /mode=auto/);
+    assert.doesNotMatch(nextSystemPrompt, /mode=plan/);
     nextTurn.close();
   });
 });

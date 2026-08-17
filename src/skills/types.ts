@@ -29,6 +29,12 @@ export type Skill = {
   description: string;
   /** Text fragment to append to the system prompt */
   systemPromptFragment?: string;
+  /** Absolute directory that contained SKILL.md, when loaded from disk. */
+  sourceDir?: string;
+  /** Filenames discovered under scripts/. */
+  scripts?: string[];
+  /** Filenames discovered under references/. */
+  references?: string[];
   /** Tools provided by this skill */
   tools?: ToolProvider;
   /** Preprocessors contributed by this skill */

@@ -24,7 +24,7 @@ type StatusBarProps = {
 export function StatusBar({ modelName, tokenEstimate, contextWindow, cwd, busy, status = "就绪", queuedCount = 0, permissionMode, thinkingLevel, cacheReadTokens, promptTokens }: StatusBarProps): React.ReactElement {
   const cwdShort = cwd.length > 30 ? `…${cwd.slice(-28)}` : cwd;
   const [branch, setBranch] = useState<string>();
-  const modeLabel = permissionMode === "plan" ? "计划" : permissionMode === "manual" ? "手动" : permissionMode === "auto" ? "自动" : "绕过";
+  const modeLabel = permissionMode === "plan" ? "计划" : "绕过";
 
   useEffect(() => {
     let active = true;

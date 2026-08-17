@@ -1,10 +1,35 @@
 #!/usr/bin/env node
 
-import { readFile, realpath } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { imagePart, textPart } from "./content.ts";
 import { loadLlmConfigFromEnv } from "./llm/index.ts";
 import { MaxTurnsExceededError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
+import { loadAgentsMd } from "./agents-md.ts";
+import {
+  defaultSkillRegistry,
+  discoverWorkspaceSkills,
+  loadSkillNamesFromEnv,
+} from "./skills/index.ts";
+import {
+  PLAN_ONLY_SUFFIX,
+  approveCurrentPlan,
+  archiveCurrentPlan,
+  createAndSavePlan,
+  editCurrentPlan,
+  formatPlanDiff,
+  formatPlanDocumentPreview,
+  formatPlanPreview,
+  historyPlanPath,
+  listPlanHistory,
+  loadPlanDocument,
+  markPlanExecutionResult,
+  planDocumentToSummary,
+  preparePlanForExecution,
+  rejectCurrentPlan,
+} from "./plan/index.ts";
 import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
@@ -63,6 +88,16 @@ function logEvent(event: LoopEvent): void {
       );
       break;
     }
+    case "auto_subagent":
+      console.error(
+        `[auto_subagent] shouldDelegate=${event.shouldDelegate} executed=${event.executed} coordinator=${event.coordinatorMode} score=${event.score} profile=${event.profile} reasons=${event.reasons.join(",")}`,
+      );
+      break;
+    case "coordinator_mode":
+      console.error(
+        `[coordinator] active=${event.active} profile=${event.profile} preflight=${event.preflightExecuted} explore=${event.directExplorationUsed}/${event.maxDirectExploration} reasons=${event.reasons.join(",")}`,
+      );
+      break;
     case "thinking_policy":
       console.error(`[thinking] mode=adaptive phase=${event.phase} level=${event.level} reasons=${event.reasons.join(",")}`);
       break;
@@ -107,13 +142,37 @@ export function parseCliArgs(argv: string[]): {
   excludeTools?: ToolName[];
   allowMcpTools: boolean;
   mode: PermissionMode;
+  planOnly: boolean;
+  planExecute: boolean;
+  planYes: boolean;
+  planRetry: boolean;
+  planForce: boolean;
+  planShow: boolean;
+  planApprove: boolean;
+  planReject: boolean;
+  planEdit: boolean;
+  planSetFile?: string;
+  planHistory: boolean;
+  planArchive: boolean;
 } {
   const imagePaths: string[] = [];
   const rest: string[] = [];
   let tools: ToolName[] | undefined;
   let excludeTools: ToolName[] | undefined;
   let allowMcpTools = false;
-  let mode: PermissionMode = "auto";
+  let mode: PermissionMode = "plan";
+  let planOnly = false;
+  let planExecute = false;
+  let planYes = false;
+  let planRetry = false;
+  let planForce = false;
+  let planShow = false;
+  let planApprove = false;
+  let planReject = false;
+  let planEdit = false;
+  let planSetFile: string | undefined;
+  let planHistory = false;
+  let planArchive = false;
   const validTools = new Set<ToolName>([
     "read", "bash", "edit", "write", "grep", "find", "ls",
     "codebase_open", "codebase_search", "codebase_read", "codebase_explain",
@@ -144,24 +203,83 @@ export function parseCliArgs(argv: string[]): {
       allowMcpTools = true;
       continue;
     }
+    if (arg === "--plan") {
+      planOnly = true;
+      continue;
+    }
+    if (arg === "--plan-execute") {
+      planExecute = true;
+      continue;
+    }
+    if (arg === "--plan-retry") {
+      planRetry = true;
+      continue;
+    }
+    if (arg === "--plan-force") {
+      planForce = true;
+      continue;
+    }
+    if (arg === "--plan-show") {
+      planShow = true;
+      continue;
+    }
+    if (arg === "--plan-approve") {
+      planApprove = true;
+      continue;
+    }
+    if (arg === "--plan-reject") {
+      planReject = true;
+      continue;
+    }
+    if (arg === "--plan-edit") {
+      planEdit = true;
+      continue;
+    }
+    if (arg === "--plan-set-file") {
+      const next = argv[i + 1];
+      if (!next || next.startsWith("--")) {
+        throw new Error("--plan-set-file requires a path argument");
+      }
+      planSetFile = next;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--plan-set-file=")) {
+      const value = arg.slice("--plan-set-file=".length);
+      if (!value) throw new Error("--plan-set-file= requires a path");
+      planSetFile = value;
+      continue;
+    }
+    if (arg === "--plan-history") {
+      planHistory = true;
+      continue;
+    }
+    if (arg === "--plan-archive") {
+      planArchive = true;
+      continue;
+    }
+    if (arg === "--yes") {
+      planYes = true;
+      continue;
+    }
     if (arg === "--mode") {
       const next = argv[i + 1];
       if (!next || next.startsWith("--")) {
-        throw new Error("--mode requires an argument: plan, manual, auto, or bypass");
+        throw new Error("--mode requires an argument: plan or bypass");
       }
       if (!isPermissionMode(next)) {
-        throw new Error("Invalid mode: use 'plan', 'manual', 'auto', or 'bypass'");
+        throw new Error("Invalid mode: use 'plan' or 'bypass'");
       }
-      mode = next as PermissionMode;
+      mode = next;
       i += 1;
       continue;
     }
     if (arg.startsWith("--mode=")) {
       const value = arg.slice("--mode=".length);
       if (!isPermissionMode(value)) {
-        throw new Error("Invalid mode: use 'plan', 'manual', 'auto', or 'bypass'");
+        throw new Error("Invalid mode: use 'plan' or 'bypass'");
       }
-      mode = value as PermissionMode;
+      mode = value;
       continue;
     }
     if (arg.startsWith("--image=")) {
@@ -190,7 +308,26 @@ export function parseCliArgs(argv: string[]): {
     rest.push(arg);
   }
 
-  return { prompt: rest.join(" ").trim(), imagePaths, tools, excludeTools, allowMcpTools, mode };
+  return {
+    prompt: rest.join(" ").trim(),
+    imagePaths,
+    tools,
+    excludeTools,
+    allowMcpTools,
+    mode,
+    planOnly,
+    planExecute,
+    planYes,
+    planRetry,
+    planForce,
+    planShow,
+    planApprove,
+    planReject,
+    planEdit,
+    planSetFile,
+    planHistory,
+    planArchive,
+  };
 }
 
 async function loadImagePart(
@@ -232,17 +369,182 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const { prompt: rawPrompt, imagePaths, tools: selectedTools, excludeTools, allowMcpTools, mode } = parsed;
+  const {
+    prompt: rawPrompt,
+    imagePaths,
+    tools: selectedTools,
+    excludeTools,
+    allowMcpTools,
+    mode,
+    planOnly,
+    planExecute,
+    planYes,
+    planRetry,
+    planForce,
+    planShow,
+    planApprove,
+    planReject,
+    planEdit,
+    planSetFile,
+    planHistory,
+    planArchive,
+  } = parsed;
   const thinking = parseThinkingIntensityPrompt(rawPrompt);
   const prompt = thinking.prompt;
-  if (!prompt && imagePaths.length === 0) {
+  const cwd = process.cwd();
+  const discoveredSkills = await discoverWorkspaceSkills(cwd);
+  const skillNames = loadSkillNamesFromEnv();
+  if (discoveredSkills.skills.length > 0) {
+    console.error(`[skills] discovered=${discoveredSkills.skills.map((skill) => skill.name).join(",")}`);
+  }
+  if (skillNames.length > 0) {
+    console.error(`[skills] active=${skillNames.join(",")}`);
+  }
+
+  // Early plan commands that do not need the LLM
+  if (planShow) {
+    const doc = await loadPlanDocument(cwd);
+    if (!doc) {
+      console.error("No saved plan found.");
+      process.exit(1);
+    }
+    console.error(formatPlanDocumentPreview(doc));
+    console.log(doc.rawMarkdown);
+    return;
+  }
+
+  if (planApprove) {
+    try {
+      const doc = await approveCurrentPlan(cwd, "user");
+      console.error(`[plan] approved (id=${doc.id})`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (planReject) {
+    try {
+      const doc = await rejectCurrentPlan(cwd);
+      console.error(`[plan] rejected (id=${doc.id})`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (planHistory) {
+    const history = await listPlanHistory(cwd);
+    if (history.length === 0) {
+      console.error("[plan] no archived plans");
+      return;
+    }
+    for (const doc of history) {
+      const promptSlice =
+        doc.prompt.length > 60 ? `${doc.prompt.slice(0, 60)}…` : doc.prompt;
+      console.error(
+        `${doc.id}  ${doc.status.padEnd(10)}  ${doc.updatedAt}  ${promptSlice}`,
+      );
+    }
+    return;
+  }
+
+  if (planArchive) {
+    try {
+      const { archivedPath, document } = await archiveCurrentPlan(cwd);
+      console.error(`[plan] archived id=${document.id} to ${archivedPath}`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (planSetFile) {
+    try {
+      const existing = await loadPlanDocument(cwd);
+      if (!existing) {
+        console.error("No saved plan found.");
+        process.exit(1);
+      }
+      const filePath = path.resolve(cwd, planSetFile);
+      const nextMarkdown = await readFile(filePath, "utf8");
+      const before = existing.rawMarkdown;
+      const doc = await editCurrentPlan(cwd, nextMarkdown);
+      console.error(formatPlanDiff(before, doc.rawMarkdown, doc.prompt));
+      console.error(formatPlanDocumentPreview(doc));
+      console.error(`[plan] updated from file ${planSetFile} (id=${doc.id}, status=${doc.status})`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (planEdit) {
+    try {
+      const existing = await loadPlanDocument(cwd);
+      if (!existing) {
+        console.error("No saved plan found.");
+        process.exit(1);
+      }
+      const editor = process.env.EDITOR || process.env.VISUAL || "vi";
+      const tmpDir = await mkdtemp(path.join(tmpdir(), "mini-agent-plan-"));
+      const tmpFile = path.join(tmpDir, "plan.md");
+      await writeFile(tmpFile, existing.rawMarkdown, "utf8");
+      const result = spawnSync(editor, [tmpFile], { stdio: "inherit" });
+      if (result.status !== 0) {
+        console.error(
+          `[plan] editor exited with status ${result.status ?? "unknown"}; aborting without save`,
+        );
+        process.exit(1);
+      }
+      const nextMarkdown = await readFile(tmpFile, "utf8");
+      const before = existing.rawMarkdown;
+      const doc = await editCurrentPlan(cwd, nextMarkdown);
+      console.error(formatPlanDiff(before, doc.rawMarkdown, doc.prompt));
+      console.error(formatPlanDocumentPreview(doc));
+      console.error(`[plan] edited (id=${doc.id}, status=${doc.status})`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (!prompt && imagePaths.length === 0 && !planExecute && !planRetry) {
     console.error(
       'Usage: npx tsx src/cli.ts "<prompt>" [--image path.png]...',
     );
     process.exit(1);
   }
 
-  const cwd = process.cwd();
+  const agentsMd = await loadAgentsMd(cwd);
+
+  // --plan flag: force plan mode and append plan-only instruction
+  const wantExecute = planExecute || planRetry;
+  const effectiveMode = planOnly ? "plan" : wantExecute ? "bypass" : mode;
+  let planSuffix = planOnly ? PLAN_ONLY_SUFFIX : "";
+  let trackingExecution = false;
+
+  // --plan-execute / --plan-retry: prepare saved plan (does NOT delete it)
+  if (wantExecute) {
+    try {
+      const prepared = await preparePlanForExecution(cwd, {
+        yes: planYes,
+        force: planForce,
+        workspaceRoot: cwd,
+      });
+      planSuffix = prepared.executionPromptSuffix;
+      trackingExecution = true;
+      console.error(`[plan] loaded plan for: ${prepared.document.prompt} (status=executing)`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+  }
   const llm = loadLlmConfigFromEnv();
   const requestLlm = thinking.intensity
     ? buildIntenseLlm(llm, thinking.intensity)
@@ -297,19 +599,15 @@ async function main(): Promise<void> {
   }
   console.error(`[deepwiki] enabled=${codebaseRuntime.deepWikiEnabled}`);
 
-  const permissionManager = new PermissionManager(mode);
+  const permissionManager = new PermissionManager(effectiveMode);
   let permissionTurn: PermissionTurnContext | undefined;
   const onPermissionRequest = (request: PermissionRequest) => {
       console.error(
         `[permission] mode=${permissionTurn?.mode ?? mode} tool=${request.tool} risk=${request.risk} request_id=${request.id}`,
       );
-      if (permissionTurn?.mode === "manual" || permissionTurn?.mode === "auto") {
-        // Non-interactive CLI cannot prompt. Deny immediately instead of hanging.
-        permissionManager.resolve("cli_session", request.id, "deny");
-        console.error(
-          `[permission] denied in non-interactive CLI; use TUI/Web or --mode=bypass for unattended runs`,
-        );
-      }
+      // plan/bypass never open interactive pending approvals. If a stale pending
+      // request surfaces, deny it so the non-interactive CLI cannot hang.
+      permissionManager.resolve("cli_session", request.id, "deny");
   };
 
   // ── Add subagent tool if enabled ────────────────────────────────────────────
@@ -341,11 +639,11 @@ async function main(): Promise<void> {
   }
 
   let messages;
-  console.error(`[config] mode=${mode}`);
+  console.error(`[config] mode=${effectiveMode}`);
   const activePermissionTurn = permissionManager.beginTurn("cli_session", onPermissionRequest);
   permissionTurn = activePermissionTurn;
   try {
-    messages = await runAgentLoop(prompt || "Please analyze the attached image(s).", {
+    messages = await runAgentLoop(prompt + planSuffix || "Please analyze the attached image(s).", {
       llm: requestLlm,
       tools,
       autoSubagent: loadAutoSubagentOptionsFromEnv(),
@@ -358,11 +656,46 @@ async function main(): Promise<void> {
       thinkingMode,
       runtimeRef: parentRuntime,
       onEvent: logEvent,
+      agentsMd,
+      skillNames,
+      skillRegistry: defaultSkillRegistry,
     });
+    if (trackingExecution) {
+      const last = [...messages].reverse().find((m) => m.role === "assistant");
+      const summary =
+        last && last.role === "assistant"
+          ? String(last.content).slice(0, 500)
+          : undefined;
+      const completed = await markPlanExecutionResult(cwd, {
+        ok: true,
+        summary,
+        workspaceRoot: cwd,
+      });
+      console.error(`[plan] completed (id=${completed.id})`);
+      console.error(`[plan] archived to ${historyPlanPath(cwd, completed.id)}`);
+      if (completed.execution?.auditReport) {
+        console.error(completed.execution.auditReport);
+      }
+    }
   } catch (error) {
+    if (trackingExecution) {
+      const message = error instanceof Error ? error.message : String(error);
+      const failed = await markPlanExecutionResult(cwd, {
+        ok: false,
+        error: message,
+        workspaceRoot: cwd,
+      });
+      if (failed.execution?.auditReport) {
+        console.error(failed.execution.auditReport);
+      }
+    }
     if (!(error instanceof MaxTurnsExceededError)) throw error;
     messages = error.messages;
     console.error(`[max_turns] reached limit ${error.maxTurns}; returning partial history`);
+    if (trackingExecution) {
+      // MaxTurns is partial success for history, but treat as failed execution
+      // already marked above only if we rethrow path; MaxTurns is caught so mark failed already
+    }
   } finally {
     activePermissionTurn.close();
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
@@ -373,7 +706,36 @@ async function main(): Promise<void> {
     .find((m) => m.role === "assistant");
 
   if (lastAssistant && lastAssistant.role === "assistant") {
-    console.log(lastAssistant.content);
+    // AssistantMessage.content is always a string in the current contract.
+    const answer = lastAssistant.content;
+
+    // --plan: save the generated plan to disk, show preview, ask for approval
+    if (planOnly) {
+      const doc = await createAndSavePlan(cwd, prompt, answer, {
+        autoApprove: planYes,
+        approvedBy: planYes ? "auto--yes" : undefined,
+      });
+      console.log(answer);
+      console.error(`\n[plan] saved (id=${doc.id}, status=${doc.status})`);
+
+      // Show formatted preview
+      const summary = planDocumentToSummary(doc);
+      console.error(formatPlanPreview(summary));
+
+      if (planYes) {
+        console.error("[plan] auto-approved (--yes flag).");
+        console.error("Run again with --plan-execute to execute this plan.");
+      } else {
+        console.error("");
+        console.error("Plan saved. Review the summary above, then run:");
+        console.error("  npx mini-agent-loop --plan-approve");
+        console.error("  npx mini-agent-loop --plan-execute \"execute the plan\"");
+        console.error("Or auto-approve with: --plan --yes");
+      }
+      return;
+    }
+
+    console.log(answer);
   } else {
     console.error("No assistant message produced.");
     process.exit(1);

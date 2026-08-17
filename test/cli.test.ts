@@ -84,7 +84,7 @@ describe("parseCliArgs", () => {
   it("returns empty prompt for no arguments", () => {
     const result = parseCliArgs([]);
     assert.equal(result.prompt, "");
-    assert.equal(result.mode, "auto"); // default mode
+    assert.equal(result.mode, "plan"); // default mode
   });
 
   it("parses --mode flag", () => {
@@ -98,14 +98,101 @@ describe("parseCliArgs", () => {
     assert.equal(result.mode, "bypass");
   });
 
-  it("parses --mode=manual", () => {
-    const result = parseCliArgs(["--mode=manual", "do something"]);
-    assert.equal(result.mode, "manual");
+  it("rejects legacy manual/auto modes", () => {
+    assert.throws(() => parseCliArgs(["--mode=manual", "do something"]), /Invalid mode/);
+    assert.throws(() => parseCliArgs(["--mode", "auto", "do something"]), /Invalid mode/);
   });
 
-  it("defaults to auto mode when not specified", () => {
+  it("defaults to plan mode when not specified", () => {
     const result = parseCliArgs(["hello world"]);
-    assert.equal(result.mode, "auto");
+    assert.equal(result.mode, "plan");
+    assert.equal(result.planOnly, false);
+  });
+
+  it("sets planOnly when --plan flag is present", () => {
+    const result = parseCliArgs(["--plan", "write a plan"]);
+    assert.equal(result.mode, "plan");
+    assert.equal(result.planOnly, true);
+    assert.equal(result.planExecute, false);
+    assert.equal(result.prompt, "write a plan");
+  });
+
+  it("sets planExecute when --plan-execute flag is present", () => {
+    const result = parseCliArgs(["--plan-execute", "execute the plan"]);
+    assert.equal(result.planOnly, false);
+    assert.equal(result.planExecute, true);
+    assert.equal(result.planYes, false);
+    assert.equal(result.prompt, "execute the plan");
+  });
+
+  it("sets planYes when --yes flag is present", () => {
+    const result = parseCliArgs(["--yes", "do something"]);
+    assert.equal(result.planYes, true);
+    assert.equal(result.planOnly, false);
+  });
+
+  it("sets planYes together with --plan", () => {
+    const result = parseCliArgs(["--plan", "--yes", "write a plan"]);
+    assert.equal(result.planOnly, true);
+    assert.equal(result.planYes, true);
+  });
+
+  it("parses new plan workflow flags", () => {
+    const result = parseCliArgs([
+      "--plan-retry",
+      "--plan-force",
+      "--plan-show",
+      "--plan-approve",
+      "--plan-reject",
+      "retry it",
+    ]);
+    assert.equal(result.planRetry, true);
+    assert.equal(result.planForce, true);
+    assert.equal(result.planShow, true);
+    assert.equal(result.planApprove, true);
+    assert.equal(result.planReject, true);
+    assert.equal(result.prompt, "retry it");
+  });
+
+  it("parses plan edit/history/archive flags", () => {
+    const result = parseCliArgs([
+      "--plan-edit",
+      "--plan-set-file",
+      "plan.md",
+      "--plan-history",
+      "--plan-archive",
+      "ignored prompt",
+    ]);
+    assert.equal(result.planEdit, true);
+    assert.equal(result.planSetFile, "plan.md");
+    assert.equal(result.planHistory, true);
+    assert.equal(result.planArchive, true);
+  });
+
+  it("parses --plan-set-file= syntax", () => {
+    const result = parseCliArgs(["--plan-set-file=./plans/x.md"]);
+    assert.equal(result.planSetFile, "./plans/x.md");
+    assert.equal(result.planEdit, false);
+  });
+
+  it("throws when --plan-set-file has no path", () => {
+    assert.throws(
+      () => parseCliArgs(["--plan-set-file"]),
+      /--plan-set-file requires a path/,
+    );
+  });
+
+  it("defaults new plan flags to false", () => {
+    const result = parseCliArgs(["hello"]);
+    assert.equal(result.planRetry, false);
+    assert.equal(result.planForce, false);
+    assert.equal(result.planShow, false);
+    assert.equal(result.planApprove, false);
+    assert.equal(result.planReject, false);
+    assert.equal(result.planEdit, false);
+    assert.equal(result.planSetFile, undefined);
+    assert.equal(result.planHistory, false);
+    assert.equal(result.planArchive, false);
   });
 
   it("throws for invalid mode", () => {
@@ -125,6 +212,6 @@ describe("CLI smoke test", () => {
     assert.equal(result.tools, undefined);
     assert.equal(result.excludeTools, undefined);
     assert.equal(result.allowMcpTools, false);
-    assert.equal(result.mode, "auto");
+    assert.equal(result.mode, "plan");
   });
 });
