@@ -121,9 +121,14 @@ function logEvent(event: LoopEvent): void {
         console.error(`${'  '.repeat(event.depth)}[sub:tool_end] ${event.inner.call.name} preview=${subPreview}`);
       }
       break;
-    case "subagent_end":
-      console.error(`[subagent_end] id=${event.id} depth=${event.depth} success=${event.success} model=${event.runtime.model} turns=${event.turns} tokens=${event.totalTokens}${event.errors?.length ? ` errors=${event.errors.map((error) => error.kind).join(",")}` : ""}`);
+    case "subagent_end": {
+      const costStr = event.estimatedCost ? ` cost=$${event.estimatedCost.total.toFixed(4)}` : "";
+      const breakdownStr = event.tokenBreakdown
+        ? ` breakdown=(in:${event.tokenBreakdown.inputTokens},out:${event.tokenBreakdown.completionTokens}${event.tokenBreakdown.cacheReadTokens ? `,cacheRead:${event.tokenBreakdown.cacheReadTokens}` : ""})`
+        : "";
+      console.error(`[subagent_end] id=${event.id} depth=${event.depth} success=${event.success} model=${event.runtime.model} turns=${event.turns} tokens=${event.totalTokens}${breakdownStr}${costStr}${event.errors?.length ? ` errors=${event.errors.map((error) => error.kind).join(",")}` : ""}`);
       break;
+    }
   }
 }
 

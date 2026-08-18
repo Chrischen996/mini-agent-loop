@@ -1237,6 +1237,7 @@ async function runAgentTurnInternal(
         // Injected chat (tests) stays non-streaming for deterministic offline coverage.
         permissionTurn?.assertCurrent();
         assistant = await completeChat!(currentLlm, messages, turnTools);
+        lastUsage = (assistant as any).usage;
         permissionTurn?.assertCurrent();
       } else {
         assistant = {

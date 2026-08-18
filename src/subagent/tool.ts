@@ -30,11 +30,14 @@ import type {
   SubagentArgs,
   SubagentBatchArgs,
   SubagentBatchTask,
+  SubagentCost,
   SubagentEvent,
   SubagentProfile,
   SubagentRuntimeInfo,
+  SubagentTokenBreakdown,
   SubagentToolOptions,
 } from "./types.ts";
+import { calculateSubagentCost } from "./cost.ts";
 import type { PermissionTurnContext } from "../permissions.ts";
 import type { ThinkingMode } from "../thinking-policy.ts";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "../types.ts";
@@ -459,6 +462,11 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
           type: "boolean",
           description: "Whether to include the parent agent's current message history.",
         },
+        tokenBudget: {
+          type: "integer",
+          minimum: 1,
+          description: "Maximum token budget for this sub-agent loop.",
+        },
       },
       required: ["task"],
       additionalProperties: false,
@@ -521,6 +529,14 @@ ${args.sharedContext}
             isError: true,
           };
         }
+      }
+
+      const effectiveTokenBudget = args.tokenBudget ?? profile?.tokenBudget;
+      if (effectiveTokenBudget !== undefined && effectiveTokenBudget <= 0) {
+        return {
+          content: `Sub-agent token budget exhausted (${effectiveTokenBudget}).`,
+          isError: true,
+        };
       }
 
       if (globalBudgetState && globalBudgetState.used >= globalBudgetState.limit) {
@@ -596,8 +612,31 @@ ${args.sharedContext}
 
       const merged = mergeAbortSignals(...signalsToMerge);
 
-      // ── Token tracking ──────────────────────────────────────────
+      // ── Token & cost tracking ────────────────────────────────────
       let accumulatedTokens = 0;
+      let accumulatedPromptTokens = 0;
+      let accumulatedInputTokens = 0;
+      let accumulatedCompletionTokens = 0;
+      let accumulatedCacheReadTokens = 0;
+      let accumulatedCacheWriteTokens = 0;
+
+      const getBreakdownAndCost = (): {
+        tokenBreakdown?: SubagentTokenBreakdown;
+        estimatedCost?: SubagentCost;
+      } => {
+        if (accumulatedTokens <= 0) return {};
+        const tokenBreakdown: SubagentTokenBreakdown = {
+          promptTokens: accumulatedPromptTokens,
+          inputTokens: accumulatedInputTokens,
+          completionTokens: accumulatedCompletionTokens,
+          totalTokens: accumulatedTokens,
+          ...(accumulatedCacheReadTokens > 0 ? { cacheReadTokens: accumulatedCacheReadTokens } : {}),
+          ...(accumulatedCacheWriteTokens > 0 ? { cacheWriteTokens: accumulatedCacheWriteTokens } : {}),
+        };
+        const estimatedCost = calculateSubagentCost(llm, tokenBreakdown);
+        return { tokenBreakdown, estimatedCost };
+      };
+
       type ErrorKind = "timeout" | "api" | "compaction" | "max_turns" | "abort";
       const errors: Array<{ message: string; kind: ErrorKind }> = [];
 
@@ -640,6 +679,16 @@ ${args.sharedContext}
             if (event.type === "assistant" && event.usage) {
               const delta = event.usage.totalTokens;
               accumulatedTokens += delta;
+              accumulatedPromptTokens += event.usage.promptTokens ?? 0;
+              accumulatedInputTokens += event.usage.inputTokens ?? 0;
+              accumulatedCompletionTokens += event.usage.completionTokens ?? 0;
+              accumulatedCacheReadTokens += event.usage.cacheReadTokens ?? 0;
+              accumulatedCacheWriteTokens += event.usage.cacheWriteTokens ?? 0;
+
+              if (effectiveTokenBudget !== undefined && accumulatedTokens > effectiveTokenBudget) {
+                throw new Error(`Sub-agent token budget exceeded (${effectiveTokenBudget}).`);
+              }
+
               if (globalBudgetState) {
                 globalBudgetState.used += delta;
                 if (globalBudgetState.used > globalBudgetState.limit) {
@@ -698,6 +747,7 @@ ${args.sharedContext}
             errors.push({ message: errorMessage, kind: "api" });
           }
 
+          const { tokenBreakdown, estimatedCost } = getBreakdownAndCost();
           onSubagentEvent?.({
             type: "subagent_end",
             id: invocationId,
@@ -706,6 +756,8 @@ ${args.sharedContext}
             depth,
             turns: 0,
             totalTokens: accumulatedTokens,
+            tokenBreakdown,
+            estimatedCost,
             runtime: runtimeInfo,
             errors,
             autoDelegationInherited: false, // auto-delegation is deliberately not inherited
@@ -732,6 +784,7 @@ ${args.sharedContext}
         // Already handled in catch above
       } else if (timeoutController?.signal.aborted === true) {
         // Timeout fired but runAgentLoop returned normally — treat as timeout
+        const { tokenBreakdown, estimatedCost } = getBreakdownAndCost();
         onSubagentEvent?.({
           type: "subagent_end",
           id: invocationId,
@@ -740,6 +793,8 @@ ${args.sharedContext}
           depth,
           turns: countTurns(finalMessages ?? []),
           totalTokens: accumulatedTokens,
+          tokenBreakdown,
+          estimatedCost,
           runtime: runtimeInfo,
           errors: [{ message: "Sub-agent timeout exceeded", kind: "timeout" }],
           autoDelegationInherited: false,
@@ -759,6 +814,7 @@ ${args.sharedContext}
       // we truly recovered nothing.
       success = extracted.text.length > 0;
 
+      const { tokenBreakdown, estimatedCost } = getBreakdownAndCost();
       onSubagentEvent?.({
         type: "subagent_end",
         id: invocationId,
@@ -767,6 +823,8 @@ ${args.sharedContext}
         depth,
         turns,
         totalTokens: accumulatedTokens,
+        tokenBreakdown,
+        estimatedCost,
         runtime: runtimeInfo,
         errors: errors.length > 0 ? errors : undefined,
         autoDelegationInherited: false, // auto-delegation is intentionally isolated per subagent
@@ -872,6 +930,11 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
                 type: "boolean",
                 description: "Whether to include the parent's current message history.",
               },
+              tokenBudget: {
+                type: "integer",
+                minimum: 1,
+                description: "Token budget limit for this task.",
+              },
             },
             required: ["label", "task"],
           },
@@ -916,6 +979,7 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
                 contextPolicy: task.contextPolicy,
                 skillNames: task.skillNames,
                 inheritContextHistory: task.inheritContextHistory,
+                tokenBudget: task.tokenBudget,
               },
               execSignal,
             );

@@ -61,6 +61,8 @@ export type SubagentProfile = {
    * Default: 2. Only used when thinkingMode is "adaptive".
    */
   maxThinkingEscalations?: number;
+  /** Optional token budget limit for this profile. */
+  tokenBudget?: number;
 };
 
 // ─── Runtime options passed when creating the subagent tool ──────────────────
@@ -194,6 +196,8 @@ export type SubagentArgs = {
    * `inheritContextHistory` is true. Used internally by the subagent tool.
    */
   _parentHistory?: AgentMessage[];
+  /** Optional token budget limit for this specific subagent call. */
+  tokenBudget?: number;
 };
 
 // ─── Parallel subagent batch arguments ───────────────────────────────────────
@@ -224,6 +228,8 @@ export type SubagentBatchTask = {
   skillNames?: string[];
   /** Whether to inherit the parent's current message history. */
   inheritContextHistory?: boolean;
+  /** Optional token budget limit for this specific batch task. */
+  tokenBudget?: number;
 };
 
 /**
@@ -262,6 +268,23 @@ export type SubagentRuntimeInfo = {
   requestedModel?: string;
 };
 
+export type SubagentTokenBreakdown = {
+  promptTokens: number;
+  inputTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+};
+
+export type SubagentCost = {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  total: number;
+};
+
 export type SubagentEvent =
   | {
       type: "subagent_start";
@@ -292,6 +315,10 @@ export type SubagentEvent =
       turns: number;
       /** Cumulative token usage across all turns (0 when unavailable). */
       totalTokens: number;
+      /** Detailed token breakdown across prompt, input, completion, cache. */
+      tokenBreakdown?: SubagentTokenBreakdown;
+      /** Estimated monetary cost in USD based on model rates. */
+      estimatedCost?: SubagentCost;
       /** Runtime info recorded at subagent start (for observability). */
       runtime: SubagentRuntimeInfo;
       /** Any errors encountered during execution. */

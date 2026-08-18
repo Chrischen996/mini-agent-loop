@@ -55,10 +55,14 @@ export type {
   SubagentArgs,
   SubagentBatchArgs,
   SubagentBatchTask,
+  SubagentCost,
   SubagentEvent,
   SubagentProfile,
+  SubagentTokenBreakdown,
   SubagentToolOptions,
 } from "./types.ts";
+
+export { calculateSubagentCost } from "./cost.ts";
 
 export type {
   AutoSubagentDecision,

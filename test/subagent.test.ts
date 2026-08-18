@@ -1214,6 +1214,97 @@ describe("createSubagentTool", () => {
         assert.equal(end.totalTokens, 0);
       }
     });
+
+    it("populates tokenBreakdown and estimatedCost on subagent_end when usage is available", async () => {
+      const events: SubagentEvent[] = [];
+      const usageChat: import("../src/llm/index.ts").ChatFn = async () => ({
+        role: "assistant",
+        content: "token usage answer",
+        usage: {
+          promptTokens: 1000,
+          inputTokens: 800,
+          completionTokens: 200,
+          totalTokens: 1200,
+          cacheReadTokens: 150,
+          cacheWriteTokens: 50,
+        },
+      });
+
+      const tool = createSubagentTool({
+        parentLlm: { ...dummyLlm, model: "openai/gpt-4o" },
+        parentTools: [],
+        onSubagentEvent: (event) => events.push(event),
+        chat: usageChat,
+      });
+
+      await tool.execute({ task: "test detailed breakdown" });
+
+      const end = events.find((e) => e.type === "subagent_end");
+      assert.ok(end && end.type === "subagent_end");
+      if (end?.type === "subagent_end") {
+        assert.equal(end.totalTokens, 1200);
+        assert.ok(end.tokenBreakdown, "tokenBreakdown should be populated");
+        assert.equal(end.tokenBreakdown.promptTokens, 1000);
+        assert.equal(end.tokenBreakdown.inputTokens, 800);
+        assert.equal(end.tokenBreakdown.completionTokens, 200);
+        assert.equal(end.tokenBreakdown.cacheReadTokens, 150);
+        assert.equal(end.tokenBreakdown.cacheWriteTokens, 50);
+        assert.ok(end.estimatedCost, "estimatedCost should be calculated");
+        assert.ok(end.estimatedCost.total > 0, "estimatedCost should be greater than 0");
+      }
+    });
+
+    it("enforces per-invocation tokenBudget limit", async () => {
+      const usageChat: import("../src/llm/index.ts").ChatFn = async () => ({
+        role: "assistant",
+        content: "budget exceeding answer",
+        usage: {
+          promptTokens: 1500,
+          inputTokens: 1500,
+          completionTokens: 500,
+          totalTokens: 2000,
+        },
+      });
+
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        chat: usageChat,
+      });
+
+      const res = await tool.execute({ task: "over budget task", tokenBudget: 1000 });
+      assert.equal(res.isError, true);
+      assert.match(String(res.content), /token budget exceeded/i);
+    });
+
+    it("enforces per-profile tokenBudget limit", async () => {
+      const usageChat: import("../src/llm/index.ts").ChatFn = async () => ({
+        role: "assistant",
+        content: "profile budget answer",
+        usage: {
+          promptTokens: 1500,
+          inputTokens: 1500,
+          completionTokens: 500,
+          totalTokens: 2000,
+        },
+      });
+
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        profiles: [{
+          name: "limited",
+          description: "budget limited profile",
+          systemPrompt: "prompt",
+          tokenBudget: 500,
+        }],
+        chat: usageChat,
+      });
+
+      const res = await tool.execute({ task: "over profile budget task", profile: "limited" });
+      assert.equal(res.isError, true);
+      assert.match(String(res.content), /token budget exceeded/i);
+    });
   });
 
   // ── Thinking mode & escalation inheritance ────────────────────────────────

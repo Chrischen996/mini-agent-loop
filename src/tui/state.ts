@@ -66,7 +66,7 @@ export type ChatMessage =
   | { kind: "assistant"; text: string; reasoning?: string }
   | { kind: "notice"; title?: string; text: string }
   | { kind: "tool_call"; id: string; name: string; args: string; rawArgs: Record<string, unknown>; status: ToolState; result?: string; durationMs?: number; startedAt: number }
-  | { kind: "subagent_call"; id: string; task: string; profile?: string; depth: number; status: ToolState; result?: string; turns?: number; totalTokens?: number; innerEvents: SubagentInnerEvent[]; toolCallCount: number; startedAt: number; durationMs?: number; expanded: boolean }
+  | { kind: "subagent_call"; id: string; task: string; profile?: string; depth: number; status: ToolState; result?: string; turns?: number; totalTokens?: number; tokenBreakdown?: import("../subagent/types.ts").SubagentTokenBreakdown; estimatedCost?: import("../subagent/types.ts").SubagentCost; innerEvents: SubagentInnerEvent[]; toolCallCount: number; startedAt: number; durationMs?: number; expanded: boolean }
   | { kind: "error"; text: string };
 
 export type TuiState = {
@@ -736,6 +736,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
                   result: evt.result,
                   turns: evt.turns,
                   totalTokens: evt.totalTokens || undefined,
+                  tokenBreakdown: evt.tokenBreakdown,
+                  estimatedCost: evt.estimatedCost,
                   durationMs: now - m.startedAt,
                 };
               }
