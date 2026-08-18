@@ -124,6 +124,7 @@ export type TuiAction =
   | { type: "MODEL_CHANGED"; modelName: string }
   | { type: "SET_STATUS"; status: string }
   | { type: "RESET" }
+  | { type: "CANCEL_GENERATION" }
   | { type: "TOGGLE_THINKING_MODE" }
   | { type: "TOGGLE_PERMISSION_MODE" }
   | { type: "SET_PERMISSION_MODE"; mode: PermissionMode }
@@ -269,6 +270,15 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
 
     case "SET_STATUS":
       return { ...state, status: action.status };
+
+    case "CANCEL_GENERATION":
+      return {
+        ...state,
+        busy: false,
+        streamingText: "",
+        streamingReasoning: "",
+        status: "Generation cancelled (ESC)",
+      };
 
     case "AUTO_CONTINUE":
       return {

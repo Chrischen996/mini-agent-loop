@@ -656,6 +656,16 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   useInput((_ch: string, key: Key) => {
     if (key.ctrl && (_ch === "c" || _ch === "C")) { abortRef.current.abort(); exit(); return; }
+    
+    // ESC: Cancel current LLM generation (but don't exit program)
+    if (key.escape && state.busy && !acMode) {
+      abortRef.current.abort();
+      // Create new AbortController for next request
+      abortRef.current = new AbortController();
+      dispatch({ type: "CANCEL_GENERATION" });
+      return;
+    }
+    
     if (!acMode && key.ctrl && (_ch === "y" || _ch === "Y" || _ch === "\u0019")) {
       suppressInputEchoRef.current = true;
       void copyResolvedText("auto");
