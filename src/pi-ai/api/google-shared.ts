@@ -246,16 +246,34 @@ const JSON_SCHEMA_META_DECLARATIONS = new Set([
 ]);
 
 /**
- * Strip meta-declarations from a schema obj
+ * Strip meta-declarations from a schema obj and normalize types for OpenAPI compatibility.
  */
-function sanitizeForOpenApi(schema: unknown): unknown {
-	if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
+export function sanitizeForOpenApi(schema: unknown): unknown {
+	if (typeof schema !== "object" || schema === null) {
 		return schema;
 	}
 
+	if (Array.isArray(schema)) {
+		return schema.map(sanitizeForOpenApi);
+	}
+
 	const result: Record<string, unknown> = {};
-	for (const [key, value] of Object.entries(schema)) {
+	const obj = schema as Record<string, unknown>;
+
+	// Handle type array (e.g. type: ["string", "null"]) -> type: "string", nullable: true
+	if (Array.isArray(obj.type)) {
+		const nonNullTypes = obj.type.filter((t) => t !== "null");
+		if (nonNullTypes.length > 0) {
+			result.type = nonNullTypes[0];
+		}
+		if (obj.type.includes("null")) {
+			result.nullable = true;
+		}
+	}
+
+	for (const [key, value] of Object.entries(obj)) {
 		if (JSON_SCHEMA_META_DECLARATIONS.has(key)) continue;
+		if (key === "type" && Array.isArray(obj.type)) continue;
 		result[key] = sanitizeForOpenApi(value);
 	}
 	return result;

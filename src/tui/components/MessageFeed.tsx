@@ -475,6 +475,7 @@ export function MessageFeed({
   const effectiveMode: ThinkingDisplayMode =
     thinkingMode ?? (showThinking ? "summary" : "hidden");
   const expandedSet = new Set(expandedThinking);
+  
   const viewport = selectMessageViewport({
     messages,
     streamingText,
