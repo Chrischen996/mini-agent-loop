@@ -13,7 +13,7 @@ import {
   readClipboardImage,
 } from "../src/tui/image-attachments.ts";
 import {
-  isImagePasteShortcut,
+  isPasteShortcut,
   PasteAwareTextInput,
 } from "../src/tui/components/PasteAwareTextInput.tsx";
 
@@ -26,9 +26,9 @@ const nextFrame = () => new Promise((resolve) => setTimeout(resolve, 25));
 
 describe("TUI image attachments", () => {
   it("recognizes terminal Ctrl+V without treating plain v as image paste", () => {
-    assert.equal(isImagePasteShortcut("v", { ctrl: true }), true);
-    assert.equal(isImagePasteShortcut("\u0016", { ctrl: true }), true);
-    assert.equal(isImagePasteShortcut("v", { ctrl: false }), false);
+    assert.equal(isPasteShortcut("v", { ctrl: true, meta: false }), true);
+    assert.equal(isPasteShortcut("\u0016", { ctrl: true, meta: false }), true);
+    assert.equal(isPasteShortcut("v", { ctrl: false, meta: false }), false);
   });
 
   it("keeps Ctrl+V out of the controlled Ink input", async () => {

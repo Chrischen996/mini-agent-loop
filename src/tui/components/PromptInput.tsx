@@ -2,9 +2,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { TUI_COLORS as C } from "../theme.ts";
 
-export function isImagePasteShortcut(input: string, key: { ctrl: boolean }): boolean {
-  return key.ctrl && (input === "v" || input === "V" || input === "\u0016");
+export function isPasteShortcut(input: string, key?: { ctrl?: boolean; meta?: boolean }): boolean {
+  return Boolean((key?.ctrl || key?.meta) && (input === "v" || input === "V" || input === "\u0016"));
 }
+
+export const isImagePasteShortcut = isPasteShortcut;
 
 export type PromptInputProps = {
   value: string;
@@ -16,6 +18,7 @@ export type PromptInputProps = {
   focus?: boolean;
   mask?: string;
   placeholder?: string;
+  attachments?: string[];
 };
 
 const COLLAPSE_THRESHOLD = 3;
@@ -92,6 +95,7 @@ export function PromptInput({
   focus = true,
   mask,
   placeholder = "",
+  attachments,
 }: PromptInputProps): React.ReactElement {
   const parts = useMemo(() => splitGraphemes(value), [value]);
   const [cursor, setCursor] = useState(() => parts.length);
@@ -128,7 +132,7 @@ export function PromptInput({
 
       if (key.tab && key.shift) return;
 
-      if (isImagePasteShortcut(input, key)) {
+      if (isPasteShortcut(input, key)) {
         if (pasteEnabled && onPasteImage) void onPasteImage();
         return;
       }
@@ -199,6 +203,13 @@ export function PromptInput({
 
   return (
     <Box flexDirection="column" flexGrow={1} minWidth={0}>
+      {attachments && attachments.length > 0 && (
+        <Box flexDirection="row" flexWrap="wrap">
+          {attachments.map((_, i) => (
+            <Text key={`img-${i}`} color="cyan">[Image #{i + 1}] </Text>
+          ))}
+        </Box>
+      )}
       {collapsed && (
         <Text color={C.muted}>[已折叠 {lineCount} 行 / {charCount} 字]</Text>
       )}

@@ -222,6 +222,11 @@ export class SessionStore {
     });
   }
 
+  async clearMessages(sessionId: string, session: PersistedSession): Promise<void> {
+    const clearedSession: PersistedSession = { ...session, messages: [] };
+    await this.save(clearedSession);
+  }
+
   async remove(sessionId: string): Promise<void> {
     await rm(path.join(this.root, sessionId), { recursive: true, force: true });
   }

@@ -1,16 +1,11 @@
 import React from "react";
-import { PromptInput, isImagePasteShortcut, type PromptInputProps } from "./PromptInput.tsx";
+import { PromptInput, isPasteShortcut, isImagePasteShortcut, type PromptInputProps } from "./PromptInput.tsx";
 
-export { isImagePasteShortcut };
+export { isPasteShortcut, isImagePasteShortcut };
 
-type PasteAwareTextInputProps = Omit<PromptInputProps, "onSubmit"> & {
-  onSubmit?: PromptInputProps["onSubmit"];
-};
+type PasteAwareTextInputProps = PromptInputProps;
 
 /** Compatibility wrapper around PromptInput for existing image-paste tests. */
-export function PasteAwareTextInput({
-  onSubmit = () => {},
-  ...props
-}: PasteAwareTextInputProps): React.ReactElement {
-  return <PromptInput {...props} onSubmit={onSubmit} />;
+export function PasteAwareTextInput(props: PasteAwareTextInputProps): React.ReactElement {
+  return <PromptInput {...props} />;
 }

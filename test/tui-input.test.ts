@@ -10,7 +10,7 @@ import {
   shouldAcceptAutocompleteOnEnter,
 } from "../src/tui/input-utils.ts";
 import {
-  isImagePasteShortcut,
+  isPasteShortcut,
   PromptInput,
 } from "../src/tui/components/PromptInput.tsx";
 
@@ -95,9 +95,9 @@ describe("TUI input utils", () => {
 
 describe("PromptInput", () => {
   it("recognizes terminal Ctrl+V without treating plain v as image paste", () => {
-    assert.equal(isImagePasteShortcut("v", { ctrl: true }), true);
-    assert.equal(isImagePasteShortcut("\u0016", { ctrl: true }), true);
-    assert.equal(isImagePasteShortcut("v", { ctrl: false }), false);
+    assert.equal(isPasteShortcut("v", { ctrl: true, meta: false }), true);
+    assert.equal(isPasteShortcut("\u0016", { ctrl: true, meta: false }), true);
+    assert.equal(isPasteShortcut("v", { ctrl: false, meta: false }), false);
   });
 
   it("types, pastes multiline text, and keeps Ctrl+V out of the value", async () => {
