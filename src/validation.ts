@@ -83,5 +83,5 @@ export async function runValidation(options: ValidationOptions): Promise<Validat
 
 export function formatValidationReport(report: ValidationReport): string {
   if (report.steps.length === 0) return "No validation scripts configured (test/typecheck/build).";
-  return report.steps.map((step) => `# ${step.name}: ${step.ok ? "PASS" : "FAIL"}\n${step.output.slice(-4_000)}`).join("\n\n");
+  return report.steps.map((step) => `# ${step.name}: ${step.ok ? "PASS" : "FAIL"}\n${step.output.slice(-1_000)}`).join("\n\n");
 }

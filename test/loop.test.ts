@@ -682,8 +682,8 @@ describe("runAgentTurn", () => {
     const systemMsg = messages.find((m) => m.role === "system");
     assert.ok(systemMsg);
     assert.ok(typeof systemMsg.content === "string");
-    assert.ok((systemMsg.content as string).includes("计划模式"));
-    assert.ok((systemMsg.content as string).includes("无权限改代码"));
+    assert.ok((systemMsg.content as string).includes("mode=plan"));
+    assert.ok((systemMsg.content as string).includes("Read-only tools only"));
     assert.ok((systemMsg.content as string).includes("custom system"));
   });
 
@@ -699,8 +699,8 @@ describe("runAgentTurn", () => {
     const systemMsg = messages.find((m) => m.role === "system");
     assert.ok(systemMsg);
     assert.ok(typeof systemMsg.content === "string");
-    assert.ok(!(systemMsg.content as string).includes("计划模式"));
-    assert.ok((systemMsg.content as string).includes("绕过模式"));
+    assert.ok(!(systemMsg.content as string).includes("mode=plan"));
+    assert.ok((systemMsg.content as string).includes("mode=bypass"));
   });
 
   it("does not duplicate plan mode notice on subsequent turns", async () => {
@@ -730,10 +730,9 @@ describe("runAgentTurn", () => {
     // Should have the original custom system content plus the injected notice
     const content = systemMsgs[0]!.content as string;
     assert.ok(content.includes("custom system"));
-    assert.ok(content.includes("计划模式"));
-    assert.ok(content.includes("无权限改代码"));
-    // The explicit "no permission to edit code" sentence should only appear once.
-    const noticeCount = content.match(/我当前处于计划模式，无权限改代码。/g)?.length ?? 0;
+    assert.ok(content.includes("mode=plan"));
+    // The mode notice should only appear once.
+    const noticeCount = content.match(/mode=plan/g)?.length ?? 0;
     assert.equal(noticeCount, 1);
   });
 
@@ -744,7 +743,7 @@ describe("runAgentTurn", () => {
     assert.ok(prompt.includes("bypass mode"));
     assert.ok(!prompt.includes("manual mode"));
     assert.ok(!prompt.includes("auto mode"));
-    assert.ok(prompt.includes("无权限改代码"));
+    assert.ok(prompt.includes("CANNOT write"));
     for (const mode of ["plan", "bypass"] as const) {
       assert.ok(buildSystemPrompt(mode).includes(`mode=${mode}`));
     }

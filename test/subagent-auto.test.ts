@@ -163,7 +163,7 @@ describe("automatic subagent preflight", () => {
         parentCalls += 1;
         assert.equal(context.at(-1)?.role, "tool");
         const system = context.find((message) => message.role === "system");
-        assert.ok(typeof system?.content === "string" && system.content.includes("### Active Coordinator Mode"));
+        assert.ok(typeof system?.content === "string" && system.content.includes("### Coordinator Mode"));
         return { role: "assistant", content: "parent used research" };
       },
       onEvent: (event) => events.push(event),
@@ -317,7 +317,7 @@ describe("automatic subagent preflight", () => {
         chat: async (_config, context) => {
           parentCalls += 1;
           const system = context.find((message) => message.role === "system");
-          assert.ok(typeof system?.content === "string" && system.content.includes("### Active Coordinator Mode"));
+          assert.ok(typeof system?.content === "string" && system.content.includes("### Coordinator Mode"));
           return { role: "assistant", content: "normal answer" };
         },
         onEvent: (event) => events.push(event),

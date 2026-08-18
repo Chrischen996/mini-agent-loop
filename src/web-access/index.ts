@@ -445,7 +445,7 @@ export function createWebAccessTools(cwd: string, options: WebAccessToolOptions 
   const webSearch: Tool = {
     name: "web_search",
     displayName: "Web Search",
-    description: "Search the web with pi-web-access providers and return synthesized answers with source URLs. The Pi browser curator is not used; results are returned directly.",
+    description: "Search the web and return answers with source URLs.",
     source: WEB_SOURCE,
     annotations: { readOnlyHint: true, openWorldHint: true },
     parameters: searchSchema(),
@@ -525,7 +525,7 @@ export function createWebAccessTools(cwd: string, options: WebAccessToolOptions 
   const fetchContent: Tool = {
     name: "fetch_content",
     displayName: "Fetch Content",
-    description: "Fetch HTTP(S) URLs or workspace-local video/files and extract readable or raw content with pi-web-access. Full content is stored for get_search_content.",
+    description: "Fetch HTTP(S) URLs or local video/files. Extract readable or raw content.",
     source: WEB_SOURCE,
     annotations: { readOnlyHint: true, openWorldHint: true },
     parameters: fetchSchema(),
@@ -567,7 +567,7 @@ export function createWebAccessTools(cwd: string, options: WebAccessToolOptions 
   const getSearchContent: Tool = {
     name: "get_search_content",
     displayName: "Get Search Content",
-    description: "Retrieve bounded content slices or matching passages from a previous web_search, fetch_content, or source_check call.",
+    description: "Retrieve content slices from a previous web_search, fetch_content, or source_check.",
     source: WEB_SOURCE,
     annotations: { readOnlyHint: true },
     parameters: contentSchema(),
@@ -590,7 +590,7 @@ export function createWebAccessTools(cwd: string, options: WebAccessToolOptions 
   const sourceCheck: Tool = {
     name: "source_check",
     displayName: "Source Check",
-    description: "Check a claim against web sources and return a structured artifact with source passages and an assessment.",
+    description: "Check a claim against web sources. Returns structured assessment with passages.",
     source: WEB_SOURCE,
     annotations: { readOnlyHint: true, openWorldHint: true },
     parameters: sourceCheckSchema(),

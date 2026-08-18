@@ -126,7 +126,7 @@ export function createReadTool(cwd: string): Tool<ReadArgs> {
   return {
     name: "read",
     description:
-      "Read a workspace file by relative path. UTF-8 text supports optional offset/limit. Image files (png/jpeg/gif/webp) return image content for vision-capable models.",
+      "Read a workspace file by relative path. Supports offset/limit for text, returns images for png/jpeg/gif/webp.",
     parameters: {
       type: "object",
       properties: {

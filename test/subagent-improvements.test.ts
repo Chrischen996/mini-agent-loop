@@ -64,10 +64,10 @@ describe("subagent delegation improvements", () => {
   describe("system prompt encourages orchestration", () => {
     it("mentions orchestrator preference and subagent tools", () => {
       const prompt = buildSystemPrompt("bypass");
-      assert.match(prompt, /primarily an orchestrator/i);
+      assert.match(prompt, /orchestrator/i);
       assert.match(prompt, /subagent_batch/);
-      assert.match(prompt, /MANDATORY for multi-step tasks/);
-      assert.match(prompt, /you MUST delegate/i);
+      assert.match(prompt, /Delegate when/i);
+      assert.match(prompt, /Handle directly only/i);
     });
 
     it("builds an active coordinator fragment with exploration budget", () => {
@@ -76,9 +76,9 @@ describe("subagent delegation improvements", () => {
         preflightExecuted: true,
         maxDirectExploration: 2,
       });
-      assert.match(fragment, /Active Coordinator Mode/);
+      assert.match(fragment, /Coordinator Mode/);
       assert.match(fragment, /coder/);
-      assert.match(fragment, /at most 2 direct exploration/);
+      assert.match(fragment, /At most 2 direct exploration/);
       assert.match(fragment, /subagent_batch/);
     });
 

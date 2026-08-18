@@ -18,7 +18,7 @@ export type ContextManagerOptions = {
 };
 
 const DEFAULT_MAX_CHARS = 160_000;
-const DEFAULT_KEEP_RECENT = 12;
+const DEFAULT_KEEP_RECENT = 8;
 const SUMMARY_START = "[Conversation summary - older messages were compacted to fit the context window]";
 const SUMMARY_END = "[End conversation summary]";
 const SUMMARY_OMISSION = "[... older summary details omitted ...]";

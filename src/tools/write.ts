@@ -17,7 +17,7 @@ export function createWriteTool(cwd: string): Tool<WriteArgs> {
   return {
     name: "write",
     description:
-      "Create or overwrite a UTF-8 text file in the workspace with the full file contents. Use relative paths. Prefer reading an existing file first before editing it. For modifications, write the complete updated file content.",
+      "Create or overwrite a UTF-8 text file. Use relative paths. Write the complete file content.",
     parameters: {
       type: "object",
       properties: {

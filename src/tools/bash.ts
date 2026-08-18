@@ -8,7 +8,7 @@ const MAX_OUTPUT_BYTES = 100 * 1024;
 export function createBashTool(cwd: string): Tool<BashArgs> {
   return {
     name: "bash",
-    description: "Execute a bash command in the current workspace directory. Returns stdout and stderr. Supports an optional timeout in seconds.",
+    description: "Execute a bash command. Returns stdout/stderr. Optional timeout.",
     parameters: {
       type: "object",
       properties: {

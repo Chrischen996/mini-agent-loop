@@ -286,21 +286,19 @@ export function buildCoordinatorPromptFragment(input: {
 }): string {
   const budget =
     input.maxDirectExploration <= 0
-      ? "Do not explore the workspace yourself with read/grep/find/ls/codebase_* — always use subagent/subagent_batch."
-      : `You may use at most ${input.maxDirectExploration} direct exploration tool calls (read/grep/find/ls/codebase_*) for quick verification. After that budget, further exploration must go through subagent/subagent_batch.`;
+      ? "No direct exploration — always delegate."
+      : `At most ${input.maxDirectExploration} direct exploration calls (read/grep/find/ls/codebase_*), then delegate.`;
 
   const preflightLine = input.preflightExecuted
-    ? `- A ${input.profile} subagent preflight already ran. Prefer its findings before doing more work yourself.`
-    : `- Prefer spawning a ${input.profile} subagent (or subagent_batch) before deep multi-file exploration or implementation.`;
+    ? `A ${input.profile} preflight already ran — prefer its findings.`
+    : `Prefer spawning a ${input.profile} subagent before deep exploration.`;
 
   return [
-    "### Active Coordinator Mode",
-    "You are the orchestrator for this request. Do not complete the whole task as a single long tool chain.",
+    "### Coordinator Mode",
+    "You are the orchestrator. Delegate multi-file work to subagent/subagent_batch.",
     preflightLine,
-    `- ${budget}`,
-    "- Good parent actions: plan, call subagent/subagent_batch, synthesize results, ask for validation, make a final answer.",
-    "- Bad parent actions: reading many files one by one, grepping across the repo yourself, implementing large changes without a coder subagent.",
-    "- If work splits cleanly into independent pieces, use subagent_batch.",
+    budget,
+    "Use subagent_batch for independent parallel work.",
   ].join("\n");
 }
 

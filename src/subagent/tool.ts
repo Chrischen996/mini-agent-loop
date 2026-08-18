@@ -216,25 +216,6 @@ function countToolCalls(messages: AgentMessage[]): number {
   }, 0);
 }
 
-function formatExecSummary(input: {
-  turns: number;
-  toolCallCount: number;
-  tokens: number;
-  errorCount: number;
-  modelFallback: boolean;
-  partial?: boolean;
-}): string {
-  const bits = [
-    `${input.turns} turn(s)`,
-    `${input.toolCallCount} tool call(s)`,
-    `~${input.tokens} tokens`,
-  ];
-  if (input.errorCount > 0) bits.push(`${input.errorCount} error(s)`);
-  if (input.modelFallback) bits.push("model fallback");
-  if (input.partial) bits.push("partial result");
-  return `— Sub-agent exec summary: ${bits.join(", ")}`;
-}
-
 /**
  * Build runtime info for a resolved LLM config.
  * Tracks whether the model switch succeeded or fell back.
@@ -499,9 +480,13 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
       const profile = resolveProfile(args.profile, profiles);
       const baseSystemPrompt =
         profile?.systemPrompt ?? args.systemPrompt ?? DEFAULT_SUBAGENT_SYSTEM_PROMPT;
-      // Prepend shared context if provided
+      // Keep static system prompt prefix first for prompt cache matching
       const systemPrompt = args.sharedContext
-        ? `[Shared context from parent agent]\n${args.sharedContext}\n[End shared context]\n\n${baseSystemPrompt}`
+        ? `${baseSystemPrompt}
+
+[Shared context from parent agent]
+${args.sharedContext}
+[End shared context]`
         : baseSystemPrompt;
       const allowedTools = profile?.allowedTools ?? args.tools;
       const maxTurns = args.maxTurns ?? profile?.maxTurns ?? DEFAULT_MAX_TURNS;
@@ -796,36 +781,17 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
         };
       }
 
-      const headerBits: string[] = [];
-      if (hitMaxTurns) {
-        headerBits.push(
-          `Partial result: stopped at maxTurns=${maxTurns}. Continue from this progress or spawn another focused subagent.`,
-        );
-      } else if (extracted.partial) {
-        headerBits.push(
-          "Partial result: no clean final summary was produced; recovered the best available progress below.",
-        );
-      }
+      // Return only the extracted text. Execution metadata (turns, tokens,
+      // errors) is available in subagent_end events for observability.
+      // Partial/maxTurns hints are prepended only when the parent needs to
+      // know the result is incomplete.
+      const prefix = hitMaxTurns
+        ? `[Partial: maxTurns=${maxTurns}] `
+        : extracted.partial
+          ? "[Partial] "
+          : "";
 
-      const summary = formatExecSummary({
-        turns,
-        toolCallCount,
-        tokens: accumulatedTokens,
-        errorCount: errors.length,
-        modelFallback: !modelSwitchSucceeded && Boolean(args.model),
-        partial,
-      });
-
-      const content = [
-        ...headerBits,
-        summary,
-        "",
-        extracted.text,
-      ].join("\n");
-
-      // Recoverable partial results are returned without isError so the parent
-      // keeps coordinating instead of treating the whole delegation as failed.
-      return { content };
+      return { content: prefix + extracted.text };
     },
   };
 }

@@ -167,11 +167,10 @@ describe("createSubagentTool", () => {
       const result = await tool.execute({ task: "What is the answer?" });
       assert.equal(result.isError, undefined);
       const text = contentAsString(result.content);
-      assert.ok(text.includes("The answer is 42."), `expected answer in result, got: ${text}`);
-      assert.ok(text.startsWith("— Sub-agent exec summary:"), `expected summary prefix, got: ${text.slice(0, 60)}`);
+      assert.equal(text, "The answer is 42.", `expected exact answer, got: ${text}`);
     });
 
-    it("prepends an execution summary to the sub-agent result", async () => {
+    it("returns the sub-agent final answer without execution summary metadata", async () => {
       const events: SubagentEvent[] = [];
       const tool = createSubagentTool({
         parentLlm: dummyLlm,
@@ -182,9 +181,14 @@ describe("createSubagentTool", () => {
 
       const result = await tool.execute({ task: "summarize this" });
       const text = contentAsString(result.content);
-      assert.ok(text.startsWith("— Sub-agent exec summary:"), `expected exec summary prefix, got: ${text.slice(0, 80)}`);
-      assert.ok(text.includes("1 turn(s)"), `expected turn count in summary, got: ${text}`);
-      assert.ok(text.includes("The final answer."), "original answer should follow the summary");
+      assert.equal(text, "The final answer.", `expected exact answer, got: ${text}`);
+      // Metadata is still available in events
+      const endEvent = events.find((e) => e.type === "subagent_end");
+      assert.ok(endEvent, "subagent_end event should be emitted");
+      if (endEvent && endEvent.type === "subagent_end") {
+        assert.ok(endEvent.turns > 0, "turn count should be in event");
+        assert.ok(typeof endEvent.totalTokens === "number", "token count should be in event");
+      }
     });
 
     it("sub-agent can use tools from the parent and return a result", async () => {
@@ -455,7 +459,10 @@ describe("createSubagentTool", () => {
       });
       assert.notEqual(result.isError, true);
       assert.ok(toolCalls <= 3, `Expected ≤3 chat calls with maxTurns=2, got ${toolCalls}`);
-      assert.ok(contentAsString(result.content).includes("Partial result"));
+      assert.ok(
+        contentAsString(result.content).startsWith("[Partial: maxTurns=2]"),
+        `expected partial prefix, got: ${contentAsString(result.content).slice(0, 80)}`,
+      );
     });
 
     it("unknown profile falls back to default config", async () => {
