@@ -11,7 +11,7 @@ export type CommandDef = {
 };
 
 export const SLASH_COMMANDS: CommandDef[] = [
-  { name: "model", usage: "/model [ref] [--base-url URL] [--api-key-env ENV]", description: "切换模型和网关" },
+  { name: "model", usage: "/model [ref] [url] [key]", description: "切换模型和网关" },
   { name: "image", usage: "/image <path>",            description: "添加本地图片" },
   { name: "paste-image", usage: "/paste-image",      description: "添加剪贴板图片" },
   { name: "read",  usage: "/read <path>",          description: "读取文件内容" },
@@ -29,6 +29,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "plan-retry", usage: "/plan-retry",       description: "重试失败的计划" },
   { name: "plan-history", usage: "/plan-history",   description: "列出计划历史" },
   { name: "plan-archive", usage: "/plan-archive",   description: "归档当前计划" },
+  { name: "copy", usage: "/copy [last|assistant|input|tool|thinking|user]", description: "复制焦点消息或上一条原文到剪贴板" },
   { name: "skill", usage: "/skill [on|off|list|clear] [name]", description: "查看或切换当前会话 Skills" },
   { name: "skills", usage: "/skills [on|off|list|clear] [name]", description: "查看或切换当前会话 Skills" },
   { name: "help",  usage: "/help",                  description: "显示帮助" },

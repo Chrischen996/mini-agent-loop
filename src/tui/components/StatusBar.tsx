@@ -73,7 +73,7 @@ export function StatusBar({ modelName, tokenEstimate, contextWindow, cwd, busy, 
         )}
       </Box>
       <Box gap={2} flexShrink={1}>
-        <Text dimColor wrap="truncate-end">[PgUp/PgDn] 滚动  [Ctrl+R] 思考  [Shift+Tab] 模式  [/clear] 清空  [Ctrl+C] 退出</Text>
+        <Text dimColor wrap="truncate-end">[PgUp/PgDn] 滚动  [Ctrl+Y] 复制  [Ctrl+R] 思考  [Shift+Tab] 模式  [/copy] 原文  [Ctrl+C] 退出</Text>
       </Box>
     </Box>
   );

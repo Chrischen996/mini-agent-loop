@@ -200,7 +200,7 @@ export function PromptInput({
   return (
     <Box flexDirection="column" flexGrow={1} minWidth={0}>
       {collapsed && (
-        <Text color={C.muted}>[已复制 {lineCount} 行 / {charCount} 字]</Text>
+        <Text color={C.muted}>[已折叠 {lineCount} 行 / {charCount} 字]</Text>
       )}
       <PromptLines
         parts={displayParts}

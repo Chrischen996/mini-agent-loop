@@ -251,7 +251,9 @@ npm run tui:ink
 /model deepseek/deepseek-v4-flash
 /model google/gemini-2.5-pro
 /model openrouter/anthropic/claude-sonnet-4
-# use a custom OpenAI-compatible gateway and an environment-stored key
+# positional custom gateway: model, base URL, api key
+/model xai/grok-3 https://api.sparkcode.top/v1 sk-...
+# flag form still works for a custom OpenAI-compatible gateway
 /model openai/gpt-4.1 --base-url https://llm.example/v1 --api-key-env COMPANY_LLM_KEY
 ```
 

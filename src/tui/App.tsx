@@ -36,7 +36,14 @@ import {
 } from "../think-intensity.ts";
 import { loadThinkingModeFromEnv } from "../thinking-policy.ts";
 import { adaptHistoryForModel } from "../message-adapter.ts";
-import { findExactModelReferenceMatch, getAllModels, resolveModel, searchModels, type ModelRef } from "../models.ts";
+import { findExactModelReferenceMatch, getAllModels, resolveModel, type ModelRef } from "../models.ts";
+import {
+  hasGatewayOverrides,
+  modelChoices,
+  modelSearchQuery,
+  parseModelCommand,
+  shouldSubmitTypedModelCommand,
+} from "./model-command.ts";
 import {
   activateProfile,
   listProfiles,
@@ -89,6 +96,8 @@ import {
   MAX_TUI_IMAGES,
   readClipboardImage,
 } from "./image-attachments.ts";
+import { writeClipboardText } from "./clipboard.ts";
+import { formatCopyResultNotice, parseCopyCommand, resolveCopyTarget } from "./copy-text.ts";
 import {
   PLAN_ONLY_SUFFIX,
   approveCurrentPlan,
@@ -111,18 +120,6 @@ import {
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
 
-function modelChoices(query = "", models = getAllModels()): {
-  references: string[];
-  contextWindows: Record<string, number>;
-} {
-  const filtered = query.trim() ? searchModels(query, models) : models;
-  return {
-    references: filtered.map((model) => `${model.provider}/${model.id}`),
-    contextWindows: Object.fromEntries(
-      filtered.map((model) => [`${model.provider}/${model.id}`, model.contextWindow]),
-    ),
-  };
-}
 
 // ─── slash command parser ────────────────────────────────────────────────────
 
@@ -134,30 +131,6 @@ type SlashCommand =
   | { cmd: "grep"; pattern: string; path: string }
   | null;
 
-type ModelCommand = {
-  reference: string;
-  overrides: ModelSwitchOverrides;
-};
-
-function parseModelCommand(raw: string): ModelCommand {
-  const tokens = raw.trim().split(/\s+/).filter(Boolean);
-  const referenceParts: string[] = [];
-  const overrides: ModelSwitchOverrides = {};
-  for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index];
-    if (token === "--base-url") {
-      overrides.baseUrl = tokens[++index];
-    } else if (token === "--api-key") {
-      overrides.apiKey = tokens[++index];
-    } else if (token === "--api-key-env") {
-      const envName = tokens[++index];
-      if (envName) overrides.apiKey = process.env[envName];
-    } else {
-      referenceParts.push(token);
-    }
-  }
-  return { reference: referenceParts.join(" "), overrides };
-}
 
 function parseSlashCommand(input: string): SlashCommand {
   const s = input.trim();
@@ -403,8 +376,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
 
     if (acMode === "model-picker") {
-      const choices = modelChoices(input);
-      setModelQuery(input);
+      const query = modelSearchQuery(input);
+      const choices = modelChoices(query);
+      setModelQuery(query);
       setModelCandidates(choices.references);
       setModelContextWindows(choices.contextWindows);
       setAcIndex((index) => Math.min(index, Math.max(0, choices.references.length - 1)));
@@ -426,7 +400,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
     const modelTrigger = input.match(/^\/model(?:\s+(.*))?$/i);
     if (modelTrigger) {
-      const query = modelTrigger[1] ?? "";
+      const query = parseModelCommand(modelTrigger[1] ?? "").reference;
       const choices = modelChoices(query);
       setModelQuery(query);
       setModelCandidates(choices.references);
@@ -593,11 +567,23 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   }, []);
 
   const selectModel = useCallback((reference: string, overrides: ModelSwitchOverrides = {}) => {
+    const applyModel = (model: ModelRef) => {
+      if (hasGatewayOverrides(overrides)) {
+        void commitModelSetup({
+          model,
+          baseUrl: overrides.baseUrl!,
+          apiKey: overrides.apiKey!,
+          field: "apiKey",
+        }, overrides.apiKey!);
+        return;
+      }
+      startModelSetup(model, overrides);
+    };
     const match = findExactModelReferenceMatch(reference, getAllModels());
     if (!match) {
       // An unknown id is a valid custom OpenAI-compatible model. Let the
       // user configure its gateway instead of trapping them in an empty picker.
-      startModelSetup(resolveModel(reference, overrides.baseUrl), overrides);
+      applyModel(resolveModel(reference, overrides.baseUrl));
       return;
     }
     if (match.ambiguous || !match.model) {
@@ -610,8 +596,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       setAcMode("model-picker");
       return;
     }
-    startModelSetup(match.model, overrides);
-  }, [startModelSetup]);
+    applyModel(match.model);
+  }, [commitModelSetup, startModelSetup]);
 
   // Match Codex's direct effort controls: the active model stays fixed and
   // only the next supported reasoning level is applied for subsequent turns.
@@ -643,10 +629,38 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     pickerRows: pickerLayout.totalRows,
   });
 
+  const copyResolvedText = useCallback(async (target: import("./copy-text.ts").CopyTarget = "auto") => {
+    const selection = resolveCopyTarget({
+      messages: state.messages,
+      focusedIndex: state.focusedMessageIndex,
+      streamingText: state.streamingText,
+      streamingReasoning: state.streamingReasoning,
+      input,
+      target,
+    });
+    if (!selection) {
+      dispatch({ type: "ADD_NOTICE", title: "复制", text: "没有可复制的原文。可用 /copy last、/copy tool 或先聚焦一条消息。" });
+      return;
+    }
+    const result = await writeClipboardText(selection.text);
+    dispatch({
+      type: "ADD_NOTICE",
+      title: result.ok ? "已复制到剪贴板" : "复制失败",
+      text: result.ok
+        ? formatCopyResultNotice(selection, result.method)
+        : (result.error ?? "无法写入系统剪贴板"),
+    });
+  }, [input, state.focusedMessageIndex, state.messages, state.streamingReasoning, state.streamingText]);
+
   // ── keyboard handler ─────────────────────────────────────────────────────
 
   useInput((_ch: string, key: Key) => {
     if (key.ctrl && (_ch === "c" || _ch === "C")) { abortRef.current.abort(); exit(); return; }
+    if (!acMode && key.ctrl && (_ch === "y" || _ch === "Y" || _ch === "\u0019")) {
+      suppressInputEchoRef.current = true;
+      void copyResolvedText("auto");
+      return;
+    }
 
     // Commit the runtime mode first. This also rejects pending approvals and
     // aborts the active turn before the UI state is updated.
@@ -1005,6 +1019,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       setInput("");
       return;
     }
+    const copyTarget = parseCopyCommand(trimmed);
+    if (copyTarget) {
+      setInput("");
+      await copyResolvedText(copyTarget);
+      return;
+    }
+
     if (trimmed === "/help" || trimmed === "/?") {
       dispatch({
         type: "ADD_NOTICE",
@@ -1211,8 +1232,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         openModelPicker();
       } else {
         const match = findExactModelReferenceMatch(parsed.reference, getAllModels());
-        if (match?.model && !match.ambiguous) selectModel(parsed.reference, parsed.overrides);
-        else openModelPicker(parsed.reference);
+        if (match?.ambiguous) openModelPicker(parsed.reference);
+        else selectModel(parsed.reference, parsed.overrides);
       }
       return;
     }
@@ -1280,7 +1301,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const displayText = planTurnOverride
       ? planTurnOverride.displayText
       : isMultiLine
-        ? `[已复制 ${lineCount} 行 / ${charCount} 字]`
+        ? `[已折叠 ${lineCount} 行 / ${charCount} 字]`
         : undefined;
     dispatch({
       type: "USER_MESSAGE",
@@ -1514,7 +1535,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         }
       }
     }
-  }, [state.busy, acMode, modelSetup, pendingProfileSetup, profileListState, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup, openProfileList, getPermissionManager, addPendingImage, handlePasteImage, conversationId, cwd]);
+  }, [state.busy, acMode, modelSetup, pendingProfileSetup, profileListState, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup, openProfileList, getPermissionManager, addPendingImage, handlePasteImage, conversationId, cwd, copyResolvedText]);
 
   // Start the next queued prompt only after the current turn has emitted done/error/aborted.
   useEffect(() => {
@@ -1675,6 +1696,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                   }
                   if (acMode === "file") {
                     acceptFile(acIndex);
+                    return;
+                  }
+                  if ((acMode === "model" || acMode === "model-picker") && shouldSubmitTypedModelCommand(val)) {
+                    void handleSubmit(val);
                     return;
                   }
                   const chosen = modelCandidates[acIndex];
