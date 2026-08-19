@@ -261,6 +261,14 @@ export async function completeChat(
         tool_calls?: OpenAIToolCall[];
       };
     }>;
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+      prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+      prompt_cache_hit_tokens?: number;
+      prompt_cache_write_tokens?: number;
+    };
   };
 
   try {
@@ -291,6 +299,26 @@ export async function completeChat(
       : message.content ?? "";
   const toolCalls = mapToolCalls(message.tool_calls);
 
+  // Extract usage from non-streaming response (mirrors streaming path in streamChat)
+  const rawUsage = data.usage;
+  let usage: StreamChatUsage | undefined;
+  if (rawUsage) {
+    const promptTokens = rawUsage.prompt_tokens ?? 0;
+    const cacheReadTokens = (rawUsage.prompt_tokens_details?.cached_tokens as number | undefined)
+      ?? rawUsage.prompt_cache_hit_tokens;
+    const cacheWriteTokens = (rawUsage.prompt_tokens_details?.cache_write_tokens as number | undefined)
+      ?? rawUsage.prompt_cache_write_tokens;
+    const inputTokens = Math.max(0, promptTokens - (cacheReadTokens ?? 0) - (cacheWriteTokens ?? 0));
+    usage = {
+      promptTokens,
+      inputTokens,
+      completionTokens: rawUsage.completion_tokens ?? 0,
+      totalTokens: rawUsage.total_tokens ?? 0,
+      ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+      ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+    };
+  }
+
   const assistant: AssistantMessage = {
     role: "assistant",
     content: content || "",
@@ -302,7 +330,7 @@ export async function completeChat(
   if (processed.errors.length > 0) {
     console.error(`[hermes] parse errors: ${processed.errors.join("; ")}`);
   }
-  return processed.message;
+  return Object.assign(processed.message, usage ? { usage } : {});
 }
 
 /**

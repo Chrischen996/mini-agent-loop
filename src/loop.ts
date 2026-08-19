@@ -1322,9 +1322,17 @@ async function runAgentTurnInternal(
           !assistant.content.trim() &&
           !(assistant.toolCalls && assistant.toolCalls.length > 0)
         ) {
-          throw new Error(
-            "LLM returned reasoning without a final answer; the configured gateway/model did not produce assistant content after retry",
-          );
+          // Gateway/model produced reasoning but no answer even after retrying
+          // with thinking disabled. Emit a graceful fallback so the loop can
+          // recover instead of crashing the entire session.
+          const fallback =
+            "[The model produced reasoning but no final answer. " +
+            "Try a different model or disable thinking mode (/think:off).]";
+          assistant = { role: "assistant", content: fallback };
+          messages.push(assistant);
+          onEvent?.({ type: "assistant", message: assistant });
+          onEvent?.({ type: "done", messages });
+          return messages;
         }
       }
     } catch (err) {

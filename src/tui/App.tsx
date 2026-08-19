@@ -1,8 +1,6 @@
 import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from "react";
 import { randomUUID } from "node:crypto";
 import { Box, Text, useApp, useInput, useStdout, type Key } from "ink";
-import { readdir, stat } from "node:fs/promises";
-import * as nodePath from "node:path";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
@@ -16,6 +14,9 @@ import {
   SLASH_COMMANDS,
   type CommandDef,
 } from "./components/FileAutocomplete.tsx";
+import { parseSlashCommand, PATH_COMMANDS } from "./slash-commands.ts";
+import { useAutocomplete } from "./hooks/useAutocomplete.ts";
+import { listCandidates } from "./file-completion.ts";
 import { tuiReducer, createInitialState } from "./state.ts";
 import {
   createAgentHistory,
@@ -121,73 +122,10 @@ type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvide
 const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
 
 
-// ─── slash command parser ────────────────────────────────────────────────────
-
-type SlashCommand =
-  | { cmd: "read"; path: string }
-  | { cmd: "bash"; command: string }
-  | { cmd: "ls"; path: string }
-  | { cmd: "find"; pattern: string; path: string }
-  | { cmd: "grep"; pattern: string; path: string }
-  | null;
-
-
-function parseSlashCommand(input: string): SlashCommand {
-  const s = input.trim();
-  if (!s.startsWith("/")) return null;
-  const parts = s.slice(1).split(/\s+/);
-  const cmd = parts[0]?.toLowerCase();
-  switch (cmd) {
-    case "read": { const path = parts.slice(1).join(" "); return path ? { cmd: "read", path } : null; }
-    case "bash": case "sh": { const command = parts.slice(1).join(" "); return command ? { cmd: "bash", command } : null; }
-    case "ls": return { cmd: "ls", path: parts[1] ?? "." };
-    case "find": return { cmd: "find", pattern: parts[1] ?? "*", path: parts[2] ?? "." };
-    case "grep": { const pattern = parts[1] ?? ""; const path = parts[2] ?? "."; return pattern ? { cmd: "grep", pattern, path } : null; }
-    default: return null;
-  }
-}
-
-// Commands that accept a path argument (trigger file autocomplete after selection)
-const PATH_COMMANDS = new Set(["read", "ls", "find", "grep"]);
-
 // ─── autocomplete modes ──────────────────────────────────────────────────────
 
-type ModelSetupState = {
-  model: ModelRef;
-  baseUrl: string;
-  apiKey: string;
-  field: "baseUrl" | "apiKey";
-  error?: string;
-};
-
-type ProfileListState = {
-  profiles: ReturnType<typeof listProfiles>;
-  selectedIndex: number;
-};
-
-// ─── file listing ────────────────────────────────────────────────────────────
-
-async function listCandidates(cwd: string, fragment: string): Promise<string[]> {
-  try {
-    const lastSlash = fragment.lastIndexOf("/");
-    const dir = lastSlash >= 0 ? fragment.slice(0, lastSlash + 1) : "";
-    const prefix = lastSlash >= 0 ? fragment.slice(lastSlash + 1) : fragment;
-    const absDir = nodePath.join(cwd, dir || ".");
-    let entries: string[];
-    try { entries = await readdir(absDir); } catch { return []; }
-    const candidates: string[] = [];
-    for (const entry of entries) {
-      if (!entry.toLowerCase().startsWith(prefix.toLowerCase())) continue;
-      if (entry.startsWith(".") && !prefix.startsWith(".")) continue;
-      const rel = dir + entry;
-      try {
-        const info = await stat(nodePath.join(cwd, rel));
-        candidates.push(info.isDirectory() ? `${rel}/` : rel);
-      } catch { candidates.push(rel); }
-    }
-    return candidates.slice(0, 20);
-  } catch { return []; }
-}
+import { Overlays } from "./components/Overlays.tsx";
+import type { ModelSetupState, ProfileListState } from "./types.ts";
 
 // ─── main app ────────────────────────────────────────────────────────────────
 
@@ -1594,86 +1532,22 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           width={termWidth}
           scrollOffset={state.scrollOffset}
         />
-        {/* Keep transient pickers in the dynamic region so they cannot push the
-            input and status bar outside the fixed terminal viewport. */}
-        {acMode === "command" && (
-          <CommandPalette
-            filter={input.slice(1)}
-            selectedIndex={acIndex}
-            candidates={cmdCandidates}
-            maxVisible={pickerLayout.itemRows}
-          />
-        )}
-
-        {acMode === "file" && (
-          <FileAutocomplete
-            candidates={fileCandidates}
-            selectedIndex={acIndex}
-            prefix={fileFragment}
-            maxVisible={pickerLayout.itemRows}
-          />
-        )}
-
-        {(acMode === "model" || acMode === "model-picker") && (
-          <ModelPicker
-            candidates={modelCandidates}
-            contextWindows={modelContextWindows}
-            selectedIndex={acIndex}
-            query={modelQuery}
-            current={`${llm.provider}/${llm.model}`}
-            maxVisible={pickerLayout.itemRows}
-          />
-        )}
-
-        {acMode === "model-setup" && modelSetup && (
-          <Box flexDirection="column" paddingX={2}>
-            <Text color={C.primary} bold>── 配置模型 ──</Text>
-            <Text>模型: {modelSetup.model.provider}/{modelSetup.model.id}</Text>
-            <Text dimColor>Base URL: {modelSetup.field === "baseUrl" ? "正在编辑" : modelSetup.baseUrl}</Text>
-            <Text dimColor>API Key: {modelSetup.field === "apiKey" ? "正在编辑" : "已设置"}</Text>
-            {modelSetup.error && <Text color={C.error}>{modelSetup.error}</Text>}
-            <Text dimColor>Enter 确认当前字段，Esc 取消</Text>
-          </Box>
-        )}
-
-        {acMode === "profile-name" && pendingProfileSetup && (
-          <Box flexDirection="column" paddingX={2}>
-            <Text color={C.primary} bold>── 保存配置文件 ──</Text>
-            <Text>模型: {pendingProfileSetup.model.provider}/{pendingProfileSetup.model.id}</Text>
-            <Text dimColor>输入配置文件名称（Enter 保存，Esc 跳过）:</Text>
-          </Box>
-        )}
-
-        {acMode === "profile-list" && profileListState && (
-          <Box flexDirection="column" paddingX={2}>
-            <Text color={C.primary} bold>── 配置文件列表 ──</Text>
-            {profileListState.profiles.length === 0 && <Text dimColor>无已保存的配置文件</Text>}
-            {(() => {
-              const count = Math.max(1, pickerLayout.itemRows);
-              const start = Math.max(0, Math.min(
-                profileListState.selectedIndex - count + 1,
-                profileListState.profiles.length - count,
-              ));
-              const visible = profileListState.profiles.slice(start, start + count);
-              return <>
-                {visible.map((profile, visibleIndex) => {
-                  const index = start + visibleIndex;
-                  return (
-                    <Text key={profile.name} color={index === profileListState.selectedIndex ? C.selection : undefined}>
-                      {index === profileListState.selectedIndex ? "▶ " : "  "}
-                      {profile.active ? "✓ " : "  "}
-                      {profile.name} ({profile.model}) — {profile.baseUrl}
-                    </Text>
-                  );
-                })}
-                {profileListState.profiles.length > visible.length && (
-                  <Text dimColor>显示 {start + 1}-{start + visible.length} / {profileListState.profiles.length}</Text>
-                )}
-              </>;
-            })()}
-            <Text dimColor>↑↓ 选择，Enter 激活，Esc 取消，/profiles delete &lt;name&gt; 删除</Text>
-          </Box>
-        )}
+        <Overlays
+          acMode={acMode}
+          input={input}
+          acIndex={acIndex}
+          cmdCandidates={cmdCandidates}
+          fileCandidates={fileCandidates}
+          fileFragment={fileFragment}
+          modelCandidates={modelCandidates}
+          modelContextWindows={modelContextWindows}
+          modelQuery={modelQuery}
+          currentModel={`${llm.provider}/${llm.model}`}
+          modelSetup={modelSetup}
+          pendingProfileSetup={pendingProfileSetup}
+          profileListState={profileListState}
+          pickerItemRows={pickerLayout.itemRows}
+        />
       </Box>
 
       <Box flexDirection="column" flexShrink={0}>
