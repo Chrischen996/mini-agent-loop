@@ -9,7 +9,15 @@ export type ModelSetupState = {
   error?: string;
 };
 
+export type PendingProfileSetup = {
+  model: ModelRef;
+  baseUrl: string;
+  apiKey: string;
+};
+
+export type ProfileSummary = ReturnType<typeof listProfiles>[number];
+
 export type ProfileListState = {
-  profiles: ReturnType<typeof listProfiles>;
+  profiles: ProfileSummary[];
   selectedIndex: number;
 };

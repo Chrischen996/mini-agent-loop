@@ -4,19 +4,10 @@ import { Box, Text, useApp, useInput, useStdout, type Key } from "ink";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
-import { PhaseIndicator } from "./components/PhaseIndicator.tsx";
-import { PlanView } from "./components/PlanView.tsx";
 import { resolvePendingPermissionDecision } from "./pending-permission.ts";
-import {
-  FileAutocomplete,
-  CommandPalette,
-  ModelPicker,
-  SLASH_COMMANDS,
-  type CommandDef,
-} from "./components/FileAutocomplete.tsx";
-import { parseSlashCommand, PATH_COMMANDS } from "./slash-commands.ts";
+import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
+import { parseSlashCommand } from "./slash-commands.ts";
 import { useAutocomplete } from "./hooks/useAutocomplete.ts";
-import { listCandidates } from "./file-completion.ts";
 import { tuiReducer, createInitialState } from "./state.ts";
 import {
   buildSystemPrompt,
@@ -41,8 +32,6 @@ import { adaptHistoryForModel } from "../message-adapter.ts";
 import { findExactModelReferenceMatch, getAllModels, resolveModel, type ModelRef } from "../models.ts";
 import {
   hasGatewayOverrides,
-  modelChoices,
-  modelSearchQuery,
   parseModelCommand,
   shouldSubmitTypedModelCommand,
 } from "./model-command.ts";
@@ -52,7 +41,6 @@ import {
   loadProfileStore,
   removeProfile,
   saveProfile,
-  type ModelProfileStore,
 } from "../profile-store.ts";
 import {
   createVisionPreprocessor,
@@ -62,7 +50,6 @@ import { createAllTools, createTools } from "../tools/index.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
 import type { AgentMessage, MessageContent } from "../types.ts";
 import type { ImageAttachment } from "./state.ts";
-import type { ChatMessage } from "./state.ts";
 import {
   createSubagentTool,
   createSubagentBatchTool,
@@ -85,12 +72,9 @@ import { estimateViewportContentHeight } from "./message-viewport.ts";
 import { TUI_COLORS as C } from "./theme.ts";
 import { PromptInput } from "./components/PromptInput.tsx";
 import {
-  extractFileAcTrigger,
   parseAtRefs,
   sanitizeInput,
-  type FileAcTrigger,
   shouldAcceptAutocompleteOnEnter,
-  type AcMode,
 } from "./input-utils.ts";
 import {
   imageAttachmentToPart,
@@ -119,16 +103,11 @@ import {
   loadSkillNamesFromEnv,
 } from "../skills/index.ts";
 
+import { Overlays } from "./components/Overlays.tsx";
+import type { ModelSetupState } from "./types.ts";
+
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
-
-
-// ─── autocomplete modes ──────────────────────────────────────────────────────
-
-import { Overlays } from "./components/Overlays.tsx";
-import type { ModelSetupState, ProfileListState } from "./types.ts";
-
-// ─── main app ────────────────────────────────────────────────────────────────
 
 export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement {
   const { exit } = useApp();
@@ -176,16 +155,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   // Generate a stable conversation session ID on startup
   const [conversationId, setConversationId] = useState(() => process.env.MINI_AGENT_SESSION_ID ?? randomUUID());
   
-  // Plan-Act approval callbacks
-  const handleApprovePlan = useCallback(() => {
-    if (!state.currentPlan) return;
-    dispatch({ type: "APPROVE_PLAN", planId: state.currentPlan.id });
-  }, [state.currentPlan]);
-  
-  const handleRejectPlan = useCallback(() => {
-    if (!state.currentPlan) return;
-    dispatch({ type: "REJECT_PLAN", planId: state.currentPlan.id });
-  }, [state.currentPlan]);
   const pendingImagesRef = useRef<ImageAttachment[]>([]);
   pendingImagesRef.current = state.pendingImages;
   const promptQueueRef = useRef<string[]>([]);
@@ -202,10 +171,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const execCaptureRef = useRef<{ mode: "run" | "retry" } | null>(null);
   const pendingPermissionRef = useRef(false);
   pendingPermissionRef.current = Boolean(state.pendingPermission);
-  // Profile state
-  const [pendingProfileSetup, setPendingProfileSetup] = useState<{ model: ModelRef; baseUrl: string; apiKey: string } | null>(null);
-  const [profileListState, setProfileListState] = useState<ProfileListState | null>(null);
-  const [profileStore, setProfileStore] = useState<ModelProfileStore | null>(null);
   // ink-text-input still receives the same keystroke as useInput; after Ctrl/Alt+T
   // it may append "t" (or a control char). Swallow that one onChange tick.
   const suppressInputEchoRef = useRef(false);
@@ -219,7 +184,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     });
   }
 
-  const turnCount = state.messages.filter((message) => message.kind === "user").length;
   const permissionSessionId = "tui_session";
 
   const getPermissionManager = useCallback(() => {
@@ -262,33 +226,41 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     setInput(sanitizeInput(value));
   }, []);
 
-  // ── autocomplete state ───────────────────────────────────────────────────
-  const [acMode, setAcMode] = useState<AcMode>(null);
-  const [acIndex, setAcIndex] = useState(0);
-  const [cmdCandidates, setCmdCandidates] = useState<CommandDef[]>([]);
-  const [fileCandidates, setFileCandidates] = useState<string[]>([]);
-  const [modelCandidates, setModelCandidates] = useState<string[]>([]);
-  const [modelContextWindows, setModelContextWindows] = useState<Record<string, number>>({});
-  const [modelQuery, setModelQuery] = useState("");
-  const [modelSetup, setModelSetup] = useState<ModelSetupState | undefined>();
-  const [fileFragment, setFileFragment] = useState("");
-  const fileTriggerRef = useRef<FileAcTrigger | null>(null);
-  const acDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const clearAc = useCallback(() => {
-    setAcMode(null);
-    setCmdCandidates([]);
-    setFileCandidates([]);
-    setModelCandidates([]);
-    setModelContextWindows({});
-    setModelQuery("");
-    setModelSetup(undefined);
-    setFileFragment("");
-    fileTriggerRef.current = null;
-    setAcIndex(0);
-    setPendingProfileSetup(null);
-    setProfileListState(null);
+  // ── autocomplete hook ────────────────────────────────────────────────────
+  const resetInputCursorToEnd = useCallback(() => {
+    setInputEpoch((n) => n + 1);
   }, []);
+
+  const {
+    acMode,
+    setAcMode,
+    acIndex,
+    setAcIndex,
+    cmdCandidates,
+    fileCandidates,
+    modelCandidates,
+    modelContextWindows,
+    modelQuery,
+    modelSetup,
+    setModelSetup,
+    pendingProfileSetup,
+    setPendingProfileSetup,
+    profileListState,
+    setProfileListState,
+    fileFragment,
+    clearAc,
+    acceptCommand,
+    acceptFile,
+    acceptModel,
+    handleTabAt,
+    handleAutocompleteKey,
+    openModelPicker,
+  } = useAutocomplete({
+    input,
+    cwd,
+    setInput,
+    resetInputCursorToEnd,
+  });
 
   const resolvePendingPermission = useCallback((decision: PermissionDecision) => {
     const pending = state.pendingPermission;
@@ -301,140 +273,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     return resolved;
   }, [dispatch, state.pendingPermission]);
 
-  // Load profile store on mount
-  useEffect(() => {
-    loadProfileStore().then(setProfileStore).catch(() => { /* non-fatal */ });
-  }, []);
-
   useEffect(() => {
     void discoverWorkspaceSkills(cwd).catch(() => { /* non-fatal */ });
   }, [cwd]);
-
-  // Watch input → update autocomplete
-  useEffect(() => {
-    if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
-
-    if (acMode === "model-picker") {
-      const query = modelSearchQuery(input);
-      const choices = modelChoices(query);
-      setModelQuery(query);
-      setModelCandidates(choices.references);
-      setModelContextWindows(choices.contextWindows);
-      setAcIndex((index) => Math.min(index, Math.max(0, choices.references.length - 1)));
-      return;
-    }
-
-    if (acMode === "model-setup") return;
-
-    // Command palette: input starts with / and no space yet
-    if (/^\/[^/\s]*$/.test(input)) {
-      const typed = input.slice(1).toLowerCase();
-      const matches = SLASH_COMMANDS.filter((c) => c.name.startsWith(typed));
-      setCmdCandidates(matches);
-      setFileCandidates([]);
-      setAcMode(matches.length > 0 ? "command" : null);
-      setAcIndex(0);
-      return;
-    }
-
-    const modelTrigger = input.match(/^\/model(?:\s+(.*))?$/i);
-    if (modelTrigger) {
-      const query = parseModelCommand(modelTrigger[1] ?? "").reference;
-      const choices = modelChoices(query);
-      setModelQuery(query);
-      setModelCandidates(choices.references);
-      setModelContextWindows(choices.contextWindows);
-      setCmdCandidates([]);
-      setFileCandidates([]);
-      setAcMode("model");
-      setAcIndex(0);
-      return;
-    }
-
-    // File autocomplete: @ref or /cmd <path>
-    const fileTrigger = extractFileAcTrigger(input);
-    if (fileTrigger) {
-      fileTriggerRef.current = fileTrigger;
-      setFileFragment(fileTrigger.fragment);
-      setCmdCandidates([]);
-      acDebounceRef.current = setTimeout(async () => {
-        const candidates = await listCandidates(cwd, fileTrigger.fragment);
-        setFileCandidates(candidates);
-        setAcMode(candidates.length > 0 ? "file" : null);
-        setAcIndex(0);
-      }, 150);
-      return;
-    }
-
-    // No trigger → clear
-    clearAc();
-
-    return () => { if (acDebounceRef.current) clearTimeout(acDebounceRef.current); };
-  }, [input, cwd, clearAc, acMode]);
-
-  // Force the input cursor to the end of the (new) value. ink-text-input keeps an
-  // internal cursorOffset and only clamps it when it exceeds the new length, so
-  // lengthening the string via Tab autocomplete leaves the caret mid-token.
-  const resetInputCursorToEnd = useCallback(() => {
-    setInputEpoch((n) => n + 1);
-  }, []);
-
-  // Accept command candidate
-  const acceptCommand = useCallback((idx: number) => {
-    const cmd = cmdCandidates[idx];
-    if (!cmd) return;
-    if (PATH_COMMANDS.has(cmd.name)) {
-      // Expand command and leave cursor after the space for path input
-      setInput(`/${cmd.name} `);
-      // File autocomplete will trigger on next render because of /read + space
-    } else {
-      setInput(`/${cmd.name}`);
-      clearAc();
-    }
-    resetInputCursorToEnd();
-    setAcMode(null);
-    setCmdCandidates([]);
-    setAcIndex(0);
-  }, [cmdCandidates, clearAc, resetInputCursorToEnd]);
-
-  // Accept file candidate
-  const acceptFile = useCallback((idx: number) => {
-    const trigger = fileTriggerRef.current;
-    const chosen = fileCandidates[idx];
-    if (!trigger || !chosen) return;
-    setInput(trigger.replaceFn(chosen));
-    resetInputCursorToEnd();
-    clearAc();
-  }, [fileCandidates, clearAc, resetInputCursorToEnd]);
-
-  // Intercept Tab at input to immediately show file autocomplete
-  const handleTabAt = useCallback((inputVal: string) => {
-    // App.useInput already owns Tab while a picker is open.
-    if (acMode === "file" || acMode === "command" || acMode === "model" || acMode === "model-picker") {
-      return;
-    }
-    const trigger = extractFileAcTrigger(inputVal);
-    if (!trigger) return;
-    fileTriggerRef.current = trigger;
-    setFileFragment(trigger.fragment);
-    setCmdCandidates([]);
-    setAcMode("file");
-    if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
-    acDebounceRef.current = setTimeout(async () => {
-      const candidates = await listCandidates(cwd, trigger.fragment);
-      setFileCandidates(candidates);
-    }, 0);
-  }, [acMode, cwd]);
-
-  const openModelPicker = useCallback((query = "") => {
-    const choices = modelChoices(query);
-    setModelQuery(query);
-    setModelCandidates(choices.references);
-    setModelContextWindows(choices.contextWindows);
-    setAcIndex(0);
-    setInput(query);
-    setAcMode("model-picker");
-  }, []);
 
   const startModelSetup = useCallback((model: ModelRef, overrides: ModelSwitchOverrides = {}) => {
     const providerKey = model.apiKeyEnv
@@ -450,7 +291,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     setInput(overrides.baseUrl || model.baseUrl);
     setAcMode("model-setup");
     setAcIndex(0);
-  }, [llm.apiKey, llm.baseUrl, llm.provider]);
+  }, [llm.apiKey, llm.baseUrl, llm.provider, setModelSetup, setAcMode, setAcIndex]);
 
   const commitModelSetup = useCallback(async (setup: ModelSetupState, apiKey: string) => {
     try {
@@ -478,13 +319,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         .replace(/-+/g, "-")
         .slice(0, 40);
       try {
-        const updated = await saveProfile(defaultName, {
+        await saveProfile(defaultName, {
           model: `${setup.model.provider}/${setup.model.id}`,
           baseUrl: setup.baseUrl,
           apiKey,
           thinkingLevel: newLlmConfig.thinkingLevel,
         });
-        setProfileStore(updated);
       } catch { /* non-fatal: model is already switched in memory */ }
     } catch (error) {
       setModelSetup({ ...setup, apiKey, error: error instanceof Error ? error.message : String(error) });
@@ -495,7 +335,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const openProfileList = useCallback(async () => {
     try {
       const store = await loadProfileStore();
-      setProfileStore(store);
       const profiles = listProfiles(store);
       setProfileListState({ profiles, selectedIndex: 0 });
       setAcMode("profile-list");
@@ -526,17 +365,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
     if (match.ambiguous || !match.model) {
-      const choices = modelChoices("", match.matches);
-      setModelQuery(reference);
-      setModelCandidates(choices.references);
-      setModelContextWindows(choices.contextWindows);
-      setAcIndex(0);
-      setInput(reference);
-      setAcMode("model-picker");
+      openModelPicker(reference, match.matches);
       return;
     }
     applyModel(match.model);
-  }, [commitModelSetup, startModelSetup]);
+  }, [commitModelSetup, openModelPicker, startModelSetup]);
 
   // Match Codex's direct effort controls: the active model stays fixed and
   // only the next supported reasoning level is applied for subsequent turns.
@@ -728,73 +561,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         return;
       }
     }
-    if (acMode === "profile-name") {
-      if (key.escape) {
-        // User skipped saving — just clear
-        setInput("");
-        clearAc();
-      }
-      return;
-    }
-
-    if (acMode === "profile-list" && profileListState) {
-      const len = profileListState.profiles.length;
-      if (key.upArrow && len > 0) {
-        setProfileListState((s) => s ? { ...s, selectedIndex: (s.selectedIndex - 1 + len) % len } : s);
-        return;
-      }
-      if (key.downArrow && len > 0) {
-        setProfileListState((s) => s ? { ...s, selectedIndex: (s.selectedIndex + 1) % len } : s);
-        return;
-      }
-      if (key.escape) {
-        setInput("");
-        clearAc();
-        return;
-      }
-      return;
-    }
-
-    if (acMode === "model-setup") {
-      if (key.escape) {
-        setInput("");
-        clearAc();
-      }
-      return;
-    }
-
-    if (acMode === "command") {
-      const len = cmdCandidates.length;
-      if (key.upArrow)   { setAcIndex((i) => (i - 1 + len) % len); return; }
-      if (key.downArrow) { setAcIndex((i) => (i + 1) % len); return; }
-      if (key.tab)       { acceptCommand(acIndex); return; }
-      if (key.escape)    { clearAc(); return; }
-      return;
-    }
-
-    if (acMode === "file") {
-      const len = fileCandidates.length;
-      if (key.upArrow)   { setAcIndex((i) => Math.max(0, i - 1)); return; }
-      if (key.downArrow) { setAcIndex((i) => Math.min(len - 1, i + 1)); return; }
-      if (key.tab || key.rightArrow) { acceptFile(acIndex); return; }
-      if (key.escape)    { clearAc(); return; }
-    }
-
-    if (acMode === "model" || acMode === "model-picker") {
-      const len = modelCandidates.length;
-      if (key.upArrow && len > 0) { setAcIndex((i) => (i - 1 + len) % len); return; }
-      if (key.downArrow && len > 0) { setAcIndex((i) => (i + 1) % len); return; }
-      if (key.tab) {
-        const chosen = modelCandidates[acIndex];
-        if (chosen) {
-          setInput(`/model ${chosen}`);
-          resetInputCursorToEnd();
-          clearAc();
-        }
-        return;
-      }
-      if (key.escape) { setInput(""); clearAc(); return; }
-    }
+    if (handleAutocompleteKey(key)) return;
   });
 
   // ── direct tool invocation ────────────────────────────────────────────────
@@ -864,13 +631,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     if (acMode === "profile-name" && pendingProfileSetup) {
       const profileName = trimmed || "default";
       try {
-        const updated = await saveProfile(profileName, {
+        await saveProfile(profileName, {
           model: `${pendingProfileSetup.model.provider}/${pendingProfileSetup.model.id}`,
           baseUrl: pendingProfileSetup.baseUrl,
           apiKey: pendingProfileSetup.apiKey,
           thinkingLevel: llm.thinkingLevel,
         });
-        setProfileStore(updated);
       } catch { /* non-fatal */ }
       setPendingProfileSetup(null);
       setInput("");
@@ -883,8 +649,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       const selected = profileListState.profiles[profileListState.selectedIndex];
       if (selected) {
         try {
-          const updated = await activateProfile(selected.name);
-          setProfileStore(updated);
+          await activateProfile(selected.name);
           const previousLlm = llm;
           const newLlm = loadLlmConfigFromEnv();
           setLlm(newLlm);
@@ -1168,8 +933,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     if (profileDeleteMatch) {
       const name = profileDeleteMatch[1]!.trim();
       try {
-        const updated = await removeProfile(name);
-        setProfileStore(updated);
+        await removeProfile(name);
         dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: { id: "profiles-delete", name: "profiles delete", arguments: {} }, result: { content: `Profile "${name}" deleted.`, isError: false } } });
       } catch (err) {
         dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: { id: "profiles-delete", name: "profiles delete", arguments: {} }, result: { content: err instanceof Error ? err.message : String(err), isError: true } } });
@@ -1595,11 +1359,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                   const chosen = modelCandidates[acIndex];
                   if (chosen) {
                     if (acMode === "model-picker") selectModel(chosen);
-                    else {
-                      setInput(`/model ${chosen}`);
-                      resetInputCursorToEnd();
-                      clearAc();
-                    }
+                    else acceptModel(acIndex);
                     return;
                   }
                 }

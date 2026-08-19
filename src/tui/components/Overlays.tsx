@@ -2,7 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { CommandPalette, FileAutocomplete, ModelPicker } from "./FileAutocomplete.tsx";
 import { TUI_COLORS as C } from "../theme.ts";
-import type { ModelSetupState, ProfileListState } from "../types.ts";
+import type { ModelSetupState, PendingProfileSetup, ProfileListState } from "../types.ts";
 import type { CommandDef } from "./FileAutocomplete.tsx";
 import type { AcMode } from "../input-utils.ts";
 
@@ -18,7 +18,7 @@ export type OverlaysProps = {
   modelQuery: string;
   currentModel: string;
   modelSetup?: ModelSetupState;
-  pendingProfileSetup?: { model: { provider: string; id: string }; baseUrl: string; apiKey: string } | null;
+  pendingProfileSetup?: PendingProfileSetup | null;
   profileListState?: ProfileListState | null;
   pickerItemRows: number;
 };
@@ -110,7 +110,7 @@ export function Overlays({
       <Box flexDirection="column" paddingX={2}>
         <Text color={C.primary} bold>── 配置文件列表 ──</Text>
         {profileListState.profiles.length === 0 && <Text dimColor>无已保存的配置文件</Text>}
-        {visible.map((profile: { name: string; model: string; baseUrl: string; active?: boolean }, visibleIndex: number) => {
+        {visible.map((profile, visibleIndex) => {
           const index = start + visibleIndex;
           return (
             <Text key={profile.name} color={index === profileListState.selectedIndex ? C.selection : undefined}>

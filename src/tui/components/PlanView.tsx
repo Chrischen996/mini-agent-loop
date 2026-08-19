@@ -72,7 +72,7 @@ export function PlanView({ plan, onApprove, onReject, width = 32 }: PlanViewProp
         {plan.steps.map((step, index) => (
           <Box key={step.id} flexDirection="column">
             <Box gap={1}>
-              <Text color={(STEP_STATUS_COLOR[step.status as StepStatus] ?? "gray") as any}>
+              <Text color={STEP_STATUS_COLOR[step.status as StepStatus] ?? "gray"}>
                 {STEP_STATUS_ICON[step.status as StepStatus] ?? "○"}
               </Text>
               <Text bold>{index + 1}.</Text>
