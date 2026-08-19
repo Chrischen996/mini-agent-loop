@@ -46,10 +46,17 @@ export type LlmStreamEvent =
 
 export class IncompleteLlmResponseError extends Error {
   readonly reason: "reasoning_only" | "empty";
-  constructor(reason: "reasoning_only" | "empty") {
-    super(`LLM incomplete response: ${reason}`);
+  constructor(reason: "reasoning_only" | "empty", message?: string) {
+    super(message ?? `LLM incomplete response: ${reason}`);
     this.name = "IncompleteLlmResponseError";
     this.reason = reason;
+  }
+}
+
+export class ThinkingCapabilityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ThinkingCapabilityError";
   }
 }
 

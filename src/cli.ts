@@ -78,6 +78,9 @@ function logEvent(event: LoopEvent): void {
       }
       break;
     }
+    case "attempt_reset":
+      process.stderr.write(`\n[llm] reasoning-only response; retrying attempt ${event.attempt}\n`);
+      break;
     case "tool_start":
       console.error(`[tool_start] ${event.call.name} id=${event.call.id}`);
       break;
@@ -120,6 +123,11 @@ function logEvent(event: LoopEvent): void {
         const subPreview = previewContent(event.inner.result.content, 60);
         console.error(`${'  '.repeat(event.depth)}[sub:tool_end] ${event.inner.call.name} preview=${subPreview}`);
       }
+      break;
+    case "budget_warning":
+      console.error(
+        `[budget_warning] id=${event.id} depth=${event.depth} used=${event.used} limit=${event.limit} percentage=${event.percentage}%`,
+      );
       break;
     case "subagent_end": {
       const costStr = event.estimatedCost ? ` cost=$${event.estimatedCost.total.toFixed(4)}` : "";

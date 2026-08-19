@@ -18,16 +18,19 @@ import {
   streamChat,
   streamLlmEvents,
   type ChatFn,
+  IncompleteLlmResponseError,
   type LlmConfig,
   type StreamChatUsage,
   type RetryableErrorType,
   LlmTimeoutError,
+  ThinkingCapabilityError,
 } from "./llm/index.ts";
 import { resolveModel } from "./models.ts";
 import {
   buildIntenseLlm,
   parseThinkingCommandMode,
   parseThinkingIntensityPrompt,
+  supportsThinkingOff,
   withThinkingLevel,
 } from "./think-intensity.ts";
 import {
@@ -83,6 +86,15 @@ export class MaxTurnsExceededError extends Error {
     this.messages = messages;
     this.maxTurns = maxTurns;
   }
+}
+
+function formatLlmIdentity(config: Pick<LlmConfig, "provider" | "model">): string {
+  const provider = config.provider.trim();
+  const model = config.model.trim();
+  if (!provider) return model;
+  return model.toLowerCase().startsWith(`${provider.toLowerCase()}/`)
+    ? model
+    : `${provider}/${model}`;
 }
 
 export type TurnContext = {
@@ -229,6 +241,7 @@ export type LoopEvent =
   | { type: "permission_required"; request: PermissionRequest }
   | { type: "plan_act_event"; event: PlanActEvent }
   | { type: "done"; messages: AgentMessage[] }
+  | { type: "attempt_reset"; reason: "reasoning_only"; attempt: number }
   | {
       type: "model_switched";
       previousModel: string;
@@ -596,6 +609,12 @@ async function runAgentTurnInternal(
     ? "fixed"
     : parseThinkingCommandMode(userText);
   const effectiveThinkingMode = requestedThinkingMode ?? thinkingMode;
+  if (parsedThinking.intensity === "off" && !supportsThinkingOff(configuredLlm)) {
+    throw new ThinkingCapabilityError(
+      `Thinking cannot be disabled for ${formatLlmIdentity(configuredLlm)} through the configured API. ` +
+      "Choose a non-reasoning model or configure a provider-supported thinking control.",
+    );
+  }
   const initialDecision = !parsedThinking.intensity && effectiveThinkingMode === "adaptive"
     ? decideInitialThinkingLevel({
       prompt: parsedThinking.prompt,
@@ -1246,7 +1265,6 @@ async function runAgentTurnInternal(
         };
         let sawFinal = false;
         let streamed = "";
-        let sawReasoning = false;
         try {
           for await (const event of streamLlmEvents(currentLlm, messages, turnTools, activeSignal)) {
             if (event.type === "answer_delta") {
@@ -1255,7 +1273,6 @@ async function runAgentTurnInternal(
               continue;
             }
             if (event.type === "reasoning_delta") {
-              sawReasoning = true;
               onEvent?.({ type: "assistant_delta", text: event.text, kind: "reasoning" });
               continue;
             }
@@ -1303,42 +1320,28 @@ async function runAgentTurnInternal(
         if (!assistant.content.trim() && streamed.trim()) {
           assistant = { ...assistant, content: streamed };
         }
-        if (
-          sawReasoning &&
-          !assistant.content.trim() &&
-          !(assistant.toolCalls && assistant.toolCalls.length > 0) &&
-          currentLlm.thinkingLevel !== "off" &&
-          reasoningOnlyRetries < 1
-        ) {
-          // A few OpenAI-compatible gateways terminate after emitting the
-          // hidden reasoning block when an unsupported effort parameter is
-          // present. Retry once with thinking disabled to recover the answer.
-          reasoningOnlyRetries += 1;
-          currentLlm = withThinkingLevel(currentLlm, "off");
-          continue;
-        }
-        if (
-          reasoningOnlyRetries > 0 &&
-          !assistant.content.trim() &&
-          !(assistant.toolCalls && assistant.toolCalls.length > 0)
-        ) {
-          // Gateway/model produced reasoning but no answer even after retrying
-          // with thinking disabled. Emit a graceful fallback so the loop can
-          // recover instead of crashing the entire session.
-          const fallback =
-            "[The model produced reasoning but no final answer. " +
-            "Try a different model or disable thinking mode (/think:off).]";
-          assistant = { role: "assistant", content: fallback };
-          messages.push(assistant);
-          onEvent?.({ type: "assistant", message: assistant });
-          onEvent?.({ type: "done", messages });
-          return messages;
-        }
       }
     } catch (err) {
       if (isAbortError(err)) {
         emitAborted(onEvent, messages, permissionTurn);
         return messages;
+      }
+      if (err instanceof IncompleteLlmResponseError && err.reason === "reasoning_only") {
+        if (currentLlm.thinkingLevel !== "off" && reasoningOnlyRetries < 1 && supportsThinkingOff(currentLlm)) {
+          reasoningOnlyRetries += 1;
+          onEvent?.({ type: "attempt_reset", reason: "reasoning_only", attempt: reasoningOnlyRetries });
+          currentLlm = withThinkingLevel(currentLlm, "off");
+          continue;
+        }
+
+        const retryNote = reasoningOnlyRetries > 0
+          ? "The recovery attempt also returned no final answer."
+          : "This model/provider does not expose a usable thinking-off control.";
+        throw new IncompleteLlmResponseError(
+          "reasoning_only",
+          `LLM ${formatLlmIdentity(currentLlm)} returned reasoning without a final answer. ${retryNote} ` +
+          "Choose a different model or configure a provider-supported thinking mode.",
+        );
       }
       const maxRetries = currentContext?.maxCompactionRetries ?? 1;
       if (isContextOverflowError(err) && overflowRetries < maxRetries) {

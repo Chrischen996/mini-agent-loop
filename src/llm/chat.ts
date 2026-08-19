@@ -21,6 +21,7 @@ import {
   toOpenAITool,
   toOpenAIMessages,
   mapToolCalls,
+  piAssistantHasReasoning,
   toPiContext,
   fromPiAssistant,
 } from "./wire.ts";
@@ -32,6 +33,7 @@ import {
   type StreamChatUsage,
   type LlmStreamEvent,
   type ToolCallDelta,
+  IncompleteLlmResponseError,
   LlmTimeoutError,
   ProtocolError,
   OutputTruncatedError,
@@ -81,6 +83,9 @@ async function completePiChat(
     sessionId: config.sessionId,
     cacheRetention: config.cacheRetention,
   });
+  if (piAssistantHasReasoning(result) && !result.content.some((part) => part.type === "text" && part.text.trim()) && !result.content.some((part) => part.type === "toolCall")) {
+    throw new IncompleteLlmResponseError("reasoning_only");
+  }
   return fromPiAssistant(result).message;
 }
 
@@ -110,7 +115,15 @@ async function* streamPiChat(
     } else if (event.type === "thinking_delta") {
       yield { type: "reasoning_delta", text: event.delta };
     } else if (event.type === "done") {
+      if (event.reason === "length") {
+        yield { type: "error", error: new OutputTruncatedError() };
+        return;
+      }
       const converted = fromPiAssistant(event.message);
+      if (piAssistantHasReasoning(event.message) && !converted.message.content.trim() && !converted.message.toolCalls?.length) {
+        yield { type: "error", error: new IncompleteLlmResponseError("reasoning_only") };
+        return;
+      }
       yield { type: "completed", message: converted.message, usage: converted.usage };
     } else if (event.type === "error") {
       if (event.reason === "aborted") {
@@ -258,6 +271,9 @@ export async function completeChat(
       finish_reason?: string | null;
       message?: {
         content?: string | null;
+        reasoning_content?: string | null;
+        reasoning?: string | null;
+        reasoning_text?: string | null;
         tool_calls?: OpenAIToolCall[];
       };
     }>;
@@ -298,6 +314,11 @@ export async function completeChat(
       ? message.content
       : message.content ?? "";
   const toolCalls = mapToolCalls(message.tool_calls);
+  const hasReasoning = [message.reasoning_content, message.reasoning, message.reasoning_text]
+    .some((value) => typeof value === "string" && value.trim().length > 0);
+  if (hasReasoning && !content.trim() && !toolCalls?.length) {
+    throw new IncompleteLlmResponseError("reasoning_only");
+  }
 
   // Extract usage from non-streaming response (mirrors streaming path in streamChat)
   const rawUsage = data.usage;
@@ -406,6 +427,7 @@ export async function* streamChat(
   }
 
   let content = "";
+  let sawReasoning = false;
   const toolAcc = new Map<number, ToolCallAccumulator>();
   let usage: StreamChatUsage | undefined;
 
@@ -494,6 +516,7 @@ export async function* streamChat(
       }
       for (const field of [choice.message.reasoning_content, choice.message.reasoning, choice.message.reasoning_text]) {
         if (typeof field === "string" && field.length > 0) {
+          sawReasoning = true;
           yield { type: "reasoning_delta", text: field };
           break;
         }
@@ -516,6 +539,7 @@ export async function* streamChat(
     // Emit reasoning_content as text deltas (DeepSeek reasoning models)
     for (const field of [delta.reasoning_content, delta.reasoning, delta.reasoning_text]) {
       if (typeof field === "string" && field.length > 0) {
+        sawReasoning = true;
         yield { type: "reasoning_delta", text: field };
         break;
       }
@@ -585,6 +609,10 @@ export async function* streamChat(
       : undefined;
 
   const toolCalls = mapToolCalls(rawToolCalls);
+  if (sawReasoning && !content.trim() && !toolCalls?.length) {
+    yield { type: "error", error: new IncompleteLlmResponseError("reasoning_only") };
+    return;
+  }
   const assistant: AssistantMessage = {
     role: "assistant",
     content: content || "",

@@ -126,4 +126,22 @@ describe("SessionStore", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("round-trips active skill names", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-skills-"));
+    try {
+      const store = new SessionStore(root);
+      await store.create({
+        id: "skill-session",
+        createdAt: Date.now(),
+        skillNames: ["research", "review"],
+        messages: [{ role: "user", content: "continue the task" }],
+      });
+
+      const restored = await new SessionStore(root).loadAll();
+      assert.deepEqual(restored.get("skill-session")?.skillNames, ["research", "review"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

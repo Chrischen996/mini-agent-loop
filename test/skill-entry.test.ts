@@ -33,6 +33,7 @@ describe("skill entry wiring", () => {
         workspace: root,
         dataDir,
         skillHome,
+        skillNames: ["repo-research"],
         skillRegistry: registry,
         chat: async (_config, messages) => {
           capturedSystem = String(messages.find((message) => message.role === "system")?.content ?? "");
@@ -51,7 +52,7 @@ describe("skill entry wiring", () => {
 
       const listed = await request(app).get(`/api/sessions/${sessionId}/skills`);
       assert.equal(listed.status, 200);
-      assert.deepEqual((listed.body as { active: string[] }).active, []);
+      assert.deepEqual((listed.body as { active: string[] }).active, ["repo-research"]);
 
       const missing = await request(app)
         .put(`/api/sessions/${sessionId}/skills`)
@@ -73,6 +74,28 @@ describe("skill entry wiring", () => {
         .post(`/api/sessions/${sessionId}/messages`)
         .field("prompt", "hello");
       assert.equal(reply.status, 200);
+      assert.match(capturedSystem, /relevant source before answering/);
+
+      const restoredApp = createAgentServer({
+        llm,
+        tools: [],
+        workspace: root,
+        dataDir,
+        skillHome,
+        skillRegistry: new InMemorySkillRegistry(),
+        chat: async (_config, messages) => {
+          capturedSystem = String(messages.find((message) => message.role === "system")?.content ?? "");
+          return { role: "assistant", content: "restored" };
+        },
+      });
+      const restored = await request(restoredApp).get(`/api/sessions/${sessionId}/skills`);
+      assert.equal(restored.status, 200);
+      assert.deepEqual((restored.body as { active: string[] }).active, ["repo-research"]);
+
+      const restoredReply = await request(restoredApp)
+        .post(`/api/sessions/${sessionId}/messages`)
+        .field("prompt", "continue");
+      assert.equal(restoredReply.status, 200);
       assert.match(capturedSystem, /relevant source before answering/);
     } finally {
       await rm(root, { recursive: true, force: true });

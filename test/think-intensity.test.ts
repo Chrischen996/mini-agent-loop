@@ -13,6 +13,7 @@ import {
   parseThinkingCommandMode,
   parseThinkingIntensityPrompt,
   stripThinkingIntensityCommands,
+  supportsThinkingOff,
   thinkingLevelToDisplay,
 } from "../src/think-intensity.ts";
 
@@ -22,6 +23,7 @@ describe("thinking intensity parsing", () => {
     assert.equal(parseThinkingIntensityCommand("  /THINK:MED do this"), "med");
     assert.equal(parseThinkingIntensityCommand("do this /think:high"), null);
     assert.equal(parseThinkingIntensityCommand("/think:xhigh"), "xhigh");
+    assert.equal(parseThinkingIntensityCommand("/think:off do this"), "off");
     assert.equal(parseThinkingIntensityCommand("/think:highest do this"), null);
     assert.equal(parseThinkingIntensityCommand("prefix/think:high do this"), null);
     assert.equal(parseThinkingIntensityCommand("thinking:high is ordinary text"), null);
@@ -50,6 +52,13 @@ describe("thinking intensity parsing", () => {
     assert.deepEqual(parseThinkingIntensityPrompt("ordinary request"), {
       intensity: null,
       prompt: "ordinary request",
+    });
+  });
+
+  it("parses an explicit thinking-off command", () => {
+    assert.deepEqual(parseThinkingIntensityPrompt("/think:off answer directly"), {
+      intensity: "off",
+      prompt: "answer directly",
     });
   });
 
@@ -117,6 +126,23 @@ describe("thinking intensity model levels", () => {
     assert.deepEqual(getThinkingLevelChoices(config), ["off"]);
     assert.equal(cycleThinkingLevel(config, "increase"), "off");
     assert.equal(cycleThinkingLevel(config, "decrease"), "off");
+  });
+
+  it("does not claim that direct xAI reasoning models support thinking off", () => {
+    assert.equal(supportsThinkingOff({
+      reasoning: true,
+      provider: "xai",
+      baseUrl: "https://api.x.ai/v1",
+      compat: { supportsReasoningEffort: false },
+      piModel: undefined,
+    }), false);
+    assert.equal(supportsThinkingOff({
+      reasoning: true,
+      provider: "custom",
+      baseUrl: "https://gateway.example/v1",
+      compat: {},
+      piModel: undefined,
+    }), true);
   });
 
   it("uses Pi's extended-level capability semantics when clamping", () => {

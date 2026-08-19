@@ -52,6 +52,7 @@ describe("TUI image attachments", () => {
       return React.createElement(PasteAwareTextInput, {
         value,
         onChange: setValue,
+        onSubmit: () => {},
         onPasteImage: () => { pasteCount += 1; },
       });
     }

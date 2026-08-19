@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { createSubagentTool, createSubagentBatchTool } from "../src/subagent/index.ts";
+import { allocateBatchTokenBudgets, createSubagentTool, createSubagentBatchTool } from "../src/subagent/index.ts";
 import type {
   SubagentEvent,
   SubagentProfile,
@@ -1675,6 +1675,220 @@ describe("createSubagentTool", () => {
       assert.equal(result.isError, true);
       assert.equal(chatCalled, false);
       assert.ok(contentAsString(result.content).includes("budget exhausted"));
+    });
+  });
+
+  // ── Batch budget allocation ────────────────────────────────────────────────
+
+  describe("batch budget allocation", () => {
+    it("allocateBatchTokenBudgets splits equally", () => {
+      const allocated = allocateBatchTokenBudgets(
+        [
+          { label: "a", task: "a" },
+          { label: "b", task: "b" },
+          { label: "c", task: "c" },
+        ],
+        { strategy: "equal" },
+        3000,
+      );
+      assert.deepEqual(allocated, [1000, 1000, 1000]);
+    });
+
+    it("allocateBatchTokenBudgets priority reserves explicit budgets then splits leftover", () => {
+      // Priority semantics: task with tokenBudget:500 keeps 500 (reserved).
+      // Remaining 2000 - 500 = 1500 is split across the other two → 750 each.
+      const allocated = allocateBatchTokenBudgets(
+        [
+          { label: "priority", task: "p", tokenBudget: 500 },
+          { label: "a", task: "a" },
+          { label: "b", task: "b" },
+        ],
+        { strategy: "priority" },
+        2000,
+      );
+      assert.deepEqual(allocated, [500, 750, 750]);
+    });
+
+    it("allocateBatchTokenBudgets applies perTaskLimit ceiling", () => {
+      const allocated = allocateBatchTokenBudgets(
+        [
+          { label: "a", task: "a" },
+          { label: "b", task: "b" },
+        ],
+        { strategy: "equal", perTaskLimit: 400 },
+        2000,
+      );
+      assert.deepEqual(allocated, [400, 400]);
+    });
+
+    it("equal allocation enforces per-task budgets in batch execution", async () => {
+      // remaining 3000 / 3 tasks → 1000 each. Usage of 1001 exceeds the allocated budget.
+      const usageChat: ChatFn = async () => ({
+        role: "assistant",
+        content: "too many tokens",
+        usage: {
+          promptTokens: 1001,
+          inputTokens: 1001,
+          completionTokens: 0,
+          totalTokens: 1001,
+        },
+      });
+
+      const batchTool = createSubagentBatchTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        globalTokenBudget: 3000,
+        chat: usageChat,
+      });
+
+      const result = await batchTool.execute({
+        tasks: [
+          { label: "a", task: "a" },
+          { label: "b", task: "b" },
+          { label: "c", task: "c" },
+        ],
+        budgetAllocation: { strategy: "equal" },
+      });
+
+      assert.equal(result.isError, true);
+      const content = String(result.content);
+      assert.match(content, /token budget exceeded/i);
+      assert.ok(content.includes("── a ──"));
+      assert.ok(content.includes("── b ──"));
+      assert.ok(content.includes("── c ──"));
+    });
+
+    it("priority allocation keeps explicit budget and shares leftover", async () => {
+      // Priority task budget 500; leftover 1500 → 750 each for others.
+      // Usage 751 exceeds the non-priority share but not the priority budget.
+      const usageChat: ChatFn = async () => ({
+        role: "assistant",
+        content: "tokens",
+        usage: {
+          promptTokens: 751,
+          inputTokens: 751,
+          completionTokens: 0,
+          totalTokens: 751,
+        },
+      });
+
+      const events: SubagentEvent[] = [];
+      const batchTool = createSubagentBatchTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        globalTokenBudget: 2000,
+        onSubagentEvent: (event) => events.push(event),
+        chat: usageChat,
+      });
+
+      const result = await batchTool.execute({
+        tasks: [
+          { label: "priority", task: "priority", tokenBudget: 500 },
+          { label: "a", task: "a" },
+          { label: "b", task: "b" },
+        ],
+        budgetAllocation: { strategy: "priority" },
+      });
+
+      assert.equal(result.isError, true);
+      const content = String(result.content);
+      // Priority task (budget 500) fails; others (budget 750) also fail with 751.
+      assert.match(content, /── priority ──[\s\S]*token budget exceeded/i);
+      assert.match(content, /── a ──[\s\S]*token budget exceeded/i);
+      assert.match(content, /── b ──[\s\S]*token budget exceeded/i);
+    });
+
+    it("perTaskLimit caps equal allocation during batch execution", async () => {
+      // equal share would be 1000, but perTaskLimit 400 → budget 400.
+      const usageChat: ChatFn = async () => ({
+        role: "assistant",
+        content: "tokens",
+        usage: {
+          promptTokens: 401,
+          inputTokens: 401,
+          completionTokens: 0,
+          totalTokens: 401,
+        },
+      });
+
+      const batchTool = createSubagentBatchTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        globalTokenBudget: 2000,
+        chat: usageChat,
+      });
+
+      const result = await batchTool.execute({
+        tasks: [
+          { label: "a", task: "a" },
+          { label: "b", task: "b" },
+        ],
+        budgetAllocation: { strategy: "equal", perTaskLimit: 400 },
+      });
+
+      assert.equal(result.isError, true);
+      assert.match(String(result.content), /token budget exceeded/i);
+    });
+
+    it("emits budget_warning once per threshold at 80%", async () => {
+      const events: SubagentEvent[] = [];
+      const usageChat: ChatFn = async () => ({
+        role: "assistant",
+        content: "near limit",
+        usage: {
+          promptTokens: 800,
+          inputTokens: 800,
+          completionTokens: 0,
+          totalTokens: 800,
+        },
+      });
+
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        onSubagentEvent: (event) => events.push(event),
+        chat: usageChat,
+      });
+
+      await tool.execute({ task: "warn", tokenBudget: 1000 });
+
+      const warnings = events.filter((e) => e.type === "budget_warning");
+      assert.equal(warnings.length, 1);
+      assert.equal(warnings[0]?.type, "budget_warning");
+      if (warnings[0]?.type === "budget_warning") {
+        assert.equal(warnings[0].percentage, 80);
+        assert.equal(warnings[0].used, 800);
+        assert.equal(warnings[0].limit, 1000);
+      }
+    });
+
+    it("enforces profile costBudget when estimated cost exceeds it", async () => {
+      const usageChat: ChatFn = async () => ({
+        role: "assistant",
+        content: "expensive",
+        usage: {
+          promptTokens: 1_000_000,
+          inputTokens: 1_000_000,
+          completionTokens: 1_000_000,
+          totalTokens: 2_000_000,
+        },
+      });
+
+      const tool = createSubagentTool({
+        parentLlm: { ...dummyLlm, model: "openai/gpt-4o" },
+        parentTools: [],
+        profiles: [{
+          name: "cheap",
+          description: "cost limited",
+          systemPrompt: "prompt",
+          costBudget: 0.000001,
+        }],
+        chat: usageChat,
+      });
+
+      const result = await tool.execute({ task: "costly", profile: "cheap" });
+      assert.equal(result.isError, true);
+      assert.match(String(result.content), /cost budget exceeded/i);
     });
   });
 

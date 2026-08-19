@@ -89,28 +89,31 @@ export function resolveCopyTarget(options: {
     const focused = focusedIndex >= 0 ? messages[focusedIndex] : undefined;
     if (focused && (focused.kind === "tool_call" || focused.kind === "subagent_call")) {
       const text = extractMessageCopyText(focused);
-      if (text) return { label: focused.kind === "subagent_call" ? "子任务输出" : `${focused.name} 输出`, text };
+      if (text) {
+        return {
+          label: focused.kind === "subagent_call" ? "子任务输出" : `${focused.name} 输出`,
+          text,
+        };
+      }
     }
-    const lastTool = findLast(messages, (message) => (
-      (message.kind === "tool_call" || message.kind === "subagent_call")
-      && Boolean(extractMessageCopyText(message))
-    ));
+    const lastTool = findLast(messages, (message) => message.kind === "tool_call" || message.kind === "subagent_call");
     if (!lastTool) return undefined;
-    return {
-      label: lastTool.kind === "subagent_call" ? "子任务输出" : `${lastTool.name} 输出`,
-      text: extractMessageCopyText(lastTool),
-    };
+    const text = extractMessageCopyText(lastTool);
+    if (!text) return undefined;
+    if (lastTool.kind === "subagent_call") return { label: "子任务输出", text };
+    if (lastTool.kind === "tool_call") return { label: `${lastTool.name} 输出`, text };
+    return { label: "工具输出", text };
   }
 
   if (target === "user") {
     const lastUser = findLast(messages, (message) => message.kind === "user" && Boolean(message.text.trim()));
-    return lastUser ? { label: "用户原文", text: lastUser.text } : undefined;
+    return lastUser && lastUser.kind === "user" ? { label: "用户原文", text: lastUser.text } : undefined;
   }
 
   if (target === "assistant" || target === "last") {
     if (streamingText.trim()) return { label: "当前回复", text: streamingText };
     const lastAssistant = findLast(messages, (message) => message.kind === "assistant" && Boolean(message.text.trim()));
-    return lastAssistant ? { label: "助手回复", text: lastAssistant.text } : undefined;
+    return lastAssistant && lastAssistant.kind === "assistant" ? { label: "助手回复", text: lastAssistant.text } : undefined;
   }
 
   const focused = focusedIndex >= 0 ? messages[focusedIndex] : undefined;
@@ -130,12 +133,22 @@ export function resolveCopyTarget(options: {
   if (streamingText.trim()) return { label: "当前回复", text: streamingText };
 
   const lastAssistant = findLast(messages, (message) => message.kind === "assistant" && Boolean(message.text.trim()));
-  if (lastAssistant) return { label: "助手回复", text: lastAssistant.text };
+  if (lastAssistant && lastAssistant.kind === "assistant") return { label: "助手回复", text: lastAssistant.text };
 
   const lastTool = findLast(messages, (message) => Boolean(extractMessageCopyText(message)));
   if (lastTool) {
+    let label = "可复制内容";
+    if (lastTool.kind === "tool_call") {
+      label = `${lastTool.name} 输出`;
+    } else if (lastTool.kind === "user") {
+      label = "用户原文";
+    } else if (lastTool.kind === "assistant") {
+      label = "助手回复";
+    } else if (lastTool.kind === "subagent_call") {
+      label = "子任务输出";
+    }
     return {
-      label: lastTool.kind === "tool_call" ? `${lastTool.name} 输出` : lastTool.kind === "user" ? "用户原文" : "可复制内容",
+      label,
       text: extractMessageCopyText(lastTool),
     };
   }
@@ -143,7 +156,6 @@ export function resolveCopyTarget(options: {
   const draft = input.trim();
   return draft ? { label: "当前输入", text: draft } : undefined;
 }
-
 export function formatCopyResultNotice(selection: CopySelection, method: string): string {
   const lineCount = selection.text.split(/\r?\n/).length;
   const charCount = [...selection.text].length;

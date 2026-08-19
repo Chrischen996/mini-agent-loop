@@ -171,6 +171,24 @@ describe("TUI sidebar state", () => {
     assert.equal(state.streamingReasoning, "next run");
   });
 
+  it("clears streamed output at a reasoning-only retry boundary", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Answer this" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "reasoning", text: "stale reasoning" },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "attempt_reset", reason: "reasoning_only", attempt: 1 },
+    });
+
+    assert.equal(state.streamingText, "");
+    assert.equal(state.streamingReasoning, "");
+    assert.equal(state.status, "思考结果不完整，正在重试 (1)...");
+    assert.equal(state.busy, true);
+  });
+
   it("reports automatic continuation without resetting context token usage", () => {
     let state = { ...createInitialState("test-model"), usedTokens: 42_000, contextTokens: 40_000, busy: true };
     state = tuiReducer(state, { type: "AUTO_CONTINUE", count: 1, max: 5 });

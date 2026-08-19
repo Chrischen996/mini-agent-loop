@@ -15,20 +15,8 @@ export type FileAcTrigger = {
 const PATH_ATOM_RE = /[\p{L}\p{N}._/\\()+\-]+/uy;
 
 export function extractFileAcTrigger(input: string): FileAcTrigger | null {
-  // @path at a token boundary. Allow trailing spaces while the user is still
-  // typing a spaced filename, but do not swallow later sentence text.
-  const atIdx = input.lastIndexOf("@");
-  if (atIdx >= 0 && isTokenStart(input, atIdx)) {
-    const after = input.slice(atIdx + 1);
-    const path = takeAtPath(input, atIdx + 1);
-    const rest = after.slice(path.length);
-    if (rest === "" || /^[ \t]+$/.test(rest)) {
-      return {
-        fragment: after,
-        replaceFn: (chosen) => input.slice(0, atIdx) + "@" + chosen,
-      };
-    }
-  }
+  const atTrigger = extractAtFileAcTrigger(input);
+  if (atTrigger) return atTrigger;
 
   // /read|/ls|/find|/grep followed by a (possibly empty) path/pattern fragment.
   const slashMatch = input.match(/^\/(read|ls|find|grep)\s+(.*)$/i);
@@ -41,7 +29,24 @@ export function extractFileAcTrigger(input: string): FileAcTrigger | null {
     };
   }
 
+  const bareTrigger = extractBareFileAcTrigger(input);
+  if (bareTrigger) return bareTrigger;
+
   return null;
+}
+
+export function extractBareFileAcTrigger(input: string): FileAcTrigger | null {
+  const fragment = input.trim();
+  if (!fragment) return null;
+  if (/^\//.test(fragment)) return null;
+  if (fragment.includes("@")) return null;
+  if (/\s/.test(fragment)) return null;
+  if (!/^[\p{L}\p{N}._/\\()+\-]+$/u.test(fragment)) return null;
+  if (!/[\p{L}\p{N}]/u.test(fragment)) return null;
+  return {
+    fragment,
+    replaceFn: (chosen) => chosen,
+  };
 }
 
 /** Collect every @path token; skip email-like word@word. */
@@ -72,6 +77,24 @@ export function shouldAcceptAutocompleteOnEnter(acMode: AcMode): boolean {
     || acMode === "file"
     || acMode === "model"
     || acMode === "model-picker";
+}
+
+function extractAtFileAcTrigger(input: string): FileAcTrigger | null {
+  // @path at a token boundary. Allow trailing spaces while the user is still
+  // typing a spaced filename, but do not swallow later sentence text.
+  const atIdx = input.lastIndexOf("@");
+  if (atIdx >= 0 && isTokenStart(input, atIdx)) {
+    const after = input.slice(atIdx + 1);
+    const path = takeAtPath(input, atIdx + 1);
+    const rest = after.slice(path.length);
+    if (rest === "" || /^[ \t]+$/.test(rest)) {
+      return {
+        fragment: after,
+        replaceFn: (chosen) => input.slice(0, atIdx) + "@" + chosen,
+      };
+    }
+  }
+  return null;
 }
 
 function isTokenStart(input: string, index: number): boolean {

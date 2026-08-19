@@ -532,6 +532,7 @@ ${args.sharedContext}
       }
 
       const effectiveTokenBudget = args.tokenBudget ?? profile?.tokenBudget;
+      const effectiveCostBudget = profile?.costBudget;
       if (effectiveTokenBudget !== undefined && effectiveTokenBudget <= 0) {
         return {
           content: `Sub-agent token budget exhausted (${effectiveTokenBudget}).`,
@@ -639,6 +640,7 @@ ${args.sharedContext}
 
       type ErrorKind = "timeout" | "api" | "compaction" | "max_turns" | "abort";
       const errors: Array<{ message: string; kind: ErrorKind }> = [];
+      const emittedWarnings = new Set<80 | 90 | 100>();
 
       // ── Run the nested loop ─────────────────────────────────────
       let finalMessages: AgentMessage[] = [];
@@ -685,8 +687,37 @@ ${args.sharedContext}
               accumulatedCacheReadTokens += event.usage.cacheReadTokens ?? 0;
               accumulatedCacheWriteTokens += event.usage.cacheWriteTokens ?? 0;
 
+              // Budget warning thresholds (emit once per threshold)
+              const budgetLimit = effectiveTokenBudget ?? globalBudgetState?.limit;
+              if (budgetLimit && budgetLimit > 0) {
+                const pct = Math.floor((accumulatedTokens / budgetLimit) * 100);
+                const thresholds: Array<80 | 90 | 100> = [80, 90, 100];
+                for (const t of thresholds) {
+                  if (pct >= t && !emittedWarnings.has(t)) {
+                    emittedWarnings.add(t);
+                    onSubagentEvent?.({
+                      type: "budget_warning",
+                      id: invocationId,
+                      used: accumulatedTokens,
+                      limit: budgetLimit,
+                      percentage: t,
+                      depth,
+                    });
+                  }
+                }
+              }
+
               if (effectiveTokenBudget !== undefined && accumulatedTokens > effectiveTokenBudget) {
                 throw new Error(`Sub-agent token budget exceeded (${effectiveTokenBudget}).`);
+              }
+
+              if (effectiveCostBudget !== undefined) {
+                const { estimatedCost } = getBreakdownAndCost();
+                if (estimatedCost && estimatedCost.total > effectiveCostBudget) {
+                  throw new Error(
+                    `Sub-agent cost budget exceeded ($${estimatedCost.total.toFixed(6)} > $${effectiveCostBudget}).`,
+                  );
+                }
               }
 
               if (globalBudgetState) {
@@ -859,6 +890,61 @@ ${args.sharedContext}
 const SUBAGENT_BATCH_TOOL_NAME = "subagent_batch";
 
 /**
+ * Allocate per-task token budgets for a parallel batch.
+ *
+ * Semantics:
+ * - No `allocation` or no finite `remainingGlobalBudget` → keep each task's
+ *   explicit `tokenBudget` (or undefined).
+ * - `equal` / `dynamic`: floor(remaining / n) for every task, then apply
+ *   `perTaskLimit` as a hard ceiling.
+ * - `priority`: tasks with an explicit `tokenBudget` keep
+ *   min(explicit, perTaskLimit, remaining); those amounts are reserved from
+ *   remaining; leftover is split equally among tasks without an explicit budget.
+ */
+export function allocateBatchTokenBudgets(
+  tasks: SubagentBatchTask[],
+  allocation: NonNullable<SubagentBatchArgs["budgetAllocation"]> | undefined,
+  remainingGlobalBudget: number | undefined,
+): Array<number | undefined> {
+  if (!allocation || remainingGlobalBudget === undefined || !Number.isFinite(remainingGlobalBudget)) {
+    return tasks.map((task) => task.tokenBudget);
+  }
+
+  const remaining = Math.max(0, Math.floor(remainingGlobalBudget));
+  const n = tasks.length;
+  if (n === 0) return [];
+
+  const ceiling = allocation.perTaskLimit;
+  const applyCeiling = (value: number): number => {
+    const capped = ceiling !== undefined ? Math.min(value, ceiling) : value;
+    return Math.max(0, Math.floor(capped));
+  };
+
+  if (allocation.strategy === "priority") {
+    const hasExplicit = tasks.map((task) => task.tokenBudget !== undefined);
+    const reserved = tasks.reduce((sum, task) => {
+      if (task.tokenBudget === undefined) return sum;
+      return sum + applyCeiling(Math.min(task.tokenBudget, remaining));
+    }, 0);
+    const leftover = Math.max(0, remaining - reserved);
+    const nonPriorityCount = hasExplicit.filter((flag) => !flag).length;
+    const equalShare =
+      nonPriorityCount > 0 ? Math.max(0, Math.floor(leftover / nonPriorityCount)) : 0;
+
+    return tasks.map((task) => {
+      if (task.tokenBudget !== undefined) {
+        return applyCeiling(Math.min(task.tokenBudget, remaining));
+      }
+      return applyCeiling(equalShare);
+    });
+  }
+
+  // "equal" and "dynamic" currently share the same even split.
+  const share = Math.max(0, Math.floor(remaining / n));
+  return tasks.map(() => applyCeiling(share));
+}
+
+/**
  * Create the `subagent_batch` {@link Tool} that runs multiple subagents in parallel.
  *
  * Each task in the batch spawns an independent subagent via the single
@@ -867,8 +953,18 @@ const SUBAGENT_BATCH_TOOL_NAME = "subagent_batch";
  * Results are collected in order and returned as a combined text result.
  */
 export function createSubagentBatchTool(options: SubagentToolOptions): Tool<SubagentBatchArgs> {
-  const singleTool = createSubagentTool(options);
-  const { profiles = [] } = options;
+  // Normalize a shared globalBudgetState so batch allocation and per-task
+  // enforcement mutate the same counters when only globalTokenBudget is set.
+  const sharedGlobalBudgetState = options.globalBudgetState ?? (
+    options.globalTokenBudget !== undefined
+      ? { used: 0, limit: options.globalTokenBudget }
+      : undefined
+  );
+  const normalizedOptions: SubagentToolOptions = sharedGlobalBudgetState
+    ? { ...options, globalBudgetState: sharedGlobalBudgetState }
+    : options;
+  const singleTool = createSubagentTool(normalizedOptions);
+  const { profiles = [] } = normalizedOptions;
 
   const profileEnum =
     profiles.length > 0
@@ -947,6 +1043,26 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
           minimum: 0,
           description: "Maximum concurrent sub-agents. 0 or omitted means all run concurrently.",
         },
+        budgetAllocation: {
+          type: "object",
+          description:
+            "Optional strategy for allocating the remaining global token budget across batch tasks.",
+          properties: {
+            strategy: {
+              type: "string",
+              enum: ["equal", "priority", "dynamic"],
+              description:
+                "Allocation strategy. equal/dynamic split remaining budget evenly; priority reserves explicit task.tokenBudget first.",
+            },
+            perTaskLimit: {
+              type: "integer",
+              minimum: 1,
+              description: "Hard ceiling applied to each task after strategy allocation.",
+            },
+          },
+          required: ["strategy"],
+          additionalProperties: false,
+        },
       },
       required: ["tasks"],
       additionalProperties: false,
@@ -958,15 +1074,31 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
       }
 
       const maxConcurrency = args.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY_BATCH;
-      const globalLimit = options.globalConcurrencyLimit ?? 0;
+      const globalLimit = normalizedOptions.globalConcurrencyLimit ?? 0;
+
+      const remainingGlobalBudget = sharedGlobalBudgetState
+        ? Math.max(0, sharedGlobalBudgetState.limit - sharedGlobalBudgetState.used)
+        : undefined;
+      const allocatedBudgets = allocateBatchTokenBudgets(
+        args.tasks,
+        args.budgetAllocation,
+        args.budgetAllocation ? remainingGlobalBudget : undefined,
+      );
 
       // Run all tasks respecting both local and global concurrency limits.
       // runWithConcurrency throws on first rejection; callers get a single error.
       const settled = await runWithConcurrency(
-        args.tasks.map((task: SubagentBatchTask) => async () => {
+        args.tasks.map((task: SubagentBatchTask, taskIndex: number) => async () => {
           // Wait for a global concurrency slot if limit is set
           await acquireGlobalSlot(globalLimit, execSignal);
           try {
+            const allocated = allocatedBudgets[taskIndex];
+            let tokenBudget = task.tokenBudget;
+            if (allocated !== undefined) {
+              tokenBudget = task.tokenBudget !== undefined
+                ? Math.min(task.tokenBudget, allocated)
+                : allocated;
+            }
             return await singleTool.execute(
               {
                 task: task.task,
@@ -979,7 +1111,7 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
                 contextPolicy: task.contextPolicy,
                 skillNames: task.skillNames,
                 inheritContextHistory: task.inheritContextHistory,
-                tokenBudget: task.tokenBudget,
+                tokenBudget,
               },
               execSignal,
             );

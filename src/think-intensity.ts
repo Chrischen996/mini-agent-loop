@@ -3,13 +3,14 @@
 import type { LlmConfig } from "./llm/config.ts";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
 
-export type ThinkingIntensity = "low" | "med" | "high" | "xhigh";
+export type ThinkingIntensity = "off" | "low" | "med" | "high" | "xhigh";
 export type ThinkingCommandMode = "adaptive";
 
 /** The default user-facing intensity when no explicit setting is present. */
 export const DEFAULT_THINKING_INTENSITY: ThinkingIntensity = "med";
 
 export const THINKING_INTENSITY_TO_MODEL_LEVEL: Readonly<Record<ThinkingIntensity, ModelThinkingLevel>> = {
+  off: "off",
   low: "low",
   med: "medium",
   high: "high",
@@ -17,7 +18,7 @@ export const THINKING_INTENSITY_TO_MODEL_LEVEL: Readonly<Record<ThinkingIntensit
 };
 
 /** Only a leading, standalone command changes the request. */
-const THINKING_COMMAND_RE = /^\s*\/think:(low|med|high|xhigh|auto)(?=$|\s)/i;
+const THINKING_COMMAND_RE = /^\s*\/think:(off|low|med|high|xhigh|auto)(?=$|\s)/i;
 
 export type ThinkingIntensityPrompt = {
   intensity: ThinkingIntensity | null;
@@ -77,6 +78,22 @@ export function normalizeThinkingLevelForModel(
   level: ModelThinkingLevel,
 ): ModelThinkingLevel {
   return reasoning ? level : "off";
+}
+
+/**
+ * Whether changing the local level to "off" changes the provider request.
+ * xAI reasoning models currently have no supported off/effort wire field in
+ * the model catalog, so retrying them with a local "off" value is a no-op.
+ */
+export function supportsThinkingOff(
+  config: Pick<LlmConfig, "reasoning" | "provider" | "baseUrl" | "compat" | "piModel">,
+): boolean {
+  if (!config.reasoning) return true;
+  const explicit = config.compat?.supportsThinkingOff;
+  if (typeof explicit === "boolean") return explicit;
+  if (config.piModel?.thinkingLevelMap?.off === null) return false;
+  if (config.provider.toLowerCase() === "xai" || /api\.x\.ai/i.test(config.baseUrl)) return false;
+  return true;
 }
 
 export type ThinkingLlmConfig = LlmConfig & { thinkingLevel: ModelThinkingLevel };
@@ -187,6 +204,7 @@ export function withThinkingLevel(base: LlmConfig, level: ModelThinkingLevel): T
 
 export function intensityToDisplay(intensity: ThinkingIntensity): string {
   const map: Record<ThinkingIntensity, string> = {
+    off: "关闭",
     low: "轻量 (Low)",
     med: "平衡 (Med)",
     high: "深度 (High)",
@@ -196,11 +214,11 @@ export function intensityToDisplay(intensity: ThinkingIntensity): string {
 }
 
 export function getIntensities(): ThinkingIntensity[] {
-  return ["low", "med", "high", "xhigh"];
+  return ["off", "low", "med", "high", "xhigh"];
 }
 
 export function isValidIntensity(test: unknown): test is ThinkingIntensity {
-  return test === "low" || test === "med" || test === "high" || test === "xhigh";
+  return test === "off" || test === "low" || test === "med" || test === "high" || test === "xhigh";
 }
 
 /** Resolve the default intensity from the legacy environment variable. */

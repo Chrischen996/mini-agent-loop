@@ -31,7 +31,7 @@
  * ```
  */
 
-export { createSubagentTool, createSubagentBatchTool } from "./tool.ts";
+export { createSubagentTool, createSubagentBatchTool, allocateBatchTokenBudgets } from "./tool.ts";
 
 export {
   buildCoordinatorPromptFragment,

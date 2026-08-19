@@ -434,6 +434,14 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           };
         }
 
+        case "attempt_reset":
+          return {
+            ...state,
+            streamingText: "",
+            streamingReasoning: "",
+            status: `思考结果不完整，正在重试 (${event.attempt})...`,
+          };
+
         case "max_turns":
           return {
             ...state,
@@ -728,6 +736,27 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
                   ...m,
                   innerEvents: [...m.innerEvents, { type: inner.type, label, detail }],
                   toolCallCount: m.toolCallCount + (isToolEnd ? 1 : 0),
+                };
+              }
+              return m;
+            }),
+          };
+        }
+        case "budget_warning": {
+          return {
+            ...state,
+            status: `预算警告 ${evt.percentage}%`,
+            messages: state.messages.map((m) => {
+              if (m.kind === "subagent_call" && m.id === evt.id) {
+                return {
+                  ...m,
+                  innerEvents: [
+                    ...m.innerEvents,
+                    {
+                      type: "budget_warning",
+                      label: `⚠ budget ${evt.percentage}% (${evt.used}/${evt.limit})`,
+                    },
+                  ],
                 };
               }
               return m;

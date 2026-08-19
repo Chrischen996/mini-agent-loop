@@ -286,3 +286,7 @@ export function fromPiAssistant(message: PiAssistantMessage): {
     },
   };
 }
+
+export function piAssistantHasReasoning(message: PiAssistantMessage): boolean {
+  return message.content.some((part) => part.type === "thinking" && part.thinking.trim().length > 0);
+}

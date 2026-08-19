@@ -35,8 +35,7 @@ test("cache tracking - extracts cache_read_tokens from OpenAI-compatible usage",
     
     // Result should have the message and cache fields
     assert.equal(result.content, "done");
-    // Note: completeChat (non-streaming) doesn't parse usage from response body,
-    // only streamChat does. This test verifies the fallback path works gracefully.
+    // Non-streaming path now parses usage from response body (mirrors streamChat)
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -68,8 +67,12 @@ test("cache tracking - handles missing cache fields gracefully", async () => {
     
     const result = await completeChat(config, [{ role: "user", content: "test" }]);
     assert.equal(result.content, "ok");
-    // Non-streaming path doesn't include usage, so cache fields are undefined
-    assert.equal((result as any).usage, undefined);
+    // Non-streaming path now includes usage from the response body
+    const usage = (result as any).usage;
+    assert.ok(usage, "usage should be populated from non-streaming response");
+    assert.equal(usage.promptTokens, 500);
+    assert.equal(usage.completionTokens, 20);
+    assert.equal(usage.totalTokens, 520);
   } finally {
     globalThis.fetch = originalFetch;
   }

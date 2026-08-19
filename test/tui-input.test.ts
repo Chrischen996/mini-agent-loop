@@ -70,6 +70,13 @@ describe("TUI input utils", () => {
     assert.equal(trigger.replaceFn("src/App.tsx"), "/read src/App.tsx");
   });
 
+  it("recognizes a bare file fragment for direct completion", () => {
+    const trigger = extractFileAcTrigger("app");
+    assert.ok(trigger);
+    assert.equal(trigger.fragment, "app");
+    assert.equal(trigger.replaceFn("src/tui/App.tsx"), "src/tui/App.tsx");
+  });
+
   it("collects multiple @refs including Chinese and spaced names", () => {
     assert.deepEqual(
       parseAtRefs("see @中文.md and @foo bar.ts"),

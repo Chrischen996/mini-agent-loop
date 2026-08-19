@@ -320,6 +320,12 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
       return { eventType: event.event.type, ...event.event };
     case "done":
       return { type: "done", messageCount: event.messages.length };
+    case "attempt_reset":
+      return {
+        type: "attempt_reset",
+        reason: event.reason,
+        attempt: event.attempt,
+      };
     case "model_switched":
       return {
         type: "model_switched",
@@ -352,6 +358,15 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         depth: event.depth,
         inner: safeEvent(event.inner),
       };
+    case "budget_warning":
+      return {
+        type: "budget_warning",
+        id: event.id,
+        used: event.used,
+        limit: event.limit,
+        percentage: event.percentage,
+        depth: event.depth,
+      };
     case "subagent_end":
       return {
         type: "subagent_end",
@@ -363,6 +378,8 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         resultPreview: event.result.slice(0, 300),
         runtime: event.runtime,
         autoDelegationInherited: event.autoDelegationInherited,
+        ...(event.tokenBreakdown ? { tokenBreakdown: event.tokenBreakdown } : {}),
+        ...(event.estimatedCost ? { estimatedCost: event.estimatedCost } : {}),
         ...(event.errors ? {
           errors: event.errors.map((error) => ({
             kind: error.kind,
@@ -370,6 +387,10 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
           })),
         } : {}),
       };
+    default: {
+      const exhaustive = event as { type: string };
+      return { type: exhaustive.type };
+    }
   }
 }
 
@@ -642,6 +663,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     thinkingLevel: session.thinkingLevel,
     thinkingMode: session.thinkingMode,
     permissionMode: session.permissionManager.getMode(),
+    skillNames: session.skillNames,
     phase: session.phase,
     currentPlan: session.currentPlan,
     messages: session.messages,
@@ -660,6 +682,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         modelId: persisted.modelId,
         thinkingLevel: persisted.thinkingLevel,
         thinkingMode: persisted.thinkingMode,
+        skillNames: persisted.skillNames ?? [...defaultSkillNames],
         parentSessionId: persisted.parentSessionId,
         forkedFromMessage: persisted.forkedFromMessage,
       };
@@ -963,6 +986,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       busy: false,
       thinkingMode: options.thinkingMode ?? loadThinkingModeFromEnv(),
       permissionManager: new PermissionManager(defaultPermissionMode),
+      skillNames: [...defaultSkillNames],
     };
     sessions.set(id, session);
     await sessionStore.create(persistedSession(session));
@@ -1004,6 +1028,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       permissionManager: new PermissionManager(parent.permissionManager.getMode()),
       parentSessionId: parent.id,
       forkedFromMessage: safeMessageIndex,
+      skillNames: [...(parent.skillNames ?? [])],
     };
     sessions.set(id, child);
     await sessionStore.create(persistedSession(child));
@@ -1814,7 +1839,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     });
   });
 
-  app.put("/api/sessions/:id/skills", (request, response) => {
+  app.put("/api/sessions/:id/skills", async (request, response) => {
     const session = sessions.get(request.params.id);
     if (!session) {
       response.status(404).json({ error: "Session not found" });
@@ -1843,6 +1868,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     const merged = uniqueSkillNames([...requested, ...add]).filter((name) => !remove.has(name));
     const activation = activateSkillNames(merged, skillRegistry);
     session.skillNames = activation.activeNames;
+    await saveSession(session);
     response.json({
       available: activation.available.map((skill) => ({
         name: skill.name,

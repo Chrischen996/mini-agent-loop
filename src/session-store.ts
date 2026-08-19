@@ -15,6 +15,7 @@ type SessionCreatedEvent = {
   thinkingLevel?: ModelThinkingLevel;
   thinkingMode?: ThinkingMode;
   permissionMode?: PermissionMode;
+  skillNames?: string[];
   phase?: SessionPhase;
   currentPlan?: ExecutionPlan;
   parentSessionId?: string;
@@ -29,6 +30,7 @@ type SessionSnapshotEvent = {
   thinkingLevel?: ModelThinkingLevel;
   thinkingMode?: ThinkingMode;
   permissionMode?: PermissionMode;
+  skillNames?: string[];
   phase?: SessionPhase;
   currentPlan?: ExecutionPlan;
   messages: AgentMessage[];
@@ -45,6 +47,8 @@ export type PersistedSession = {
   thinkingLevel?: ModelThinkingLevel;
   thinkingMode?: ThinkingMode;
   permissionMode?: PermissionMode;
+  /** Currently active Skill names for this session. */
+  skillNames?: string[];
   /** Current phase of the Plan-Act workflow. */
   phase?: SessionPhase;
   /** Currently active execution plan. */
@@ -124,6 +128,7 @@ export class SessionStore {
               thinkingLevel: parsed.thinkingLevel,
               thinkingMode: parsed.thinkingMode,
               permissionMode: parsed.permissionMode,
+              skillNames: parsed.skillNames,
               phase: parsed.phase,
               currentPlan: parsed.currentPlan,
               messages: [],
@@ -138,6 +143,7 @@ export class SessionStore {
               thinkingLevel: parsed.thinkingLevel ?? current?.thinkingLevel,
               thinkingMode: parsed.thinkingMode ?? current?.thinkingMode,
               permissionMode: parsed.permissionMode ?? current?.permissionMode,
+              skillNames: parsed.skillNames ?? current?.skillNames,
               phase: parsed.phase ?? current?.phase,
               currentPlan: parsed.currentPlan ?? current?.currentPlan,
               messages: parsed.messages,
@@ -197,6 +203,7 @@ export class SessionStore {
       thinkingLevel: session.thinkingLevel,
       thinkingMode: session.thinkingMode,
       permissionMode: session.permissionMode,
+      skillNames: session.skillNames,
       phase: session.phase,
       currentPlan: session.currentPlan,
       parentSessionId: session.parentSessionId,
@@ -214,6 +221,7 @@ export class SessionStore {
       thinkingLevel: session.thinkingLevel,
       thinkingMode: session.thinkingMode,
       permissionMode: session.permissionMode,
+      skillNames: session.skillNames,
       phase: session.phase,
       currentPlan: session.currentPlan,
       messages: session.messages,

@@ -19,6 +19,7 @@ import { useAutocomplete } from "./hooks/useAutocomplete.ts";
 import { listCandidates } from "./file-completion.ts";
 import { tuiReducer, createInitialState } from "./state.ts";
 import {
+  buildSystemPrompt,
   createAgentHistory,
   MaxTurnsExceededError,
   runAgentTurn,
@@ -619,6 +620,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
       permissionManager.setMode(next);
       dispatch({ type: "SET_PERMISSION_MODE", mode: next });
+      // also refresh system prompt in current history so next turn picks it up immediately
+      if (historyRef.current.length > 0) {
+        const newPrompt = buildSystemPrompt(next);
+        historyRef.current = createAgentHistory(newPrompt, next);
+      }
       return;
     }
 

@@ -63,6 +63,8 @@ export type SubagentProfile = {
   maxThinkingEscalations?: number;
   /** Optional token budget limit for this profile. */
   tokenBudget?: number;
+  /** Optional cost budget limit (USD) for this profile. */
+  costBudget?: number;
 };
 
 // ─── Runtime options passed when creating the subagent tool ──────────────────
@@ -244,6 +246,17 @@ export type SubagentBatchArgs = {
    * with the specified concurrency limit.
    */
   maxConcurrency?: number;
+  /**
+   * Budget allocation strategy for parallel tasks.
+   * "equal" – divide remaining global budget evenly across tasks.
+   * "priority" – use task.tokenBudget when provided, otherwise fall back to equal share.
+   * "dynamic" – currently treated like "equal" (runtime rebalancing reserved for later).
+   */
+  budgetAllocation?: {
+    strategy: "equal" | "priority" | "dynamic";
+    /** Optional hard ceiling applied to each task after strategy allocation. */
+    perTaskLimit?: number;
+  };
 };
 
 // ─── Subagent-specific events ────────────────────────────────────────────────
@@ -305,9 +318,17 @@ export type SubagentEvent =
       depth: number;
     }
   | {
-      type: "subagent_end";
+      type: "budget_warning";
       id: string;
-      /** Final text answer from the subagent (empty on error / abort). */
+      used: number;
+      limit: number;
+      percentage: 80 | 90 | 100;
+      depth: number;
+    }
+  | {
+      type: "subagent_end";
+      /** Unique id for this subagent invocation. */
+      id: string;
       result: string;
       /** Whether the subagent finished normally. */
       success: boolean;

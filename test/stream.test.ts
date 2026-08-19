@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { makeLlmConfig, streamChat, OutputTruncatedError, LlmTimeoutError } from "../src/llm/index.ts";
+import { makeLlmConfig, streamChat, OutputTruncatedError, LlmTimeoutError, IncompleteLlmResponseError } from "../src/llm/index.ts";
 import type { AgentMessage, AssistantMessage } from "../src/types.ts";
 
 function sseResponse(chunks: string[]): Response {
@@ -246,6 +246,33 @@ describe("streamChat", () => {
     }
   });
 
+  it("classifies reasoning-only streams instead of returning an empty completion", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      sseResponse([
+        JSON.stringify({ choices: [{ delta: { reasoning_content: "checking the task" } }] }),
+        JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+      ])) as typeof fetch;
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "http://localhost/v1",
+        model: "custom-reasoning",
+        reasoning: true,
+      });
+      const events = [];
+      for await (const event of streamChat(config, [{ role: "user", content: "hi" }])) events.push(event);
+      const error = events.find((event) => event.type === "error");
+      assert.ok(error?.type === "error");
+      assert.ok(error?.error instanceof IncompleteLlmResponseError);
+      assert.equal((error?.error as IncompleteLlmResponseError).reason, "reasoning_only");
+      assert.equal(events.some((event) => event.type === "completed"), false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("does not send unsupported reasoning_effort to xAI-compatible gateways", async () => {
     const originalFetch = globalThis.fetch;
     let requestBody: Record<string, unknown> | undefined;
@@ -267,6 +294,37 @@ describe("streamChat", () => {
         // Consume the stream to force request construction and completion.
       }
       assert.equal(requestBody?.reasoning_effort, undefined);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("uses the native xAI Grok 4.3 adapter without a fake effort parameter", async () => {
+    const originalFetch = globalThis.fetch;
+    let requestUrl = "";
+    let requestBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (input, init) => {
+      requestUrl = String(input);
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return sseResponse([
+        JSON.stringify({ choices: [{ delta: { content: "ok" } }] }),
+        JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+      ]);
+    }) as typeof fetch;
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "https://api.x.ai/v1",
+        model: "xai/grok-4.3",
+      });
+      for await (const _event of streamChat(config, [{ role: "user", content: "hi" }])) {
+        // Consume the native adapter stream.
+      }
+      assert.equal(requestUrl, "https://api.x.ai/v1/chat/completions");
+      assert.equal(requestBody?.model, "grok-4.3");
+      assert.equal(requestBody?.reasoning_effort, undefined);
+      assert.equal(requestBody?.max_completion_tokens, 30_000);
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -108,6 +108,10 @@ function handleEvent(state: TuiState, event: LoopEvent): void {
       state.status = `自适应思考: ${thinkingLevelToDisplay(event.level)} (${event.reasons.join(", ")})`;
       state.thinkingLevel = event.level;
       break;
+    case "attempt_reset":
+      state.streamingText = "";
+      state.status = `思考结果不完整，正在重试 (${event.attempt})...`;
+      break;
     case "permission_required":
       state.status = `等待权限确认: ${event.request.tool} (${event.request.risk})`;
       break;

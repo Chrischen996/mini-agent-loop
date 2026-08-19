@@ -24,6 +24,14 @@ import {
 import { streamChat } from "../src/llm/index.ts";
 import type { AgentMessage } from "../src/types.ts";
 
+function loopSseResponse(chunks: string[]): Response {
+  const payload = chunks.map((chunk) => `data: ${chunk}\n\n`).join("") + "data: [DONE]\n\n";
+  return new Response(payload, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
 const dummyLlm = makeLlmConfig({
   apiKey: "test-key",
   baseUrl: "http://localhost/v1",
@@ -348,6 +356,104 @@ describe("runAgentTurn", () => {
     assert.equal(calls, 2);
     assert.equal(messages.at(-1)?.role, "assistant");
     assert.equal(messages.at(-1)?.content, "continued");
+  });
+
+  it("retries reasoning-only streams only when thinking-off changes the request", async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return calls === 1
+        ? loopSseResponse([
+            JSON.stringify({ choices: [{ delta: { reasoning_content: "first attempt" } }] }),
+            JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+          ])
+        : loopSseResponse([
+            JSON.stringify({ choices: [{ delta: { content: "continued" } }] }),
+            JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+          ]);
+    }) as typeof fetch;
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "http://localhost/v1",
+        model: "custom-reasoning",
+        reasoning: true,
+      });
+      const messages = await runAgentTurn(createAgentHistory(), "continue", {
+        llm: config,
+        tools: [],
+        onEvent: (event) => events.push(event),
+      });
+      assert.equal(calls, 2);
+      assert.equal(messages.at(-1)?.content, "continued");
+      assert.ok(events.some((event) => event.type === "attempt_reset"));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("fails explicitly for direct xAI Grok when reasoning has no final answer", async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return loopSseResponse([
+        JSON.stringify({ choices: [{ delta: { reasoning_content: "xAI reasoning" } }] }),
+        JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }),
+      ]);
+    }) as typeof fetch;
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "https://api.x.ai/v1",
+        model: "xai/grok-4.3",
+      });
+      await assert.rejects(
+        () => runAgentTurn(createAgentHistory(), "continue", {
+          llm: config,
+          tools: [],
+          onEvent: (event) => events.push(event),
+        }),
+        /xai\/grok-4\.3 returned reasoning without a final answer.*thinking-off control/i,
+      );
+      assert.equal(calls, 1);
+      assert.equal(events.some((event) => event.type === "attempt_reset"), false);
+      assert.equal(events.some((event) => event.type === "assistant"), false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("rejects /think:off for direct xAI Grok before sending a request", async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      throw new Error("fetch should not be called");
+    }) as typeof fetch;
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "https://api.x.ai/v1",
+        model: "xai/grok-4.3",
+      });
+      await assert.rejects(
+        () => runAgentTurn(createAgentHistory(), "/think:off answer directly", {
+          llm: config,
+          tools: [],
+        }),
+        /Thinking cannot be disabled for xai\/grok-4\.3/i,
+      );
+      assert.equal(calls, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("compacts before a model call and emits a context event", async () => {

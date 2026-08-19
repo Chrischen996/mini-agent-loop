@@ -37,6 +37,7 @@ export {
   type ToolCallDelta,
   // ── typed incomplete-response errors ──
   IncompleteLlmResponseError,
+  ThinkingCapabilityError,
   OutputTruncatedError,
   ProtocolError,
   LlmTimeoutError,
