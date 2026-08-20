@@ -768,159 +768,157 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     }
 
     // ── Plan workflow slash commands ───────────────────────────────────────
-    if (trimmed === "/plan-show") {
-      setInput("");
-      try {
-        const doc = await loadPlanDocument(cwd);
-        if (!doc) {
-          dispatch({ type: "ADD_NOTICE", title: "计划", text: "当前没有保存的计划。使用 /plan <任务> 生成。" });
-        } else {
-          dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
-        }
-      } catch (err) {
-        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-      }
-      return;
-    }
-
-    if (trimmed === "/plan-approve") {
-      setInput("");
-      try {
-        const doc = await approveCurrentPlan(cwd, "user");
-        dispatch({
-          type: "ADD_NOTICE",
-          title: "计划已批准",
-          text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}`,
-        });
-      } catch (err) {
-        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-      }
-      return;
-    }
-
-    if (trimmed === "/plan-reject") {
-      setInput("");
-      try {
-        const doc = await rejectCurrentPlan(cwd);
-        dispatch({ type: "ADD_NOTICE", title: "计划已拒绝", text: `id=${doc.id} status=${doc.status}` });
-      } catch (err) {
-        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-      }
-      return;
-    }
-
-    if (trimmed === "/plan-history") {
-      setInput("");
-      try {
-        const history = await listPlanHistory(cwd);
-        if (history.length === 0) {
-          dispatch({ type: "ADD_NOTICE", title: "计划历史", text: "尚无归档计划。" });
-        } else {
-          const lines = history.map((doc) => {
-            const promptSlice = doc.prompt.length > 60 ? `${doc.prompt.slice(0, 60)}…` : doc.prompt;
-            return `${doc.id}  ${doc.status.padEnd(10)}  ${doc.updatedAt}  ${promptSlice}`;
-          });
-          dispatch({ type: "ADD_NOTICE", title: "计划历史", text: lines.join("\n") });
-        }
-      } catch (err) {
-        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-      }
-      return;
-    }
-
-    if (trimmed === "/plan-archive") {
-      setInput("");
-      try {
-        const { archivedPath, document } = await archiveCurrentPlan(cwd);
-        dispatch({
-          type: "ADD_NOTICE",
-          title: "计划已归档",
-          text: `id=${document.id}\npath=${archivedPath}`,
-        });
-      } catch (err) {
-        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-      }
-      return;
-    }
-
-    // Plan generation / execution may fall through into the normal agent turn.
-    // These overrides let slash commands reuse the existing run path.
-    let planTurnOverride: {
+    // Extracted as local helper for readability
+    const handlePlanTurnOverride = async (): Promise<{
       displayText: string;
       prompt: string;
       forceMode?: PermissionMode;
       restoreMode?: PermissionMode;
-    } | null = null;
-
-    // /plan [task] — generate a plan via agent turn in plan mode
-    const planMatch = trimmed.match(/^\/plan(?:\s+(.*))?$/i);
-    if (planMatch && !trimmed.startsWith("/plan-")) {
-      const task = (planMatch[1] ?? "").trim();
-      if (!task) {
+    } | null | undefined> => {
+      // /plan-show /plan-approve /plan-reject /plan-history /plan-archive — no agent turn
+      if (trimmed === "/plan-show") {
         setInput("");
         try {
           const doc = await loadPlanDocument(cwd);
-          if (doc) {
-            dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
+          if (!doc) {
+            dispatch({ type: "ADD_NOTICE", title: "计划", text: "当前没有保存的计划。使用 /plan <任务> 生成。" });
           } else {
-            dispatch({ type: "ADD_NOTICE", title: "计划", text: "用法: /plan <任务>" });
+            dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
           }
         } catch (err) {
           dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
         }
-        return;
+        return null;
       }
-
-      planCaptureRef.current = { prompt: task };
-      execCaptureRef.current = null;
-      const permissionManager = getPermissionManager();
-      if (permissionManager.getMode() !== "plan") {
-        permissionManager.setMode("plan");
-        dispatch({ type: "SET_PERMISSION_MODE", mode: "plan" });
-      }
-      planTurnOverride = {
-        displayText: `/plan ${task}`,
-        prompt: task + PLAN_ONLY_SUFFIX,
-        forceMode: "plan",
-      };
-    }
-
-    // /plan-run and /plan-retry — execute approved plan in bypass mode
-    if (!planTurnOverride && (trimmed === "/plan-run" || trimmed === "/plan-retry")) {
-      const isRetry = trimmed === "/plan-retry";
-      let executionPromptSuffix: string;
-      try {
-        const prepared = await preparePlanForExecution(cwd, {
-          yes: false,
-          workspaceRoot: cwd,
-        });
-        executionPromptSuffix = prepared.executionPromptSuffix;
-        dispatch({
-          type: "ADD_NOTICE",
-          title: isRetry ? "重试计划" : "执行计划",
-          text: `id=${prepared.document.id} status=executing\nprompt: ${prepared.document.prompt}`,
-        });
-      } catch (err) {
+      if (trimmed === "/plan-approve") {
         setInput("");
-        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-        return;
+        try {
+          const doc = await approveCurrentPlan(cwd, "user");
+          dispatch({
+            type: "ADD_NOTICE",
+            title: "计划已批准",
+            text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}`,
+          });
+        } catch (err) {
+          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+        }
+        return null;
+      }
+      if (trimmed === "/plan-reject") {
+        setInput("");
+        try {
+          const doc = await rejectCurrentPlan(cwd);
+          dispatch({ type: "ADD_NOTICE", title: "计划已拒绝", text: `id=${doc.id} status=${doc.status}` });
+        } catch (err) {
+          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+        }
+        return null;
+      }
+      if (trimmed === "/plan-history") {
+        setInput("");
+        try {
+          const history = await listPlanHistory(cwd);
+          if (history.length === 0) {
+            dispatch({ type: "ADD_NOTICE", title: "计划历史", text: "尚无归档计划。" });
+          } else {
+            const lines = history.map((doc: any) => {
+              const promptSlice = doc.prompt.length > 60 ? `${doc.prompt.slice(0, 60)}…` : doc.prompt;
+              return `${doc.id}  ${doc.status.padEnd(10)}  ${doc.updatedAt}  ${promptSlice}`;
+            });
+            dispatch({ type: "ADD_NOTICE", title: "计划历史", text: lines.join("\n") });
+          }
+        } catch (err) {
+          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+        }
+        return null;
+      }
+      if (trimmed === "/plan-archive") {
+        setInput("");
+        try {
+          const { archivedPath, document } = await archiveCurrentPlan(cwd);
+          dispatch({
+            type: "ADD_NOTICE",
+            title: "计划已归档",
+            text: `id=${document.id}\npath=${archivedPath}`,
+          });
+        } catch (err) {
+          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+        }
+        return null;
       }
 
-      execCaptureRef.current = { mode: isRetry ? "retry" : "run" };
-      planCaptureRef.current = null;
-      const permissionManager = getPermissionManager();
-      const previousMode = permissionManager.getMode();
-      if (previousMode !== "bypass") {
-        permissionManager.setMode("bypass");
-        dispatch({ type: "SET_PERMISSION_MODE", mode: "bypass" });
+      // /plan [task] — generate a plan via agent turn in plan mode
+      const planMatch = trimmed.match(/^\/plan(?:\s+(.*))?$/i);
+      if (planMatch && !trimmed.startsWith("/plan-")) {
+        const task = (planMatch[1] ?? "").trim();
+        if (!task) {
+          setInput("");
+          try {
+            const doc = await loadPlanDocument(cwd);
+            if (doc) {
+              dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
+            } else {
+              dispatch({ type: "ADD_NOTICE", title: "计划", text: "用法: /plan <任务>" });
+            }
+          } catch (err) {
+            dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+          }
+          return null;
+        }
+        planCaptureRef.current = { prompt: task };
+        execCaptureRef.current = null;
+        const permissionManager = getPermissionManager();
+        if (permissionManager.getMode() !== "plan") {
+          permissionManager.setMode("plan");
+          dispatch({ type: "SET_PERMISSION_MODE", mode: "plan" });
+        }
+        return {
+          displayText: `/plan ${task}`,
+          prompt: task + PLAN_ONLY_SUFFIX,
+          forceMode: "plan",
+        };
       }
-      planTurnOverride = {
-        displayText: trimmed,
-        prompt: `Execute the approved plan.${executionPromptSuffix}`,
-        forceMode: "bypass",
-        restoreMode: previousMode,
-      };
-    }
+
+      // /plan-run and /plan-retry — execute approved plan in bypass mode
+      if (trimmed === "/plan-run" || trimmed === "/plan-retry") {
+        const isRetry = trimmed === "/plan-retry";
+        let executionPromptSuffix: string;
+        try {
+          const prepared = await preparePlanForExecution(cwd, {
+            yes: false,
+            workspaceRoot: cwd,
+          });
+          executionPromptSuffix = prepared.executionPromptSuffix;
+          dispatch({
+            type: "ADD_NOTICE",
+            title: isRetry ? "重试计划" : "执行计划",
+            text: `id=${prepared.document.id} status=executing\nprompt: ${prepared.document.prompt}`,
+          });
+        } catch (err) {
+          setInput("");
+          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+          return null;
+        }
+        execCaptureRef.current = { mode: isRetry ? "retry" : "run" };
+        planCaptureRef.current = null;
+        const permissionManager = getPermissionManager();
+        const previousMode = permissionManager.getMode();
+        if (previousMode !== "bypass") {
+          permissionManager.setMode("bypass");
+          dispatch({ type: "SET_PERMISSION_MODE", mode: "bypass" });
+        }
+        return {
+          displayText: trimmed,
+          prompt: `Execute the approved plan.${executionPromptSuffix}`,
+          forceMode: "bypass",
+          restoreMode: previousMode,
+        };
+      }
+
+      return undefined; // not a plan command
+    };
+
+    const planTurnOverride = await handlePlanTurnOverride() ?? null;
 
     // /profiles: show profile list
     if (/^\/profiles?$/i.test(trimmed)) {
