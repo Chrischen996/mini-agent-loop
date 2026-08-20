@@ -103,6 +103,7 @@ export type AutocompleteNavKey = {
   upArrow?: boolean;
   downArrow?: boolean;
   tab?: boolean;
+  shift?: boolean;
   rightArrow?: boolean;
   escape?: boolean;
 };
@@ -141,7 +142,7 @@ export function resolveAutocompleteNav(
   if (acMode === "command") {
     if (key.upArrow) return { type: "move", index: nextWrappedIndex(acIndex, -1, lengths.commands) };
     if (key.downArrow) return { type: "move", index: nextWrappedIndex(acIndex, 1, lengths.commands) };
-    if (key.tab) return { type: "accept-command" };
+    if (key.tab && !key.shift) return { type: "accept-command" };
     if (key.escape) return { type: "cancel" };
     return { type: "ignore" };
   }
@@ -149,7 +150,7 @@ export function resolveAutocompleteNav(
   if (acMode === "file") {
     if (key.upArrow) return { type: "move", index: nextClampedIndex(acIndex, -1, lengths.files) };
     if (key.downArrow) return { type: "move", index: nextClampedIndex(acIndex, 1, lengths.files) };
-    if (key.tab || key.rightArrow) return { type: "accept-file" };
+    if ((key.tab || key.rightArrow) && !key.shift) return { type: "accept-file" };
     if (key.escape) return { type: "cancel" };
     return { type: "none" };
   }
@@ -157,7 +158,7 @@ export function resolveAutocompleteNav(
   if (acMode === "model" || acMode === "model-picker") {
     if (key.upArrow) return { type: "move", index: nextWrappedIndex(acIndex, -1, lengths.models) };
     if (key.downArrow) return { type: "move", index: nextWrappedIndex(acIndex, 1, lengths.models) };
-    if (key.tab) return { type: "accept-model" };
+    if (key.tab && !key.shift) return { type: "accept-model" };
     if (key.escape) return { type: "cancel", clearInput: true };
     return { type: "none" };
   }

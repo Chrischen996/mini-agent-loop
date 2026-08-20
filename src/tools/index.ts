@@ -21,6 +21,7 @@ import type { CodebaseSemanticProvider } from "../codebase/deepwiki-provider.ts"
 import { createWebAccessTools } from "../web-access/index.ts";
 import { createGitTools } from "./git.ts";
 import { createValidationTool } from "./validation.ts";
+import { createSandboxRunner, type SandboxConfig } from "../sandbox/index.ts";
 
 export type { JsonSchema, Tool, ToolResult } from "./types.ts";
 export type { ReadArgs } from "./read.ts";
@@ -93,6 +94,7 @@ export function createTools(cwd: string, options: ToolSelection & {
   codebaseStore?: RepositoryStore;
   codebaseProvider?: CodebaseSemanticProvider;
   webAccess?: boolean;
+  sandbox?: SandboxConfig;
 } = {}): Tool[] {
   const tools = createDefaultTools(cwd, options);
   const selectedGit = options.tools
@@ -120,4 +122,60 @@ export function createTools(cwd: string, options: ToolSelection & {
       selectedWeb.includes(tool.name as ToolName) && !options.excludeTools?.includes(tool.name as ToolName)));
   }
   return tools;
+}
+
+/** Async variant that initializes a sandbox runner before building tools. */
+export async function createToolsWithSandbox(
+  cwd: string,
+  options: ToolSelection & {
+    codebase?: boolean;
+    codebaseStore?: RepositoryStore;
+    codebaseProvider?: CodebaseSemanticProvider;
+    webAccess?: boolean;
+    sandbox?: SandboxConfig;
+  } = {},
+): Promise<{ tools: Tool[]; cleanup: () => Promise<void> }> {
+  let sandboxRunner: Awaited<ReturnType<typeof createSandboxRunner>> | undefined;
+  if (options.sandbox) {
+    sandboxRunner = await createSandboxRunner(options.sandbox);
+  }
+  const sandbox = sandboxRunner
+    ? { runner: sandboxRunner, config: options.sandbox ?? { enabled: true, type: "none" } }
+    : undefined;
+
+  const tools = createAllTools(cwd);
+  // Replace the bash tool with the sandbox-aware version
+  const bashTool = createBashTool(cwd, sandbox);
+  const filtered = tools.filter((t) => t.name !== "bash");
+  filtered.unshift(bashTool as Tool);
+
+  const selectedGit = options.tools
+    ? options.tools.filter((name) => name.startsWith("git_") || name === "validate_workspace")
+    : ["git_status", "git_diff", "git_checkpoint", "git_undo", "git_branch_isolate", "validate_workspace"] as ToolName[];
+  const existingNames = new Set(filtered.map((tool) => tool.name));
+  filtered.push(...[...createGitTools(cwd), createValidationTool(cwd)].filter((tool) =>
+    !existingNames.has(tool.name)
+      && selectedGit.includes(tool.name as ToolName)
+      && !options.excludeTools?.includes(tool.name as ToolName)));
+  const explicitSelection = options.tools;
+  const codebaseNames = new Set(["codebase_open", "codebase_search", "codebase_read", "codebase_explain"]);
+  const selectedCodebase = explicitSelection ? explicitSelection.filter((name) => codebaseNames.has(name)) : [...codebaseNames];
+  if (options.codebase !== false) {
+    filtered.push(...createCodebaseTools(
+      options.codebaseStore ?? createRepositoryStoreFromEnv(),
+      { semanticProvider: options.codebaseProvider },
+    ).filter((tool) => selectedCodebase.includes(tool.name as ToolName) && !options.excludeTools?.includes(tool.name as ToolName)));
+  }
+  if (options.webAccess !== false) {
+    const selectedWeb = explicitSelection
+      ? explicitSelection.filter((name) => WEB_ACCESS_TOOL_NAMES.has(name))
+      : [...WEB_ACCESS_TOOL_NAMES];
+    filtered.push(...createWebAccessTools(cwd).filter((tool) =>
+      selectedWeb.includes(tool.name as ToolName) && !options.excludeTools?.includes(tool.name as ToolName)));
+  }
+
+  const cleanup = async () => {
+    if (sandboxRunner) await sandboxRunner.cleanup();
+  };
+  return { tools: filtered, cleanup };
 }

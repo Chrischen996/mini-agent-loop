@@ -34,7 +34,8 @@ import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
 } from "./preprocessors/index.ts";
-import { createTools, type ToolName } from "./tools/index.ts";
+import { createTools, createToolsWithSandbox, type ToolName } from "./tools/index.ts";
+import { type SandboxConfig } from "./sandbox/index.ts";
 import { createMcpRuntimeFromEnv } from "./mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
 import {
@@ -167,6 +168,7 @@ export function parseCliArgs(argv: string[]): {
   planSetFile?: string;
   planHistory: boolean;
   planArchive: boolean;
+  sandboxEnabled: boolean;
 } {
   const imagePaths: string[] = [];
   const rest: string[] = [];
@@ -186,6 +188,7 @@ export function parseCliArgs(argv: string[]): {
   let planSetFile: string | undefined;
   let planHistory = false;
   let planArchive = false;
+  let sandboxEnabled = process.env.MINI_AGENT_SANDBOX !== "0";
   const validTools = new Set<ToolName>([
     "read", "bash", "edit", "write", "grep", "find", "ls",
     "codebase_open", "codebase_search", "codebase_read", "codebase_explain",
@@ -340,6 +343,7 @@ export function parseCliArgs(argv: string[]): {
     planSetFile,
     planHistory,
     planArchive,
+    sandboxEnabled,
   };
 }
 
@@ -401,7 +405,19 @@ async function main(): Promise<void> {
     planSetFile,
     planHistory,
     planArchive,
+    sandboxEnabled,
   } = parsed;
+  const sandboxConfig: SandboxConfig | undefined = sandboxEnabled && process.env.MINI_AGENT_SANDBOX !== "false"
+    ? {
+        enabled: true,
+        type: (process.env.MINI_AGENT_SANDBOX_TYPE as "auto" | "docker" | "node" | "none" | undefined) ?? "auto",
+        dockerImage: process.env.MINI_AGENT_SANDBOX_IMAGE,
+        allowNetwork: process.env.MINI_AGENT_SANDBOX_NETWORK === "true",
+        cpuLimit: process.env.MINI_AGENT_SANDBOX_CPUS ? parseFloat(process.env.MINI_AGENT_SANDBOX_CPUS) : undefined,
+        memoryLimit: process.env.MINI_AGENT_SANDBOX_MEMORY,
+        timeout: process.env.MINI_AGENT_SANDBOX_TIMEOUT ? parseInt(process.env.MINI_AGENT_SANDBOX_TIMEOUT, 10) : undefined,
+      }
+    : undefined;
   const thinking = parseThinkingIntensityPrompt(rawPrompt);
   const prompt = thinking.prompt;
   const cwd = process.cwd();
@@ -597,6 +613,7 @@ async function main(): Promise<void> {
       codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
       codebaseStore: codebaseRuntime.store,
       codebaseProvider: codebaseRuntime.semanticProvider,
+      sandbox: sandboxConfig,
     }));
     tools = () => {
       const available = resolveToolProvider(configuredTools);

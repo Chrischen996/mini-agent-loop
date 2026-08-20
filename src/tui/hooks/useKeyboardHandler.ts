@@ -6,6 +6,7 @@ import { buildSystemPrompt, createAgentHistory } from "../../loop.ts";
 import type { Dispatch } from "react";
 import type { TuiAction } from "../state.ts";
 import type { PermissionDecision, PermissionManager, PermissionTurnContext } from "../../permissions.ts";
+import type { AcMode } from "../input-utils.ts";
 
 export type UseKeyboardHandlerDeps = {
   exit: () => void;
@@ -16,7 +17,8 @@ export type UseKeyboardHandlerDeps = {
   adjustThinkingLevel: (direction: "increase" | "decrease", wrap?: boolean) => void;
   resolvePendingPermission: (decision: PermissionDecision) => boolean;
   dispatch: Dispatch<TuiAction>;
-  acMode: string | null;
+  acMode: AcMode;
+  setAcMode: (mode: AcMode) => void;
   state: { busy: boolean; pendingPermission?: unknown; phase: string; currentPlan?: { id: string } };
   feedHeight: number;
   handleAutocompleteKey: (key: Key) => boolean;
@@ -28,7 +30,7 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
   const {
     exit, abortRef, copyResolvedText, getPermissionManager, historyRef,
     adjustThinkingLevel, resolvePendingPermission, dispatch,
-    acMode, state, feedHeight, handleAutocompleteKey,
+    acMode, setAcMode, state, feedHeight, handleAutocompleteKey,
     suppressInputEchoRef, pendingPermissionRef,
   } = deps;
 
@@ -55,18 +57,19 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
       return;
     }
 
-    // Shift+Tab: cycle permission mode
-    if (!acMode && key.shift && key.tab) {
+    // Shift+Tab: cycle permission mode (works even during autocomplete)
+    if (key.shift && key.tab) {
       suppressInputEchoRef.current = true;
       const permissionManager = getPermissionManager();
       const next = nextPermissionMode(permissionManager.getMode());
-      if (!switchPermissionMode(permissionManager, next)) {
+      if (switchPermissionMode(permissionManager, next)) {
         dispatch({ type: "SET_PERMISSION_MODE", mode: next });
       }
       if (historyRef.current.length > 0) {
         const newPrompt = buildSystemPrompt(next);
         historyRef.current = createAgentHistory(newPrompt, next);
       }
+      setAcMode(null);
       return;
     }
 

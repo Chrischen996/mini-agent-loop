@@ -130,7 +130,11 @@ export function PromptInput({
       const currentParts = partsRef.current;
       const currentCursor = clampCursor(cursorRef.current, currentParts.length);
 
-      if (key.tab && key.shift) return;
+      if (key.tab && key.shift) {
+        // Shift+Tab is handled by the global keyboard handler for permission mode cycling.
+        // Return without consuming so the event propagates to the parent handler.
+        return;
+      }
 
       if (isPasteShortcut(input, key)) {
         if (pasteEnabled && onPasteImage) void onPasteImage();

@@ -1,11 +1,15 @@
 import { spawn } from "node:child_process";
 import type { Tool, ToolResult } from "./types.ts";
+import type { SandboxConfig, SandboxResult, SandboxRunner } from "../sandbox/types.ts";
 
 export type BashArgs = { command: string; timeout?: number };
 
 const MAX_OUTPUT_BYTES = 100 * 1024;
 
-export function createBashTool(cwd: string): Tool<BashArgs> {
+export function createBashTool(
+  cwd: string,
+  sandbox?: { runner: SandboxRunner; config: SandboxConfig },
+): Tool<BashArgs> {
   return {
     name: "bash",
     description: "Execute a bash command. Returns stdout/stderr. Optional timeout.",
@@ -24,6 +28,38 @@ export function createBashTool(cwd: string): Tool<BashArgs> {
       }
       if (signal?.aborted) throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
 
+      const effectiveTimeoutMs = Math.min(
+        (args.timeout ?? sandbox?.config.timeout ?? 30) * 1000,
+        Number.MAX_SAFE_INTEGER,
+      );
+
+      // Sandbox mode: use the runner directly (command-level exec only)
+      if (sandbox && sandbox.runner.type !== "none") {
+        try {
+          const result: SandboxResult = await sandbox.runner.execute({
+            command: "bash",
+            args: ["-lc", args.command],
+            cwd,
+            timeout: effectiveTimeoutMs,
+            allowNetwork: sandbox.config.allowNetwork ?? false,
+            allowWrite: true,
+          });
+
+          const content = result.stdout + (result.stderr ? `\n${result.stderr}` : "");
+          const truncated = result.stdout.length > MAX_OUTPUT_BYTES
+            ? `[notice: output truncated to ${MAX_OUTPUT_BYTES} bytes]`
+            : "";
+          const suffix = result.exitCode === 0 ? ""
+            : result.timedOut
+              ? `\n\n[command timed out after ${effectiveTimeoutMs / 1000} seconds]`
+              : `\n\n[exit code: ${result.exitCode}${result.signal ? ` (signal ${result.signal})` : ""}]`;
+          return { content: content + truncated + suffix, isError: result.exitCode !== 0 };
+        } catch (err) {
+          return { content: `Sandbox execution failed: ${err instanceof Error ? err.message : String(err)}`, isError: true };
+        }
+      }
+
+      // Fallback: spawn directly (original behavior)
       return await new Promise((resolve, reject) => {
         const child = spawn("bash", ["-lc", args.command], {
           cwd,

@@ -236,7 +236,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     clearAc,
     acceptCommand,
     acceptFile,
-    acceptModel,
     handleTabAt,
     handleAutocompleteKey,
     openModelPicker,
@@ -338,7 +337,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   useKeyboardHandler({
     exit, abortRef, copyResolvedText, getPermissionManager, historyRef,
     adjustThinkingLevel, resolvePendingPermission, dispatch,
-    acMode, state, feedHeight, handleAutocompleteKey,
+    acMode, setAcMode, state, feedHeight, handleAutocompleteKey,
     suppressInputEchoRef, pendingPermissionRef,
   });
 
@@ -1101,8 +1100,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                   }
                   const chosen = modelCandidates[acIndex];
                   if (chosen) {
-                    if (acMode === "model-picker") selectModelRef(chosen);
-                    else acceptModel(acIndex);
+                    // Enter selects the model and starts the setup flow. Tab
+                    // remains the completion-only path in useAutocomplete.
+                    selectModelRef(chosen);
                     return;
                   }
                 }
