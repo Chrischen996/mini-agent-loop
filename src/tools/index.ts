@@ -21,11 +21,12 @@ import type { CodebaseSemanticProvider } from "../codebase/deepwiki-provider.ts"
 import { createWebAccessTools } from "../web-access/index.ts";
 import { createGitTools } from "./git.ts";
 import { createValidationTool } from "./validation.ts";
-import { createSandboxRunner, type SandboxConfig } from "../sandbox/index.ts";
+import { createSandboxRunner, type SandboxConfig, type SandboxRunner } from "../sandbox/index.ts";
 
 export type { JsonSchema, Tool, ToolResult } from "./types.ts";
 export type { ReadArgs } from "./read.ts";
 export type { WriteArgs } from "./write.ts";
+export type { SandboxConfig } from "../sandbox/index.ts";
 export type { BashArgs } from "./bash.ts";
 export { createBashTool } from "./bash.ts";
 export { createReadTool } from "./read.ts";
@@ -74,11 +75,14 @@ export function createDefaultTools(cwd: string, selection: ToolSelection = {}): 
 }
 
 /** All seven Pi coding-agent tools, before active-tool filtering. */
-export function createAllTools(cwd: string): Tool[] {
-  // Concrete tool arg types are assignable at runtime; widen for the registry list.
+export function createAllTools(
+  cwd: string,
+  options: { sandboxRunner?: SandboxRunner; sandboxConfig?: SandboxConfig } = {},
+): Tool[] {
+  const bashTool = createBashTool(cwd, options.sandboxRunner ? { runner: options.sandboxRunner, config: options.sandboxConfig! } : undefined);
   return [
     createReadTool(cwd) as Tool,
-    createBashTool(cwd) as Tool,
+    bashTool as Tool,
     createEditTool(cwd) as Tool,
     createWriteTool(cwd) as Tool,
     createGrepTool(cwd) as Tool,
@@ -89,14 +93,30 @@ export function createAllTools(cwd: string): Tool[] {
   ];
 }
 
-export function createTools(cwd: string, options: ToolSelection & {
-  codebase?: boolean;
-  codebaseStore?: RepositoryStore;
-  codebaseProvider?: CodebaseSemanticProvider;
-  webAccess?: boolean;
-  sandbox?: SandboxConfig;
-} = {}): Tool[] {
-  const tools = createDefaultTools(cwd, options);
+export function createTools(
+  cwd: string,
+  options: ToolSelection & {
+    codebase?: boolean;
+    codebaseStore?: RepositoryStore;
+    codebaseProvider?: CodebaseSemanticProvider;
+    webAccess?: boolean;
+    /** Pre-created sandbox runner. Pass `undefined` for no sandbox. */
+    sandboxRunner?: SandboxRunner;
+    /** Original sandbox config (for reference in error messages). */
+    sandboxConfig?: SandboxConfig;
+    /** Inline sandbox config — creates a noop runner if provided (sync path). */
+    sandbox?: SandboxConfig;
+  } = {},
+): Tool[] {
+  const baseTools = createAllTools(cwd, {
+    sandboxRunner: options.sandboxRunner,
+    sandboxConfig: options.sandboxConfig ?? options.sandbox,
+  });
+
+  const selected = options.tools ?? ["read", "bash", "edit", "write"];
+  const excluded = new Set(options.excludeTools ?? []);
+  const tools = baseTools.filter((t) => selected.includes(t.name as ToolName) && !excluded.has(t.name as ToolName));
+
   const selectedGit = options.tools
     ? options.tools.filter((name) => name.startsWith("git_") || name === "validate_workspace")
     : ["git_status", "git_diff", "git_checkpoint", "git_undo", "git_branch_isolate", "validate_workspace"] as ToolName[];
@@ -124,7 +144,13 @@ export function createTools(cwd: string, options: ToolSelection & {
   return tools;
 }
 
-/** Async variant that initializes a sandbox runner before building tools. */
+/**
+ * Async variant that initializes a sandbox runner (Docker/Node) and returns
+ * tools with the bash command routed through it.
+ *
+ * Use this from `server.ts` and other async bootstrap contexts. The returned
+ * `cleanup` function must be called on shutdown to remove lingering containers.
+ */
 export async function createToolsWithSandbox(
   cwd: string,
   options: ToolSelection & {
@@ -135,47 +161,19 @@ export async function createToolsWithSandbox(
     sandbox?: SandboxConfig;
   } = {},
 ): Promise<{ tools: Tool[]; cleanup: () => Promise<void> }> {
-  let sandboxRunner: Awaited<ReturnType<typeof createSandboxRunner>> | undefined;
+  let sandboxRunner: SandboxRunner | undefined;
   if (options.sandbox) {
     sandboxRunner = await createSandboxRunner(options.sandbox);
   }
-  const sandbox = sandboxRunner
-    ? { runner: sandboxRunner, config: options.sandbox ?? { enabled: true, type: "none" } }
-    : undefined;
 
-  const tools = createAllTools(cwd);
-  // Replace the bash tool with the sandbox-aware version
-  const bashTool = createBashTool(cwd, sandbox);
-  const filtered = tools.filter((t) => t.name !== "bash");
-  filtered.unshift(bashTool as Tool);
-
-  const selectedGit = options.tools
-    ? options.tools.filter((name) => name.startsWith("git_") || name === "validate_workspace")
-    : ["git_status", "git_diff", "git_checkpoint", "git_undo", "git_branch_isolate", "validate_workspace"] as ToolName[];
-  const existingNames = new Set(filtered.map((tool) => tool.name));
-  filtered.push(...[...createGitTools(cwd), createValidationTool(cwd)].filter((tool) =>
-    !existingNames.has(tool.name)
-      && selectedGit.includes(tool.name as ToolName)
-      && !options.excludeTools?.includes(tool.name as ToolName)));
-  const explicitSelection = options.tools;
-  const codebaseNames = new Set(["codebase_open", "codebase_search", "codebase_read", "codebase_explain"]);
-  const selectedCodebase = explicitSelection ? explicitSelection.filter((name) => codebaseNames.has(name)) : [...codebaseNames];
-  if (options.codebase !== false) {
-    filtered.push(...createCodebaseTools(
-      options.codebaseStore ?? createRepositoryStoreFromEnv(),
-      { semanticProvider: options.codebaseProvider },
-    ).filter((tool) => selectedCodebase.includes(tool.name as ToolName) && !options.excludeTools?.includes(tool.name as ToolName)));
-  }
-  if (options.webAccess !== false) {
-    const selectedWeb = explicitSelection
-      ? explicitSelection.filter((name) => WEB_ACCESS_TOOL_NAMES.has(name))
-      : [...WEB_ACCESS_TOOL_NAMES];
-    filtered.push(...createWebAccessTools(cwd).filter((tool) =>
-      selectedWeb.includes(tool.name as ToolName) && !options.excludeTools?.includes(tool.name as ToolName)));
-  }
+  const tools = createTools(cwd, {
+    ...options,
+    sandboxRunner,
+    sandboxConfig: options.sandbox,
+  });
 
   const cleanup = async () => {
     if (sandboxRunner) await sandboxRunner.cleanup();
   };
-  return { tools: filtered, cleanup };
+  return { tools, cleanup };
 }

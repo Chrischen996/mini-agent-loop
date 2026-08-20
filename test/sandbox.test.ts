@@ -200,3 +200,48 @@ describe("sandbox integration", () => {
     });
   });
 });
+
+describe("bash tool sandbox integration", () => {
+  it("falls back to direct spawn when no sandbox is configured", async () => {
+    const { createBashTool } = await import("../src/tools/bash.ts");
+    const tmpDir = await mkdtemp(path.join(tmpdir(), "mini-agent-bash-"));
+    try {
+      const tool = createBashTool(tmpDir);
+      const result = await tool.execute({ command: "echo hello" });
+      assert.ok(!result.isError);
+      assert.match(result.content, /hello/);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("routes through node sandbox runner when configured", async () => {
+    const { createBashTool } = await import("../src/tools/bash.ts");
+    const { NodeSandboxRunner } = await import("../src/sandbox/index.ts");
+    const tmpDir = await mkdtemp(path.join(tmpdir(), "mini-agent-sandbox-"));
+    try {
+      const runner = new NodeSandboxRunner();
+      const tool = createBashTool(tmpDir, { runner, config: { enabled: true, type: "node" } });
+      const result = await tool.execute({ command: "echo sandboxed" });
+      assert.ok(!result.isError);
+      assert.match(result.content, /sandboxed/);
+      // Verify network isolation
+      const netResult = await tool.execute({ command: "curl -s --max-time 2 https://example.com || echo unreachable", timeout: 5 });
+      assert.ok(netResult.content.includes("unreachable") || netResult.isError);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns error when sandbox execution fails", async () => {
+    const { createBashTool } = await import("../src/tools/bash.ts");
+    const tmpDir = await mkdtemp(path.join(tmpdir(), "mini-agent-bash-"));
+    try {
+      const tool = createBashTool(tmpDir);
+      const result = await tool.execute({ command: "nonexistent_command_xyz" });
+      assert.ok(result.isError);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});

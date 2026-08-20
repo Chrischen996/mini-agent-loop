@@ -605,16 +605,18 @@ async function main(): Promise<void> {
     throw error;
   });
   let tools;
+  let sandboxCleanup: (() => Promise<void>) | undefined;
   const parentRuntime: AgentRuntimeRef = {};
   try {
-    const configuredTools = mcpRuntime.toolProvider(createTools(cwd, {
+    const { tools: configuredTools, cleanup } = await createToolsWithSandbox(cwd, {
       tools: selectedTools,
       excludeTools,
       codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
       codebaseStore: codebaseRuntime.store,
       codebaseProvider: codebaseRuntime.semanticProvider,
       sandbox: sandboxConfig,
-    }));
+    });
+    sandboxCleanup = cleanup;
     tools = () => {
       const available = resolveToolProvider(configuredTools);
       return allowMcpTools ? available : available.filter((tool) => tool.source?.kind !== "mcp");
@@ -622,6 +624,7 @@ async function main(): Promise<void> {
     tools();
   } catch (error) {
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
+    if (sandboxCleanup) await sandboxCleanup();
     throw error;
   }
   for (const status of mcpRuntime.statuses()) {
@@ -728,7 +731,7 @@ async function main(): Promise<void> {
     }
   } finally {
     activePermissionTurn.close();
-    await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
+    await Promise.all([mcpRuntime.close(), codebaseRuntime.close(), sandboxCleanup?.() ?? Promise.resolve()]);
   }
 
   const lastAssistant = [...messages]

@@ -28,12 +28,14 @@ import {
   loadVisionConfigFromEnv,
   type MessagePreprocessor,
 } from "./preprocessors/index.ts";
-import { createTools } from "./tools/index.ts";
+import { createTools, type SandboxConfig } from "./tools/index.ts";
+import { createSandboxRunner } from "./sandbox/index.ts";
 import { createRepositoryStoreFromEnv, RepositoryStore } from "./codebase/repository-store.ts";
 import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
 import type { CodebaseSemanticProvider } from "./codebase/deepwiki-provider.ts";
 import { createDocumentEditTool } from "./tools/document-edit.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "./tools/types.ts";
+import type { SandboxRunner } from "./sandbox/types.ts";
 import type { AgentMessage, ContentPart } from "./types.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
 import type { McpServerStatus } from "./mcp/types.ts";
@@ -192,6 +194,10 @@ export type AgentServerOptions = {
   skillRegistry?: SkillRegistry;
   /** Optional home directory used when discovering user-level skills. */
   skillHome?: string;
+  /** Optional sandbox configuration for bash tool isolation. */
+  sandbox?: SandboxConfig;
+  /** Pre-initialized sandbox runner (for async bootstrap). */
+  sandboxRunner?: SandboxRunner;
 };
 
 function safeMessage(message: AgentMessage): Record<string, unknown> {
@@ -647,6 +653,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
       codebase: codebaseEnabled,
       codebaseStore,
       codebaseProvider: options.codebaseProvider,
+      sandbox: options.sandbox,
+      sandboxRunner: options.sandboxRunner,
     });
     tools = () => mergeToolSets(
       localTools,
@@ -2124,6 +2132,27 @@ async function startServer(): Promise<void> {
     throw error;
   });
 
+  // Initialize sandbox runner if enabled via env
+  let sandboxRunner: Awaited<ReturnType<typeof createSandboxRunner>> | undefined;
+  const sandboxEnabled = process.env.MINI_AGENT_SANDBOX !== "0" && process.env.MINI_AGENT_SANDBOX !== "false";
+  if (sandboxEnabled) {
+    try {
+      sandboxRunner = await createSandboxRunner({
+        enabled: true,
+        type: (process.env.MINI_AGENT_SANDBOX_TYPE as "auto" | "docker" | "node" | "none" | undefined) ?? "auto",
+        dockerImage: process.env.MINI_AGENT_SANDBOX_IMAGE,
+        allowNetwork: process.env.MINI_AGENT_SANDBOX_NETWORK === "true",
+        cpuLimit: process.env.MINI_AGENT_SANDBOX_CPUS ? parseFloat(process.env.MINI_AGENT_SANDBOX_CPUS) : undefined,
+        memoryLimit: process.env.MINI_AGENT_SANDBOX_MEMORY,
+        timeout: process.env.MINI_AGENT_SANDBOX_TIMEOUT ? parseInt(process.env.MINI_AGENT_SANDBOX_TIMEOUT, 10) : undefined,
+      });
+      console.error(`[sandbox] initialized type=${sandboxRunner.type}`);
+    } catch (error) {
+      console.error(`[sandbox] failed to initialize: ${error instanceof Error ? error.message : String(error)}`);
+      // Continue without sandbox rather than crashing
+    }
+  }
+
   let app: Express;
   try {
     app = createAgentServer({
@@ -2138,9 +2167,11 @@ async function startServer(): Promise<void> {
       subagentEnabled: process.env.MINI_AGENT_SUBAGENT !== "0",
       subagentProfiles: defaultProfiles,
       autoSubagent: loadAutoSubagentOptionsFromEnv(),
+      sandboxRunner,
     });
   } catch (error) {
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
+    if (sandboxRunner) await sandboxRunner.cleanup();
     throw error;
   }
   const port = Number(process.env.PORT ?? 3001);
@@ -2154,8 +2185,14 @@ async function startServer(): Promise<void> {
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close()]);
     throw error;
   }
-  server.on("close", () => void Promise.all([mcpRuntime.close(), codebaseRuntime.close()]));
-  const shutdown = () => server.close();
+  const cleanupAll = async () => {
+    await Promise.all([mcpRuntime.close(), codebaseRuntime.close(), sandboxRunner?.cleanup() ?? Promise.resolve()]);
+  };
+  server.on("close", () => void cleanupAll());
+  const shutdown = () => {
+    server.close();
+    if (sandboxRunner) void sandboxRunner.cleanup().catch(() => {});
+  };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
   console.log(`Mini Agent server: http://127.0.0.1:${port}`);
