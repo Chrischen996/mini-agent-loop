@@ -68,6 +68,13 @@ import {
 import { TurnEventBuffer } from "./stream-buffer.ts";
 import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./layout.ts";
 import { estimateViewportContentHeight } from "./message-viewport.ts";
+import { resolveAtRefs } from "./at-refs-resolver.ts";
+import { runDirectTool } from "./direct-tool-runner.ts";
+import { addPendingImage, handlePasteImage } from "./image-handler.ts";
+import { startModelSetup, commitModelSetup, openProfileList } from "./profile-manager.ts";
+import { selectModel } from "./model-switcher.ts";
+import { SubagentToolsFactory } from "./subagent-tools-factory.ts";
+import { useKeyboardHandler } from "./hooks/useKeyboardHandler.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
 import { PromptInput } from "./components/PromptInput.tsx";
@@ -128,27 +135,19 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const agentToolsRef = useRef<ToolProvider>(agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
 
   // Create the subagent tool — dispatches SubagentEvents to the TUI reducer
-  const subagentToolsRef = useRef<Tool[]>([]);
+  const subagentFactory = new SubagentToolsFactory();
   const subagentRuntimeRef = useRef<AgentRuntimeRef>({});
   const getSubagentTools = useCallback((parentLlm = llm): Tool[] => {
-    if (subagentToolsRef.current.length === 0) {
-      const sharedOptions = {
-        parentLlm,
-        parentTools: agentToolsRef.current,
-        profiles: defaultProfiles,
-        preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
-        onSubagentEvent: (event: SubagentEvent) => {
-          dispatch({ type: "SUBAGENT_EVENT", event });
-        },
-        getPermissionTurn: () => permissionTurnRef.current ?? undefined,
-        parentRuntime: subagentRuntimeRef.current,
-      };
-      subagentToolsRef.current = [
-        createSubagentTool(sharedOptions) as Tool,
-        createSubagentBatchTool(sharedOptions) as Tool,
-      ];
-    }
-    return subagentToolsRef.current;
+    return subagentFactory.getTools({
+      parentLlm,
+      parentTools: agentToolsRef.current,
+      visionPreprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+      onSubagentEvent: (event: SubagentEvent) => {
+        dispatch({ type: "SUBAGENT_EVENT", event });
+      },
+      getPermissionTurn: () => permissionTurnRef.current ?? undefined,
+      parentRuntime: subagentRuntimeRef.current,
+    });
   }, [llm, vision]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
@@ -190,27 +189,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("plan"));
   }, []);
 
-  const addPendingImage = useCallback((image: ImageAttachment): boolean => {
-    const current = pendingImagesRef.current;
-    if (current.some((item) => item.path === image.path)) return true;
-    if (current.length >= MAX_TUI_IMAGES) {
-      dispatch({ type: "ATTACHMENT_ERROR", message: `最多可同时添加 ${MAX_TUI_IMAGES} 张图片` });
-      return false;
-    }
-    pendingImagesRef.current = [...current, image];
-    dispatch({ type: "ADD_PENDING_IMAGE", image });
-    return true;
-  }, []);
+  const addPendingImageRef = useCallback((image: ImageAttachment): boolean => {
+    return addPendingImage(image, { pendingImages: pendingImagesRef.current, pendingImagesRef, dispatch, cwd });
+  }, [dispatch, cwd]);
 
-  const handlePasteImage = useCallback(async (): Promise<boolean> => {
-    try {
-      return addPendingImage(await readClipboardImage());
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      dispatch({ type: "ATTACHMENT_ERROR", message: `无法粘贴图片: ${detail}` });
-      return false;
-    }
-  }, [addPendingImage]);
+  const handlePasteImageRef = useCallback(async (): Promise<boolean> => {
+    return handlePasteImage({ pendingImages: pendingImagesRef.current, pendingImagesRef, dispatch, cwd });
+  }, [dispatch, cwd]);
 
   // Cleanup buffered stream output on unmount.
   useEffect(() => {
@@ -277,99 +262,23 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     void discoverWorkspaceSkills(cwd).catch(() => { /* non-fatal */ });
   }, [cwd]);
 
-  const startModelSetup = useCallback((model: ModelRef, overrides: ModelSwitchOverrides = {}) => {
-    const providerKey = model.apiKeyEnv
-      .map((name) => process.env[name])
-      .find((value): value is string => Boolean(value));
-    const canReuseCurrentKey = model.provider === llm.provider && model.baseUrl === llm.baseUrl;
-    setModelSetup({
-      model,
-      baseUrl: overrides.baseUrl || model.baseUrl,
-      apiKey: overrides.apiKey ?? (canReuseCurrentKey ? llm.apiKey : providerKey ?? ""),
-      field: "baseUrl",
+  // ── model switching ─────────────────────────────────────────────────────
+
+  const selectModelRef = useCallback((reference: string, overrides: ModelSwitchOverrides = {}) => {
+    return selectModel(reference, overrides, {
+      openModelPicker,
+      commitModelSetup: (setup, apiKey) => commitModelSetup(setup, apiKey, {
+        llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
+      }),
+      startModelSetup: (model, overrides) => startModelSetup(model, overrides, {
+        llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
+      }),
     });
-    setInput(overrides.baseUrl || model.baseUrl);
-    setAcMode("model-setup");
-    setAcIndex(0);
-  }, [llm.apiKey, llm.baseUrl, llm.provider, setModelSetup, setAcMode, setAcIndex]);
+  }, [llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef]);
 
-  const commitModelSetup = useCallback(async (setup: ModelSetupState, apiKey: string) => {
-    try {
-      const newLlmConfig = switchLlmModel(llm, setup.model, {
-        baseUrl: setup.baseUrl,
-        apiKey,
-      });
-      setLlm(newLlmConfig);
-      dispatch({ type: "MODEL_CHANGED", modelName: setup.model.id });
-
-      // Adapt existing conversation history for the new model's capabilities
-      if (historyRef.current.length > 1) {
-        historyRef.current = adaptHistoryForModel(historyRef.current, {
-          targetCapabilities: newLlmConfig.capabilities,
-          sourceCapabilities: llm.capabilities,
-        });
-      }
-
-      setModelSetup(undefined);
-      setAcMode(null);
-      setInput("");
-      // Auto-save as a named profile (fire-and-forget, non-fatal)
-      const defaultName = `${setup.model.provider}-${setup.model.id}`
-        .replace(/[^a-zA-Z0-9_-]/g, "-")
-        .replace(/-+/g, "-")
-        .slice(0, 40);
-      try {
-        await saveProfile(defaultName, {
-          model: `${setup.model.provider}/${setup.model.id}`,
-          baseUrl: setup.baseUrl,
-          apiKey,
-          thinkingLevel: newLlmConfig.thinkingLevel,
-        });
-      } catch { /* non-fatal: model is already switched in memory */ }
-    } catch (error) {
-      setModelSetup({ ...setup, apiKey, error: error instanceof Error ? error.message : String(error) });
-      setInput(apiKey);
-    }
-  }, []);
-
-  const openProfileList = useCallback(async () => {
-    try {
-      const store = await loadProfileStore();
-      const profiles = listProfiles(store);
-      setProfileListState({ profiles, selectedIndex: 0 });
-      setAcMode("profile-list");
-      setInput("");
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  const selectModel = useCallback((reference: string, overrides: ModelSwitchOverrides = {}) => {
-    const applyModel = (model: ModelRef) => {
-      if (hasGatewayOverrides(overrides)) {
-        void commitModelSetup({
-          model,
-          baseUrl: overrides.baseUrl!,
-          apiKey: overrides.apiKey!,
-          field: "apiKey",
-        }, overrides.apiKey!);
-        return;
-      }
-      startModelSetup(model, overrides);
-    };
-    const match = findExactModelReferenceMatch(reference, getAllModels());
-    if (!match) {
-      // An unknown id is a valid custom OpenAI-compatible model. Let the
-      // user configure its gateway instead of trapping them in an empty picker.
-      applyModel(resolveModel(reference, overrides.baseUrl));
-      return;
-    }
-    if (match.ambiguous || !match.model) {
-      openModelPicker(reference, match.matches);
-      return;
-    }
-    applyModel(match.model);
-  }, [commitModelSetup, openModelPicker, startModelSetup]);
+  const openProfileListRef = useCallback(async () => {
+    return openProfileList({ llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef });
+  }, [llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef]);
 
   // Match Codex's direct effort controls: the active model stays fixed and
   // only the next supported reasoning level is applied for subsequent turns.
@@ -426,190 +335,24 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   // ── keyboard handler ─────────────────────────────────────────────────────
 
-  useInput((_ch: string, key: Key) => {
-    if (key.ctrl && (_ch === "c" || _ch === "C")) { abortRef.current.abort(); exit(); return; }
-    
-    // ESC: Cancel current LLM generation (but don't exit program)
-    if (key.escape && state.busy && !acMode) {
-      abortRef.current.abort();
-      // Create new AbortController for next request
-      abortRef.current = new AbortController();
-      dispatch({ type: "CANCEL_GENERATION" });
-      return;
-    }
-    
-    if (!acMode && key.ctrl && (_ch === "y" || _ch === "Y" || _ch === "\u0019")) {
-      suppressInputEchoRef.current = true;
-      void copyResolvedText("auto");
-      return;
-    }
-
-    // Commit the runtime mode first. This also rejects pending approvals and
-    // aborts the active turn before the UI state is updated.
-    if (!acMode && key.shift && key.tab) {
-      suppressInputEchoRef.current = true;
-      const permissionManager = getPermissionManager();
-      const current = PERMISSION_MODES.indexOf(permissionManager.getMode());
-      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
-      permissionManager.setMode(next);
-      dispatch({ type: "SET_PERMISSION_MODE", mode: next });
-      // also refresh system prompt in current history so next turn picks it up immediately
-      if (historyRef.current.length > 0) {
-        const newPrompt = buildSystemPrompt(next);
-        historyRef.current = createAgentHistory(newPrompt, next);
-      }
-      return;
-    }
-
-    if (state.pendingPermission) {
-      pendingPermissionRef.current = true;
-      const decision = resolvePendingPermissionDecision(_ch, key);
-      if (decision) {
-        resolvePendingPermission(decision);
-        return;
-      }
-      return;
-    }
-    pendingPermissionRef.current = false;
-    
-    // Plan approval shortcuts when in review phase
-    if (!acMode && !state.busy && state.phase === "review" && state.currentPlan) {
-      if (_ch === "a" || _ch === "A") {
-        suppressInputEchoRef.current = true;
-        dispatch({ type: "APPROVE_PLAN", planId: state.currentPlan.id });
-        return;
-      }
-      if (_ch === "r" || _ch === "R") {
-        suppressInputEchoRef.current = true;
-        dispatch({ type: "REJECT_PLAN", planId: state.currentPlan.id });
-        return;
-      }
-    }
-
-    // Codex-compatible effort shortcuts:
-    // Shift+↑/↓ and Alt+./, change one level without touching the prompt.
-    if (!acMode && !state.busy && key.shift && key.upArrow) {
-      suppressInputEchoRef.current = true;
-      adjustThinkingLevel("increase");
-      return;
-    }
-    if (!acMode && !state.busy && key.shift && key.downArrow) {
-      suppressInputEchoRef.current = true;
-      adjustThinkingLevel("decrease");
-      return;
-    }
-    if (!acMode && !state.busy && key.meta && (_ch === "." || _ch === ",") && !key.ctrl) {
-      suppressInputEchoRef.current = true;
-      adjustThinkingLevel(_ch === "." ? "increase" : "decrease");
-      return;
-    }
-
-    // Ctrl+R is the quick path: cycle through all levels supported by the
-    // active model, wrapping from the last level back to the first.
-    if (!acMode && !state.busy && key.ctrl && (_ch === "r" || _ch === "R" || _ch === "\u0012")) {
-      suppressInputEchoRef.current = true;
-      adjustThinkingLevel("increase", true);
-      return;
-    }
-
-    // Ctrl+T: cycle global thinking mode (hidden → summary → full)
-    // Some terminals report ctrl+t as input="t" + key.ctrl, others as a control char.
-    if (key.ctrl && (_ch === "t" || _ch === "T" || _ch === "\u0014")) {
-      suppressInputEchoRef.current = true;
-      dispatch({ type: "TOGGLE_THINKING_MODE" });
-      return;
-    }
-    // Alt+T: toggle expand/collapse of focused (or last) reasoning message.
-    if (key.meta && (_ch === "t" || _ch === "T") && !key.ctrl) {
-      suppressInputEchoRef.current = true;
-      dispatch({ type: "TOGGLE_MESSAGE_THINKING" });
-      return;
-    }
-    // Alt+↑ / Alt+↓: move focus among reasoning messages
-    if (!acMode && key.meta && key.upArrow) {
-      dispatch({ type: "FOCUS_NEXT_REASONING", direction: -1 });
-      return;
-    }
-    if (!acMode && key.meta && key.downArrow) {
-      dispatch({ type: "FOCUS_NEXT_REASONING", direction: 1 });
-      return;
-    }
-
-    // Message history scrolling (does not steal autocomplete navigation).
-    // PageUp/PageDown and Ctrl+↑/↓ move a bottom-anchored window over history.
-    if (!acMode) {
-      if (key.pageUp) {
-        dispatch({ type: "SCROLL_BY", delta: Math.max(1, feedHeight - 2) });
-        return;
-      }
-      if (key.pageDown) {
-        dispatch({ type: "SCROLL_BY", delta: -Math.max(1, feedHeight - 2) });
-        return;
-      }
-      if (key.ctrl && key.upArrow) {
-        dispatch({ type: "SCROLL_BY", delta: 1 });
-        return;
-      }
-      if (key.ctrl && key.downArrow) {
-        dispatch({ type: "SCROLL_BY", delta: -1 });
-        return;
-      }
-      // Ctrl+G jumps back to the latest messages (stick-to-bottom).
-      if (key.ctrl && (_ch === "g" || _ch === "G")) {
-        suppressInputEchoRef.current = true;
-        dispatch({ type: "SCROLL_TO_BOTTOM" });
-        return;
-      }
-    }
-    if (handleAutocompleteKey(key)) return;
+  useKeyboardHandler({
+    exit, abortRef, copyResolvedText, getPermissionManager, historyRef,
+    adjustThinkingLevel, resolvePendingPermission, dispatch,
+    acMode, state, feedHeight, handleAutocompleteKey,
+    suppressInputEchoRef, pendingPermissionRef,
   });
 
   // ── direct tool invocation ────────────────────────────────────────────────
 
-  const runDirectTool = useCallback(async (toolName: string, args: Record<string, unknown>) => {
-    const tool = resolveToolProvider(allToolsRef.current).find((t) => t.name === toolName);
-    const fakeCall = { id: `direct-${Date.now()}`, name: toolName, arguments: args };
-    if (!tool) {
-      dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: fakeCall, result: { content: `Unknown tool: ${toolName}`, isError: true } } });
-      return;
-    }
-    dispatch({ type: "LOOP_EVENT", event: { type: "tool_start", call: fakeCall } });
-    const permissionManager = getPermissionManager();
-    const permissionTurn = permissionManager.beginTurn(
-      permissionSessionId,
-      (request) => dispatch({ type: "LOOP_EVENT", event: { type: "permission_required", request } }),
-      abortRef.current.signal,
-    );
-    try {
-      const result = await permissionTurn.execute(tool, args);
-      dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: fakeCall, result } });
-    } catch (err) {
-      dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: fakeCall, result: { content: err instanceof Error ? err.message : String(err), isError: true } } });
-    } finally {
-      permissionTurn.close();
-    }
-  }, [getPermissionManager]);
+  const runDirectToolRef = useCallback(async (toolName: string, args: Record<string, unknown>) => {
+    return runDirectTool(toolName, args, { allTools: allToolsRef.current, permissionSessionId, getPermissionManager, abortSignal: abortRef.current.signal, dispatch });
+  }, [getPermissionManager, abortRef, dispatch]);
 
   // ── @file resolver ────────────────────────────────────────────────────────
 
-  const resolveAtRefs = useCallback(async (text: string, permissionTurn: PermissionTurnContext): Promise<MessageContent> => {
-    const paths = parseAtRefs(text);
-    if (paths.length === 0) return text;
-    const readTool = resolveToolProvider(allToolsRef.current).find((t) => t.name === "read");
-    if (!readTool) return text;
-    const parts: MessageContent = [{ type: "text", text }];
-    for (const p of paths) {
-      try {
-        const result = await permissionTurn.execute(readTool, { path: p });
-        const content = typeof result.content === "string" ? result.content : "";
-        parts.push({ type: "text", text: `\n\n[File: ${p}]\n\`\`\`\n${content}\n\`\`\`` });
-      } catch (error) {
-        if (error instanceof PermissionModeChangedError || permissionTurn.signal.aborted) throw error;
-        /* Keep unresolved references out of the model prompt. */
-      }
-    }
-    return parts;
-  }, []);
+  const resolveAtRefsRef = useCallback(async (text: string, permissionTurn: PermissionTurnContext): Promise<MessageContent> => {
+    return resolveAtRefs(text, permissionTurn, allToolsRef.current);
+  }, [allToolsRef]);
 
   // ── submit handler ────────────────────────────────────────────────────────
 
@@ -674,7 +417,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         setModelSetup({ ...modelSetup, baseUrl, field: "apiKey", error: undefined });
         setInput(modelSetup.apiKey);
       } else {
-        void commitModelSetup(modelSetup, trimmed);
+        void commitModelSetup(modelSetup, trimmed, {
+          llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
+        });
       }
       return;
     }
@@ -715,7 +460,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
     if (/^\/paste-image$/i.test(trimmed)) {
       setInput("");
-      await handlePasteImage();
+      await handlePasteImageRef();
       return;
     }
 
@@ -730,7 +475,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         return;
       }
       try {
-        addPendingImage(await loadImageAttachment(imagePath, cwd));
+        addPendingImageRef(await loadImageAttachment(imagePath, cwd));
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         dispatch({ type: "ATTACHMENT_ERROR", message: `无法添加图片: ${detail}` });
@@ -922,7 +667,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
     // /profiles: show profile list
     if (/^\/profiles?$/i.test(trimmed)) {
-      await openProfileList();
+      await openProfileListRef();
       return;
     }
 
@@ -949,7 +694,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       } else {
         const match = findExactModelReferenceMatch(parsed.reference, getAllModels());
         if (match?.ambiguous) openModelPicker(parsed.reference);
-        else selectModel(parsed.reference, parsed.overrides);
+        else selectModelRef(parsed.reference, parsed.overrides);
       }
       return;
     }
@@ -960,11 +705,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       setInput("");
       dispatch({ type: "USER_MESSAGE", text: trimmed });
       switch (slashCmd.cmd) {
-        case "read": await runDirectTool("read", { path: slashCmd.path }); break;
-        case "bash": await runDirectTool("bash", { command: slashCmd.command }); break;
-        case "ls":   await runDirectTool("ls",   { path: slashCmd.path }); break;
-        case "find": await runDirectTool("find", { pattern: slashCmd.pattern, path: slashCmd.path }); break;
-        case "grep": await runDirectTool("grep", { pattern: slashCmd.pattern, path: slashCmd.path }); break;
+        case "read": await runDirectToolRef("read", { path: slashCmd.path }); break;
+        case "bash": await runDirectToolRef("bash", { command: slashCmd.command }); break;
+        case "ls":   await runDirectToolRef("ls",   { path: slashCmd.path }); break;
+        case "find": await runDirectToolRef("find", { pattern: slashCmd.pattern, path: slashCmd.path }); break;
+        case "grep": await runDirectToolRef("grep", { pattern: slashCmd.pattern, path: slashCmd.path }); break;
       }
       dispatch({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
       return;
@@ -1066,7 +811,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     try {
       let currentUserContent = planTurnOverride
         ? prompt
-        : await resolveAtRefs(prompt, permissionTurn);
+        : await resolveAtRefsRef(prompt, permissionTurn);
       if (imageParts.length > 0) {
         const contentParts = typeof currentUserContent === "string"
           ? [{ type: "text" as const, text: currentUserContent }]
@@ -1251,7 +996,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         }
       }
     }
-  }, [state.busy, acMode, modelSetup, pendingProfileSetup, profileListState, llm, vision, exit, runDirectTool, resolveAtRefs, clearAc, commitModelSetup, openProfileList, getPermissionManager, addPendingImage, handlePasteImage, conversationId, cwd, copyResolvedText]);
+  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText]);
 
   // Start the next queued prompt only after the current turn has emitted done/error/aborted.
   useEffect(() => {
@@ -1335,7 +1080,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               key={inputEpoch}
               value={input}
               onChange={setInputSafe}
-              onPasteImage={handlePasteImage}
+              onPasteImage={handlePasteImageRef}
               onTab={handleTabAt}
               pasteEnabled={!state.pendingPermission}
               focus={!state.pendingPermission}
@@ -1356,7 +1101,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                   }
                   const chosen = modelCandidates[acIndex];
                   if (chosen) {
-                    if (acMode === "model-picker") selectModel(chosen);
+                    if (acMode === "model-picker") selectModelRef(chosen);
                     else acceptModel(acIndex);
                     return;
                   }

@@ -85,9 +85,6 @@ npm install
 | `MINI_AGENT_AUTO_SUBAGENT_PROFILE` | no | auto (`researcher`/`coder`/`reviewer`) |
 | `MINI_AGENT_AUTO_SUBAGENT_MODEL` | no | parent model |
 | `MINI_AGENT_AUTO_SUBAGENT_MAX_TURNS` | no | profile/default |
-| `MINI_AGENT_COORDINATOR_MODE` | no | `true` when auto-subagent is enabled |
-| `MINI_AGENT_MAX_DIRECT_EXPLORATION` | no | `2` parent read/grep/find/ls/codebase_* calls |
-| `MINI_AGENT_SKILLS` | no | comma-separated registered skill names |
 
 \* Real runs need at least one supported provider key.
 `/model` only lists
@@ -121,36 +118,17 @@ propagated into nested subagents, so it does not recurse.
 To restore pure LLM-only delegation:
 
 ```bash
-export MINI_AGENT_AUTO_SUBAGENT=0
-# optional overrides when enabled:
-# export MINI_AGENT_AUTO_SUBAGENT_PROFILE=researcher
-# export MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE=2
-# export MINI_AGENT_COORDINATOR_MODE=0
-# export MINI_AGENT_MAX_DIRECT_EXPLORATION=2
+export MINI_AGENT_AUTO_SUBAGENT=1
+export MINI_AGENT_AUTO_SUBAGENT_PROFILE=researcher  # optional
 ```
 
-Skills can be activated for CLI, TUI, and Web sessions with
-`MINI_AGENT_SKILLS=skill-a,skill-b`. Programmatic callers can pass `skills`,
-`skillNames`, and `skillRegistry` to the agent loop or server options.
-At startup, the CLI, TUI, and Web server automatically discover official-style
-`SKILL.md` packages from `skills/`, `.grok/skills/`, `.claude/skills/`,
-`~/.grok/skills/`, and `~/.claude/skills/`. A file may use optional frontmatter:
-
-```markdown
----
-name: repo-research
-description: Inspect repositories before answering
----
-Read the relevant source files before answering.
-```
-
-Without frontmatter, the directory name is used as the Skill name.
-Discovered skills only contribute their `name` and `description` until they are
-activated. Activation injects the `SKILL.md` body and, when present, the skill
-directory plus `scripts/` and `references/` filenames. The model can then use
-`read` or `bash` to open those files. Scripts are never executed automatically.
-
-In the TUI, `/skill` (alias `/skills`) lists discovered skills and can enable, disable, or clear them for the current session. The HTTP server exposes `GET/PUT /api/sessions/:id/skills`.
+The loop scores the initial request using explainable signals such as prompt
+length, multi-step language, code/workspace context, and investigation terms.
+When the score reaches `MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE`, it runs one
+subagent preflight before the parent model call, then returns the result to the
+parent context. The option is not propagated into nested subagents, so this
+does not recursively trigger automatic preflights. Leave the flag unset to
+keep the existing LLM-only delegation behavior.
 
 The vision variables are optional. For the generic provider, the three
 `VISION_API_KEY`, `VISION_BASE_URL`, and `VISION_MODEL` values must be set
