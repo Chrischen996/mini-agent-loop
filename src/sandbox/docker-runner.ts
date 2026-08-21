@@ -4,6 +4,7 @@ import type { SandboxRunner, SandboxExecOptions, SandboxResult } from "./types.t
 
 export class DockerSandboxRunner implements SandboxRunner {
   readonly type = "docker" as const;
+  readonly isolation = "secure-sandbox" as const;
   private containerIds = new Set<string>();
 
   constructor(private readonly image = "mini-agent-sandbox:latest") {}

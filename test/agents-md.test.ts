@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { mkdtemp, writeFile, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { loadAgentsMd } from "../src/agents-md.ts";
+import { loadAgentsMd, loadInstructionBundle } from "../src/agents-md.ts";
 import { buildSystemPrompt } from "../src/loop.ts";
 
 describe("loadAgentsMd", () => {
@@ -48,6 +48,21 @@ describe("loadAgentsMd", () => {
       assert.equal(result, "caps content");
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("merges ancestor instructions from low to high precedence", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agents-bundle-"));
+    const nested = path.join(root, "repo", "src");
+    try {
+      await mkdir(nested, { recursive: true });
+      await writeFile(path.join(root, "repo", "AGENTS.md"), "repo rules");
+      await writeFile(path.join(nested, ".agents.md"), "src rules");
+      const bundle = await loadInstructionBundle(nested, { includeGlobal: false });
+      assert.deepEqual(bundle.sources.map((source) => source.content), ["repo rules", "src rules"]);
+      assert.ok(bundle.content.indexOf("repo rules") < bundle.content.indexOf("src rules"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

@@ -80,11 +80,14 @@ npm install
 | `MINI_AGENT_MCP_CONFIG` | no | — |
 | `MINI_AGENT_PERMISSION_MODE` | no | `plan` (or `bypass`) |
 | `MINI_AGENT_SUBAGENT` | no | `1` in CLI/server, TUI always on |
+| `MINI_AGENT_GLOBAL_TOKEN_BUDGET` | no | unlimited; shared by parent and nested subagents |
+| `MINI_AGENT_GLOBAL_CONCURRENCY_LIMIT` | no | unlimited; applies across overlapping batches |
 | `MINI_AGENT_AUTO_SUBAGENT` | no | enabled by default; set `0`/`false`/`off` to disable |
 | `MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE` | no | `2` |
 | `MINI_AGENT_AUTO_SUBAGENT_PROFILE` | no | auto (`researcher`/`coder`/`reviewer`) |
 | `MINI_AGENT_AUTO_SUBAGENT_MODEL` | no | parent model |
 | `MINI_AGENT_AUTO_SUBAGENT_MAX_TURNS` | no | profile/default |
+| `MINI_AGENT_AUTO_SUBAGENT_ALLOW_WRITES` | no | disabled; automatic preflight stays read-only |
 
 \* Real runs need at least one supported provider key.
 `/model` only lists
@@ -101,7 +104,7 @@ before the parent model call and injects the result into parent context.
 
 Profile selection is automatic unless you override it:
 
-- write/implement/refactor → `coder`
+- write/implement/refactor → `researcher` by default; `coder` requires `MINI_AGENT_AUTO_SUBAGENT_ALLOW_WRITES=1`
 - pure review/audit → `reviewer`
 - otherwise → `researcher`
 
@@ -114,6 +117,13 @@ uses a focused child task (not the raw user prompt blob) and returns recoverable
 partial progress when `maxTurns` is hit or no clean final summary is produced,
 instead of hard-failing the whole delegation. The preflight option is not
 propagated into nested subagents, so it does not recurse.
+
+The built-in `researcher` and `reviewer` profiles are read-only and cannot use
+workspace writes, process execution, network access, or external MCP data. The
+parent and nested subagents can share a total token budget through
+`MINI_AGENT_GLOBAL_TOKEN_BUDGET`; `MINI_AGENT_GLOBAL_CONCURRENCY_LIMIT` bounds
+overlapping `subagent_batch` work. A value of `0` for the concurrency limit
+means unlimited.
 
 To restore pure LLM-only delegation:
 

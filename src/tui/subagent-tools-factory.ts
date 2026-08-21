@@ -14,6 +14,8 @@ export type SubagentToolsFactoryDeps = {
   onSubagentEvent: (event: SubagentEvent) => void;
   getPermissionTurn: () => PermissionTurnContext | undefined;
   parentRuntime: AgentRuntimeRef;
+  globalTokenBudget?: number;
+  globalConcurrencyLimit?: number;
 };
 
 /**
@@ -37,6 +39,8 @@ export class SubagentToolsFactory {
         onSubagentEvent: deps.onSubagentEvent,
         getPermissionTurn: deps.getPermissionTurn,
         parentRuntime: deps.parentRuntime,
+        globalTokenBudget: deps.globalTokenBudget,
+        globalConcurrencyLimit: deps.globalConcurrencyLimit,
       };
       this.tools = [
         createSubagentTool(sharedOptions) as Tool,

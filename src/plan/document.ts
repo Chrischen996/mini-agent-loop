@@ -26,6 +26,7 @@ export type PlanDocumentStep = {
 export type PlanExecutionBaseline = {
   gitHead?: string | null;
   dirtyFiles?: string[];
+  dirtyFileHashes?: Record<string, string | null>;
 };
 
 export type PlanExecutionState = {

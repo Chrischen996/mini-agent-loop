@@ -13,6 +13,8 @@ import {
 } from "./permissions.ts";
 import {
   completeChat,
+  LlmRetryCoordinator,
+  waitForRetry,
   isAbortError,
   isContextOverflowError,
   streamChat,
@@ -20,8 +22,8 @@ import {
   type ChatFn,
   IncompleteLlmResponseError,
   type LlmConfig,
-  type StreamChatUsage,
   type RetryableErrorType,
+  type StreamChatUsage,
   LlmTimeoutError,
   ThinkingCapabilityError,
 } from "./llm/index.ts";
@@ -69,6 +71,13 @@ import type { SessionPhase, ExecutionPlan, PlanActEvent } from "./plan-act/types
 import { planManager } from "./plan-act/plan-manager.ts";
 import { planGenerator } from "./plan-act/plan-generator.ts";
 import { validatePhaseTransition, isTerminalPhase } from "./plan-act/state-machine.ts";
+import {
+  ToolExecutionBroker,
+  executeToolWithBroker,
+  type ToolExecutionAuditEvent,
+} from "./runtime/tool-execution-broker.ts";
+import type { RuntimeExecutionContext } from "./runtime/policy-types.ts";
+import type { PauseGate } from "./orchestration/pause-gate.ts";
 
 export type NextTurnUpdate = {
   llm?: LlmConfig;
@@ -117,6 +126,8 @@ export type AgentLoopOptions = {
   systemPrompt?: string;
   /** Hard stop for runaway loops. Default: 30 */
   maxTurns?: number;
+  /** Optional total token budget shared by this loop and nested subagents. */
+  globalTokenBudget?: number;
   /** Inject a faux model in tests. */
   chat?: ChatFn;
   onEvent?: (event: LoopEvent) => void;
@@ -129,6 +140,14 @@ export type AgentLoopOptions = {
   userContent?: MessageContent;
   /** Optional cancellation signal for the whole turn. */
   signal?: AbortSignal;
+  /** Cooperative pause gate used by background orchestration jobs. */
+  pauseGate?: PauseGate;
+  /** Shared runtime identity and policy snapshot for tool execution. */
+  runtimeContext?: RuntimeExecutionContext;
+  /** Injectable execution boundary used by the loop and nested callers. */
+  toolExecutionBroker?: ToolExecutionBroker;
+  /** Optional audit sink for every tool execution attempt. */
+  onToolExecutionAudit?: (event: ToolExecutionAuditEvent) => void;
   /** Context compaction settings for long-running sessions. */
   context?: ContextManagerOptions;
   authorizeTool?: (tool: Tool, args: Record<string, unknown>, signal?: AbortSignal) => Promise<void>;
@@ -194,6 +213,12 @@ export type AgentRuntimeRef = {
   context?: ContextManagerOptions;
   /** Currently resolved skill names for this loop, inherited by nested subagents. */
   skillNames?: string[];
+  /** Execution policy and broker shared with nested tool boundaries. */
+  executionContext?: RuntimeExecutionContext;
+  toolExecutionBroker?: ToolExecutionBroker;
+  onToolExecutionAudit?: (event: ToolExecutionAuditEvent) => void;
+  /** Shared token budget state, when the caller enables a global budget. */
+  globalBudgetState?: { used: number; limit: number };
 };
 
 export type LoopEvent =
@@ -263,6 +288,7 @@ const PERMISSION_MODE_MARKER = "\n[MODE]\n";
 /** Mode-specific suffix appended to the system prompt. */
 const MODE_SUFFIX: Record<PermissionMode, string> = {
   plan: "mode=plan. Read-only tools only. No writes, dangerous bash, or MCP. Output a plan first.",
+  approval: "mode=approval. Safe reads may run; writes, dangerous bash, and remote tools pause for explicit approval.",
   bypass: "mode=bypass. All tools run without approval; sandbox rules still apply.",
 };
 
@@ -360,6 +386,7 @@ export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string): str
     "",
     "### Permission Mode Awareness",
     "- plan mode: you CANNOT write. Say \"我当前处于计划模式，无权限改代码。\" and output a clear plan for user review.",
+    "- approval mode: safe reads may run; writes, dangerous bash, and remote tools pause until the user explicitly allows or denies them.",
     "- bypass mode: all registered tools may run without interactive approval; sandbox rules still apply.",
     "- When a tool call is blocked, adapt and inform the user about the mode constraint.",
     "",
@@ -539,11 +566,16 @@ async function runAgentTurnInternal(
     llm: configuredLlm,
     tools,
     maxTurns = 30,
+    globalTokenBudget,
     chat: completeChat,
     onEvent,
     userContent,
     preprocessors = [],
     signal,
+    pauseGate,
+    runtimeContext,
+    toolExecutionBroker,
+    onToolExecutionAudit,
     context,
     authorizeTool,
     parallelToolExecution = true,
@@ -561,6 +593,13 @@ async function runAgentTurnInternal(
     sessionPhase,
     onPlanEvent,
   } = options;
+
+  const activeRuntimeRef = runtimeRef ?? (globalTokenBudget !== undefined ? {} : undefined);
+  if (activeRuntimeRef && globalTokenBudget !== undefined && !activeRuntimeRef.globalBudgetState) {
+    activeRuntimeRef.globalBudgetState = { used: 0, limit: globalTokenBudget };
+  }
+  const effectiveRuntimeContext = runtimeContext ?? activeRuntimeRef?.executionContext ?? {};
+  const effectiveAudit = onToolExecutionAudit ?? activeRuntimeRef?.onToolExecutionAudit;
 
   // ── Skill resolution and merging ─────────────────────────────────────────
   const resolvedFromNames = skillRegistry.resolve(skillNames);
@@ -632,6 +671,7 @@ async function runAgentTurnInternal(
   const activePermissionMode = permissionTurn?.mode ?? permissionMode;
   const activeSignal = signal ?? permissionTurn?.signal;
   let checkpointPromise: Promise<unknown> | undefined;
+  const executionBroker = toolExecutionBroker ?? activeRuntimeRef?.toolExecutionBroker ?? new ToolExecutionBroker();
   const checkpointBeforeWrite = async (tool: Tool): Promise<void> => {
     if (!autoCheckpoint || checkpointPromise || !["write", "edit", "delete", "mkdir", "copy", "move", "patch", "document_edit"].includes(tool.name)) return;
     checkpointPromise = new GitWorkflow(validationWorkspace).createCheckpoint(`before-turn-${Date.now()}`);
@@ -671,6 +711,7 @@ async function runAgentTurnInternal(
   };
 
   const executeTool = async (tool: Tool, args: Record<string, unknown>): Promise<ToolResult> => {
+    await pauseGate?.wait(activeSignal);
     if (coordinatorActive && EXPLORATION_TOOL_NAMES.has(tool.name)) {
       if (directExplorationUsed >= maxDirectExploration) {
         return {
@@ -706,10 +747,17 @@ async function runAgentTurnInternal(
       });
     }
 
-    if (permissionTurn) return permissionTurn.execute(tool, args, activeSignal, () => checkpointBeforeWrite(tool));
-    await authorizeTool?.(tool, args, signal);
-    await checkpointBeforeWrite(tool);
-    return tool.execute(args, signal);
+    return executeToolWithBroker({
+      broker: executionBroker,
+      tool,
+      args,
+      runtimeContext: effectiveRuntimeContext,
+      signal: activeSignal,
+      permissionTurn,
+      authorizeTool,
+      beforeExecute: () => checkpointBeforeWrite(tool),
+      onAudit: effectiveAudit,
+    });
   };
   let currentLlm = initialLlm;
   let currentContext = context;
@@ -734,15 +782,29 @@ async function runAgentTurnInternal(
   const messages: AgentMessage[] = [...compactHistory(history, currentContext), ...initialBatch];
 
   const syncRuntimeRef = (): void => {
-    if (!runtimeRef) return;
-    runtimeRef.llm = currentLlm;
-    runtimeRef.history = messages;
-    runtimeRef.thinkingMode = effectiveThinkingMode;
-    runtimeRef.maxThinkingEscalations = maxThinkingEscalations;
-    runtimeRef.context = currentContext;
-    runtimeRef.skillNames = activeSkills.map((skill) => skill.name);
+    if (!activeRuntimeRef) return;
+    activeRuntimeRef.llm = currentLlm;
+    activeRuntimeRef.history = messages;
+    activeRuntimeRef.thinkingMode = effectiveThinkingMode;
+    activeRuntimeRef.maxThinkingEscalations = maxThinkingEscalations;
+    activeRuntimeRef.context = currentContext;
+    activeRuntimeRef.skillNames = activeSkills.map((skill) => skill.name);
+    if (runtimeContext) activeRuntimeRef.executionContext = runtimeContext;
+    if (executionBroker) activeRuntimeRef.toolExecutionBroker = executionBroker;
+    if (effectiveAudit) activeRuntimeRef.onToolExecutionAudit = effectiveAudit;
   };
   syncRuntimeRef();
+
+  const emitAssistantEvent = (message: AssistantMessage, usage?: StreamChatUsage): void => {
+    const budget = activeRuntimeRef?.globalBudgetState;
+    let exceeded = false;
+    if (budget && usage?.totalTokens) {
+      budget.used += usage.totalTokens;
+      exceeded = budget.used > budget.limit;
+    }
+    onEvent?.({ type: "assistant", message, ...(usage ? { usage } : {}) });
+    if (exceeded) throw new Error(`Global agent token budget exceeded (${budget?.limit}).`);
+  };
 
   // Keep the model's active mode synchronized when a session changes modes.
   if (activePermissionMode !== undefined) applyPermissionModePrompt(messages, activePermissionMode);
@@ -773,6 +835,7 @@ async function runAgentTurnInternal(
   maxDirectExploration =
     options.autoSubagent?.maxDirectExploration ?? DEFAULT_MAX_DIRECT_EXPLORATION;
   let reasoningOnlyRetries = 0;
+  const retryCoordinator = new LlmRetryCoordinator();
 
   if (initialDecision) {
     onEvent?.({
@@ -866,7 +929,7 @@ async function runAgentTurnInternal(
     // ── No tool calls ──────────────────────────────────────────────
     if (calls.length === 0) {
       if (assistant.content.trim().length === 0) {
-        onEvent?.({ type: "assistant", message: assistant, usage });
+        emitAssistantEvent(assistant, usage);
         emptyAssistantResponses += 1;
         if (emptyAssistantResponses > MAX_EMPTY_ASSISTANT_RESPONSES) {
           throw new Error(
@@ -877,7 +940,7 @@ async function runAgentTurnInternal(
       }
       emptyAssistantResponses = 0;
       messages.push(assistant);
-      onEvent?.({ type: "assistant", message: assistant, usage });
+      emitAssistantEvent(assistant, usage);
       
       // Check if this is a plan generation in planning phase
       if (sessionPhase === "planning" && onPlanEvent) {
@@ -898,7 +961,7 @@ async function runAgentTurnInternal(
     // ── Has tool calls ─────────────────────────────────────────────
     emptyAssistantResponses = 0;
     messages.push(assistant);
-    onEvent?.({ type: "assistant", message: assistant, usage });
+    emitAssistantEvent(assistant, usage);
 
     let toolMessages: ToolResultMessage[];
     let wasAborted: boolean;
@@ -1058,7 +1121,7 @@ async function runAgentTurnInternal(
       const validationCall: ToolCall = { id: `auto_validation_${turn}`, name: "validate_workspace", arguments: {} };
       const validationAssistant: AssistantMessage = { role: "assistant", content: "", toolCalls: [validationCall] };
       messages.push(validationAssistant);
-      onEvent?.({ type: "assistant", message: validationAssistant });
+      emitAssistantEvent(validationAssistant);
       onEvent?.({ type: "tool_start", call: validationCall });
       const report = await runValidation({ workspace: validationWorkspace, signal: activeSignal });
       const validationResult: ToolResult = { content: formatValidationReport(report), isError: !report.ok };
@@ -1084,9 +1147,13 @@ async function runAgentTurnInternal(
   }
 
   for (let turn = 1; turn <= maxTurns; turn++) {
+    await pauseGate?.wait(activeSignal);
     if (activeSignal?.aborted) {
       emitAborted(onEvent, messages, permissionTurn);
       return messages;
+    }
+    if (activeRuntimeRef?.globalBudgetState && activeRuntimeRef.globalBudgetState.used >= activeRuntimeRef.globalBudgetState.limit) {
+      throw new Error(`Global agent token budget exhausted (${activeRuntimeRef.globalBudgetState.limit}).`);
     }
     try {
       permissionTurn?.assertCurrent();
@@ -1160,7 +1227,7 @@ async function runAgentTurnInternal(
             toolCalls: [call],
           };
           messages.push(assistant);
-          onEvent?.({ type: "assistant", message: assistant });
+          emitAssistantEvent(assistant);
           onEvent?.({ type: "tool_start", call });
 
           let result: ToolResult;
@@ -1291,7 +1358,7 @@ async function runAgentTurnInternal(
             if (streamed) {
               assistant = { role: "assistant", content: streamed };
               messages.push(assistant);
-              onEvent?.({ type: "assistant", message: assistant });
+              emitAssistantEvent(assistant);
             }
             emitAborted(onEvent, messages, permissionTurn);
             return messages;
@@ -1303,7 +1370,7 @@ async function runAgentTurnInternal(
             if (streamed) {
               const partial = { role: "assistant" as const, content: streamed };
               messages.push(partial);
-              onEvent?.({ type: "assistant", message: partial });
+              emitAssistantEvent(partial);
             }
             // Attach the accumulated messages so the caller can restore history.
             throw new LlmTimeoutError(err.partialContent, messages);
@@ -1359,6 +1426,24 @@ async function runAgentTurnInternal(
           throw new Error("Context window overflowed and could not be compacted further");
         }
         messages.splice(0, messages.length, ...compacted);
+        turn -= 1;
+        continue;
+      }
+
+      // Retry only request-level transient failures. Retrying after a tool
+      // call, timeout, permission error, or budget error could repeat side
+      // effects or hide the actual policy boundary.
+      const retry = retryCoordinator.next(err);
+      if (retry) {
+        onEvent?.({
+          type: "retry_attempt",
+          errorType: retry.errorType,
+          attempt: retry.attempt,
+          maxRetries: retry.maxRetries,
+          delayMs: retry.delayMs,
+          errorMessage: err instanceof Error ? err.message : String(err),
+        });
+        await waitForRetry(retry.delayMs, activeSignal);
         turn -= 1;
         continue;
       }

@@ -176,9 +176,10 @@ export async function preparePlanForExecution(
   }
 
   const workspaceRoot = opts.workspaceRoot ?? cwd;
-  let baseline: { gitHead: string | null; dirtyFiles: string[] } = {
+  let baseline: { gitHead: string | null; dirtyFiles: string[]; dirtyFileHashes: Record<string, string | null> } = {
     gitHead: null,
     dirtyFiles: [],
+    dirtyFileHashes: {},
   };
   try {
     baseline = await captureBaseline(workspaceRoot);

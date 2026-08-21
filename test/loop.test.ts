@@ -39,6 +39,70 @@ const dummyLlm = makeLlmConfig({
 });
 
 describe("runAgentLoop", () => {
+  it("enforces an exhausted global token budget before the parent model call", async () => {
+    let chatCalled = false;
+    await assert.rejects(
+      () => runAgentLoop("budget check", {
+        llm: dummyLlm,
+        tools: [],
+        globalTokenBudget: 0,
+        chat: async () => {
+          chatCalled = true;
+          return { role: "assistant", content: "must not run" };
+        },
+      }),
+      /Global agent token budget exhausted/,
+    );
+    assert.equal(chatCalled, false);
+  });
+
+  it("accounts parent assistant usage in the shared runtime budget", async () => {
+    const runtimeRef: import("../src/loop.ts").AgentRuntimeRef = {};
+    const messages = await runAgentLoop("budget usage", {
+      llm: dummyLlm,
+      tools: [],
+      globalTokenBudget: 10,
+      runtimeRef,
+      chat: async () => ({
+        role: "assistant",
+        content: "done",
+        usage: {
+          promptTokens: 4,
+          inputTokens: 4,
+          completionTokens: 1,
+          totalTokens: 5,
+        },
+      } as import("../src/types.ts").AssistantMessage & { usage: { promptTokens: number; inputTokens: number; completionTokens: number; totalTokens: number } }),
+    });
+    assert.equal(messages.at(-1)?.role, "assistant");
+    assert.equal(runtimeRef.globalBudgetState?.used, 5);
+  });
+
+  it("retries a transient network failure before failing the turn", async () => {
+    let calls = 0;
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+    const messages = await runAgentLoop("retry transient provider failure", {
+      llm: dummyLlm,
+      tools: [],
+      chat: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("LLM network error: ECONNRESET");
+        return { role: "assistant", content: "recovered" };
+      },
+      onEvent: (event) => events.push(event),
+    });
+
+    assert.equal(calls, 2);
+    assert.equal(messages.at(-1)?.role, "assistant");
+    assert.equal((messages.at(-1) as { content: string }).content, "recovered");
+    const retry = events.find((event) => event.type === "retry_attempt");
+    assert.ok(retry && retry.type === "retry_attempt");
+    if (retry?.type === "retry_attempt") {
+      assert.equal(retry.errorType, "network");
+      assert.equal(retry.attempt, 1);
+    }
+  });
+
   it("happy path: user -> assistant(toolCalls) -> tool -> assistant(text)", async () => {
     const tools = createDefaultTools(process.cwd());
     const chat = createFauxChat({

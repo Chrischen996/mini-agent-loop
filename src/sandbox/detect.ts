@@ -29,7 +29,7 @@ export async function detectPodman(): Promise<boolean> {
 export async function detectBestSandboxType(
   config: SandboxConfig,
 ): Promise<SandboxType> {
-  if (!config.enabled || config.type === "none") {
+  if (!config.enabled || config.mode === "disabled" || config.type === "none") {
     return "none";
   }
 
@@ -42,6 +42,9 @@ export async function detectBestSandboxType(
   }
 
   if (config.type === "node") {
+    if (config.mode === "required") {
+      throw new Error("Secure sandbox required but Node process isolation was requested");
+    }
     return "node";
   }
 
@@ -54,5 +57,8 @@ export async function detectBestSandboxType(
     return "docker"; // Podman is Docker-compatible
   }
 
+  if (config.mode === "required") {
+    throw new Error("Secure sandbox required but Docker/Podman is not available");
+  }
   return "node";
 }

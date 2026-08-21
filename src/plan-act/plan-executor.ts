@@ -4,6 +4,8 @@ import type { PermissionManager, PermissionTurnContext } from "../permissions.ts
 import type { Tool } from "../tools/types.ts";
 import { planManager } from "./plan-manager.ts";
 import { validatePhaseTransition, logPhaseTransition } from "./state-machine.ts";
+import { ToolExecutionBroker, type ToolExecutionAuditEvent } from "../runtime/tool-execution-broker.ts";
+import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 
 /**
  * Executor for execution plans.
@@ -12,6 +14,7 @@ export class PlanExecutor {
   private readonly permissionManager: PermissionManager;
   private readonly toolProvider: () => Tool[];
   private readonly options: PlanExecutorOptions;
+  private readonly executionBroker: ToolExecutionBroker;
 
   constructor(
     permissionManager: PermissionManager,
@@ -21,6 +24,7 @@ export class PlanExecutor {
     this.permissionManager = permissionManager;
     this.toolProvider = toolProvider;
     this.options = options;
+    this.executionBroker = options.toolExecutionBroker ?? new ToolExecutionBroker();
   }
 
   /**
@@ -189,7 +193,13 @@ export class PlanExecutor {
       planManager.updateStepStatus(plan.id, step.id, "running");
 
       // Execute with permission check
-      const result = await turn.execute(tool, step.arguments, signal);
+      const result = await this.executionBroker.execute(tool, step.arguments, {
+        ...this.options.runtimeContext,
+        signal,
+        permissionTurn: turn,
+        policyRevision: this.options.runtimeContext?.policyRevision ?? turn.revision,
+        onAudit: this.options.onToolExecutionAudit,
+      });
 
       // Update step status
       step.status = "completed";
@@ -249,6 +259,12 @@ export interface PlanExecutorOptions {
   stopOnError?: boolean;
   /** Event callback for plan lifecycle events. */
   onEvent?: (event: import("./types.ts").PlanActEvent) => void;
+  /** Shared execution boundary for plan steps. */
+  toolExecutionBroker?: ToolExecutionBroker;
+  /** Runtime identity and policy fields attached to every step execution. */
+  runtimeContext?: RuntimeExecutionContext;
+  /** Optional audit sink for plan tool calls. */
+  onToolExecutionAudit?: (event: ToolExecutionAuditEvent) => void;
 }
 
 /**

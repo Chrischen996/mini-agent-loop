@@ -30,13 +30,13 @@ export const researcherProfile: SubagentProfile = {
     "grep",
     "find",
     "ls",
-    "bash",
     "codebase_open",
     "codebase_search",
     "codebase_read",
     "codebase_explain",
   ],
   maxTurns: 12,
+  readOnly: true,
 };
 
 // ─── Coder ───────────────────────────────────────────────────────────────────
@@ -63,7 +63,6 @@ export const coderProfile: SubagentProfile = {
     "grep",
     "find",
     "ls",
-    "bash",
   ],
   maxTurns: 15,
 };
@@ -80,7 +79,7 @@ export const reviewerProfile: SubagentProfile = {
     "- NEVER modify any file. Your output is analysis only.",
     "- Check for: bugs, edge cases, security issues, performance problems, code style.",
     "- Use `grep` and `find` to trace dependencies and usage patterns.",
-    "- Use `bash` only for read-only commands (e.g. `git log`, `git diff`, type-checking).",
+    "- Use the provided read and search tools to inspect the workspace; do not execute commands.",
     "- Structure your review with clear categories (bugs, improvements, style).",
     "- Rate severity: 🔴 critical, 🟡 warning, 🔵 suggestion.",
     "- Be specific — reference file paths and line numbers.",
@@ -91,11 +90,11 @@ export const reviewerProfile: SubagentProfile = {
     "grep",
     "find",
     "ls",
-    "bash",
     "codebase_read",
     "codebase_explain",
   ],
   maxTurns: 10,
+  readOnly: true,
 };
 
 // ─── All built-in profiles ───────────────────────────────────────────────────

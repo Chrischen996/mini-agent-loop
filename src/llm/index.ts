@@ -42,6 +42,7 @@ export {
   ProtocolError,
   LlmTimeoutError,
 } from "./retry.ts";
+export { LlmRetryCoordinator, waitForRetry, type RetryDecision } from "./recovery.ts";
 
 // ── vision ───────────────────────────────────────────────────────────────────
 export { prepareMessagesForModel } from "./vision.ts";

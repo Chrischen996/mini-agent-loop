@@ -313,7 +313,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     case "TOGGLE_PERMISSION_MODE": {
       const current = PERMISSION_MODES.indexOf(state.permissionMode);
       const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
-      const modeLabel = next === "plan" ? "计划" : "绕过";
+      const modeLabel = next === "plan" ? "计划" : next === "approval" ? "审批" : "绕过";
       return {
         ...state,
         permissionMode: next,
@@ -322,7 +322,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     }
 
     case "SET_PERMISSION_MODE": {
-      const modeLabel = action.mode === "plan" ? "计划" : "绕过";
+      const modeLabel = action.mode === "plan" ? "计划" : action.mode === "approval" ? "审批" : "绕过";
       return {
         ...state,
         permissionMode: action.mode,

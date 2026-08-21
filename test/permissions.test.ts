@@ -43,6 +43,32 @@ describe("PermissionManager", () => {
     });
   });
 
+  it("pauses risky tools in approval mode and resumes after an explicit decision", async () => {
+    const manager = new PermissionManager("approval");
+    const requests: string[] = [];
+    manager.onPermissionEvent = (event) => {
+      if (event.type === "request") requests.push(event.request.id);
+    };
+    let executed = false;
+    const pending = manager.beginTurn("session", (request) => {
+      requests.push(request.id);
+    }).execute({
+      ...writeTool,
+      execute: async () => {
+        executed = true;
+        return { content: "approved" };
+      },
+    }, { path: "approved.txt" });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(executed, false);
+    assert.equal(requests.length, 2);
+    assert.equal(manager.resolve("session", requests[0]!, "allow"), true);
+    const result = await pending;
+    assert.equal(result.content, "approved");
+    assert.equal(executed, true);
+  });
+
   it("automatically allows read-only codebase operations after opening a handle", async () => {
     const manager = new PermissionManager();
     for (const name of ["codebase_search", "codebase_read", "codebase_explain"]) {

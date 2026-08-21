@@ -4,8 +4,23 @@ import { isPathInsideCwd } from "../workspace.ts";
 import { resolve } from "node:path";
 import type { SandboxRunner, SandboxExecOptions, SandboxResult } from "./types.ts";
 
+const INHERITED_ENVIRONMENT = new Set([
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "TERM",
+  "CI",
+]);
+
 export class NodeSandboxRunner implements SandboxRunner {
   readonly type = "node" as const;
+  readonly isolation = "process-isolation" as const;
 
   async execute(options: SandboxExecOptions): Promise<SandboxResult> {
     const {
@@ -30,6 +45,19 @@ export class NodeSandboxRunner implements SandboxRunner {
       let stdout = "";
       let stderr = "";
       let timedOut = false;
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      let forceKillHandle: NodeJS.Timeout | undefined;
+
+      const clearTimeoutHandle = () => {
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+          timeoutHandle = undefined;
+        }
+        if (forceKillHandle) {
+          clearTimeout(forceKillHandle);
+          forceKillHandle = undefined;
+        }
+      };
 
       proc.stdout?.on("data", (chunk) => {
         stdout += chunk.toString();
@@ -45,10 +73,12 @@ export class NodeSandboxRunner implements SandboxRunner {
       }
 
       proc.on("error", (err) => {
+        clearTimeoutHandle();
         reject(new Error(`Failed to spawn process: ${err.message}`));
       });
 
       proc.on("close", (exitCode, signal) => {
+        clearTimeoutHandle();
         resolve({
           stdout,
           stderr,
@@ -59,10 +89,13 @@ export class NodeSandboxRunner implements SandboxRunner {
       });
 
       if (timeout) {
-        setTimeout(() => {
+        timeoutHandle = setTimeout(() => {
           timedOut = true;
           proc.kill("SIGTERM");
-          setTimeout(() => proc.kill("SIGKILL"), 1000);
+          forceKillHandle = setTimeout(() => {
+            forceKillHandle = undefined;
+            proc.kill("SIGKILL");
+          }, 1000);
         }, timeout);
       }
     });
@@ -78,7 +111,10 @@ export class NodeSandboxRunner implements SandboxRunner {
   ): Record<string, string> {
     const env: Record<string, string> = {};
     
+    // Process isolation is not a secure sandbox. Keep credentials out of the
+    // child by default while preserving enough environment for common tools.
     for (const [key, value] of Object.entries(process.env)) {
+      if (!INHERITED_ENVIRONMENT.has(key) && !key.startsWith("LC_")) continue;
       if (value !== undefined) {
         env[key] = value;
       }

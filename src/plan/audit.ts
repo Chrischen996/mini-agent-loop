@@ -3,11 +3,23 @@
  * and infer per-step status after a run.
  */
 
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { PlanDocumentStep, PlanStepStatus } from "./document.ts";
 
 const execFileAsync = promisify(execFile);
+
+async function workspaceFileHash(workspaceRoot: string, relativePath: string): Promise<string | null> {
+  try {
+    const bytes = await readFile(path.join(workspaceRoot, relativePath));
+    return createHash("sha256").update(bytes).digest("hex");
+  } catch {
+    return null;
+  }
+}
 
 export type FileAuditResult = {
   changedFiles: string[];
@@ -196,22 +208,27 @@ function parsePorcelainPaths(porcelain: string): string[] {
 
 export async function captureBaseline(
   workspaceRoot: string,
-): Promise<{ gitHead: string | null; dirtyFiles: string[] }> {
+): Promise<{ gitHead: string | null; dirtyFiles: string[]; dirtyFileHashes: Record<string, string | null> }> {
   const inside = await runGit(workspaceRoot, ["rev-parse", "--is-inside-work-tree"]);
   if (!inside.ok || !inside.stdout.trim().includes("true")) {
-    return { gitHead: null, dirtyFiles: [] };
+    return { gitHead: null, dirtyFiles: [], dirtyFileHashes: {} };
   }
   const head = await runGit(workspaceRoot, ["rev-parse", "HEAD"]);
   const status = await runGit(workspaceRoot, ["status", "--porcelain"]);
+  const dirtyFiles = parsePorcelainPaths(status.stdout);
+  const dirtyFileHashes = Object.fromEntries(await Promise.all(
+    dirtyFiles.map(async (file) => [file, await workspaceFileHash(workspaceRoot, file)] as const),
+  ));
   return {
     gitHead: head.ok ? head.stdout.trim() || null : null,
-    dirtyFiles: parsePorcelainPaths(status.stdout),
+    dirtyFiles,
+    dirtyFileHashes,
   };
 }
 
 export async function collectChangedFiles(
   workspaceRoot: string,
-  _baseline?: { dirtyFiles?: string[] },
+  baseline?: { dirtyFiles?: string[]; dirtyFileHashes?: Record<string, string | null> },
 ): Promise<string[]> {
   const inside = await runGit(workspaceRoot, ["rev-parse", "--is-inside-work-tree"]);
   if (!inside.ok || !inside.stdout.trim().includes("true")) {
@@ -228,7 +245,20 @@ export async function collectChangedFiles(
         .filter(Boolean)
     : [];
 
-  return Array.from(new Set([...fromStatus, ...fromDiff]));
+  const baselineFiles = new Set((baseline?.dirtyFiles ?? []).map(normalizePath));
+  const baselineHashes = baseline?.dirtyFileHashes ?? {};
+  const candidates = Array.from(new Set([...fromStatus, ...fromDiff]));
+  const changed: string[] = [];
+  for (const file of candidates) {
+    if (!baselineFiles.has(file)) {
+      changed.push(file);
+      continue;
+    }
+    if (!Object.prototype.hasOwnProperty.call(baselineHashes, file)) continue;
+    const currentHash = await workspaceFileHash(workspaceRoot, file);
+    if (currentHash !== baselineHashes[file]) changed.push(file);
+  }
+  return changed;
 }
 
 export async function runExecutionAudit(input: {

@@ -23,7 +23,7 @@ import { createGitTools } from "./git.ts";
 import { createValidationTool } from "./validation.ts";
 import { createSandboxRunner, type SandboxConfig, type SandboxRunner } from "../sandbox/index.ts";
 
-export type { JsonSchema, Tool, ToolResult } from "./types.ts";
+export type { JsonSchema, Tool, ToolCapabilities, ToolResult } from "./types.ts";
 export type { ReadArgs } from "./read.ts";
 export type { WriteArgs } from "./write.ts";
 export type { SandboxConfig } from "../sandbox/index.ts";

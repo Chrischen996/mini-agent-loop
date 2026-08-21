@@ -63,6 +63,10 @@ describe("automatic subagent preflight", () => {
   it("infers coder/reviewer/researcher profiles from the prompt", () => {
     assert.equal(
       decideAutoSubagent("请修改项目代码并实现一个新模块", { minScore: 3 }).profile,
+      "researcher",
+    );
+    assert.equal(
+      decideAutoSubagent("请修改项目代码并实现一个新模块", { minScore: 3, allowWrites: true }).profile,
       "coder",
     );
     assert.equal(
@@ -88,6 +92,7 @@ describe("automatic subagent preflight", () => {
       minScore: process.env.MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE,
       coordinator: process.env.MINI_AGENT_COORDINATOR_MODE,
       explore: process.env.MINI_AGENT_MAX_DIRECT_EXPLORATION,
+      allowWrites: process.env.MINI_AGENT_AUTO_SUBAGENT_ALLOW_WRITES,
     };
     try {
       delete process.env.MINI_AGENT_AUTO_SUBAGENT;
@@ -95,6 +100,7 @@ describe("automatic subagent preflight", () => {
       delete process.env.MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE;
       delete process.env.MINI_AGENT_COORDINATOR_MODE;
       delete process.env.MINI_AGENT_MAX_DIRECT_EXPLORATION;
+      delete process.env.MINI_AGENT_AUTO_SUBAGENT_ALLOW_WRITES;
       assert.deepEqual(loadAutoSubagentOptionsFromEnv(), { enabled: true });
 
       process.env.MINI_AGENT_AUTO_SUBAGENT = "0";
@@ -108,12 +114,14 @@ describe("automatic subagent preflight", () => {
       process.env.MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE = "4";
       process.env.MINI_AGENT_COORDINATOR_MODE = "0";
       process.env.MINI_AGENT_MAX_DIRECT_EXPLORATION = "1";
+      process.env.MINI_AGENT_AUTO_SUBAGENT_ALLOW_WRITES = "1";
       assert.deepEqual(loadAutoSubagentOptionsFromEnv(), {
         enabled: true,
         profile: "coder",
         minScore: 4,
         coordinatorMode: false,
         maxDirectExploration: 1,
+        allowWrites: true,
       });
     } finally {
       for (const [key, value] of Object.entries({
@@ -122,6 +130,7 @@ describe("automatic subagent preflight", () => {
         MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE: previous.minScore,
         MINI_AGENT_COORDINATOR_MODE: previous.coordinator,
         MINI_AGENT_MAX_DIRECT_EXPLORATION: previous.explore,
+        MINI_AGENT_AUTO_SUBAGENT_ALLOW_WRITES: previous.allowWrites,
       })) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
@@ -190,7 +199,7 @@ describe("automatic subagent preflight", () => {
     assert.ok(events.some((event) => event.type === "coordinator_mode" && event.active));
   });
 
-  it("auto-selects the coder profile for implementation tasks", async () => {
+  it("downgrades automatic implementation preflight to the read-only researcher", async () => {
     let receivedArgs: Record<string, unknown> | undefined;
     const tool = fakeSubagentTool(async (args) => {
       receivedArgs = args as Record<string, unknown>;
@@ -200,6 +209,22 @@ describe("automatic subagent preflight", () => {
       llm,
       tools: [tool],
       autoSubagent: { enabled: true, minScore: 3 },
+      chat: async () => ({ role: "assistant", content: "parent answer" }),
+    });
+
+    assert.equal(receivedArgs?.profile, "researcher");
+  });
+
+  it("selects the coder profile only with explicit write opt-in", async () => {
+    let receivedArgs: Record<string, unknown> | undefined;
+    const tool = fakeSubagentTool(async (args) => {
+      receivedArgs = args as Record<string, unknown>;
+      return { content: "coder result" };
+    });
+    await runAgentLoop("请修改项目代码并实现一个新模块，然后补充测试", {
+      llm,
+      tools: [tool],
+      autoSubagent: { enabled: true, minScore: 3, allowWrites: true },
       chat: async () => ({ role: "assistant", content: "parent answer" }),
     });
 

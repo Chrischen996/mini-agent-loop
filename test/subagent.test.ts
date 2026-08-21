@@ -11,7 +11,8 @@ import type { Tool, ToolResult } from "../src/tools/types.ts";
 import type { AssistantMessage } from "../src/types.ts";
 import { PermissionManager } from "../src/permissions.ts";
 import { validateToolArgs } from "../src/validate.ts";
-import type { AgentRuntimeRef } from "../src/loop.ts";
+import { runAgentLoop, type AgentRuntimeRef } from "../src/loop.ts";
+import { ToolExecutionBroker } from "../src/runtime/tool-execution-broker.ts";
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -203,6 +204,43 @@ describe("createSubagentTool", () => {
       assert.equal(result.isError, undefined);
       const text = contentAsString(result.content);
       assert.ok(text.includes("Echo test complete."), `expected answer in result, got: ${text}`);
+    });
+
+    it("returns recovered tool progress when the model fails after a tool call", async () => {
+      const events: SubagentEvent[] = [];
+      let callCount = 0;
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [createEchoTool()],
+        onSubagentEvent: (event) => events.push(event),
+        chat: async (): Promise<AssistantMessage> => {
+          callCount += 1;
+          if (callCount === 1) {
+            return {
+              role: "assistant",
+              content: "",
+              toolCalls: [{ id: "partial_echo", name: "echo", arguments: { message: "kept" } }],
+            };
+          }
+          throw new Error("provider disconnected after tool execution");
+        },
+      });
+
+      const result = await tool.execute({ task: "echo before the provider failure" });
+      const text = contentAsString(result.content);
+      assert.equal(result.isError, true);
+      assert.match(text, /provider disconnected after tool execution/);
+      assert.match(text, /Recovered partial progress/);
+      assert.match(text, /echo: kept/);
+
+      const end = events.find((event) => event.type === "subagent_end");
+      assert.ok(end && end.type === "subagent_end");
+      if (end?.type === "subagent_end") {
+        assert.equal(end.success, false);
+        assert.equal(end.turns, 1);
+        assert.match(end.result, /echo: kept/);
+        assert.equal(end.errors?.[0]?.kind, "api");
+      }
     });
 
     it("returns isError when sub-agent produces no usable answer", async () => {
@@ -557,6 +595,117 @@ describe("createSubagentTool", () => {
       assert.ok(toolNames.includes("echo"));
       assert.ok(toolNames.includes("tracker"));
     });
+
+    it("enforces read-only profiles against process, network, and external-data tools", async () => {
+      const toolNames: string[] = [];
+      const makeTool = (name: string, capabilities: Tool["capabilities"] = {}, source?: Tool["source"]): Tool => ({
+        name,
+        description: name,
+        parameters: { type: "object" },
+        ...(Object.keys(capabilities).length > 0 ? { capabilities } : {}),
+        ...(source ? { source } : {}),
+        execute: async () => ({ content: name }),
+      });
+      const read = makeTool("read");
+      const tools = [
+        read,
+        makeTool("opaque"),
+        makeTool("bash"),
+        makeTool("runner", { executeProcess: true }),
+        makeTool("fetcher", { network: true }),
+        makeTool("remote-data", { readWorkspace: true, writeWorkspace: false }, {
+          kind: "mcp",
+          serverId: "remote",
+          toolName: "read",
+        }),
+      ];
+      const profile: SubagentProfile = {
+        name: "strict-researcher",
+        description: "strict read-only research",
+        systemPrompt: "research",
+        allowedTools: tools.map((tool) => tool.name),
+        readOnly: true,
+      };
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: tools,
+        profiles: [profile],
+        chat: async (_config, _messages, childTools) => {
+          toolNames.push(...(childTools ?? []).map((childTool) => childTool.name));
+          return { role: "assistant", content: "read-only" };
+        },
+      });
+
+      await tool.execute({ task: "inspect", profile: "strict-researcher" });
+
+      assert.deepEqual(toolNames, ["read"]);
+    });
+  });
+
+  describe("runtime execution propagation", () => {
+    it("shares the broker and execution identity with child tool calls", async () => {
+      const audits: Array<import("../src/runtime/tool-execution-broker.ts").ToolExecutionAuditEvent> = [];
+      const broker = new ToolExecutionBroker({ onAudit: (event) => audits.push(event) });
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [createEchoTool()],
+        toolExecutionBroker: broker,
+        runtimeContext: {
+          taskId: "task-1",
+          jobId: "job-1",
+          sessionId: "session-1",
+          workspaceId: "workspace-1",
+          policyRevision: 7,
+        },
+        chat: createToolThenAnswerChat("echo", { message: "hello" }, "done"),
+      });
+
+      const result = await tool.execute({ task: "use the child tool" });
+
+      assert.equal(result.isError, undefined);
+      const completed = audits.find((event) => event.type === "completed" && event.toolName === "echo");
+      assert.ok(completed, "child tool execution should be audited");
+      assert.equal(completed?.taskId, "task-1");
+      assert.equal(completed?.jobId, "job-1");
+      assert.equal(completed?.sessionId, "session-1");
+      assert.equal(completed?.workspaceId, "workspace-1");
+      assert.equal(completed?.policyRevision, 7);
+    });
+
+    it("preserves the live parent context when a later turn omits an override", async () => {
+      const parentRuntime: AgentRuntimeRef = {};
+      const firstBroker = new ToolExecutionBroker();
+      const context = {
+        taskId: "task-1",
+        workspaceId: "workspace-1",
+        policyRevision: 3,
+      };
+      await runAgentLoop("first parent turn", {
+        llm: dummyLlm,
+        tools: [],
+        runtimeRef: parentRuntime,
+        toolExecutionBroker: firstBroker,
+        runtimeContext: context,
+        chat: createImmediateChat("first"),
+      });
+
+      const audits: Array<import("../src/runtime/tool-execution-broker.ts").ToolExecutionAuditEvent> = [];
+      const secondBroker = new ToolExecutionBroker({ onAudit: (event) => audits.push(event) });
+      await runAgentLoop("second parent turn", {
+        llm: dummyLlm,
+        tools: [createEchoTool()],
+        runtimeRef: parentRuntime,
+        toolExecutionBroker: secondBroker,
+        chat: createToolThenAnswerChat("echo", { message: "second" }, "second"),
+      });
+
+      assert.deepEqual(parentRuntime.executionContext, context);
+      assert.equal(parentRuntime.toolExecutionBroker, secondBroker);
+      const completed = audits.find((event) => event.type === "completed" && event.toolName === "echo");
+      assert.equal(completed?.taskId, "task-1");
+      assert.equal(completed?.workspaceId, "workspace-1");
+      assert.equal(completed?.policyRevision, 3);
+    });
   });
 
   // ── Event propagation ──────────────────────────────────────────────────────
@@ -718,6 +867,24 @@ describe("createSubagentTool", () => {
       // Should NOT throw
       const result = await tool.execute({ task: "boom" });
       assert.equal(result.isError, true);
+    });
+
+    it("classifies context token overflow separately from budget failures", async () => {
+      const events: SubagentEvent[] = [];
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        onSubagentEvent: (event) => events.push(event),
+        chat: async () => { throw new Error("context token limit exceeded"); },
+      });
+
+      const result = await tool.execute({ task: "overflow" });
+      assert.equal(result.isError, true);
+      const end = events.find((event) => event.type === "subagent_end");
+      assert.ok(end && end.type === "subagent_end");
+      if (end?.type === "subagent_end") {
+        assert.equal(end.errors?.at(-1)?.kind, "compaction");
+      }
     });
   });
 
@@ -1624,6 +1791,31 @@ describe("createSubagentTool", () => {
       assert.ok(String(result.content).includes("ok"));
     });
 
+    it("preserves successful siblings when one batch task rejects", async () => {
+      const batchTool = createSubagentBatchTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        onSubagentEvent: (event) => {
+          if (event.type === "subagent_start" && event.task === "bad") {
+            throw new Error("synthetic batch failure");
+          }
+        },
+        chat: createImmediateChat("successful result"),
+      });
+
+      const result = await batchTool.execute({
+        tasks: [
+          { label: "good", task: "good" },
+          { label: "bad", task: "bad" },
+        ],
+        maxConcurrency: 1,
+      });
+
+      assert.equal(result.isError, true);
+      assert.match(String(result.content), /── good ──[\s\S]*successful result/);
+      assert.match(String(result.content), /── bad ──[\s\S]*synthetic batch failure/);
+    });
+
     it("enforces global concurrency across overlapping batches", async () => {
       let active = 0;
       let maxActive = 0;
@@ -1675,6 +1867,45 @@ describe("createSubagentTool", () => {
       assert.equal(result.isError, true);
       assert.equal(chatCalled, false);
       assert.ok(contentAsString(result.content).includes("budget exhausted"));
+    });
+
+    it("shares a parent runtime budget across separately-created tools", async () => {
+      const parentRuntime: AgentRuntimeRef = {};
+      const usageChat: ChatFn = async () => ({
+        role: "assistant",
+        content: "used tokens",
+        usage: {
+          promptTokens: 3,
+          inputTokens: 3,
+          completionTokens: 0,
+          totalTokens: 3,
+        },
+      } as AssistantMessage & { usage: { promptTokens: number; inputTokens: number; completionTokens: number; totalTokens: number } });
+      const singleTool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        parentRuntime,
+        chat: usageChat,
+      });
+      const batchTool = createSubagentBatchTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        parentRuntime,
+        chat: usageChat,
+      });
+      // Both tools were created before the parent loop initialized its state.
+      parentRuntime.globalBudgetState = { used: 0, limit: 5 };
+
+      const first = await singleTool.execute({ task: "single" });
+      assert.equal(first.isError, undefined);
+      assert.equal(parentRuntime.globalBudgetState.used, 3);
+
+      const second = await batchTool.execute({
+        tasks: [{ label: "batch", task: "batch" }],
+      });
+      assert.equal(second.isError, true);
+      assert.match(String(second.content), /global agent token budget exceeded/i);
+      assert.equal(parentRuntime.globalBudgetState.used, 6);
     });
   });
 
@@ -1939,7 +2170,14 @@ describe("createSubagentTool", () => {
       const tools = reviewerProfile.allowedTools!;
       assert.ok(!tools.includes("write"), "reviewer should not have write");
       assert.ok(!tools.includes("edit"), "reviewer should not have edit");
+      assert.ok(!tools.includes("bash"), "reviewer should not have bash");
       assert.ok(tools.includes("read"), "reviewer should have read");
+    });
+
+    it("marks built-in read-only profiles explicitly", async () => {
+      const { researcherProfile, reviewerProfile } = await import("../src/subagent/index.ts");
+      assert.equal(researcherProfile.readOnly, true);
+      assert.equal(reviewerProfile.readOnly, true);
     });
   });
 

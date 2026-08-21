@@ -12,9 +12,9 @@ export type PermissionRequest = {
   source?: ToolSource;
 };
 
-export type PermissionMode = "plan" | "bypass";
+export type PermissionMode = "plan" | "approval" | "bypass";
 
-export const PERMISSION_MODES: readonly PermissionMode[] = ["plan", "bypass"] as const;
+export const PERMISSION_MODES: readonly PermissionMode[] = ["plan", "approval", "bypass"] as const;
 
 export function isPermissionMode(value: unknown): value is PermissionMode {
   return typeof value === "string" && (PERMISSION_MODES as readonly string[]).includes(value);
@@ -561,6 +561,47 @@ export class PermissionManager {
       risk: "high",
       source: tool.source,
     };
+    if (mode === "approval") {
+      const key = this.key(sessionId, tool, args);
+      if (this.approved.has(key)) {
+        this.onPermissionEvent?.({ type: "allow", request });
+        return;
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const onAbort = () => finish(() => reject(
+          signal?.reason instanceof Error
+            ? signal.reason
+            : Object.assign(new Error("Operation aborted"), { name: "AbortError" }),
+        ));
+        const cleanup = () => {
+          signal?.removeEventListener("abort", onAbort);
+          this.pending.delete(request.id);
+        };
+        const finish = (callback: () => void) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          callback();
+        };
+        this.pending.set(request.id, {
+          request,
+          key,
+          revision,
+          resolve: () => finish(resolve),
+          reject: (error) => finish(() => reject(error)),
+          cleanup,
+        });
+        signal?.addEventListener("abort", onAbort, { once: true });
+        this.onPermissionEvent?.({ type: "request", request });
+        onRequest(request);
+        if (signal?.aborted) onAbort();
+      });
+      this.assertRevision(mode, revision);
+      return;
+    }
+
     // Plan is analysis-only: audit the blocked call, but never open an
     // interactive approval prompt that could be "allowed" into execution.
     this.onPermissionEvent?.({ type: "request", request });

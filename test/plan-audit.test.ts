@@ -80,4 +80,34 @@ describe("plan audit helpers", () => {
     assert.match(report, /Steps:/);
     assert.match(report, /1\. done/);
   });
+
+  it("excludes files that were already dirty at the execution baseline", async () => {
+    const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const exec = promisify(execFile);
+    const root = await mkdtemp(`${tmpdir()}/mini-agent-plan-audit-`);
+    try {
+      await exec("git", ["init", "-q"], { cwd: root });
+      await exec("git", ["config", "user.email", "test@example.com"], { cwd: root });
+      await exec("git", ["config", "user.name", "test"], { cwd: root });
+      await writeFile(`${root}/baseline.ts`, "before\n", "utf8");
+      await exec("git", ["add", "."], { cwd: root });
+      await exec("git", ["commit", "-qm", "baseline"], { cwd: root });
+      await writeFile(`${root}/baseline.ts`, "preexisting\n", "utf8");
+      await writeFile(`${root}/new.ts`, "new\n", "utf8");
+      const { captureBaseline, collectChangedFiles } = await import("../src/plan/audit.ts");
+      const changed = await collectChangedFiles(root, { dirtyFiles: ["baseline.ts"] });
+      assert.deepEqual(changed, ["new.ts"]);
+      await rm(`${root}/new.ts`, { force: true });
+      const baseline = await captureBaseline(root);
+      await writeFile(`${root}/baseline.ts`, "changed during execution\n", "utf8");
+      await writeFile(`${root}/new.ts`, "new during execution\n", "utf8");
+      const changedWithHash = await collectChangedFiles(root, baseline);
+      assert.deepEqual(changedWithHash, ["baseline.ts", "new.ts"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

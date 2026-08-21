@@ -22,7 +22,11 @@ describe("subagent delegation improvements", () => {
       assert.ok(decision.shouldDelegate, "should delegate multi-step code task");
       assert.ok(decision.coordinatorMode, "should enter coordinator mode");
       assert.ok(decision.score >= 2, `score ${decision.score} should be >= 2`);
-      assert.equal(decision.profile, "coder");
+      assert.equal(decision.profile, "researcher");
+      assert.equal(
+        decideAutoSubagent(text, { allowWrites: true }).profile,
+        "coder",
+      );
     });
 
     it("scores high for investigation/review tasks", () => {

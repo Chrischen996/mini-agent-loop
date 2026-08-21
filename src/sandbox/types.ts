@@ -1,4 +1,5 @@
 export type SandboxType = "docker" | "node" | "none";
+export type SandboxIsolation = "secure-sandbox" | "process-isolation" | "none";
 
 export interface SandboxExecOptions {
   command: string;
@@ -23,12 +24,15 @@ export interface SandboxResult {
 
 export interface SandboxRunner {
   readonly type: SandboxType;
+  readonly isolation: SandboxIsolation;
   execute(options: SandboxExecOptions): Promise<SandboxResult>;
   cleanup(): Promise<void>;
 }
 
 export interface SandboxConfig {
   enabled: boolean;
+  /** preferred preserves the legacy Node fallback; required fails closed. */
+  mode?: "required" | "preferred" | "disabled";
   type?: "auto" | "docker" | "node" | "none";
   dockerImage?: string;
   allowNetwork?: boolean;

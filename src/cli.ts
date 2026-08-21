@@ -7,7 +7,7 @@ import path from "node:path";
 import { imagePart, textPart } from "./content.ts";
 import { loadLlmConfigFromEnv } from "./llm/index.ts";
 import { MaxTurnsExceededError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
-import { loadAgentsMd } from "./agents-md.ts";
+import { loadInstructionBundle } from "./agents-md.ts";
 import {
   defaultSkillRegistry,
   discoverWorkspaceSkills,
@@ -48,6 +48,8 @@ import { resolveToolProvider, type Tool } from "./tools/types.ts";
 import type { ContentPart, MessageContent } from "./types.ts";
 import { buildIntenseLlm, parseThinkingCommandMode, parseThinkingIntensityPrompt } from "./think-intensity.ts";
 import { loadThinkingModeFromEnv } from "./thinking-policy.ts";
+import type { RuntimeExecutionContext } from "./runtime/policy-types.ts";
+import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "./runtime/limits.ts";
 import {
   PermissionManager,
   isPermissionMode,
@@ -281,10 +283,10 @@ export function parseCliArgs(argv: string[]): {
     if (arg === "--mode") {
       const next = argv[i + 1];
       if (!next || next.startsWith("--")) {
-        throw new Error("--mode requires an argument: plan or bypass");
+        throw new Error("--mode requires an argument: plan, approval, or bypass");
       }
       if (!isPermissionMode(next)) {
-        throw new Error("Invalid mode: use 'plan' or 'bypass'");
+        throw new Error("Invalid mode: use 'plan', 'approval', or 'bypass'");
       }
       mode = next;
       i += 1;
@@ -293,7 +295,7 @@ export function parseCliArgs(argv: string[]): {
     if (arg.startsWith("--mode=")) {
       const value = arg.slice("--mode=".length);
       if (!isPermissionMode(value)) {
-        throw new Error("Invalid mode: use 'plan' or 'bypass'");
+        throw new Error("Invalid mode: use 'plan', 'approval', or 'bypass'");
       }
       mode = value;
       continue;
@@ -550,7 +552,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const agentsMd = await loadAgentsMd(cwd);
+  const agentsMd = (await loadInstructionBundle(cwd)).content || undefined;
 
   // --plan flag: force plan mode and append plan-only instruction
   const wantExecute = planExecute || planRetry;
@@ -607,6 +609,12 @@ async function main(): Promise<void> {
   let tools;
   let sandboxCleanup: (() => Promise<void>) | undefined;
   const parentRuntime: AgentRuntimeRef = {};
+  const runtimeContext: RuntimeExecutionContext = {
+    sessionId: "cli_session",
+    workspaceId: cwd,
+  };
+  const globalTokenBudget = loadGlobalTokenBudgetFromEnv();
+  const globalConcurrencyLimit = loadGlobalConcurrencyLimitFromEnv();
   try {
     const { tools: configuredTools, cleanup } = await createToolsWithSandbox(cwd, {
       tools: selectedTools,
@@ -638,8 +646,8 @@ async function main(): Promise<void> {
       console.error(
         `[permission] mode=${permissionTurn?.mode ?? mode} tool=${request.tool} risk=${request.risk} request_id=${request.id}`,
       );
-      // plan/bypass never open interactive pending approvals. If a stale pending
-      // request surfaces, deny it so the non-interactive CLI cannot hang.
+      // The one-shot CLI has no approval UI. Approval mode therefore denies
+      // pending requests instead of leaving the process blocked indefinitely.
       permissionManager.resolve("cli_session", request.id, "deny");
   };
 
@@ -655,6 +663,8 @@ async function main(): Promise<void> {
       onSubagentEvent: (subEvent) => logEvent(subEvent),
       getPermissionTurn: () => permissionTurn,
       thinkingMode,
+      globalTokenBudget,
+      globalConcurrencyLimit,
       parentRuntime,
     });
     const subagentBatchTool = createSubagentBatchTool({
@@ -665,6 +675,8 @@ async function main(): Promise<void> {
       onSubagentEvent: (subEvent) => logEvent(subEvent),
       getPermissionTurn: () => permissionTurn,
       thinkingMode,
+      globalTokenBudget,
+      globalConcurrencyLimit,
       parentRuntime,
     });
     const enrichedTools = [...baseTools, subagentTool as Tool, subagentBatchTool as Tool];
@@ -688,6 +700,8 @@ async function main(): Promise<void> {
       autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
       thinkingMode,
       runtimeRef: parentRuntime,
+      runtimeContext,
+      globalTokenBudget,
       onEvent: logEvent,
       agentsMd,
       skillNames,

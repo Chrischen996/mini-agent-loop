@@ -25,6 +25,21 @@ export type ToolAnnotations = {
   openWorldHint?: boolean;
 };
 
+/**
+ * Execution capabilities are policy input, not user-facing tool hints.
+ * Undefined fields are resolved conservatively from the tool name/source.
+ */
+export type ToolCapabilities = {
+  readWorkspace?: boolean;
+  writeWorkspace?: boolean;
+  executeProcess?: boolean;
+  network?: boolean;
+  externalData?: boolean;
+  destructive?: boolean;
+  requiresApproval?: boolean;
+  idempotent?: boolean;
+};
+
 export type ToolSource =
   | { kind: "local" }
   | { kind: "web"; package: "pi-web-access" }
@@ -37,6 +52,7 @@ export type Tool<TArgs = Record<string, unknown>> = {
   source?: ToolSource;
   /** Advisory metadata only. Never use remote hints as an authorization decision. */
   annotations?: ToolAnnotations;
+  capabilities?: ToolCapabilities;
   /** OpenAI function parameters object (JSON Schema). */
   parameters: JsonSchema;
   execute: (args: TArgs, signal?: AbortSignal) => Promise<ToolResult>;

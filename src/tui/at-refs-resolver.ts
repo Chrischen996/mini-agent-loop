@@ -4,6 +4,7 @@ import type { ToolProvider } from "../tools/types.ts";
 import { parseAtRefs } from "./input-utils.ts";
 import { resolveToolProvider } from "../tools/types.ts";
 import { PermissionModeChangedError } from "../permissions.ts";
+import { ToolExecutionBroker } from "../runtime/tool-execution-broker.ts";
 
 /**
  * Resolve @file references in user input by reading file contents through tools.
@@ -12,6 +13,7 @@ export async function resolveAtRefs(
   text: string,
   permissionTurn: PermissionTurnContext,
   allTools: ToolProvider,
+  toolExecutionBroker: ToolExecutionBroker = new ToolExecutionBroker(),
 ): Promise<MessageContent> {
   const paths = parseAtRefs(text);
   if (paths.length === 0) return text;
@@ -22,7 +24,10 @@ export async function resolveAtRefs(
   const parts: MessageContent = [{ type: "text", text }];
   for (const p of paths) {
     try {
-      const result = await permissionTurn.execute(readTool, { path: p });
+      const result = await toolExecutionBroker.execute(readTool, { path: p }, {
+        signal: permissionTurn.signal,
+        permissionTurn,
+      });
       const content = typeof result.content === "string" ? result.content : "";
       parts.push({ type: "text", text: `\n\n[File: ${p}]\n\`\`\`\n${content}\n\`\`\`` });
     } catch (error) {

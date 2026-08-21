@@ -80,10 +80,15 @@ describe("TUI sidebar state", () => {
 
   it("cycles permission mode with TOGGLE_PERMISSION_MODE", () => {
     let state = createInitialState("test-model");
-    // Default is plan; order is plan -> bypass
+    // Default is plan; order is plan -> approval -> bypass
     assert.equal(state.permissionMode, "plan");
 
-    // plan -> bypass
+    // plan -> approval
+    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
+    assert.equal(state.permissionMode, "approval");
+    assert.equal(state.status, "权限模式: 审批");
+
+    // approval -> bypass
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "bypass");
     assert.equal(state.status, "权限模式: 绕过");
@@ -96,7 +101,8 @@ describe("TUI sidebar state", () => {
 
   it("preserves permission mode on RESET", () => {
     let state = createInitialState("test-model");
-    // plan -> bypass
+    // plan -> approval -> bypass
+    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "bypass");
 

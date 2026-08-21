@@ -8,6 +8,8 @@
  */
 
 import type { AgentRuntimeRef, LoopEvent } from "../loop.ts";
+import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
+import type { ToolExecutionAuditEvent, ToolExecutionBroker } from "../runtime/tool-execution-broker.ts";
 import type { ChatFn, LlmConfig } from "../llm/index.ts";
 import type { ToolProvider } from "../tools/types.ts";
 import type { MessagePreprocessor } from "../preprocessors/index.ts";
@@ -65,6 +67,8 @@ export type SubagentProfile = {
   tokenBudget?: number;
   /** Optional cost budget limit (USD) for this profile. */
   costBudget?: number;
+  /** Enforce a read-only tool boundary in addition to the prompt contract. */
+  readOnly?: boolean;
 };
 
 // ─── Runtime options passed when creating the subagent tool ──────────────────
@@ -136,6 +140,12 @@ export type SubagentToolOptions = {
   getPermissionTurn?: () => PermissionTurnContext | undefined;
   /** Mutable parent runtime updated by the shared agent loop. */
   parentRuntime?: AgentRuntimeRef;
+  /** Runtime identity and policy propagated to child tool execution. */
+  runtimeContext?: RuntimeExecutionContext;
+  /** Shared tool execution broker for policy checks and auditing. */
+  toolExecutionBroker?: ToolExecutionBroker;
+  /** Audit sink propagated to child tool execution. */
+  onToolExecutionAudit?: (event: ToolExecutionAuditEvent) => void;
   /** @deprecated Use permissionTurn/getPermissionTurn. */
   getPermissionMode?: () => PermissionMode;
   /** @deprecated Use permissionTurn/getPermissionTurn. */
@@ -298,6 +308,16 @@ export type SubagentCost = {
   total: number;
 };
 
+export type SubagentErrorKind =
+  | "timeout"
+  | "api"
+  | "compaction"
+  | "max_turns"
+  | "abort"
+  | "permission"
+  | "budget"
+  | "model";
+
 export type SubagentEvent =
   | {
       type: "subagent_start";
@@ -343,7 +363,7 @@ export type SubagentEvent =
       /** Runtime info recorded at subagent start (for observability). */
       runtime: SubagentRuntimeInfo;
       /** Any errors encountered during execution. */
-      errors?: Array<{ message: string; kind: "timeout" | "api" | "compaction" | "max_turns" | "abort" }>;
+      errors?: Array<{ message: string; kind: SubagentErrorKind }>;
       /** Whether auto-delegation was inherited from the parent (false = deliberate isolation). */
       autoDelegationInherited: boolean;
     };

@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { contentAsString } from "../src/content.ts";
 import {
   createSandboxRunner,
   detectDocker,
@@ -39,12 +40,20 @@ describe("sandbox detection", () => {
     const sandboxType = await detectBestSandboxType({ enabled: true, type: "node" });
     assert.equal(sandboxType, "node");
   });
+
+  it("fails closed when secure sandbox is required but only Node is selected", async () => {
+    await assert.rejects(
+      () => detectBestSandboxType({ enabled: true, mode: "required", type: "node" }),
+      /Secure sandbox required/,
+    );
+  });
 });
 
 describe("NodeSandboxRunner", () => {
   it("executes simple commands", async () => {
     await withTempDir(async (cwd) => {
       const runner = new NodeSandboxRunner();
+      assert.equal(runner.isolation, "process-isolation");
       const result = await runner.execute({
         command: "echo",
         args: ["hello world"],
@@ -136,6 +145,27 @@ describe("NodeSandboxRunner", () => {
     });
   });
 
+  it("does not inherit arbitrary host environment variables", async () => {
+    await withTempDir(async (cwd) => {
+      const key = "MINI_AGENT_SANDBOX_TEST_SECRET";
+      const previous = process.env[key];
+      process.env[key] = "must-not-leak";
+      try {
+        const runner = new NodeSandboxRunner();
+        const result = await runner.execute({
+          command: "node",
+          args: ["-e", `console.log(process.env.${key} ? 'present' : 'absent')`],
+          cwd,
+        });
+        assert.equal(result.exitCode, 0);
+        assert.match(result.stdout, /absent/);
+      } finally {
+        if (previous === undefined) delete process.env[key];
+        else process.env[key] = previous;
+      }
+    });
+  });
+
   it("supports stdin input", async () => {
     await withTempDir(async (cwd) => {
       const runner = new NodeSandboxRunner();
@@ -209,7 +239,7 @@ describe("bash tool sandbox integration", () => {
       const tool = createBashTool(tmpDir);
       const result = await tool.execute({ command: "echo hello" });
       assert.ok(!result.isError);
-      assert.match(result.content, /hello/);
+      assert.match(contentAsString(result.content), /hello/);
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }
@@ -224,10 +254,10 @@ describe("bash tool sandbox integration", () => {
       const tool = createBashTool(tmpDir, { runner, config: { enabled: true, type: "node" } });
       const result = await tool.execute({ command: "echo sandboxed" });
       assert.ok(!result.isError);
-      assert.match(result.content, /sandboxed/);
+      assert.match(contentAsString(result.content), /sandboxed/);
       // Verify network isolation
       const netResult = await tool.execute({ command: "curl -s --max-time 2 https://example.com || echo unreachable", timeout: 5 });
-      assert.ok(netResult.content.includes("unreachable") || netResult.isError);
+      assert.ok(contentAsString(netResult.content).includes("unreachable") || netResult.isError);
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }

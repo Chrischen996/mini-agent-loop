@@ -26,12 +26,16 @@ import {
   type LoopEvent,
 } from "../loop.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
+import { resolveToolCapabilities } from "../runtime/tool-types.ts";
+import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
+import type { ToolExecutionAuditEvent, ToolExecutionBroker } from "../runtime/tool-execution-broker.ts";
 import type {
   SubagentArgs,
   SubagentBatchArgs,
   SubagentBatchTask,
   SubagentCost,
   SubagentEvent,
+  SubagentErrorKind,
   SubagentProfile,
   SubagentRuntimeInfo,
   SubagentTokenBreakdown,
@@ -48,6 +52,7 @@ const DEFAULT_MAX_TURNS = 8;
 const DEFAULT_MAX_DEPTH = 3;
 const DEFAULT_MAX_CONCURRENCY_BATCH = 0; // 0 = unlimited (all concurrent)
 const SUBAGENT_TOOL_NAME = "subagent";
+const SUBAGENT_TOOL_NAMES = new Set(["subagent", "subagent_batch"]);
 const MAX_PARTIAL_TOOL_SNIPPETS = 4;
 const MAX_PARTIAL_TOOL_CHARS = 400;
 
@@ -132,6 +137,7 @@ function buildChildTools(
    * Default: false (prevents infinite recursion).
    */
   allowRecursion: boolean,
+  readOnly = false,
 ): Tool[] {
   const all = resolveToolProvider(parentTools);
   let filtered = all;
@@ -142,10 +148,45 @@ function buildChildTools(
   }
 
   if (!allowRecursion) {
-    filtered = filtered.filter((t) => t.name !== SUBAGENT_TOOL_NAME);
+    filtered = filtered.filter((t) => !SUBAGENT_TOOL_NAMES.has(t.name));
+  }
+
+  if (readOnly) {
+    const blockedNames = new Set([
+      "bash", "write", "edit", "patch", "mkdir", "copy", "move", "delete",
+      "document_edit", "git_checkpoint", "git_undo", "git_branch_isolate",
+    ]);
+    filtered = filtered.filter((tool) => {
+      if (blockedNames.has(tool.name)) return false;
+      // Remote tools are not assumed read-only unless they explicitly declare it.
+      if (tool.source?.kind === "mcp" && tool.capabilities?.writeWorkspace !== false) return false;
+      const capabilities = resolveToolCapabilities(tool);
+      return !capabilities.writeWorkspace
+        && !capabilities.destructive
+        && !capabilities.executeProcess
+        && !capabilities.network
+        && !capabilities.externalData
+        && capabilities.readWorkspace;
+    });
   }
 
   return filtered;
+}
+
+function resolveSharedGlobalBudgetState(
+  options: SubagentToolOptions,
+): { used: number; limit: number } | undefined {
+  const existing = options.globalBudgetState ?? options.parentRuntime?.globalBudgetState;
+  if (existing) {
+    if (options.parentRuntime && !options.parentRuntime.globalBudgetState) {
+      options.parentRuntime.globalBudgetState = existing;
+    }
+    return existing;
+  }
+  if (options.globalTokenBudget === undefined) return undefined;
+  const created = { used: 0, limit: options.globalTokenBudget };
+  if (options.parentRuntime) options.parentRuntime.globalBudgetState = created;
+  return created;
 }
 
 /**
@@ -219,6 +260,30 @@ function countToolCalls(messages: AgentMessage[]): number {
   }, 0);
 }
 
+function classifySubagentError(error: unknown): SubagentErrorKind {
+  const message = error instanceof Error ? error.message : String(error);
+  const name = error instanceof Error ? error.name : "";
+  if (name === "AbortError" || /\babort(?:ed)?\b/i.test(message)) return "abort";
+  if (name === "LlmTimeoutError" || /timed out|timeout/i.test(message)) return "timeout";
+  if (/permission denied|plan mode|authorization|policy revision|sandbox policy/i.test(message)) return "permission";
+  if (/context (?:window|length)|too many tokens|prompt is too long|token limit/i.test(message)) return "compaction";
+  if (/budget|tokens? exhausted|cost budget/i.test(message)) return "budget";
+  if (/model .*not found|invalid model|thinking cannot be disabled|reasoning without a final answer/i.test(message)) return "model";
+  return "api";
+}
+
+function partialMessagesFromError(error: unknown): AgentMessage[] | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const messages = (error as { messages?: unknown }).messages;
+  return Array.isArray(messages) ? messages as AgentMessage[] : undefined;
+}
+
+function partialTextFromError(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const content = (error as { partialContent?: unknown }).partialContent;
+  return typeof content === "string" && content.trim() ? content.trim() : undefined;
+}
+
 /**
  * Build runtime info for a resolved LLM config.
  * Tracks whether the model switch succeeded or fell back.
@@ -283,9 +348,9 @@ function mergeAbortSignals(
 async function runWithConcurrency<T>(
   tasks: Array<() => Promise<T>>,
   maxConcurrency: number,
-): Promise<T[]> {
+): Promise<PromiseSettledResult<T>[]> {
   if (maxConcurrency <= 0 || maxConcurrency >= tasks.length) {
-    return Promise.all(tasks.map((fn) => fn()));
+    return Promise.allSettled(tasks.map((fn) => fn()));
   }
 
   /**
@@ -318,14 +383,13 @@ async function runWithConcurrency<T>(
 
   await Promise.all(Array.from({ length: limit }, () => worker()));
 
-  // Reassemble in original index order, throwing on first rejection
+  // Reassemble in original index order while preserving each task outcome.
   const ordered = slots
     .filter((s): s is Resolved<T> => s.tag === "resolved")
     .sort((a, b) => a.index - b.index);
-  const results: T[] = new Array(ordered.length);
+  const results: PromiseSettledResult<T>[] = new Array(ordered.length);
   for (const slot of ordered) {
-    if (slot.result.status === "rejected") throw slot.result.reason;
-    results[slot.index] = slot.result.value;
+    results[slot.index] = slot.result;
   }
   return results;
 }
@@ -360,12 +424,13 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
     maxThinkingEscalations: parentMaxEscalations,
     getParentHistory,
     parentRuntime,
+    runtimeContext,
+    toolExecutionBroker,
+    onToolExecutionAudit,
   } = options;
-  const globalBudgetState = options.globalBudgetState ?? (
-    options.globalTokenBudget !== undefined
-      ? { used: 0, limit: options.globalTokenBudget }
-      : undefined
-  );
+  const configuredGlobalBudgetState = resolveSharedGlobalBudgetState(options);
+  const resolveGlobalBudgetState = (): { used: number; limit: number } | undefined =>
+    options.parentRuntime?.globalBudgetState ?? configuredGlobalBudgetState;
 
   // Build the parameter schema dynamically to include available profile names.
   const profileEnum =
@@ -506,6 +571,9 @@ ${args.sharedContext}
       const effectiveParentThinkingMode = parentRuntime?.thinkingMode ?? parentThinkingMode;
       const effectiveParentMaxEscalations = parentRuntime?.maxThinkingEscalations ?? parentMaxEscalations;
       const effectiveContextPolicy = args.contextPolicy ?? parentRuntime?.context;
+      const effectiveRuntimeContext = parentRuntime?.executionContext ?? runtimeContext;
+      const effectiveToolExecutionBroker = parentRuntime?.toolExecutionBroker ?? toolExecutionBroker;
+      const effectiveAudit = parentRuntime?.onToolExecutionAudit ?? onToolExecutionAudit;
       const inheritedParentHistory = args.inheritContextHistory
         ? parentRuntime?.history ?? getParentHistory?.()
         : undefined;
@@ -540,6 +608,7 @@ ${args.sharedContext}
         };
       }
 
+      const globalBudgetState = resolveGlobalBudgetState();
       if (globalBudgetState && globalBudgetState.used >= globalBudgetState.limit) {
         return {
           content: `Sub-agent global token budget exhausted (${globalBudgetState.limit}).`,
@@ -556,12 +625,14 @@ ${args.sharedContext}
       );
 
       // ── Build child tool set ────────────────────────────────────
-      const childTools = buildChildTools(parentTools, allowedTools, false);
-      const childRuntimeRef: AgentRuntimeRef = {};
+      const childTools = buildChildTools(parentTools, allowedTools, false, profile?.readOnly === true);
+      const childRuntimeRef: AgentRuntimeRef = globalBudgetState
+        ? { globalBudgetState }
+        : {};
 
       // If the child is allowed to spawn sub-agents itself (depth < maxDepth),
       // add a nested subagent tool with incremented depth.
-      if (depth < maxDepth) {
+      if (depth < maxDepth && profile?.readOnly !== true) {
         const nestedSubagentTool = createSubagentTool({
           parentLlm: llm,
           parentTools: childTools,
@@ -581,6 +652,9 @@ ${args.sharedContext}
           thinkingMode: effectiveThinkingMode,
           maxThinkingEscalations: effectiveMaxEscalations,
           parentRuntime: childRuntimeRef,
+          runtimeContext: effectiveRuntimeContext,
+          toolExecutionBroker: effectiveToolExecutionBroker,
+          onToolExecutionAudit: effectiveAudit,
           globalBudgetState,
           checkGlobalBudget: options.checkGlobalBudget,
         });
@@ -638,7 +712,7 @@ ${args.sharedContext}
         return { tokenBreakdown, estimatedCost };
       };
 
-      type ErrorKind = "timeout" | "api" | "compaction" | "max_turns" | "abort";
+      type ErrorKind = SubagentErrorKind;
       const errors: Array<{ message: string; kind: ErrorKind }> = [];
       const emittedWarnings = new Set<80 | 90 | 100>();
 
@@ -664,6 +738,9 @@ ${args.sharedContext}
           maxThinkingEscalations: effectiveMaxEscalations,
           // ── Pass through context policy if provided ─────────────
           ...(effectiveContextPolicy ? { context: effectiveContextPolicy } : {}),
+          ...(effectiveRuntimeContext ? { runtimeContext: effectiveRuntimeContext } : {}),
+          ...(effectiveToolExecutionBroker ? { toolExecutionBroker: effectiveToolExecutionBroker } : {}),
+          ...(effectiveAudit ? { onToolExecutionAudit: effectiveAudit } : {}),
           // ── Pass through explicit skill names, otherwise inherit parent ──
           ...(() => {
             const inheritedSkillNames = args.skillNames?.length
@@ -720,15 +797,7 @@ ${args.sharedContext}
                 }
               }
 
-              if (globalBudgetState) {
-                globalBudgetState.used += delta;
-                if (globalBudgetState.used > globalBudgetState.limit) {
-                  throw new Error(`Sub-agent global token budget exceeded (${globalBudgetState.limit}).`);
-                }
-                options.checkGlobalBudget?.(globalBudgetState.used);
-              } else {
-                options.checkGlobalBudget?.(accumulatedTokens);
-              }
+              options.checkGlobalBudget?.(globalBudgetState?.used ?? accumulatedTokens);
             }
 
             // Capture notable errors for subagent_end reporting
@@ -772,20 +841,28 @@ ${args.sharedContext}
           // Classify the error kind
           const isTimeout = timeoutController?.signal.aborted === true;
 
-          if (isTimeout) {
-            errors.push({ message: "Sub-agent timeout exceeded", kind: "timeout" });
-          } else {
-            errors.push({ message: errorMessage, kind: "api" });
-          }
+          const errorKind: SubagentErrorKind = isTimeout ? "timeout" : classifySubagentError(err);
+          errors.push({
+            message: isTimeout ? "Sub-agent timeout exceeded" : errorMessage,
+            kind: errorKind,
+          });
+
+          // Provider failures can happen after useful tool work. Preserve the
+          // partial history carried by typed loop errors so the parent can
+          // decide whether to continue, retry, or use the recovered findings.
+          const partialMessages = partialMessagesFromError(err) ?? childRuntimeRef.history;
+          if (partialMessages) finalMessages = partialMessages;
+          const extracted = extractBestAnswer(finalMessages);
+          const partialContent = extracted.text || partialTextFromError(err);
 
           const { tokenBreakdown, estimatedCost } = getBreakdownAndCost();
           onSubagentEvent?.({
             type: "subagent_end",
             id: invocationId,
-            result: "",
+            result: partialContent ?? "",
             success: false,
             depth,
-            turns: 0,
+            turns: countTurns(finalMessages),
             totalTokens: accumulatedTokens,
             tokenBreakdown,
             estimatedCost,
@@ -795,9 +872,13 @@ ${args.sharedContext}
           });
 
           return {
-            content: isTimeout
-              ? `Sub-agent timed out after ${timeout}ms. Consider increasing the timeout or simplifying the task.`
-              : `Sub-agent failed: ${errorMessage}`,
+            content: [
+              isTimeout
+                ? `Sub-agent timed out after ${timeout}ms.`
+                : `Sub-agent failed (${errorKind}): ${errorMessage}`,
+              partialContent ? `Recovered partial progress:\n${partialContent}` : "No partial progress was recovered.",
+              isTimeout ? "Consider increasing the timeout or simplifying the task." : "",
+            ].filter(Boolean).join("\n\n"),
             isError: true,
           };
         }
@@ -955,13 +1036,9 @@ export function allocateBatchTokenBudgets(
 export function createSubagentBatchTool(options: SubagentToolOptions): Tool<SubagentBatchArgs> {
   // Normalize a shared globalBudgetState so batch allocation and per-task
   // enforcement mutate the same counters when only globalTokenBudget is set.
-  const sharedGlobalBudgetState = options.globalBudgetState ?? (
-    options.globalTokenBudget !== undefined
-      ? { used: 0, limit: options.globalTokenBudget }
-      : undefined
-  );
-  const normalizedOptions: SubagentToolOptions = sharedGlobalBudgetState
-    ? { ...options, globalBudgetState: sharedGlobalBudgetState }
+  const configuredGlobalBudgetState = resolveSharedGlobalBudgetState(options);
+  const normalizedOptions: SubagentToolOptions = configuredGlobalBudgetState
+    ? { ...options, globalBudgetState: configuredGlobalBudgetState }
     : options;
   const singleTool = createSubagentTool(normalizedOptions);
   const { profiles = [] } = normalizedOptions;
@@ -1075,6 +1152,8 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
 
       const maxConcurrency = args.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY_BATCH;
       const globalLimit = normalizedOptions.globalConcurrencyLimit ?? 0;
+      const sharedGlobalBudgetState = normalizedOptions.parentRuntime?.globalBudgetState
+        ?? normalizedOptions.globalBudgetState;
 
       const remainingGlobalBudget = sharedGlobalBudgetState
         ? Math.max(0, sharedGlobalBudgetState.limit - sharedGlobalBudgetState.used)
@@ -1086,7 +1165,7 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
       );
 
       // Run all tasks respecting both local and global concurrency limits.
-      // runWithConcurrency throws on first rejection; callers get a single error.
+      // Keep each task's outcome so a failed sibling does not erase successes.
       const settled = await runWithConcurrency(
         args.tasks.map((task: SubagentBatchTask, taskIndex: number) => async () => {
           // Wait for a global concurrency slot if limit is set
@@ -1120,16 +1199,16 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
           }
         }),
         maxConcurrency,
-      ).catch((reason): import("../tools/types.ts").ToolResult[] => {
-        // On error, return error results for all tasks so we still produce output.
-        return args.tasks.map(() => ({ content: String(reason), isError: true }));
-      });
+      );
 
       // Collect results in order
       const parts: string[] = [];
       for (let i = 0; i < args.tasks.length; i++) {
         const task = args.tasks[i]!;
-        const outcome = settled[i]!;
+        const settledOutcome = settled[i]!;
+        const outcome: import("../tools/types.ts").ToolResult = settledOutcome.status === "fulfilled"
+          ? settledOutcome.value
+          : { content: settledOutcome.reason instanceof Error ? settledOutcome.reason.message : String(settledOutcome.reason), isError: true };
         const header = `── ${task.label} ──`;
 
         const content = typeof outcome.content === "string"
@@ -1138,7 +1217,9 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
         parts.push(`${header}\n${outcome.isError ? "[ERROR] " : ""}${content}`);
       }
 
-      const hasErrors = settled.some((s) => s.isError);
+      const hasErrors = settled.some((s) =>
+        s.status === "rejected" || (s.status === "fulfilled" && s.value.isError === true),
+      );
 
       return {
         content: parts.join("\n\n"),

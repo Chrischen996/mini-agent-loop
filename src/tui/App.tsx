@@ -112,6 +112,8 @@ import {
 
 import { Overlays } from "./components/Overlays.tsx";
 import type { ModelSetupState } from "./types.ts";
+import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
+import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
@@ -128,6 +130,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   llmRef.current = llm;
   const vision = loadVisionConfigFromEnv();
   const autoSubagent = useMemo(() => loadAutoSubagentOptionsFromEnv(), []);
+  const globalTokenBudget = useMemo(() => loadGlobalTokenBudgetFromEnv(), []);
+  const globalConcurrencyLimit = useMemo(() => loadGlobalConcurrencyLimitFromEnv(), []);
   const [skillNames, setSkillNames] = useState<string[]>(() => loadSkillNamesFromEnv());
   const skillNamesRef = useRef(skillNames);
   skillNamesRef.current = skillNames;
@@ -147,6 +151,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       },
       getPermissionTurn: () => permissionTurnRef.current ?? undefined,
       parentRuntime: subagentRuntimeRef.current,
+      globalTokenBudget,
+      globalConcurrencyLimit,
     });
   }, [llm, vision]);
 
@@ -830,6 +836,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             signal: abortRef.current.signal,
             userContent: currentUserContent,
             permissionTurn,
+            runtimeContext: {
+              sessionId: conversationId,
+              workspaceId: cwd,
+            } satisfies RuntimeExecutionContext,
+            globalTokenBudget,
             autoValidate: process.env.MINI_AGENT_AUTO_VALIDATE === "1",
             validationWorkspace: cwd,
             autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
@@ -995,7 +1006,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         }
       }
     }
-  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText]);
+  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit]);
 
   // Start the next queued prompt only after the current turn has emitted done/error/aborted.
   useEffect(() => {

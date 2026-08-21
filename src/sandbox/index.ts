@@ -11,6 +11,7 @@ export { DockerSandboxRunner } from "./docker-runner.ts";
 
 class NoopSandboxRunner implements SandboxRunner {
   readonly type = "none" as const;
+  readonly isolation = "none" as const;
 
   async execute(options: any): Promise<any> {
     throw new Error("Sandbox is disabled");

@@ -3,6 +3,7 @@ import type { TuiAction } from "./state.ts";
 import type { PermissionManager } from "../permissions.ts";
 import type { ToolProvider } from "../tools/types.ts";
 import { resolveToolProvider } from "../tools/types.ts";
+import { ToolExecutionBroker } from "../runtime/tool-execution-broker.ts";
 
 export type DirectToolRunnerDeps = {
   allTools: ToolProvider;
@@ -10,6 +11,7 @@ export type DirectToolRunnerDeps = {
   getPermissionManager: () => PermissionManager;
   abortSignal: AbortSignal;
   dispatch: Dispatch<TuiAction>;
+  toolExecutionBroker?: ToolExecutionBroker;
 };
 
 /**
@@ -43,7 +45,10 @@ export async function runDirectTool(
   );
 
   try {
-    const result = await permissionTurn.execute(tool, args);
+    const result = await (deps.toolExecutionBroker ?? new ToolExecutionBroker()).execute(tool, args, {
+      signal: abortSignal,
+      permissionTurn,
+    });
     dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: fakeCall, result } });
   } catch (err) {
     dispatch({

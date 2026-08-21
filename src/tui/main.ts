@@ -29,6 +29,8 @@ import { PERMISSION_MODES, PermissionManager, type PermissionMode } from "../per
 import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 import { createSubagentTool, createSubagentBatchTool, defaultProfiles } from "../subagent/index.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
+import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
+import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
 import {
   applySkillCommand,
   defaultSkillRegistry,
@@ -166,6 +168,12 @@ async function main(): Promise<void> {
   });
   let tools;
   const parentRuntime: AgentRuntimeRef = {};
+  const runtimeContext: RuntimeExecutionContext = {
+    sessionId: "tui_session",
+    workspaceId: cwd,
+  };
+  const globalTokenBudget = loadGlobalTokenBudgetFromEnv();
+  const globalConcurrencyLimit = loadGlobalConcurrencyLimitFromEnv();
   try {
     const baseTools = mcpRuntime.toolProvider(createTools(cwd, {
       codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
@@ -188,6 +196,8 @@ async function main(): Promise<void> {
         }
       },
       parentRuntime,
+      globalTokenBudget,
+      globalConcurrencyLimit,
     });
     const subagentBatchTool = createSubagentBatchTool({
       parentLlm: activeLlm,
@@ -204,6 +214,8 @@ async function main(): Promise<void> {
         }
       },
       parentRuntime,
+      globalTokenBudget,
+      globalConcurrencyLimit,
     });
     tools = () => [
       ...baseTools(),
@@ -311,6 +323,8 @@ async function main(): Promise<void> {
         autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
         thinkingMode,
         runtimeRef: parentRuntime,
+        runtimeContext,
+        globalTokenBudget,
         skillNames: activeSkillNames,
         skillRegistry: defaultSkillRegistry,
         onEvent: (event) => {

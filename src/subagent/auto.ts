@@ -13,6 +13,8 @@ export type AutoSubagentOptions = {
   model?: string;
   /** Optional max-turn override passed to the subagent tool. */
   maxTurns?: number;
+  /** Allow the automatic preflight to select a write-capable profile. */
+  allowWrites?: boolean;
   /**
    * When true (default if enabled), the parent stays in coordinator mode for
    * complex tasks: stronger orchestration prompt + limited direct exploration.
@@ -117,7 +119,7 @@ function inferProfile(text: string): string {
  */
 export function decideAutoSubagent(
   userText: string,
-  options: Pick<AutoSubagentOptions, "minScore" | "profile" | "coordinatorMode"> = {},
+  options: Pick<AutoSubagentOptions, "minScore" | "profile" | "coordinatorMode" | "allowWrites"> = {},
 ): AutoSubagentDecision {
   const text = userText.trim();
   const reasons: string[] = [];
@@ -207,7 +209,10 @@ export function decideAutoSubagent(
   }
 
   const minScore = options.minScore ?? DEFAULT_MIN_SCORE;
-  const profile = options.profile ?? inferProfile(text);
+  const requestedProfile = options.profile ?? inferProfile(text);
+  const profile = !options.allowWrites && requestedProfile === "coder"
+    ? "researcher"
+    : requestedProfile;
   const shouldDelegate =
     !looksSimple && (explicitDelegation || score >= minScore);
   const coordinatorEnabled = options.coordinatorMode !== false;
@@ -216,6 +221,9 @@ export function decideAutoSubagent(
   // Keep profile reason visible for observability when we actually plan to run.
   if (shouldDelegate && !options.profile) {
     reasons.push(`profile:${profile}`);
+  }
+  if (requestedProfile !== profile) {
+    reasons.push("write-capable auto profile downgraded to researcher");
   }
   if (coordinatorMode) {
     reasons.push("coordinator mode");
@@ -320,6 +328,7 @@ export function loadAutoSubagentOptionsFromEnv(): AutoSubagentOptions | undefine
   const coordinatorMode = readBool(process.env.MINI_AGENT_COORDINATOR_MODE);
   const profile = process.env.MINI_AGENT_AUTO_SUBAGENT_PROFILE?.trim() || undefined;
   const model = process.env.MINI_AGENT_AUTO_SUBAGENT_MODEL?.trim() || undefined;
+  const allowWrites = readBool(process.env.MINI_AGENT_AUTO_SUBAGENT_ALLOW_WRITES);
 
   return {
     enabled: true,
@@ -329,5 +338,6 @@ export function loadAutoSubagentOptionsFromEnv(): AutoSubagentOptions | undefine
     ...(coordinatorMode !== undefined ? { coordinatorMode } : {}),
     ...(profile ? { profile } : {}),
     ...(model ? { model } : {}),
+    ...(allowWrites === true ? { allowWrites: true } : {}),
   };
 }

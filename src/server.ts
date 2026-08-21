@@ -12,6 +12,7 @@ import express, {
 import multer from "multer";
 import { documentTextPart, MAX_ATTACHMENT_BYTES } from "./attachments.ts";
 import { contentAsString, imagePart, textPart } from "./content.ts";
+import { loadInstructionBundle } from "./agents-md.ts";
 import { DocumentStore } from "./documents.ts";
 import { SessionStore, type PersistedSession } from "./session-store.ts";
 import { isAbortError, loadLlmConfigFromEnv, switchLlmModel, type ChatFn, type LlmConfig } from "./llm/index.ts";
@@ -19,7 +20,9 @@ import { getAvailableModels, resolveModel, searchModels } from "./models.ts";
 import { getActiveProfile, loadProfileStore } from "./profile-store.ts";
 import {
   createAgentHistory,
+  buildSystemPrompt,
   runAgentTurn,
+  type AgentLoopOptions,
   type AgentRuntimeRef,
   type LoopEvent,
 } from "./loop.ts";
@@ -36,7 +39,7 @@ import type { CodebaseSemanticProvider } from "./codebase/deepwiki-provider.ts";
 import { createDocumentEditTool } from "./tools/document-edit.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "./tools/types.ts";
 import type { SandboxRunner } from "./sandbox/types.ts";
-import type { AgentMessage, ContentPart } from "./types.ts";
+import type { AgentMessage, ContentPart, MessageContent } from "./types.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
 import type { McpServerStatus } from "./mcp/types.ts";
 import {
@@ -45,7 +48,9 @@ import {
   defaultProfiles,
   loadAutoSubagentOptionsFromEnv,
   type AutoSubagentOptions,
+  type SubagentEvent,
   type SubagentProfile,
+  type SubagentToolOptions,
 } from "./subagent/index.ts";
 import {
   activateSkillNames,
@@ -68,14 +73,26 @@ import {
 } from "./think-intensity.ts";
 import { loadThinkingModeFromEnv, type ThinkingMode } from "./thinking-policy.ts";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
-import { PermissionManager, isPermissionMode, type PermissionDecision, type PermissionMode } from "./permissions.ts";
+import { PermissionManager, isPermissionMode, type PermissionDecision, type PermissionMode, type PermissionTurnContext } from "./permissions.ts";
 import { planManager } from "./plan-act/plan-manager.ts";
 import { validatePhaseTransition } from "./plan-act/state-machine.ts";
 import { planGenerator } from "./plan-act/plan-generator.ts";
 import type { SessionPhase, ExecutionPlan } from "./plan-act/types.ts";
-import { PlanDocument, loadPlanDocument, createAndSavePlan, approveCurrentPlan, rejectCurrentPlan, editCurrentPlan, archiveCurrentPlan, listPlanHistory, preparePlanForExecution, markPlanExecutionResult, PLAN_ONLY_SUFFIX } from "./plan/index.ts";
+import { PlanDocument, loadPlanDocument, createAndSavePlan, approveCurrentPlan, rejectCurrentPlan, editCurrentPlan, archiveCurrentPlan, listPlanHistory, preparePlanForExecution, markPlanExecutionResult, PLAN_ONLY_SUFFIX, captureBaseline, collectChangedFiles } from "./plan/index.ts";
 import { GitWorkflow } from "./git/workflow.ts";
 import { formatValidationReport, runValidation, type ValidationStepName } from "./validation.ts";
+import type { RuntimeExecutionContext } from "./runtime/policy-types.ts";
+import type { ToolExecutionAuditEvent, ToolExecutionBroker } from "./runtime/tool-execution-broker.ts";
+import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "./runtime/limits.ts";
+import {
+  JobManager,
+  JobStore,
+  MemoryStore,
+  SessionExecutionGate,
+  runPlannerWorkerReviewer,
+} from "./orchestration/index.ts";
+import type { PauseGate } from "./orchestration/pause-gate.ts";
+import type { SessionExecutionLease } from "./orchestration/session-gate.ts";
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 5;
@@ -140,6 +157,8 @@ type Session = {
   skillNames?: string[];
   /** Current Plan-Act workflow phase. */
   phase?: import('./plan-act/types.js').SessionPhase;
+  /** Currently running background orchestration job, if any. */
+  activeJobId?: string;
   /** Currently active execution plan. */
   currentPlan?: import('./plan-act/types.js').ExecutionPlan;
   /** Plan history for this session. */
@@ -198,6 +217,16 @@ export type AgentServerOptions = {
   sandbox?: SandboxConfig;
   /** Pre-initialized sandbox runner (for async bootstrap). */
   sandboxRunner?: SandboxRunner;
+  /** Shared execution identity inherited by parent and child tool calls. */
+  runtimeContext?: RuntimeExecutionContext;
+  /** Shared broker used by all tool calls in a request. */
+  toolExecutionBroker?: ToolExecutionBroker;
+  /** Optional audit sink for parent and child tool executions. */
+  onToolExecutionAudit?: (event: ToolExecutionAuditEvent) => void;
+  /** Optional total token budget shared by the parent and nested subagents. */
+  globalTokenBudget?: number;
+  /** Optional global concurrent subagent limit. */
+  globalConcurrencyLimit?: number;
 };
 
 function safeMessage(message: AgentMessage): Record<string, unknown> {
@@ -627,6 +656,18 @@ async function parseMessageRequest(
 export function createAgentServer(options: AgentServerOptions): Express {
   const workspace = path.resolve(options.workspace ?? process.cwd());
   const sessions = new Map<string, Session>();
+  const sessionGate = new SessionExecutionGate();
+  const isSessionBusy = (session: Session): boolean => session.busy || sessionGate.isBusy(session.id);
+  const reserveSession = (session: Session, owner: string): SessionExecutionLease | undefined => {
+    if (isSessionBusy(session)) return undefined;
+    const lease = sessionGate.tryAcquire(session.id, owner);
+    if (!lease) return undefined;
+    session.busy = true;
+    return lease;
+  };
+  const releaseSession = (session: Session, lease: SessionExecutionLease): void => {
+    if (sessionGate.release(lease)) session.busy = false;
+  };
   const skillRegistry = options.skillRegistry ?? defaultSkillRegistry;
   if (options.skills) {
     for (const skill of options.skills) skillRegistry.register(skill);
@@ -637,7 +678,137 @@ export function createAgentServer(options: AgentServerOptions): Express {
   ]);
   const resolveSessionSkillNames = (session: Session): string[] =>
     activateSkillNames(session.skillNames ?? [], skillRegistry).activeNames;
+  const defaultSandboxMode = options.runtimeContext?.sandboxMode
+    ?? options.sandbox?.mode
+    ?? (options.sandbox?.enabled === false || options.sandbox?.type === "none"
+      ? "disabled"
+      : options.sandboxRunner
+        ? (options.sandboxRunner.type === "none" ? "disabled" : "preferred")
+        : "disabled");
+  const defaultSandboxIsolation = options.runtimeContext?.sandboxIsolation
+    ?? options.sandboxRunner?.isolation;
+  const runtimeContextForSession = (
+    sessionId: string,
+    overrides: Pick<RuntimeExecutionContext, "taskId" | "jobId"> = {},
+  ): RuntimeExecutionContext => ({
+    ...options.runtimeContext,
+    ...overrides,
+    sessionId,
+    workspaceId: options.runtimeContext?.workspaceId ?? workspace,
+    sandboxMode: defaultSandboxMode,
+    ...(defaultSandboxIsolation ? { sandboxIsolation: defaultSandboxIsolation } : {}),
+  });
+  const globalTokenBudget = options.globalTokenBudget ?? loadGlobalTokenBudgetFromEnv();
+  const globalConcurrencyLimit = options.globalConcurrencyLimit ?? loadGlobalConcurrencyLimitFromEnv();
+  const subagentProfiles = options.subagentProfiles ?? defaultProfiles;
+  const subagentEnabled = Boolean(options.subagentEnabled || options.subagentProfiles?.length);
+  const createSessionSubagentToolSet = (input: {
+    sessionId: string;
+    parentLlm: LlmConfig;
+    parentTools: ToolProvider;
+    signal?: AbortSignal;
+    permissionTurn?: PermissionTurnContext;
+    parentRuntime: AgentRuntimeRef;
+    runtimeContext?: RuntimeExecutionContext;
+    thinkingMode?: ThinkingMode;
+    onSubagentEvent?: (event: SubagentEvent) => void;
+  }): { subagent: Tool; tools: ToolProvider } => {
+    const createOptions = (parentTools: ToolProvider): SubagentToolOptions => ({
+      parentLlm: input.parentLlm,
+      parentTools,
+      profiles: subagentProfiles,
+      preprocessors: options.preprocessors ?? [],
+      signal: input.signal,
+      chat: options.chat,
+      onSubagentEvent: input.onSubagentEvent,
+      permissionTurn: input.permissionTurn,
+      thinkingMode: input.thinkingMode
+        ?? input.parentRuntime.thinkingMode
+        ?? options.thinkingMode
+        ?? loadThinkingModeFromEnv(),
+      maxThinkingEscalations: options.maxThinkingEscalations,
+      parentRuntime: input.parentRuntime,
+      runtimeContext: input.runtimeContext ?? runtimeContextForSession(input.sessionId),
+      toolExecutionBroker: options.toolExecutionBroker,
+      onToolExecutionAudit: options.onToolExecutionAudit,
+      globalTokenBudget,
+      globalConcurrencyLimit,
+    });
+    const subagent = createSubagentTool(createOptions(resolveToolProvider(input.parentTools))) as Tool;
+    const tools: ToolProvider = subagentEnabled
+      ? () => {
+          const base = resolveToolProvider(input.parentTools);
+          const subagentOptions = createOptions(base);
+          return [
+            ...base,
+            createSubagentTool(subagentOptions) as Tool,
+            createSubagentBatchTool(subagentOptions) as Tool,
+          ];
+        }
+      : input.parentTools;
+    return { subagent, tools };
+  };
+  const createSessionLoopOptions = (input: {
+    session: Session;
+    llm: LlmConfig;
+    tools: ToolProvider;
+    runtimeRef: AgentRuntimeRef;
+    runtimeContext?: RuntimeExecutionContext;
+    signal?: AbortSignal;
+    pauseGate?: PauseGate;
+    permissionTurn?: PermissionTurnContext;
+    userContent?: MessageContent;
+    thinkingMode?: ThinkingMode;
+    autoValidate?: boolean;
+    autoCheckpoint?: boolean;
+    persistModelUpdates?: boolean;
+    onEvent?: (event: LoopEvent) => void;
+  }): AgentLoopOptions => {
+    const loopOptions: AgentLoopOptions = {
+      llm: input.llm,
+      tools: input.tools,
+      autoSubagent: options.autoSubagent,
+      preprocessors: options.preprocessors ?? [],
+      chat: options.chat,
+      signal: input.signal,
+      pauseGate: input.pauseGate,
+      userContent: input.userContent,
+      permissionTurn: input.permissionTurn,
+      autoValidate: input.autoValidate ?? options.autoValidate ?? process.env.MINI_AGENT_AUTO_VALIDATE === "1",
+      validationWorkspace: workspace,
+      autoCheckpoint: input.autoCheckpoint ?? options.autoCheckpoint ?? process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
+      thinkingMode: input.thinkingMode
+        ?? input.session.thinkingMode
+        ?? options.thinkingMode
+        ?? loadThinkingModeFromEnv(),
+      maxThinkingEscalations: options.maxThinkingEscalations,
+      runtimeRef: input.runtimeRef,
+      runtimeContext: input.runtimeContext ?? runtimeContextForSession(input.session.id),
+      toolExecutionBroker: options.toolExecutionBroker,
+      onToolExecutionAudit: options.onToolExecutionAudit,
+      globalTokenBudget,
+      skillNames: resolveSessionSkillNames(input.session),
+      skillRegistry,
+      onEvent: input.onEvent,
+    };
+    if (input.persistModelUpdates) {
+      loopOptions.prepareNextTurn = async (context) => {
+        const update = await options.prepareNextTurn?.(context);
+        if (update?.llm) {
+          input.session.llmOverride = update.llm;
+          input.session.modelId = `${update.llm.provider}/${update.llm.model}`;
+          input.session.thinkingLevel = update.llm.thinkingLevel;
+        }
+        return update;
+      };
+    }
+    return loopOptions;
+  };
   const skillDiscovery = discoverWorkspaceSkills(workspace, skillRegistry, options.skillHome);
+  let instructionContent = "";
+  const instructionDiscovery = loadInstructionBundle(workspace).then((bundle) => {
+    instructionContent = bundle.content;
+  });
   const envPermissionMode = process.env.MINI_AGENT_PERMISSION_MODE;
   // All entry points use plan unless an explicit mode is configured.
   const defaultPermissionMode: PermissionMode = options.permissionMode
@@ -663,6 +834,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
   }
   const documentStore = new DocumentStore(path.join(dataRoot, "documents"));
   const sessionStore = new SessionStore(path.join(dataRoot, "sessions"));
+  const jobManager = new JobManager(new JobStore(path.join(dataRoot, "jobs")));
+  const memoryStore = new MemoryStore(path.join(dataRoot, "memory", "records.json"));
   const gitWorkflow = new GitWorkflow(workspace);
   const persistedSession = (session: Session): PersistedSession => ({
     id: session.id,
@@ -679,7 +852,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     forkedFromMessage: session.forkedFromMessage,
   });
   const saveSession = (session: Session): Promise<void> => sessionStore.save(persistedSession(session));
-  const restorePromise = sessionStore.loadAll().then((restored) => {
+  const restoreSessions = sessionStore.loadAll().then((restored) => {
     return Promise.all([...restored.values()].map(async (persisted) => {
       const session: Session = {
         id: persisted.id,
@@ -719,6 +892,12 @@ export function createAgentServer(options: AgentServerOptions): Express {
       await documentStore.restoreSession(persisted.id);
     }));
   });
+  const restorePromise = Promise.all([
+    restoreSessions,
+    jobManager.restore(),
+    memoryStore.load(),
+    instructionDiscovery,
+  ]).then(() => undefined);
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { files: MAX_ATTACHMENTS, fileSize: MAX_ATTACHMENT_BYTES, fields: 10 },
@@ -727,10 +906,281 @@ export function createAgentServer(options: AgentServerOptions): Express {
   app.disable("x-powered-by");
   app.use(express.json());
   app.use((_request, _response, next) => {
-    void Promise.all([restorePromise, skillDiscovery]).then(() => next()).catch(next);
+    void Promise.all([restorePromise, skillDiscovery, instructionDiscovery]).then(() => next()).catch(next);
   });
 
+  const startSessionJob = async (session: Session, jobId: string, lease: SessionExecutionLease): Promise<void> => {
+    try {
+      await jobManager.start(jobId, async (context) => {
+      session.activeJobId = jobId;
+      const permissionTurn = session.permissionManager.beginTurn(
+        session.id,
+        (permissionRequest) => {
+          void context.setStatus("waiting_approval", `approval required for ${permissionRequest.tool}`).catch(() => undefined);
+          void context.emit("permission_required", `approval required for ${permissionRequest.tool}`, { request: permissionRequest });
+        },
+        context.signal,
+      );
+      const parentRuntime: AgentRuntimeRef = {};
+      try {
+        const memoryPrompt = await memoryStore.buildPrompt(context.job.task, { scope: "project", limit: 8 });
+        const taskPrompt = memoryPrompt ? `${context.job.task}\n\n${memoryPrompt}` : context.job.task;
+        const sessionLlm = session.llmOverride ?? options.llm;
+        const baseTools: ToolProvider = () => resolveToolProvider(tools);
+        const subagentTools = createSessionSubagentToolSet({
+          sessionId: session.id,
+          parentLlm: sessionLlm,
+          parentTools: baseTools,
+          signal: context.signal,
+          permissionTurn,
+          parentRuntime,
+          runtimeContext: runtimeContextForSession(session.id, { jobId: context.job.id }),
+          thinkingMode: session.thinkingMode,
+          onSubagentEvent: (event) => {
+            void context.emit(event.type, undefined, { event });
+          },
+        });
+        const subagentTool = subagentTools.subagent;
+        const sessionTools = subagentTools.tools;
+
+        if (context.job.kind === "planner_worker_reviewer") {
+          const workflowBaseline = await captureBaseline(workspace);
+          const workflow = await runPlannerWorkerReviewer({
+            goal: context.job.task,
+            workspace,
+            acceptanceCriteria: [context.job.task],
+            onStateChange: async (state) => {
+              context.job.workOrder = state.workOrder;
+              context.job.workerReport = state.workerReport;
+              context.job.reviewReport = state.reviewReport;
+              await context.emit("workflow_stage", `workflow ${state.stage}`, {
+                stage: state.stage,
+                reworkCount: state.reworkCount,
+              });
+            },
+            collectEvidence: async ({ workerReport }) => {
+              await context.pauseGate.wait(context.signal);
+              const changedFiles = await collectChangedFiles(workspace, workflowBaseline);
+              const validation = await runValidation({
+                workspace,
+                steps: ["typecheck"],
+                signal: context.signal,
+              });
+              const diff = (await Promise.all(changedFiles.map(async (file) => {
+                const content = await gitWorkflow.diff({ path: file }).catch(() => "");
+                return content ? `## ${file}\n${content}` : "";
+              }))).filter(Boolean).join("\n");
+              const validationLines = validation.steps.map((step) =>
+                `${step.name}: ${step.ok ? "PASS" : "FAIL"}`,
+              );
+              return {
+                changedFiles,
+                validation: validationLines,
+                evidence: [
+                  `Worker summary: ${workerReport.summary.slice(0, 2_000)}`,
+                  `Changed files: ${changedFiles.length ? changedFiles.join(", ") : "(none detected)"}`,
+                  formatValidationReport(validation).slice(-4_000),
+                  diff ? `Git diff (truncated):\n${diff.slice(-12_000)}` : "Git diff for newly changed files: (none)",
+                ],
+              };
+            },
+            invoke: async ({ profile, task, sharedContext }) => {
+              await context.pauseGate.wait(context.signal);
+              const result = await subagentTool.execute({ profile, task, sharedContext }, context.signal);
+              const text = contentAsString(result.content);
+              if (result.isError) throw new Error(text);
+              return text;
+            },
+          });
+          context.job.workOrder = workflow.workOrder;
+          context.job.workerReport = workflow.workerReport;
+          context.job.reviewReport = workflow.reviewReport;
+          return workflow.reviewReport?.findings.join("\n");
+        }
+
+        session.messages = await runAgentTurn(
+          session.messages,
+          taskPrompt,
+          createSessionLoopOptions({
+            session,
+            llm: sessionLlm,
+            tools: sessionTools,
+            signal: context.signal,
+            pauseGate: context.pauseGate,
+            permissionTurn,
+            runtimeRef: parentRuntime,
+            runtimeContext: runtimeContextForSession(session.id, { jobId: context.job.id }),
+            thinkingMode: session.thinkingMode,
+            onEvent: (event) => {
+              void context.emit(event.type, undefined, { event });
+            },
+          }),
+        );
+        context.job.messages = session.messages;
+        await context.emit("session_snapshot", "background job updated session history", {
+          messageCount: session.messages.length,
+        });
+        await saveSession(session);
+        const lastAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
+        return lastAssistant && lastAssistant.role === "assistant"
+          ? contentAsString(lastAssistant.content).slice(0, 2000)
+          : undefined;
+      } finally {
+        permissionTurn.close();
+        session.activeJobId = undefined;
+        try {
+          await saveSession(session);
+        } finally {
+          releaseSession(session, lease);
+        }
+      }
+      });
+    } catch (error) {
+      releaseSession(session, lease);
+      throw error;
+    }
+  };
+
   app.get("/api/health", (_request, response) => response.json({ ok: true }));
+
+  app.get("/api/memory", async (request, response) => {
+    const scope = typeof request.query.scope === "string"
+      ? request.query.scope as import("./orchestration/index.ts").MemoryScope
+      : undefined;
+    const query = typeof request.query.query === "string" ? request.query.query : "";
+    const records = query
+      ? await memoryStore.search(query, { scope })
+      : await memoryStore.list({ scope });
+    response.json({ records });
+  });
+
+  app.post("/api/memory", async (request, response) => {
+    const scope = request.body?.scope;
+    const key = typeof request.body?.key === "string" ? request.body.key.trim() : "";
+    const content = typeof request.body?.content === "string" ? request.body.content.trim() : "";
+    if (!["user", "project", "directory", "task"].includes(scope) || !key || !content) {
+      response.status(400).json({ error: "scope, key, and content are required" });
+      return;
+    }
+    const record = await memoryStore.add({
+      scope,
+      key,
+      content,
+      source: typeof request.body?.source === "string" ? request.body.source : undefined,
+    });
+    response.status(201).json({ record });
+  });
+
+  app.post("/api/memory/:id/confirm", async (request, response) => {
+    const record = await memoryStore.confirm(request.params.id);
+    if (!record) {
+      response.status(404).json({ error: "Memory record not found" });
+      return;
+    }
+    response.json({ record });
+  });
+
+  app.delete("/api/memory/:id", async (request, response) => {
+    const record = await memoryStore.forget(request.params.id);
+    if (!record) {
+      response.status(404).json({ error: "Memory record not found" });
+      return;
+    }
+    response.json({ record });
+  });
+
+  app.get("/api/jobs/:id", (request, response) => {
+    const job = jobManager.get(request.params.id);
+    if (!job) {
+      response.status(404).json({ error: "Job not found" });
+      return;
+    }
+    response.json({ job });
+  });
+
+  app.get("/api/sessions/:id/jobs", (request, response) => {
+    if (!sessions.has(request.params.id)) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    response.json({ jobs: jobManager.list(request.params.id) });
+  });
+
+  app.post("/api/sessions/:id/jobs", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const task = typeof request.body?.prompt === "string" ? request.body.prompt.trim() : "";
+    const requestedKind = request.body?.kind;
+    if (requestedKind !== undefined && requestedKind !== "agent_turn" && requestedKind !== "planner_worker_reviewer") {
+      response.status(400).json({ error: "kind must be agent_turn or planner_worker_reviewer" });
+      return;
+    }
+    if (!task) {
+      response.status(400).json({ error: "prompt is required" });
+      return;
+    }
+    const lease = reserveSession(session, "job:create");
+    if (!lease) {
+      response.status(409).json({ error: "Session already has an active job", jobId: session.activeJobId ?? null });
+      return;
+    }
+    try {
+      const job = await jobManager.create({
+        sessionId: session.id,
+        task,
+        kind: requestedKind ?? "agent_turn",
+      });
+      session.activeJobId = job.id;
+      await startSessionJob(session, job.id, lease);
+      response.status(202).json({ job });
+    } catch (error) {
+      releaseSession(session, lease);
+      session.activeJobId = undefined;
+      response.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  for (const action of ["pause", "resume", "cancel"] as const) {
+    app.post(`/api/jobs/:id/${action}`, async (request, response) => {
+      try {
+        const job = await jobManager[action](request.params.id);
+        response.json({ job });
+      } catch (error) {
+        response.status(404).json({ error: error instanceof Error ? error.message : String(error) });
+      }
+    });
+  }
+  app.post("/api/jobs/:id/retry", async (request, response) => {
+    const existing = jobManager.get(request.params.id);
+    if (!existing) {
+      response.status(404).json({ error: "Job not found" });
+      return;
+    }
+    const session = sessions.get(existing.sessionId);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    const lease = reserveSession(session, "job:retry");
+    if (!lease) {
+      response.status(409).json({ error: "Session already has an active job", jobId: session.activeJobId ?? null });
+      return;
+    }
+    try {
+      const job = await jobManager.retry(existing.id);
+      session.activeJobId = job.id;
+      await startSessionJob(session, job.id, lease);
+      response.status(202).json({ job });
+    } catch (error) {
+      releaseSession(session, lease);
+      session.activeJobId = undefined;
+      const message = error instanceof Error ? error.message : String(error);
+      response.status(/Invalid orchestration job transition/i.test(message) ? 409 : 500).json({ error: message });
+    }
+  });
   app.get("/api/config", async (_request, response) => {
     const mcpStatuses = typeof options.mcpStatuses === "function"
       ? options.mcpStatuses()
@@ -862,19 +1312,20 @@ export function createAgentServer(options: AgentServerOptions): Express {
     });
   });
 
-  app.put("/api/sessions/:id/model", (request, response) => {
+  app.put("/api/sessions/:id/model", async (request, response) => {
     const session = sessions.get(request.params.id);
     if (!session) {
       response.status(404).json({ error: "Session not found" });
       return;
     }
-    if (session.busy) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
     const modelId = String(request.body?.model ?? "").trim();
     if (!modelId) {
       response.status(400).json({ error: "model is required" });
+      return;
+    }
+    const lease = reserveSession(session, "model");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
       return;
     }
     try {
@@ -887,8 +1338,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       session.modelId = `${newLlm.provider}/${newLlm.model}`;
       session.llmOverride = newLlm;
       session.thinkingLevel = newLlm.thinkingLevel;
-      // Persist the model switch
-      void saveSession(session);
+      await saveSession(session);
       const resolved = resolveModel(newLlm.model, newLlm.baseUrl);
       response.json({
         model: newLlm.model,
@@ -902,6 +1352,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       response.status(400).json({ error: message });
+    } finally {
+      releaseSession(session, lease);
     }
   });
 
@@ -974,7 +1426,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       .map((session) => ({
         id: session.id,
         createdAt: session.createdAt,
-        busy: session.busy,
+        busy: isSessionBusy(session),
         parentSessionId: session.parentSessionId ?? null,
         forkedFromMessage: session.forkedFromMessage ?? null,
         messageCount: visibleMessageCount(session.messages),
@@ -989,7 +1441,10 @@ export function createAgentServer(options: AgentServerOptions): Express {
     const id = randomUUID();
     const session: Session = {
       id,
-      messages: createAgentHistory(undefined, defaultPermissionMode),
+      messages: createAgentHistory(
+        buildSystemPrompt(defaultPermissionMode, instructionContent || undefined),
+        defaultPermissionMode,
+      ),
       createdAt: Date.now(),
       busy: false,
       thinkingMode: options.thinkingMode ?? loadThinkingModeFromEnv(),
@@ -1008,10 +1463,6 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(404).json({ error: "Session not found" });
       return;
     }
-    if (parent.busy) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
     const requestedIndex = request.body?.messageIndex;
     const visibleMessages = parent.messages.filter((message) => message.role !== "system");
     const messageIndex = requestedIndex === undefined
@@ -1021,33 +1472,42 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(400).json({ error: `messageIndex must be an integer between 0 and ${visibleMessages.length}` });
       return;
     }
-    const messages = truncateSessionMessages(parent.messages, messageIndex);
-    const safeMessageIndex = visibleMessageCount(messages);
-    const id = randomUUID();
-    const child: Session = {
-      id,
-      messages,
-      createdAt: Date.now(),
-      busy: false,
-      modelId: parent.modelId,
-      llmOverride: parent.llmOverride,
+    const lease = reserveSession(parent, "fork");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
+    try {
+      const messages = truncateSessionMessages(parent.messages, messageIndex);
+      const safeMessageIndex = visibleMessageCount(messages);
+      const id = randomUUID();
+      const child: Session = {
+        id,
+        messages,
+        createdAt: Date.now(),
+        busy: false,
+        modelId: parent.modelId,
+        llmOverride: parent.llmOverride,
         thinkingLevel: parent.thinkingLevel,
         thinkingMode: parent.thinkingMode,
-      permissionManager: new PermissionManager(parent.permissionManager.getMode()),
-      parentSessionId: parent.id,
-      forkedFromMessage: safeMessageIndex,
-      skillNames: [...(parent.skillNames ?? [])],
-    };
-    sessions.set(id, child);
-    await sessionStore.create(persistedSession(child));
-    await documentStore.createSession(id);
-    response.status(201).json({
-      id,
-      parentSessionId: parent.id,
-      forkedFromMessage: safeMessageIndex,
-      createdAt: child.createdAt,
-      messageCount: safeMessageIndex,
-    });
+        permissionManager: new PermissionManager(parent.permissionManager.getMode()),
+        parentSessionId: parent.id,
+        forkedFromMessage: safeMessageIndex,
+        skillNames: [...(parent.skillNames ?? [])],
+      };
+      sessions.set(id, child);
+      await sessionStore.create(persistedSession(child));
+      await documentStore.createSession(id);
+      response.status(201).json({
+        id,
+        parentSessionId: parent.id,
+        forkedFromMessage: safeMessageIndex,
+        createdAt: child.createdAt,
+        messageCount: safeMessageIndex,
+      });
+    } finally {
+      releaseSession(parent, lease);
+    }
   });
 
   app.post("/api/sessions/:id/rewind", async (request, response) => {
@@ -1056,20 +1516,25 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(404).json({ error: "Session not found" });
       return;
     }
-    if (session.busy) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
     const visibleMessages = session.messages.filter((message) => message.role !== "system");
     const messageIndex = Number(request.body?.messageIndex);
     if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex > visibleMessages.length) {
       response.status(400).json({ error: `messageIndex must be an integer between 0 and ${visibleMessages.length}` });
       return;
     }
-    session.messages = truncateSessionMessages(session.messages, messageIndex);
-    const safeMessageIndex = visibleMessageCount(session.messages);
-    await saveSession(session);
-    response.json({ id: session.id, messageIndex: safeMessageIndex, messageCount: safeMessageIndex });
+    const lease = reserveSession(session, "rewind");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
+    try {
+      session.messages = truncateSessionMessages(session.messages, messageIndex);
+      const safeMessageIndex = visibleMessageCount(session.messages);
+      await saveSession(session);
+      response.json({ id: session.id, messageIndex: safeMessageIndex, messageCount: safeMessageIndex });
+    } finally {
+      releaseSession(session, lease);
+    }
   });
 
   app.get("/api/sessions/tree", (_request, response) => {
@@ -1079,7 +1544,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       parentSessionId: session.parentSessionId ?? null,
       forkedFromMessage: session.forkedFromMessage ?? null,
       messageCount: visibleMessageCount(session.messages),
-      busy: session.busy,
+      busy: isSessionBusy(session),
       children: [] as string[],
     }));
     const byId = new Map(nodes.map((node) => [node.id, node]));
@@ -1109,7 +1574,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
     const mode = request.body?.mode;
     if (!isPermissionMode(mode)) {
-      response.status(400).json({ error: "mode must be plan or bypass" });
+      response.status(400).json({ error: "mode must be plan, approval, or bypass" });
       return;
     }
     const change = session.permissionManager.setMode(mode);
@@ -1174,10 +1639,19 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(400).json({ error: result.reason });
       return;
     }
-    const previousPhase = session.phase;
-    session.phase = targetPhase;
-    await saveSession(session);
-    response.json({ from: previousPhase, to: targetPhase, reason: result.reason });
+    const lease = reserveSession(session, "phase");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
+    try {
+      const previousPhase = session.phase;
+      session.phase = targetPhase;
+      await saveSession(session);
+      response.json({ from: previousPhase, to: targetPhase, reason: result.reason });
+    } finally {
+      releaseSession(session, lease);
+    }
   });
 
   /** POST /api/sessions/:id/plans - Generate new plan */
@@ -1187,26 +1661,31 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(404).json({ error: "Session not found" });
       return;
     }
-    if (session.busy) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
     const output = request.body?.output as string | undefined;
     const summary = request.body?.summary as string | undefined;
     if (!output) {
       response.status(400).json({ error: "output is required" });
       return;
     }
-    const plan = planGenerator.generateAndStore(output, session.id, summary);
-    if (!plan) {
-      response.status(400).json({ error: "Failed to parse plan from output" });
+    const lease = reserveSession(session, "plan-act:generate");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
       return;
     }
-    session.currentPlan = plan;
-    session.planHistory = session.planHistory ?? []; session.planHistory.push(plan);
-    session.phase = "review";
-    await saveSession(session);
-    response.status(201).json(plan);
+    try {
+      const plan = planGenerator.generateAndStore(output, session.id, summary);
+      if (!plan) {
+        response.status(400).json({ error: "Failed to parse plan from output" });
+        return;
+      }
+      session.currentPlan = plan;
+      session.planHistory = session.planHistory ?? []; session.planHistory.push(plan);
+      session.phase = "review";
+      await saveSession(session);
+      response.status(201).json(plan);
+    } finally {
+      releaseSession(session, lease);
+    }
   });
 
   /** GET /api/sessions/:id/plans - List plans for session */
@@ -1255,15 +1734,24 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(403).json({ error: "Plan does not belong to this session" });
       return;
     }
-    const approved = planManager.approvePlan(plan.id, request.body);
-    if (!approved) {
-      response.status(400).json({ error: "Failed to approve plan" });
+    const lease = reserveSession(session, "plan-act:approve");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
       return;
     }
-    session.currentPlan = approved;
-    session.phase = "acting";
-    await saveSession(session);
-    response.json(approved);
+    try {
+      const approved = planManager.approvePlan(plan.id, request.body);
+      if (!approved) {
+        response.status(400).json({ error: "Failed to approve plan" });
+        return;
+      }
+      session.currentPlan = approved;
+      session.phase = "acting";
+      await saveSession(session);
+      response.json(approved);
+    } finally {
+      releaseSession(session, lease);
+    }
   });
 
   /** POST /api/sessions/:id/plans/:planId/reject - Reject plan */
@@ -1283,15 +1771,24 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     const reason = request.body?.reason as string | undefined;
-    const rejected = planManager.rejectPlan(plan.id, reason);
-    if (!rejected) {
-      response.status(400).json({ error: "Failed to reject plan" });
+    const lease = reserveSession(session, "plan-act:reject");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
       return;
     }
-    session.currentPlan = undefined;
-    session.phase = "cancelled";
-    await saveSession(session);
-    response.json(rejected);
+    try {
+      const rejected = planManager.rejectPlan(plan.id, reason);
+      if (!rejected) {
+        response.status(400).json({ error: "Failed to reject plan" });
+        return;
+      }
+      session.currentPlan = undefined;
+      session.phase = "cancelled";
+      await saveSession(session);
+      response.json(rejected);
+    } finally {
+      releaseSession(session, lease);
+    }
   });
 
   /** POST /api/sessions/:id/plans/:planId/modify - Request modifications */
@@ -1310,15 +1807,24 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(403).json({ error: "Plan does not belong to this session" });
       return;
     }
-    const modified = planManager.updatePlanStatus(plan.id, "modified");
-    if (!modified) {
-      response.status(400).json({ error: "Failed to modify plan" });
+    const lease = reserveSession(session, "plan-act:modify");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
       return;
     }
-    session.currentPlan = modified;
-    session.phase = "planning";
-    await saveSession(session);
-    response.json(modified);
+    try {
+      const modified = planManager.updatePlanStatus(plan.id, "modified");
+      if (!modified) {
+        response.status(400).json({ error: "Failed to modify plan" });
+        return;
+      }
+      session.currentPlan = modified;
+      session.phase = "planning";
+      await saveSession(session);
+      response.json(modified);
+    } finally {
+      releaseSession(session, lease);
+    }
   });
 
   /** DELETE /api/sessions/:id/plans/:planId - Delete plan */
@@ -1337,11 +1843,20 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(403).json({ error: "Plan does not belong to this session" });
       return;
     }
-    planManager.deletePlan(plan.id);
-    if (session.currentPlan?.id === plan.id) {
-      session.currentPlan = undefined;
+    const lease = reserveSession(session, "plan-act:delete");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
     }
-    response.status(204).end();
+    try {
+      planManager.deletePlan(plan.id);
+      if (session.currentPlan?.id === plan.id) {
+        session.currentPlan = undefined;
+      }
+      response.status(204).end();
+    } finally {
+      releaseSession(session, lease);
+    }
   });
 
   // ── Session plan API (per-session plan kernel root) ─────────────────────────
@@ -1373,12 +1888,21 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     const autoApprove = Boolean(request.body?.autoApprove);
-    const planRoot = sessionPlanRoot(dataRoot, session.id);
-    const plan = await createAndSavePlan(planRoot, prompt, planMarkdown, {
-      autoApprove,
-      approvedBy: autoApprove ? "api" : undefined,
-    });
-    response.status(201).json({ plan });
+    const lease = reserveSession(session, "plan:create");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
+    try {
+      const planRoot = sessionPlanRoot(dataRoot, session.id);
+      const plan = await createAndSavePlan(planRoot, prompt, planMarkdown, {
+        autoApprove,
+        approvedBy: autoApprove ? "api" : undefined,
+      });
+      response.status(201).json({ plan });
+    } finally {
+      releaseSession(session, lease);
+    }
   });
 
   app.post("/api/sessions/:id/plan/approve", async (request, response) => {
@@ -1390,12 +1914,19 @@ export function createAgentServer(options: AgentServerOptions): Express {
     const by = typeof request.body?.by === "string" && request.body.by.trim()
       ? request.body.by.trim()
       : "api";
+    const lease = reserveSession(session, "plan:approve");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
     try {
       const plan = await approveCurrentPlan(sessionPlanRoot(dataRoot, session.id), by);
       response.json({ plan });
     } catch (error) {
       const { status, message } = planHttpError(error);
       response.status(status).json({ error: message });
+    } finally {
+      releaseSession(session, lease);
     }
   });
 
@@ -1405,12 +1936,19 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(404).json({ error: "Session not found" });
       return;
     }
+    const lease = reserveSession(session, "plan:reject");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
     try {
       const plan = await rejectCurrentPlan(sessionPlanRoot(dataRoot, session.id));
       response.json({ plan });
     } catch (error) {
       const { status, message } = planHttpError(error);
       response.status(status).json({ error: message });
+    } finally {
+      releaseSession(session, lease);
     }
   });
 
@@ -1425,12 +1963,19 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(400).json({ error: "plan is required" });
       return;
     }
+    const lease = reserveSession(session, "plan:edit");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
     try {
       const plan = await editCurrentPlan(sessionPlanRoot(dataRoot, session.id), planMarkdown);
       response.json({ plan });
     } catch (error) {
       const { status, message } = planHttpError(error);
       response.status(status).json({ error: message });
+    } finally {
+      releaseSession(session, lease);
     }
   });
 
@@ -1440,12 +1985,19 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(404).json({ error: "Session not found" });
       return;
     }
+    const lease = reserveSession(session, "plan:archive");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
     try {
       const result = await archiveCurrentPlan(sessionPlanRoot(dataRoot, session.id));
       response.json({ plan: result.document, archivedPath: result.archivedPath });
     } catch (error) {
       const { status, message } = planHttpError(error);
       response.status(status).json({ error: message });
+    } finally {
+      releaseSession(session, lease);
     }
   });
 
@@ -1465,17 +2017,17 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(404).json({ error: "Session not found" });
       return;
     }
-    if (session.busy) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
     const prompt = typeof request.body?.prompt === "string" ? request.body.prompt.trim() : "";
     if (!prompt) {
       response.status(400).json({ error: "prompt is required" });
       return;
     }
+    const lease = reserveSession(session, "plan:generate");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
 
-    session.busy = true;
     const planRoot = sessionPlanRoot(dataRoot, session.id);
     const previousMode = session.permissionManager.getMode();
     let modeChanged = false;
@@ -1510,32 +2062,18 @@ export function createAgentServer(options: AgentServerOptions): Express {
         session.messages = await runAgentTurn(
           session.messages,
           generatePrompt,
-          {
+          createSessionLoopOptions({
+            session,
             llm: sessionLlm,
             tools,
-            autoSubagent: options.autoSubagent,
-            preprocessors: options.preprocessors ?? [],
-            chat: options.chat,
             signal: abortController.signal,
             permissionTurn,
             autoValidate: false,
-            validationWorkspace: workspace,
             autoCheckpoint: false,
-            thinkingMode: session.thinkingMode ?? options.thinkingMode ?? loadThinkingModeFromEnv(),
-            maxThinkingEscalations: options.maxThinkingEscalations,
+            persistModelUpdates: true,
             runtimeRef: parentRuntime,
-            skillNames: resolveSessionSkillNames(session),
-            skillRegistry,
-            prepareNextTurn: async (context) => {
-              const update = await options.prepareNextTurn?.(context);
-              if (update?.llm) {
-                session.llmOverride = update.llm;
-                session.modelId = `${update.llm.provider}/${update.llm.model}`;
-                session.thinkingLevel = update.llm.thinkingLevel;
-              }
-              return update;
-            },
-          },
+            runtimeContext: runtimeContextForSession(session.id),
+          }),
         );
       } finally {
         permissionTurn.close();
@@ -1566,7 +2104,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       if (modeChanged) {
         session.permissionManager.setMode(previousMode);
       }
-      session.busy = false;
+      releaseSession(session, lease);
     }
   });
 
@@ -1577,7 +2115,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(404).json({ error: "Session not found" });
       return;
     }
-    if (session.busy) {
+    const lease = reserveSession(session, `plan:${isRetry ? "retry" : "execute"}`);
+    if (!lease) {
       response.status(409).json({ error: "Session is busy" });
       return;
     }
@@ -1591,12 +2130,12 @@ export function createAgentServer(options: AgentServerOptions): Express {
         workspaceRoot: workspace,
       });
     } catch (error) {
+      releaseSession(session, lease);
       const { status, message } = planHttpError(error);
       response.status(status).json({ error: message });
       return;
     }
 
-    session.busy = true;
     const previousMode = session.permissionManager.getMode();
     let modeChanged = false;
     if (previousMode !== "bypass") {
@@ -1655,58 +2194,30 @@ export function createAgentServer(options: AgentServerOptions): Express {
       ) as Tool;
       const sessionLlm = session.llmOverride ?? options.llm;
       const baseToolProvider: ToolProvider = () => [...resolveToolProvider(tools), documentTool];
-      const enableSubagent = options.subagentEnabled || (options.subagentProfiles && options.subagentProfiles.length > 0);
-      const sessionTools: ToolProvider = enableSubagent
-        ? () => {
-            const base = resolveToolProvider(baseToolProvider);
-            const subagentOpts = {
-              parentLlm: sessionLlm,
-              parentTools: base,
-              profiles: options.subagentProfiles ?? defaultProfiles,
-              preprocessors: options.preprocessors ?? [],
-              signal: abortController.signal,
-              onSubagentEvent: (subEvent: import("./subagent/types.ts").SubagentEvent) => send(safeEvent(subEvent)),
-              permissionTurn,
-              thinkingMode: session.thinkingMode ?? options.thinkingMode ?? loadThinkingModeFromEnv(),
-              maxThinkingEscalations: options.maxThinkingEscalations,
-              parentRuntime,
-            };
-            return [
-              ...base,
-              createSubagentTool(subagentOpts) as Tool,
-              createSubagentBatchTool(subagentOpts) as Tool,
-            ];
-          }
-        : baseToolProvider;
+      const { tools: sessionTools } = createSessionSubagentToolSet({
+        sessionId: session.id,
+        parentLlm: sessionLlm,
+        parentTools: baseToolProvider,
+        signal: abortController.signal,
+        permissionTurn,
+        parentRuntime,
+        runtimeContext: runtimeContextForSession(session.id, { taskId: prepared.document.id }),
+        thinkingMode: session.thinkingMode,
+        onSubagentEvent: (subEvent) => send(safeEvent(subEvent)),
+      });
 
       session.messages = await runAgentTurn(
         session.messages,
         executionUserText,
-        {
+        createSessionLoopOptions({
+          session,
           llm: sessionLlm,
           tools: sessionTools,
-          autoSubagent: options.autoSubagent,
-          preprocessors: options.preprocessors ?? [],
-          chat: options.chat,
           signal: abortController.signal,
           permissionTurn,
-          autoValidate: options.autoValidate ?? process.env.MINI_AGENT_AUTO_VALIDATE === "1",
-          validationWorkspace: workspace,
-          autoCheckpoint: options.autoCheckpoint ?? process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
-          thinkingMode: session.thinkingMode ?? options.thinkingMode ?? loadThinkingModeFromEnv(),
-          maxThinkingEscalations: options.maxThinkingEscalations,
+          persistModelUpdates: true,
           runtimeRef: parentRuntime,
-          skillNames: resolveSessionSkillNames(session),
-          skillRegistry,
-          prepareNextTurn: async (context) => {
-            const update = await options.prepareNextTurn?.(context);
-            if (update?.llm) {
-              session.llmOverride = update.llm;
-              session.modelId = `${update.llm.provider}/${update.llm.model}`;
-              session.thinkingLevel = update.llm.thinkingLevel;
-            }
-            return update;
-          },
+          runtimeContext: runtimeContextForSession(session.id, { taskId: prepared.document.id }),
           onEvent: (event) => {
             if (event.type === "thinking_policy") {
               session.thinkingLevel = event.level;
@@ -1723,7 +2234,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
               }
             }
           },
-        },
+        }),
       );
 
       const lastAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
@@ -1782,8 +2293,11 @@ export function createAgentServer(options: AgentServerOptions): Express {
       if (modeChanged) {
         session.permissionManager.setMode(previousMode);
       }
-      session.busy = false;
-      if (!response.writableEnded) response.end();
+      try {
+        if (!response.writableEnded) response.end();
+      } finally {
+        releaseSession(session, lease);
+      }
     }
   };
 
@@ -1812,7 +2326,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
     response.json({
       id: session.id,
-      busy: session.busy,
+      busy: isSessionBusy(session),
+      activeJobId: session.activeJobId ?? null,
       modelId: session.modelId,
       thinkingMode: session.thinkingMode ?? loadThinkingModeFromEnv(),
       parentSessionId: session.parentSessionId ?? null,
@@ -1853,10 +2368,6 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(404).json({ error: "Session not found" });
       return;
     }
-    if (session.busy) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
     const body = (request.body ?? {}) as {
       skillNames?: unknown;
       add?: unknown;
@@ -1874,17 +2385,26 @@ export function createAgentServer(options: AgentServerOptions): Express {
         : [],
     );
     const merged = uniqueSkillNames([...requested, ...add]).filter((name) => !remove.has(name));
+    const lease = reserveSession(session, "skills");
+    if (!lease) {
+      response.status(409).json({ error: "Session is busy" });
+      return;
+    }
     const activation = activateSkillNames(merged, skillRegistry);
-    session.skillNames = activation.activeNames;
-    await saveSession(session);
-    response.json({
-      available: activation.available.map((skill) => ({
-        name: skill.name,
-        description: skill.description,
-      })),
-      active: activation.activeNames,
-      missing: activation.missingNames,
-    });
+    try {
+      session.skillNames = activation.activeNames;
+      await saveSession(session);
+      response.json({
+        available: activation.available.map((skill) => ({
+          name: skill.name,
+          description: skill.description,
+        })),
+        active: activation.activeNames,
+        missing: activation.missingNames,
+      });
+    } finally {
+      releaseSession(session, lease);
+    }
   });
 
   app.delete("/api/sessions/:id", async (request, response) => {
@@ -1893,14 +2413,19 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(404).json({ error: "Session not found" });
       return;
     }
-    if (session.busy) {
+    const lease = reserveSession(session, "session:delete");
+    if (!lease) {
       response.status(409).json({ error: "Session is busy" });
       return;
     }
-    sessions.delete(request.params.id);
-    await sessionStore.remove(request.params.id);
-    void documentStore.removeSession(request.params.id);
-    response.status(204).end();
+    try {
+      sessions.delete(request.params.id);
+      await sessionStore.remove(request.params.id);
+      void documentStore.removeSession(request.params.id);
+      response.status(204).end();
+    } finally {
+      releaseSession(session, lease);
+    }
   });
 
   app.get("/api/sessions/:id/files/:fileId", async (request, response) => {
@@ -1938,17 +2463,17 @@ export function createAgentServer(options: AgentServerOptions): Express {
         response.status(404).json({ error: "Session not found" });
         return;
       }
-      if (session.busy) {
+      const lease = reserveSession(session, "message");
+      if (!lease) {
         response.status(409).json({ error: "Session is busy" });
         return;
       }
-      session.busy = true;
 
       let input: Awaited<ReturnType<typeof parseMessageRequest>>;
       try {
         input = await parseMessageRequest(request, workspace, documentStore, String(request.params.id));
       } catch (err) {
-        session.busy = false;
+        releaseSession(session, lease);
         const message = err instanceof Error ? err.message : String(err);
         response.status(400).json({ error: message });
         return;
@@ -2017,58 +2542,31 @@ export function createAgentServer(options: AgentServerOptions): Express {
         if (input.thinkingMode) session.thinkingMode = input.thinkingMode;
         // Build the tool set, optionally including the subagent tool
         const baseToolProvider: ToolProvider = () => [...resolveToolProvider(tools), documentTool];
-        const enableSubagent = options.subagentEnabled || (options.subagentProfiles && options.subagentProfiles.length > 0);
-        const sessionTools: ToolProvider = enableSubagent
-          ? () => {
-              const base = resolveToolProvider(baseToolProvider);
-              const subagentOpts = {
-                parentLlm: effectiveLlm,
-                parentTools: base,
-                profiles: options.subagentProfiles ?? defaultProfiles,
-                preprocessors: options.preprocessors ?? [],
-                signal: abortController.signal,
-                onSubagentEvent: (subEvent: import("./subagent/types.ts").SubagentEvent) => send(safeEvent(subEvent)),
-                permissionTurn,
-                thinkingMode: session.thinkingMode ?? options.thinkingMode ?? loadThinkingModeFromEnv(),
-                maxThinkingEscalations: options.maxThinkingEscalations,
-                parentRuntime,
-              };
-              return [
-                ...base,
-                createSubagentTool(subagentOpts) as Tool,
-                createSubagentBatchTool(subagentOpts) as Tool,
-              ];
-            }
-          : baseToolProvider;
+        const { tools: sessionTools } = createSessionSubagentToolSet({
+          sessionId: session.id,
+          parentLlm: effectiveLlm,
+          parentTools: baseToolProvider,
+          signal: abortController.signal,
+          permissionTurn,
+          parentRuntime,
+          runtimeContext: runtimeContextForSession(session.id, { taskId: operationScope }),
+          thinkingMode: input.thinkingMode ?? session.thinkingMode,
+          onSubagentEvent: (subEvent) => send(safeEvent(subEvent)),
+        });
         session.messages = await runAgentTurn(
           session.messages,
           input.modelPrompt,
-          {
+          createSessionLoopOptions({
+            session,
             llm: effectiveLlm,
             tools: sessionTools,
-            autoSubagent: options.autoSubagent,
-            preprocessors: options.preprocessors ?? [],
-            chat: options.chat,
             userContent,
             signal: abortController.signal,
             permissionTurn,
-            autoValidate: options.autoValidate ?? process.env.MINI_AGENT_AUTO_VALIDATE === "1",
-            validationWorkspace: workspace,
-            autoCheckpoint: options.autoCheckpoint ?? process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
-            thinkingMode: input.thinkingMode ?? session.thinkingMode ?? options.thinkingMode ?? loadThinkingModeFromEnv(),
-            maxThinkingEscalations: options.maxThinkingEscalations,
+            thinkingMode: input.thinkingMode ?? session.thinkingMode,
+            persistModelUpdates: true,
             runtimeRef: parentRuntime,
-            skillNames: resolveSessionSkillNames(session),
-            skillRegistry,
-            prepareNextTurn: async (context) => {
-              const update = await options.prepareNextTurn?.(context);
-              if (update?.llm) {
-                session.llmOverride = update.llm;
-                session.modelId = `${update.llm.provider}/${update.llm.model}`;
-                session.thinkingLevel = update.llm.thinkingLevel;
-              }
-              return update;
-            },
+            runtimeContext: runtimeContextForSession(session.id, { taskId: operationScope }),
             onEvent: (event) => {
               if (event.type === "thinking_policy") {
                 session.thinkingLevel = event.level;
@@ -2081,7 +2579,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
                 }
               }
             },
-          },
+          }),
         );
         await saveSession(session);
       } catch (err) {
@@ -2103,8 +2601,11 @@ export function createAgentServer(options: AgentServerOptions): Express {
         permissionTurn.close();
         request.off("aborted", onClientAbort);
         response.off("close", onResponseClose);
-        session.busy = false;
-        if (!response.writableEnded) response.end();
+        try {
+          if (!response.writableEnded) response.end();
+        } finally {
+          releaseSession(session, lease);
+        }
       }
     },
   );
@@ -2135,17 +2636,21 @@ async function startServer(): Promise<void> {
   // Initialize sandbox runner if enabled via env
   let sandboxRunner: Awaited<ReturnType<typeof createSandboxRunner>> | undefined;
   const sandboxEnabled = process.env.MINI_AGENT_SANDBOX !== "0" && process.env.MINI_AGENT_SANDBOX !== "false";
+  const sandboxConfig: SandboxConfig = {
+    enabled: sandboxEnabled,
+    mode: !sandboxEnabled
+      ? "disabled"
+      : process.env.MINI_AGENT_SANDBOX_MODE === "required" ? "required" : "preferred",
+    type: (process.env.MINI_AGENT_SANDBOX_TYPE as "auto" | "docker" | "node" | "none" | undefined) ?? "auto",
+    dockerImage: process.env.MINI_AGENT_SANDBOX_IMAGE,
+    allowNetwork: process.env.MINI_AGENT_SANDBOX_NETWORK === "true",
+    cpuLimit: process.env.MINI_AGENT_SANDBOX_CPUS ? parseFloat(process.env.MINI_AGENT_SANDBOX_CPUS) : undefined,
+    memoryLimit: process.env.MINI_AGENT_SANDBOX_MEMORY,
+    timeout: process.env.MINI_AGENT_SANDBOX_TIMEOUT ? parseInt(process.env.MINI_AGENT_SANDBOX_TIMEOUT, 10) : undefined,
+  };
   if (sandboxEnabled) {
     try {
-      sandboxRunner = await createSandboxRunner({
-        enabled: true,
-        type: (process.env.MINI_AGENT_SANDBOX_TYPE as "auto" | "docker" | "node" | "none" | undefined) ?? "auto",
-        dockerImage: process.env.MINI_AGENT_SANDBOX_IMAGE,
-        allowNetwork: process.env.MINI_AGENT_SANDBOX_NETWORK === "true",
-        cpuLimit: process.env.MINI_AGENT_SANDBOX_CPUS ? parseFloat(process.env.MINI_AGENT_SANDBOX_CPUS) : undefined,
-        memoryLimit: process.env.MINI_AGENT_SANDBOX_MEMORY,
-        timeout: process.env.MINI_AGENT_SANDBOX_TIMEOUT ? parseInt(process.env.MINI_AGENT_SANDBOX_TIMEOUT, 10) : undefined,
-      });
+      sandboxRunner = await createSandboxRunner(sandboxConfig);
       console.error(`[sandbox] initialized type=${sandboxRunner.type}`);
     } catch (error) {
       console.error(`[sandbox] failed to initialize: ${error instanceof Error ? error.message : String(error)}`);
@@ -2167,6 +2672,7 @@ async function startServer(): Promise<void> {
       subagentEnabled: process.env.MINI_AGENT_SUBAGENT !== "0",
       subagentProfiles: defaultProfiles,
       autoSubagent: loadAutoSubagentOptionsFromEnv(),
+      sandbox: sandboxConfig,
       sandboxRunner,
     });
   } catch (error) {
