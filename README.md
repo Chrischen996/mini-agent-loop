@@ -59,6 +59,9 @@ npm install
 | `SILICONFLOW_API_KEY` | no | — |
 | `OPENAI_BASE_URL` | no | OpenAI or DeepSeek auto |
 | `OPENAI_MODEL` | no | `gpt-4o-mini` / `deepseek-chat` |
+| `MINI_AGENT_REQUEST_TIMEOUT_MS` | no | `120000` (total request) |
+| `MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS` | no | same as request timeout |
+| `MINI_AGENT_STREAM_IDLE_TIMEOUT_MS` | no | `60000` after stream starts |
 | `MINI_AGENT_MODELS` | no | — |
 | `VISION_API_KEY` | no\* | — |
 | `VISION_BASE_URL` | no\* | — |
@@ -92,6 +95,19 @@ npm install
 \* Real runs need at least one supported provider key.
 `/model` only lists
 models whose declared key is configured.
+
+### LLM timeout recovery
+
+LLM requests use three deadlines. The first-response deadline covers waiting for
+the provider to start responding. The stream-idle deadline resets whenever a
+stream chunk arrives, including reasoning output. The total request deadline
+limits the entire request regardless of stream activity.
+
+If a request times out before producing answer text, the main agent retries it
+once. A timeout after partial answer text is preserved in conversation history
+and is not replayed automatically. Nested sub-agent timeouts return any
+recovered partial text to the parent as an error result, allowing the parent to
+choose whether to retry or simplify the task.
 
 ### Automatic subagent preflight
 

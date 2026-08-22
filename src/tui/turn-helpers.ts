@@ -99,6 +99,23 @@ export function handleMaxTurnsExceeded(
 /**
  * Handle LlmTimeoutError: save partial history and report.
  */
+export function formatLlmTimeoutMessage(err: LlmTimeoutError): string {
+  const phaseLabel = err.phase === "first_response"
+    ? "first response"
+    : err.phase === "stream_idle"
+      ? "stream idle"
+      : err.phase === "total"
+        ? "total request"
+        : "request";
+  const duration = err.timeoutMs !== undefined
+    ? `, ${Math.ceil(err.timeoutMs / 1000)}s`
+    : "";
+  const preview = err.partialContent?.replace(/\s+/g, " ").trim().slice(0, 80);
+  return preview
+    ? `LLM timeout (${phaseLabel}${duration}) - partial response saved: ${preview}`
+    : `LLM timeout (${phaseLabel}${duration}) - no partial response received`;
+}
+
 export function handleLlmTimeout(
   err: LlmTimeoutError,
   history: AgentMessage[],
@@ -106,7 +123,7 @@ export function handleLlmTimeout(
 ): { errorMessage: string } | null {
   if (err.messages) {
     history.push(...err.messages);
-    const errorMessage = `LLM timeout — partial response saved (${err.partialContent?.substring(0, 80) || ""})`;
+    const errorMessage = formatLlmTimeoutMessage(err);
     dispatch({ type: "LOOP_EVENT", event: { type: "error", message: errorMessage } } as any);
     return { errorMessage };
   }

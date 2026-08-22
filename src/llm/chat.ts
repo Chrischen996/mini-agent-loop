@@ -13,6 +13,9 @@ import type { AgentMessage, AssistantMessage } from "../types.ts";
 import {
   type LlmConfig,
   requestTimeout,
+  firstResponseTimeout,
+  streamIdleTimeout,
+  timeoutLimitForPhase,
   createRequestSignal,
   resolveEffectiveApiKey,
 } from "./config.ts";
@@ -133,7 +136,7 @@ async function* streamPiChat(
       const errMsg = event.error.errorMessage || "Pi provider stream failed";
       // Normalize Pi provider timeout errors to LlmTimeoutError for consistent handling
       if (/timed? ?out|timeout|request timed/i.test(errMsg)) {
-        yield { type: "error", error: new LlmTimeoutError() };
+        yield { type: "error", error: new LlmTimeoutError(undefined, undefined, { phase: "total" }) };
       } else {
         yield { type: "error", error: new Error(errMsg) };
       }
@@ -147,6 +150,7 @@ async function* iterateSseDataLines(
   response: Response,
   signal?: AbortSignal,
   onDone?: () => void,
+  onActivity?: () => void,
 ): AsyncGenerator<string> {
   if (!response.body) {
     throw new Error("LLM stream response missing body");
@@ -165,6 +169,7 @@ async function* iterateSseDataLines(
     throwIfAborted(signal);
     const { done, value } = await reader.read();
     if (done) break;
+    if (value?.byteLength) onActivity?.();
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? "";
@@ -251,7 +256,11 @@ export async function completeChat(
   } catch (err) {
     request.cleanup();
     if (request.didTimeout()) {
-      throw new LlmTimeoutError();
+      throw new LlmTimeoutError(undefined, undefined, {
+        phase: request.timeoutPhase() ?? "total",
+        timeoutMs: timeoutLimitForPhase(config, request.timeoutPhase()),
+        elapsedMs: request.elapsedMs(),
+      });
     }
     if (isAbortError(err)) throw err;
     const message = err instanceof Error ? err.message : String(err);
@@ -394,7 +403,10 @@ export async function* streamChat(
   }
 
   const url = `${config.baseUrl}/chat/completions`;
-  const request = createRequestSignal(signal, requestTimeout(config));
+  const request = createRequestSignal(signal, requestTimeout(config), {
+    firstResponseTimeoutMs: firstResponseTimeout(config),
+    idleTimeoutMs: streamIdleTimeout(config),
+  });
   const effectiveKey = await resolveEffectiveApiKey(config);
   let response: Response;
   try {
@@ -411,7 +423,11 @@ export async function* streamChat(
   } catch (err) {
     request.cleanup();
     if (request.didTimeout()) {
-      throw new LlmTimeoutError();
+      throw new LlmTimeoutError(undefined, undefined, {
+        phase: request.timeoutPhase() ?? "total",
+        timeoutMs: timeoutLimitForPhase(config, request.timeoutPhase()),
+        elapsedMs: request.elapsedMs(),
+      });
     }
     if (isAbortError(err)) throw err;
     const message = err instanceof Error ? err.message : String(err);
@@ -436,9 +452,13 @@ export async function* streamChat(
   let sawTerminalMessage = false;
   let finishReason: string | null = null;
   try {
-    for await (const data of iterateSseDataLines(response, request.signal, () => {
-      sawDoneMarker = true;
-    })) {
+    request.markResponseStarted();
+    for await (const data of iterateSseDataLines(
+      response,
+      request.signal,
+      () => { sawDoneMarker = true; },
+      () => { request.markActivity(); },
+    )) {
     let parsed: {
       usage?: {
         prompt_tokens?: number;
@@ -577,7 +597,11 @@ export async function* streamChat(
     }
 
     if (request.didTimeout()) {
-      throw new LlmTimeoutError();
+      throw new LlmTimeoutError(undefined, undefined, {
+        phase: request.timeoutPhase() ?? "total",
+        timeoutMs: timeoutLimitForPhase(config, request.timeoutPhase()),
+        elapsedMs: request.elapsedMs(),
+      });
     }
     if (finishReason === "length") {
       yield { type: "error", error: new OutputTruncatedError() }; return;
@@ -588,6 +612,15 @@ export async function* streamChat(
     if (!sawDoneMarker && !sawFinishReason && !sawTerminalMessage) {
       throw new Error("LLM stream ended before completion (missing finish_reason, terminal message, or [DONE])");
     }
+  } catch (err) {
+    if (request.didTimeout()) {
+      throw new LlmTimeoutError(undefined, undefined, {
+        phase: request.timeoutPhase() ?? "total",
+        timeoutMs: timeoutLimitForPhase(config, request.timeoutPhase()),
+        elapsedMs: request.elapsedMs(),
+      });
+    }
+    throw err;
   } finally {
     // Always clear the timeout and parent abort listener, including network
     // failures and malformed/incomplete provider streams.

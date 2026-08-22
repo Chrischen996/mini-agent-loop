@@ -836,6 +836,7 @@ async function runAgentTurnInternal(
     options.autoSubagent?.maxDirectExploration ?? DEFAULT_MAX_DIRECT_EXPLORATION;
   let reasoningOnlyRetries = 0;
   const retryCoordinator = new LlmRetryCoordinator();
+  let timeoutRetries = 0;
 
   if (initialDecision) {
     onEvent?.({
@@ -1373,7 +1374,15 @@ async function runAgentTurnInternal(
               emitAssistantEvent(partial);
             }
             // Attach the accumulated messages so the caller can restore history.
-            throw new LlmTimeoutError(err.partialContent, messages);
+            throw new LlmTimeoutError(
+              streamed || err.partialContent,
+              messages,
+              {
+                phase: err.phase,
+                timeoutMs: err.timeoutMs,
+                elapsedMs: err.elapsedMs,
+              },
+            );
           }
           throw err;
         }
@@ -1409,6 +1418,23 @@ async function runAgentTurnInternal(
           `LLM ${formatLlmIdentity(currentLlm)} returned reasoning without a final answer. ${retryNote} ` +
           "Choose a different model or configure a provider-supported thinking mode.",
         );
+      }
+      if (err instanceof LlmTimeoutError) {
+        const hasPartialAnswer = Boolean(err.partialContent?.trim());
+        if (!hasPartialAnswer && timeoutRetries < 1) {
+          timeoutRetries += 1;
+          onEvent?.({
+            type: "retry_attempt",
+            errorType: "timeout",
+            attempt: timeoutRetries,
+            maxRetries: 1,
+            delayMs: 0,
+            errorMessage: err.message,
+          });
+          turn -= 1;
+          continue;
+        }
+        throw err;
       }
       const maxRetries = currentContext?.maxCompactionRetries ?? 1;
       if (isContextOverflowError(err) && overflowRetries < maxRetries) {
@@ -1462,6 +1488,8 @@ async function runAgentTurnInternal(
       }
       throw err;
     }
+
+    timeoutRetries = 0;
 
     const afterToolResults = messages
       .slice()

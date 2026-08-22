@@ -14,6 +14,7 @@ export function getTuiViewportHeight(termRows: number | undefined): number {
 export function getMessageFeedHeight(options: {
   termRows: number | undefined;
   hasPendingImages?: boolean;
+  todoRows?: number;
   pickerRows?: number;
 }): number {
   const viewport = getTuiViewportHeight(options.termRows);
@@ -22,6 +23,7 @@ export function getMessageFeedHeight(options: {
     2 + // input row
     3 + // status bar border box
     (options.hasPendingImages ? 1 : 0) +
+    (options.todoRows ?? 0) +
     (options.pickerRows ?? 0);
   return Math.max(3, viewport - chrome);
 }
@@ -30,10 +32,11 @@ export function getPickerLayout(options: {
   termRows: number | undefined;
   requestedItems: number;
   hasPendingImages?: boolean;
+  todoRows?: number;
   extraRows?: number;
 }): { itemRows: number; totalRows: number } {
   const viewport = getTuiViewportHeight(options.termRows);
-  const fixedChrome = 3 + 2 + 3 + (options.hasPendingImages ? 1 : 0);
+  const fixedChrome = 3 + 2 + 3 + (options.hasPendingImages ? 1 : 0) + (options.todoRows ?? 0);
   const extraRows = options.extraRows ?? 2;
   const maxTotal = Math.max(0, viewport - fixedChrome - 3);
   const itemRows = Math.max(0, Math.min(options.requestedItems, maxTotal - extraRows));

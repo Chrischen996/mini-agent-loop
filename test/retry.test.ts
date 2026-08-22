@@ -7,7 +7,22 @@ import {
   isContextOverflowError,
   isAbortError,
   throwIfAborted,
+  LlmTimeoutError,
 } from "../src/llm/retry.ts";
+
+describe("LlmTimeoutError", () => {
+  it("preserves timeout phase and timing metadata", () => {
+    const error = new LlmTimeoutError(undefined, undefined, {
+      phase: "stream_idle",
+      timeoutMs: 60_000,
+      elapsedMs: 60_017,
+    });
+
+    assert.equal(error.phase, "stream_idle");
+    assert.equal(error.timeoutMs, 60_000);
+    assert.equal(error.elapsedMs, 60_017);
+  });
+});
 
 describe("classifyError", () => {
   it("classifies 429 / rate limit errors", () => {

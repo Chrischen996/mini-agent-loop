@@ -6,7 +6,7 @@ import type {
   SubagentProfile,
 } from "../src/subagent/types.ts";
 import { contentAsString } from "../src/content.ts";
-import { makeLlmConfig, type ChatFn } from "../src/llm/index.ts";
+import { LlmTimeoutError, makeLlmConfig, type ChatFn } from "../src/llm/index.ts";
 import type { Tool, ToolResult } from "../src/tools/types.ts";
 import type { AssistantMessage } from "../src/types.ts";
 import { PermissionManager } from "../src/permissions.ts";
@@ -1713,6 +1713,32 @@ describe("createSubagentTool", () => {
         assert.ok(end.errors, "timeout errors should be recorded");
         assert.ok(end.errors!.some((e) => e.kind === "timeout"));
       }
+    });
+
+    it("returns recovered partial text when a timed-out run has progress", async () => {
+      const partialMessages = [
+        { role: "system" as const, content: "system" },
+        { role: "user" as const, content: "partial task" },
+        { role: "assistant" as const, content: "partial progress" },
+      ];
+      const slowChat: ChatFn = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        throw new LlmTimeoutError("partial progress", partialMessages);
+      };
+
+      const timeoutTool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        chat: slowChat,
+        timeout: 5,
+      });
+
+      const result = await timeoutTool.execute({ task: "recover partial task" });
+      const text = contentAsString(result.content);
+      assert.equal(result.isError, true);
+      assert.match(text, /\[Partial\]/);
+      assert.match(text, /partial progress/);
+      assert.match(text, /timed out/);
     });
   });
 

@@ -4,6 +4,7 @@ import type { LoopEvent } from "../loop.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
 import { PERMISSION_MODES, type PermissionMode } from "../permissions.ts";
 import type { SessionPhase, ExecutionPlan, PlanActEvent } from "../plan-act/types.ts";
+import type { TodoItem } from "../tools/todo.ts";
 
 export type { PermissionMode } from "../permissions.ts";
 export type { SessionPhase } from "../plan-act/types.ts";
@@ -79,6 +80,8 @@ export type TuiState = {
   touchedFiles: string[];
   /** Tool activity cards, kept separately from the chat feed for the sidebar. */
   toolCards: ToolCardState[];
+  /** Independent task checklist maintained by the agent. */
+  todos: TodoItem[];
   streamingText: string;
   streamingReasoning: string;
   /** Track context compaction events for /context command. */
@@ -123,6 +126,7 @@ export type TuiAction =
   | { type: "AUTO_CONTINUE"; count: number; max: number }
   | { type: "MODEL_CHANGED"; modelName: string }
   | { type: "SET_STATUS"; status: string }
+  | { type: "SET_TODOS"; todos: TodoItem[] }
   | { type: "RESET" }
   | { type: "CANCEL_GENERATION" }
   | { type: "TOGGLE_THINKING_MODE" }
@@ -194,6 +198,7 @@ export function createInitialState(modelName: string): TuiState {
     steps: [],
     touchedFiles: [],
     toolCards: [],
+    todos: [],
     streamingText: "",
     streamingReasoning: "",
     busy: false,
@@ -270,6 +275,9 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
 
     case "SET_STATUS":
       return { ...state, status: action.status };
+
+    case "SET_TODOS":
+      return { ...state, todos: action.todos };
 
     case "CANCEL_GENERATION":
       return {
@@ -442,6 +450,16 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             status: `思考结果不完整，正在重试 (${event.attempt})...`,
           };
 
+        case "retry_attempt":
+          return {
+            ...state,
+            streamingText: "",
+            streamingReasoning: "",
+            status: event.errorType === "timeout"
+              ? `请求超时，正在重试 (${event.attempt}/${event.maxRetries})...`
+              : `请求失败，正在重试 (${event.attempt}/${event.maxRetries})...`,
+          };
+
         case "max_turns":
           return {
             ...state,
@@ -482,6 +500,9 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           };
 
         case "tool_start": {
+          if (event.call.name === "todo_write") {
+            return { ...state, status: "更新任务清单..." };
+          }
           const rawArgs = (event.call.arguments ?? {}) as Record<string, unknown>;
           const args = shortPreview(JSON.stringify(rawArgs), 120);
           const startedAt = Date.now();
@@ -524,6 +545,12 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         }
 
         case "tool_end": {
+          if (event.call.name === "todo_write") {
+            return {
+              ...state,
+              status: event.result.isError ? "任务清单更新失败" : "任务清单已更新",
+            };
+          }
           const now = Date.now();
           const result = resultPreview(event.result.content);
           const updatedMessages = state.messages.map((m) => {

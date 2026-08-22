@@ -27,6 +27,7 @@ import {
 } from "../think-intensity.ts";
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import type { CacheRetention } from "../pi-ai/types.ts";
+import type { LlmTimeoutPhase } from "./retry.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -39,6 +40,8 @@ export type LlmConfig = {
   contextWindow: number;
   maxTokens: number;
   timeoutMs?: number;
+  firstResponseTimeoutMs?: number;
+  streamIdleTimeoutMs?: number;
   piModel?: ModelRef["piModel"];
   reasoning: boolean;
   /** Provider compatibility flags used by the fallback OpenAI-compatible path. */
@@ -113,34 +116,118 @@ export function resolveOutputTokenLimit(
 // ─── Timeout / signal utilities ──────────────────────────────────────────────
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 60_000;
 
-function configuredTimeout(raw: string | undefined): number {
+function configuredTimeout(raw: string | undefined, fallback: number): number {
   const value = Number(raw);
-  return Number.isFinite(value) && value >= 1_000 ? Math.floor(value) : DEFAULT_REQUEST_TIMEOUT_MS;
+  return Number.isFinite(value) && value >= 1_000 ? Math.floor(value) : fallback;
 }
 
 export function requestTimeout(config: LlmConfig): number {
-  return config.timeoutMs ?? configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS);
+  return config.timeoutMs ?? configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS);
 }
+
+export function firstResponseTimeout(config: LlmConfig): number {
+  return config.firstResponseTimeoutMs
+    ?? configuredTimeout(process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS, requestTimeout(config));
+}
+
+export function streamIdleTimeout(config: LlmConfig): number {
+  return config.streamIdleTimeoutMs
+    ?? configuredTimeout(process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS, DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+}
+
+export function timeoutLimitForPhase(
+  config: LlmConfig,
+  phase: LlmTimeoutPhase | undefined,
+): number {
+  if (phase === "first_response") return firstResponseTimeout(config);
+  if (phase === "stream_idle") return streamIdleTimeout(config);
+  return requestTimeout(config);
+}
+
+export type RequestSignalOptions = {
+  firstResponseTimeoutMs?: number;
+  idleTimeoutMs?: number;
+};
 
 export function createRequestSignal(parent: AbortSignal | undefined, timeoutMs: number): {
   signal: AbortSignal;
   didTimeout: () => boolean;
+  timeoutPhase: () => LlmTimeoutPhase | undefined;
+  elapsedMs: () => number;
+  markResponseStarted: () => void;
+  markActivity: () => void;
+  cleanup: () => void;
+};
+export function createRequestSignal(
+  parent: AbortSignal | undefined,
+  timeoutMs: number,
+  options: RequestSignalOptions,
+): {
+  signal: AbortSignal;
+  didTimeout: () => boolean;
+  timeoutPhase: () => LlmTimeoutPhase | undefined;
+  elapsedMs: () => number;
+  markResponseStarted: () => void;
+  markActivity: () => void;
+  cleanup: () => void;
+};
+export function createRequestSignal(
+  parent: AbortSignal | undefined,
+  timeoutMs: number,
+  options: RequestSignalOptions = {},
+): {
+  signal: AbortSignal;
+  didTimeout: () => boolean;
+  timeoutPhase: () => LlmTimeoutPhase | undefined;
+  elapsedMs: () => number;
+  markResponseStarted: () => void;
+  markActivity: () => void;
   cleanup: () => void;
 } {
   const controller = new AbortController();
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
+  const startedAt = Date.now();
+  let phase: LlmTimeoutPhase | undefined;
+  let firstResponseTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let responseStarted = false;
+
+  const abortFor = (nextPhase: LlmTimeoutPhase) => {
+    if (phase) return;
+    phase = nextPhase;
     controller.abort();
-  }, timeoutMs);
+  };
+  const totalTimer = setTimeout(() => abortFor("total"), timeoutMs);
+  if (options.firstResponseTimeoutMs !== undefined) {
+    firstResponseTimer = setTimeout(
+      () => abortFor("first_response"),
+      options.firstResponseTimeoutMs,
+    );
+  }
+  const refreshIdleTimer = () => {
+    if (options.idleTimeoutMs === undefined || !responseStarted || phase) return;
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => abortFor("stream_idle"), options.idleTimeoutMs);
+  };
   const onAbort = () => controller.abort();
   parent?.addEventListener("abort", onAbort, { once: true });
   return {
     signal: controller.signal,
-    didTimeout: () => timedOut,
+    didTimeout: () => phase !== undefined,
+    timeoutPhase: () => phase,
+    elapsedMs: () => Date.now() - startedAt,
+    markResponseStarted: () => {
+      if (phase || responseStarted) return;
+      responseStarted = true;
+      if (firstResponseTimer !== undefined) clearTimeout(firstResponseTimer);
+      refreshIdleTimer();
+    },
+    markActivity: refreshIdleTimer,
     cleanup: () => {
-      clearTimeout(timer);
+      clearTimeout(totalTimer);
+      if (firstResponseTimer !== undefined) clearTimeout(firstResponseTimer);
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
       parent?.removeEventListener("abort", onAbort);
     },
   };
@@ -184,6 +271,9 @@ export function loadDotEnvFile(
 
 export function loadLlmConfigFromEnv(): LlmConfig {
   loadDotEnvFile();
+  const timeoutMs = configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS);
+  const firstResponseTimeoutMs = configuredTimeout(process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS, timeoutMs);
+  const streamIdleTimeoutMs = configuredTimeout(process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS, DEFAULT_STREAM_IDLE_TIMEOUT_MS);
 
   // ── 1. Active profile (highest precedence) ─────────────────────────────────
   const profileStore = loadProfileStoreSync();
@@ -201,7 +291,9 @@ export function loadLlmConfigFromEnv(): LlmConfig {
       capabilities: resolved.capabilities,
       contextWindow: resolved.contextWindow,
       maxTokens: resolveOutputTokenLimit(resolved.maxTokens, resolved.contextWindow),
-      timeoutMs: configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS),
+      timeoutMs,
+      firstResponseTimeoutMs,
+      streamIdleTimeoutMs,
       piModel: resolved.piModel,
       reasoning: resolved.reasoning,
       compat: resolved.compat,
@@ -270,7 +362,9 @@ export function loadLlmConfigFromEnv(): LlmConfig {
     capabilities: resolved.capabilities,
     contextWindow: resolved.contextWindow,
     maxTokens: resolveOutputTokenLimit(resolved.maxTokens, resolved.contextWindow),
-    timeoutMs: configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS),
+    timeoutMs,
+    firstResponseTimeoutMs,
+    streamIdleTimeoutMs,
     piModel: resolved.piModel,
     reasoning: resolved.reasoning,
     compat: resolved.compat,
@@ -300,6 +394,8 @@ export function makeLlmConfig(
     contextWindow?: number;
     maxTokens?: number;
     timeoutMs?: number;
+    firstResponseTimeoutMs?: number;
+    streamIdleTimeoutMs?: number;
     reasoning?: boolean;
     thinkingLevel?: ModelThinkingLevel;
     imagePolicy?: ImagePolicy;
@@ -322,6 +418,8 @@ export function makeLlmConfig(
       partial.maxTokens,
     ),
     timeoutMs: partial.timeoutMs,
+    firstResponseTimeoutMs: partial.firstResponseTimeoutMs,
+    streamIdleTimeoutMs: partial.streamIdleTimeoutMs,
     piModel: resolved.piModel,
     reasoning: partial.reasoning ?? resolved.reasoning,
     compat: partial.compat ?? resolved.compat,

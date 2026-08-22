@@ -18,7 +18,7 @@
 
 import { randomUUID } from "node:crypto";
 import { contentAsString } from "../content.ts";
-import { switchLlmModel, type LlmConfig } from "../llm/index.ts";
+import { LlmTimeoutError, switchLlmModel, type LlmConfig } from "../llm/index.ts";
 import {
   MaxTurnsExceededError,
   runAgentLoop,
@@ -839,21 +839,25 @@ ${args.sharedContext}
             err instanceof Error ? err.message : String(err);
 
           // Classify the error kind
-          const isTimeout = timeoutController?.signal.aborted === true;
+          const timeoutError = err instanceof LlmTimeoutError ? err : undefined;
+          const isTimeout = timeoutController?.signal.aborted === true || timeoutError !== undefined;
 
           const errorKind: SubagentErrorKind = isTimeout ? "timeout" : classifySubagentError(err);
+          const timeoutPhase = timeoutError?.phase ? ` (${timeoutError.phase})` : "";
+          const timeoutMessage = `Sub-agent timed out${timeoutPhase} after ${timeout}ms. Consider increasing the timeout or simplifying the task.`;
           errors.push({
-            message: isTimeout ? "Sub-agent timeout exceeded" : errorMessage,
+            message: isTimeout ? timeoutMessage : errorMessage,
             kind: errorKind,
           });
 
           // Provider failures can happen after useful tool work. Preserve the
           // partial history carried by typed loop errors so the parent can
           // decide whether to continue, retry, or use the recovered findings.
-          const partialMessages = partialMessagesFromError(err) ?? childRuntimeRef.history;
+          const partialMessages = timeoutError?.messages ?? partialMessagesFromError(err) ?? childRuntimeRef.history;
           if (partialMessages) finalMessages = partialMessages;
           const extracted = extractBestAnswer(finalMessages);
           const partialContent = extracted.text || partialTextFromError(err);
+          const partialResult = isTimeout && partialContent ? `[Partial] ${partialContent}` : partialContent;
 
           const { tokenBreakdown, estimatedCost } = getBreakdownAndCost();
           onSubagentEvent?.({
@@ -873,11 +877,10 @@ ${args.sharedContext}
 
           return {
             content: [
+              isTimeout ? timeoutMessage : `Sub-agent failed (${errorKind}): ${errorMessage}`,
               isTimeout
-                ? `Sub-agent timed out after ${timeout}ms.`
-                : `Sub-agent failed (${errorKind}): ${errorMessage}`,
-              partialContent ? `Recovered partial progress:\n${partialContent}` : "No partial progress was recovered.",
-              isTimeout ? "Consider increasing the timeout or simplifying the task." : "",
+                ? (partialResult || "No partial progress was recovered.")
+                : (partialContent ? `Recovered partial progress:\n${partialContent}` : "No partial progress was recovered."),
             ].filter(Boolean).join("\n\n"),
             isError: true,
           };
@@ -896,11 +899,14 @@ ${args.sharedContext}
         // Already handled in catch above
       } else if (timeoutController?.signal.aborted === true) {
         // Timeout fired but runAgentLoop returned normally — treat as timeout
+        const recovered = extractBestAnswer(finalMessages ?? []).text.trim();
+        const partialResult = recovered ? `[Partial] ${recovered}` : "";
+        const timeoutMessage = `Sub-agent timed out after ${timeout}ms. Consider increasing the timeout or simplifying the task.`;
         const { tokenBreakdown, estimatedCost } = getBreakdownAndCost();
         onSubagentEvent?.({
           type: "subagent_end",
           id: invocationId,
-          result: "",
+          result: partialResult,
           success: false,
           depth,
           turns: countTurns(finalMessages ?? []),
@@ -908,11 +914,11 @@ ${args.sharedContext}
           tokenBreakdown,
           estimatedCost,
           runtime: runtimeInfo,
-          errors: [{ message: "Sub-agent timeout exceeded", kind: "timeout" }],
+          errors: [{ message: timeoutMessage, kind: "timeout" }],
           autoDelegationInherited: false,
         });
         return {
-          content: `Sub-agent timed out after ${timeout}ms. Consider increasing the timeout or simplifying the task.`,
+          content: recovered ? `${partialResult}\n\n${timeoutMessage}` : timeoutMessage,
           isError: true,
         };
       }

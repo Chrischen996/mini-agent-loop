@@ -28,6 +28,8 @@ export type { ReadArgs } from "./read.ts";
 export type { WriteArgs } from "./write.ts";
 export type { SandboxConfig } from "../sandbox/index.ts";
 export type { BashArgs } from "./bash.ts";
+export { createTodoTool } from "./todo.ts";
+export type { TodoItem, TodoStatus, TodoWriteArgs } from "./todo.ts";
 export { createBashTool } from "./bash.ts";
 export { createReadTool } from "./read.ts";
 export { createWriteTool } from "./write.ts";
@@ -52,7 +54,7 @@ export type ToolName =
   | "codebase_open" | "codebase_search" | "codebase_read" | "codebase_explain"
   | "web_search" | "fetch_content" | "get_search_content" | "source_check"
   | "subagent" | "git_status" | "git_diff" | "git_checkpoint" | "git_undo" | "git_branch_isolate"
-  | "validate_workspace";
+  | "validate_workspace" | "todo_write";
 
 const WEB_ACCESS_TOOL_NAMES = new Set<ToolName>([
   "web_search",

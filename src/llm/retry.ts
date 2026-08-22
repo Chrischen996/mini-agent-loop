@@ -42,6 +42,14 @@ export type LlmStreamEvent =
   | { type: "error"; error: Error }
   | { type: "attempt_reset" }; // emitted before a recovery retry so the UI can clear temp reasoning
 
+export type LlmTimeoutPhase = "first_response" | "stream_idle" | "total";
+
+export type LlmTimeoutDetails = {
+  phase?: LlmTimeoutPhase;
+  timeoutMs?: number;
+  elapsedMs?: number;
+};
+
 // ─── Typed incomplete-response errors ────────────────────────────────────────
 
 export class IncompleteLlmResponseError extends Error {
@@ -80,12 +88,22 @@ export class ProtocolError extends Error {
 export class LlmTimeoutError extends Error {
   readonly partialContent?: string;
   readonly messages?: AgentMessage[];
+  readonly phase?: LlmTimeoutPhase;
+  readonly timeoutMs?: number;
+  readonly elapsedMs?: number;
 
-  constructor(partialContent?: string, messages?: AgentMessage[]) {
+  constructor(
+    partialContent?: string,
+    messages?: AgentMessage[],
+    details: LlmTimeoutDetails = {},
+  ) {
     super(`LLM request timed out after ${typeof process !== 'undefined' ? 'request timeout' : 'timeout'}`);
     this.name = "LlmTimeoutError";
     this.partialContent = partialContent;
     this.messages = messages;
+    this.phase = details.phase;
+    this.timeoutMs = details.timeoutMs;
+    this.elapsedMs = details.elapsedMs;
   }
 }
 

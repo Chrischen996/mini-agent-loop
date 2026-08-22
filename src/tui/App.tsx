@@ -18,6 +18,7 @@ import {
   type LoopEvent,
 } from "../loop.ts";
 import { LlmTimeoutError } from "../llm/retry.ts";
+import { formatLlmTimeoutMessage } from "./turn-helpers.ts";
 import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
 import {
   buildIntenseLlm,
@@ -46,7 +47,7 @@ import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
 } from "../preprocessors/index.ts";
-import { createAllTools, createTools } from "../tools/index.ts";
+import { createAllTools, createTodoTool, createTools } from "../tools/index.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
 import type { AgentMessage, MessageContent } from "../types.ts";
 import type { ImageAttachment } from "./state.ts";
@@ -78,6 +79,7 @@ import { useKeyboardHandler } from "./hooks/useKeyboardHandler.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
 import { PromptInput } from "./components/PromptInput.tsx";
+import { getTodoPanelRows, TodoPanel } from "./components/TodoPanel.tsx";
 import {
   parseAtRefs,
   sanitizeInput,
@@ -157,6 +159,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   }, [llm, vision]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
+  const todoToolRef = useRef<ReturnType<typeof createTodoTool> | null>(null);
+  if (!todoToolRef.current) {
+    todoToolRef.current = createTodoTool((todos) => dispatch({ type: "SET_TODOS", todos }));
+  }
   // Generate a stable conversation session ID on startup
   const [conversationId, setConversationId] = useState(() => process.env.MINI_AGENT_SESSION_ID ?? randomUUID());
   
@@ -307,11 +313,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     termRows: stdout?.rows,
     requestedItems: requestedPickerItems,
     hasPendingImages: state.pendingImages.length > 0,
+    todoRows: getTodoPanelRows(state.todos),
     extraRows: acMode === "model" || acMode === "model-picker" || acMode === "file" ? 3 : 2,
   });
   const feedHeight = getMessageFeedHeight({
     termRows: stdout?.rows,
     hasPendingImages: state.pendingImages.length > 0,
+    todoRows: getTodoPanelRows(state.todos),
     pickerRows: pickerLayout.totalRows,
   });
 
@@ -830,7 +838,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         try {
           historyRef.current = await runAgentTurn(historyRef.current, currentUserText, {
             llm: { ...turnLlm, sessionId: conversationId },
-            tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools(turnLlm)],
+            tools: () => {
+              const baseTools = resolveToolProvider(agentToolsRef.current);
+              const hasTodoTool = baseTools.some((tool) => tool.name === "todo_write");
+              const tuiTools = hasTodoTool ? baseTools : [...baseTools, todoToolRef.current!];
+              return [...tuiTools, ...getSubagentTools(turnLlm)];
+            },
             autoSubagent,
             preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
             signal: abortRef.current.signal,
@@ -891,7 +904,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             // turn starts from the known state instead of losing the streamed output.
             historyRef.current = err.messages;
             streamBuffer.finish(runId);
-            turnErrorMessage = `LLM timeout — partial response saved (${err.partialContent?.substring(0, 80) || ""})`;
+            turnErrorMessage = formatLlmTimeoutMessage(err);
             dispatch({ type: "LOOP_EVENT", event: { type: "error", message: turnErrorMessage } });
             break;
           }
@@ -1074,6 +1087,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       </Box>
 
       <Box flexDirection="column" flexShrink={0}>
+        <TodoPanel todos={state.todos} width={termWidth} />
         {state.pendingImages.length > 0 && (
           <Box paddingX={1} gap={1}>
             {state.pendingImages.map((img, idx) => (

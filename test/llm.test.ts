@@ -3,10 +3,16 @@ import { describe, it } from "node:test";
 import { imagePart, textPart } from "../src/content.ts";
 import {
   completeChat,
+  createRequestSignal,
   makeLlmConfig,
   resolveOutputTokenLimit,
+  timeoutLimitForPhase,
 } from "../src/llm/index.ts";
 import type { AgentMessage } from "../src/types.ts";
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 const llm = makeLlmConfig({
   apiKey: "llm-test-key",
@@ -255,6 +261,74 @@ describe("completeChat wire protocol", () => {
       assert.match(result.toolCalls?.[0]?.argumentsParseError ?? "", /JSON/);
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("layered LLM request timeouts", () => {
+  it("uses the deadline that corresponds to each timeout phase", () => {
+    const config = makeLlmConfig({
+      apiKey: "test",
+      baseUrl: "https://llm.example/v1",
+      model: "gpt-4o-mini",
+      timeoutMs: 120_000,
+      firstResponseTimeoutMs: 30_000,
+      streamIdleTimeoutMs: 10_000,
+    });
+
+    assert.equal(timeoutLimitForPhase(config, "first_response"), 30_000);
+    assert.equal(timeoutLimitForPhase(config, "stream_idle"), 10_000);
+    assert.equal(timeoutLimitForPhase(config, "total"), 120_000);
+  });
+
+  it("reports a first-response timeout before headers arrive", async () => {
+    const request = createRequestSignal(undefined, 100, {
+      firstResponseTimeoutMs: 15,
+      idleTimeoutMs: 80,
+    });
+
+    try {
+      await wait(30);
+      assert.equal(request.didTimeout(), true);
+      assert.equal(request.timeoutPhase(), "first_response");
+      assert.ok(request.elapsedMs() >= 15);
+    } finally {
+      request.cleanup();
+    }
+  });
+
+  it("refreshes stream idle timeout on activity and still honors total timeout", async () => {
+    const request = createRequestSignal(undefined, 80, {
+      firstResponseTimeoutMs: 60,
+      idleTimeoutMs: 25,
+    });
+    request.markResponseStarted();
+
+    try {
+      await wait(15);
+      request.markActivity();
+      await wait(15);
+      assert.equal(request.didTimeout(), false);
+      await wait(20);
+      assert.equal(request.didTimeout(), true);
+      assert.equal(request.timeoutPhase(), "stream_idle");
+    } finally {
+      request.cleanup();
+    }
+  });
+
+  it("reports total timeout after a response has started", async () => {
+    const request = createRequestSignal(undefined, 25, {
+      firstResponseTimeoutMs: 80,
+      idleTimeoutMs: 80,
+    });
+    request.markResponseStarted();
+
+    try {
+      await wait(40);
+      assert.equal(request.timeoutPhase(), "total");
+    } finally {
+      request.cleanup();
     }
   });
 });

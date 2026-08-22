@@ -195,6 +195,31 @@ describe("TUI sidebar state", () => {
     assert.equal(state.busy, true);
   });
 
+  it("clears transient output and shows timeout retry status", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Answer this" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "answer", text: "stale" },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "retry_attempt",
+        errorType: "timeout",
+        attempt: 1,
+        maxRetries: 1,
+        delayMs: 0,
+        errorMessage: "LLM request timed out",
+      },
+    });
+
+    assert.equal(state.streamingText, "");
+    assert.equal(state.streamingReasoning, "");
+    assert.equal(state.status, "请求超时，正在重试 (1/1)...");
+    assert.equal(state.busy, true);
+  });
+
   it("reports automatic continuation without resetting context token usage", () => {
     let state = { ...createInitialState("test-model"), usedTokens: 42_000, contextTokens: 40_000, busy: true };
     state = tuiReducer(state, { type: "AUTO_CONTINUE", count: 1, max: 5 });

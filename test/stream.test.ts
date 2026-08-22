@@ -410,6 +410,82 @@ describe("streamChat", () => {
     }
   });
 
+  it("resets idle timeout on stream chunks and reports stream idle when they stop", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      new ReadableStream({
+        start(ctrl) {
+          ctrl.enqueue(new TextEncoder().encode(
+            'data: {"choices":[{"delta":{"content":"a"}}]}\n\n',
+          ));
+          setTimeout(() => {
+            ctrl.enqueue(new TextEncoder().encode(
+              'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+            ));
+            ctrl.close();
+          }, 10);
+        },
+      }),
+      { headers: { "Content-Type": "text/event-stream" } },
+    )) as typeof fetch;
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "http://localhost/v1",
+        model: "gpt-4o-mini",
+        timeoutMs: 100,
+        firstResponseTimeoutMs: 50,
+        streamIdleTimeoutMs: 25,
+      });
+      const events = [];
+      for await (const event of streamChat(config, [{ role: "user", content: "hi" }])) {
+        events.push(event);
+      }
+      assert.equal(events.at(-1)?.type, "completed");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("reports stream idle timeout metadata after partial stream output", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      new ReadableStream({
+        start(ctrl) {
+          ctrl.enqueue(new TextEncoder().encode(
+            'data: {"choices":[{"delta":{"content":"a"}}]}\n\n',
+          ));
+        },
+      }),
+      { headers: { "Content-Type": "text/event-stream" } },
+    )) as typeof fetch;
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "http://localhost/v1",
+        model: "gpt-4o-mini",
+        timeoutMs: 100,
+        firstResponseTimeoutMs: 50,
+        streamIdleTimeoutMs: 20,
+      });
+      await assert.rejects(
+        async () => {
+          for await (const _event of streamChat(config, [{ role: "user", content: "hi" }])) { /* consume */ }
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof LlmTimeoutError);
+          assert.equal(err.phase, "stream_idle");
+          assert.equal(err.timeoutMs, 20);
+          return true;
+        },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("recognises Pi provider timeout messages with the normalisation regex", () => {
     // The Pi error normalisation logic uses this regex to decide whether to
     // yield LlmTimeoutError instead of a plain Error.

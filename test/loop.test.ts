@@ -1023,13 +1023,55 @@ describe("createReadTool", () => {
 });
 
 describe("LlmTimeoutError in loop", () => {
+  it("retries once when the request times out before any answer text", async () => {
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+
+    globalThis.fetch = (async () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(
+          new ReadableStream({ start() { /* no response data */ } }),
+          { headers: { "Content-Type": "text/event-stream" } },
+        );
+      }
+      return loopSseResponse([
+        JSON.stringify({ choices: [{ delta: { content: "recovered" } }] }),
+      ]);
+    }) as typeof fetch;
+
+    try {
+      const llm = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "http://localhost/v1",
+        model: "gpt-4o-mini",
+        timeoutMs: 20,
+      });
+      const messages = await runAgentTurn(createAgentHistory(), "hello", {
+        llm,
+        tools: [],
+        onEvent: (event) => events.push(event),
+      });
+
+      assert.equal(calls, 2);
+      assert.equal(messages.at(-1)?.content, "recovered");
+      assert.ok(events.some((event) => event.type === "retry_attempt" && event.errorType === "timeout"));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("does NOT throw MaxTurnsExceededError when stream hits LlmTimeoutError with partial content", async () => {
     const events: import("../src/loop.ts").LoopEvent[] = [];
     const originalFetch = globalThis.fetch;
+    let calls = 0;
 
     // Return a response that yields one delta then hangs forever,
     // causing the internal request timeout to fire and throw LlmTimeoutError.
-    globalThis.fetch = (async () => new Response(
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response(
       new ReadableStream({
         start(ctrl) {
           ctrl.enqueue(
@@ -1041,7 +1083,8 @@ describe("LlmTimeoutError in loop", () => {
         },
       }),
       { headers: { "Content-Type": "text/event-stream" } },
-    )) as typeof fetch;
+      );
+    }) as typeof fetch;
 
     try {
       const llm = makeLlmConfig({
@@ -1069,6 +1112,7 @@ describe("LlmTimeoutError in loop", () => {
         },
       );
       // The partial assistant message should have been saved via onEvent.
+      assert.equal(calls, 1, "partial answer timeouts must not be automatically replayed");
       assert.ok(events.some((e) => e.type === "assistant_delta" && e.kind === "answer"), "should have emitted answer delta");
       assert.ok(events.some((e) => e.type === "assistant"), "should have emitted partial assistant message");
     } finally {
