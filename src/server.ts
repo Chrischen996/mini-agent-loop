@@ -37,6 +37,7 @@ import { createRepositoryStoreFromEnv, RepositoryStore } from "./codebase/reposi
 import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
 import type { CodebaseSemanticProvider } from "./codebase/deepwiki-provider.ts";
 import { createDocumentEditTool } from "./tools/document-edit.ts";
+import { createTodoTool, validateTodoSnapshot, type TodoItem } from "./tools/todo.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "./tools/types.ts";
 import type { SandboxRunner } from "./sandbox/types.ts";
 import type { AgentMessage, ContentPart, MessageContent } from "./types.ts";
@@ -163,6 +164,8 @@ type Session = {
   currentPlan?: import('./plan-act/types.js').ExecutionPlan;
   /** Plan history for this session. */
   planHistory?: import('./plan-act/types.js').ExecutionPlan[];
+  todos: TodoItem[];
+  todoVersion: number;
 };
 
 export type AgentServerOptions = {
@@ -848,10 +851,24 @@ export function createAgentServer(options: AgentServerOptions): Express {
     phase: session.phase,
     currentPlan: session.currentPlan,
     messages: session.messages,
+    todos: session.todos,
+    todoVersion: session.todoVersion,
     parentSessionId: session.parentSessionId,
     forkedFromMessage: session.forkedFromMessage,
   });
   const saveSession = (session: Session): Promise<void> => sessionStore.save(persistedSession(session));
+  const updateSessionTodos = async (session: Session, snapshot: unknown): Promise<void> => {
+    const todos = validateTodoSnapshot(snapshot);
+    session.todos = todos;
+    session.todoVersion += 1;
+    await saveSession(session);
+  };
+  const createSessionTodoTool = (session: Session): Tool =>
+    createTodoTool((todos) => updateSessionTodos(session, todos));
+  const addSessionTodoTool = (session: Session, baseTools: ToolProvider): ToolProvider => {
+    const todoTool = createSessionTodoTool(session);
+    return () => [...resolveToolProvider(baseTools), todoTool];
+  };
   const restoreSessions = sessionStore.loadAll().then((restored) => {
     return Promise.all([...restored.values()].map(async (persisted) => {
       const session: Session = {
@@ -864,6 +881,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
         thinkingLevel: persisted.thinkingLevel,
         thinkingMode: persisted.thinkingMode,
         skillNames: persisted.skillNames ?? [...defaultSkillNames],
+        todos: persisted.todos ?? [],
+        todoVersion: persisted.todoVersion ?? 0,
         parentSessionId: persisted.parentSessionId,
         forkedFromMessage: persisted.forkedFromMessage,
       };
@@ -926,7 +945,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         const memoryPrompt = await memoryStore.buildPrompt(context.job.task, { scope: "project", limit: 8 });
         const taskPrompt = memoryPrompt ? `${context.job.task}\n\n${memoryPrompt}` : context.job.task;
         const sessionLlm = session.llmOverride ?? options.llm;
-        const baseTools: ToolProvider = () => resolveToolProvider(tools);
+        const baseTools: ToolProvider = addSessionTodoTool(session, () => resolveToolProvider(tools));
         const subagentTools = createSessionSubagentToolSet({
           sessionId: session.id,
           parentLlm: sessionLlm,
@@ -1450,6 +1469,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
       thinkingMode: options.thinkingMode ?? loadThinkingModeFromEnv(),
       permissionManager: new PermissionManager(defaultPermissionMode),
       skillNames: [...defaultSkillNames],
+      todos: [],
+      todoVersion: 0,
     };
     sessions.set(id, session);
     await sessionStore.create(persistedSession(session));
@@ -1491,6 +1512,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
         thinkingLevel: parent.thinkingLevel,
         thinkingMode: parent.thinkingMode,
         permissionManager: new PermissionManager(parent.permissionManager.getMode()),
+        todos: parent.todos.map((todo) => ({ ...todo })),
+        todoVersion: parent.todoVersion,
         parentSessionId: parent.id,
         forkedFromMessage: safeMessageIndex,
         skillNames: [...(parent.skillNames ?? [])],
@@ -2057,6 +2080,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       const sessionLlm = session.llmOverride ?? options.llm;
       const parentRuntime: AgentRuntimeRef = {};
       const generatePrompt = prompt + PLAN_ONLY_SUFFIX;
+      const sessionTools: ToolProvider = addSessionTodoTool(session, tools);
 
       try {
         session.messages = await runAgentTurn(
@@ -2065,7 +2089,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
           createSessionLoopOptions({
             session,
             llm: sessionLlm,
-            tools,
+            tools: sessionTools,
             signal: abortController.signal,
             permissionTurn,
             autoValidate: false,
@@ -2193,7 +2217,10 @@ export function createAgentServer(options: AgentServerOptions): Express {
         operationScope,
       ) as Tool;
       const sessionLlm = session.llmOverride ?? options.llm;
-      const baseToolProvider: ToolProvider = () => [...resolveToolProvider(tools), documentTool];
+      const baseToolProvider = addSessionTodoTool(
+        session,
+        () => [...resolveToolProvider(tools), documentTool],
+      );
       const { tools: sessionTools } = createSessionSubagentToolSet({
         sessionId: session.id,
         parentLlm: sessionLlm,
@@ -2339,6 +2366,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
       contextWindow: resolved.contextWindow,
       capabilities: effectiveLlm.capabilities,
       skillNames: resolveSessionSkillNames(session),
+      todos: session.todos,
+      todoVersion: session.todoVersion,
       messages: session.messages
         .filter((message) => message.role !== "system")
         .map(safeMessage),
@@ -2531,7 +2560,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         // Use the per-session model and thinking level, otherwise fall back to
         // the server default. A /think command is applied before the first
         // model request and is retained for subsequent messages in this session.
-        const sessionLlm = session.llmOverride ?? options.llm;
+      const sessionLlm = session.llmOverride ?? options.llm;
         const effectiveLlm = input.thinkingLevel
           ? withThinkingLevel(sessionLlm, input.thinkingLevel)
           : sessionLlm;
@@ -2541,7 +2570,10 @@ export function createAgentServer(options: AgentServerOptions): Express {
         }
         if (input.thinkingMode) session.thinkingMode = input.thinkingMode;
         // Build the tool set, optionally including the subagent tool
-        const baseToolProvider: ToolProvider = () => [...resolveToolProvider(tools), documentTool];
+        const baseToolProvider = addSessionTodoTool(
+          session,
+          () => [...resolveToolProvider(tools), documentTool],
+        );
         const { tools: sessionTools } = createSessionSubagentToolSet({
           sessionId: session.id,
           parentLlm: effectiveLlm,

@@ -237,6 +237,87 @@ describe("agent server", () => {
     assert.doesNotMatch(history.text, /must-not-leak/);
   });
 
+  it("binds todo updates to sessions, persists them, and inherits them on fork", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-server-todos-"));
+    const seenToolNames: string[][] = [];
+    let chatCalls = 0;
+    const chat = async (
+      _config: typeof llm,
+      _messages: AgentMessage[],
+      tools: Tool[] = [],
+    ): Promise<AssistantMessage> => {
+      seenToolNames.push(tools.map((tool) => tool.name));
+      chatCalls += 1;
+      if (chatCalls === 1) {
+        return {
+          role: "assistant",
+          content: "",
+          toolCalls: [{
+            id: "todo-write-1",
+            name: "todo_write",
+            arguments: {
+              todos: [{ id: "inspect", content: "Inspect code", status: "in_progress" }],
+            },
+          }],
+        };
+      }
+      return { role: "assistant", content: "Todo saved" };
+    };
+
+    try {
+      const firstApp = createAgentServer({ llm, tools: [], chat, dataDir, permissionMode: "bypass" });
+      const created = await request(firstApp).post("/api/sessions");
+      const sessionId = (created.body as { id: string }).id;
+      const response = await request(firstApp)
+        .post(`/api/sessions/${sessionId}/messages`)
+        .field("prompt", "inspect the code");
+
+      assert.equal(response.status, 200);
+      const events = response.text
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { type: string; content?: string; name?: string });
+      assert.deepEqual(events.map((event) => event.type), [
+        "user",
+        "assistant",
+        "tool_start",
+        "tool_end",
+        "assistant",
+        "done",
+      ]);
+      assert.equal(events[2]?.name, "todo_write");
+      assert.equal(events[4]?.content, "Todo saved");
+      assert.ok(seenToolNames[0]?.includes("todo_write"));
+      assert.equal(seenToolNames[0]?.includes("caller_tool"), false);
+
+      const session = await request(firstApp).get(`/api/sessions/${sessionId}`);
+      assert.equal(session.status, 200);
+      assert.deepEqual((session.body as { todos: unknown[] }).todos, [
+        { id: "inspect", content: "Inspect code", status: "in_progress" },
+      ]);
+      assert.equal((session.body as { todoVersion: number }).todoVersion, 1);
+
+      const secondApp = createAgentServer({ llm, tools: [], chat, dataDir, permissionMode: "bypass" });
+      const restored = await request(secondApp).get(`/api/sessions/${sessionId}`);
+      assert.equal(restored.status, 200);
+      assert.deepEqual((restored.body as { todos: unknown[] }).todos, [
+        { id: "inspect", content: "Inspect code", status: "in_progress" },
+      ]);
+      assert.equal((restored.body as { todoVersion: number }).todoVersion, 1);
+
+      const forked = await request(secondApp).post(`/api/sessions/${sessionId}/fork`);
+      assert.equal(forked.status, 201);
+      const forkId = (forked.body as { id: string }).id;
+      const fork = await request(secondApp).get(`/api/sessions/${forkId}`);
+      assert.deepEqual((fork.body as { todos: unknown[] }).todos, [
+        { id: "inspect", content: "Inspect code", status: "in_progress" },
+      ]);
+      assert.equal((fork.body as { todoVersion: number }).todoVersion, 1);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("applies /think commands on the first request and removes them from session messages", async () => {
     let capturedLevel: string | undefined;
     let capturedUser: string | undefined;
