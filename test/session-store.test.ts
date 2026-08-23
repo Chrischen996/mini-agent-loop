@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { truncateSessionMessages } from "../src/server.ts";
 import { SessionStore } from "../src/session-store.ts";
+import type { TodoItem } from "../src/tools/todo.ts";
 
 describe("SessionStore", () => {
   it("truncates an incomplete assistant tool-call block as one unit", () => {
@@ -140,6 +141,57 @@ describe("SessionStore", () => {
 
       const restored = await new SessionStore(root).loadAll();
       assert.deepEqual(restored.get("skill-session")?.skillNames, ["research", "review"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("round-trips todo snapshots and their version", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-todos-"));
+    try {
+      const todos: TodoItem[] = [
+        { id: "todo-1", content: "Persist this todo", status: "in_progress" },
+      ];
+      const store = new SessionStore(root);
+      await store.create({
+        id: "todo-session",
+        createdAt: Date.now(),
+        messages: [],
+        todos,
+        todoVersion: 4,
+      });
+
+      const restored = await store.loadAll();
+      assert.deepEqual(restored.get("todo-session")?.todos, todos);
+      assert.equal(restored.get("todo-session")?.todoVersion, 4);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("defaults missing todo fields for legacy sessions", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-legacy-"));
+    try {
+      const sessionId = "legacy-session";
+      await mkdir(path.join(root, sessionId), { recursive: true });
+      await appendFile(
+        path.join(root, sessionId, "events.jsonl"),
+        `${JSON.stringify({
+          type: "session_created",
+          sessionId,
+          createdAt: Date.now(),
+        })}\n${JSON.stringify({
+          type: "session_snapshot",
+          sessionId,
+          createdAt: Date.now(),
+          messages: [],
+        })}\n`,
+        "utf8",
+      );
+
+      const restored = await new SessionStore(root).loadAll();
+      assert.deepEqual(restored.get(sessionId)?.todos, []);
+      assert.equal(restored.get(sessionId)?.todoVersion, 0);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

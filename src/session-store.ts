@@ -6,6 +6,7 @@ import type { PermissionMode } from "./permissions.ts";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
 import type { ThinkingMode } from "./thinking-policy.ts";
 import type { SessionPhase, ExecutionPlan } from "./plan-act/types.ts";
+import type { TodoItem } from "./tools/todo.ts";
 
 type SessionCreatedEvent = {
   type: "session_created";
@@ -18,6 +19,8 @@ type SessionCreatedEvent = {
   skillNames?: string[];
   phase?: SessionPhase;
   currentPlan?: ExecutionPlan;
+  todos?: TodoItem[];
+  todoVersion?: number;
   parentSessionId?: string;
   forkedFromMessage?: number;
 };
@@ -34,6 +37,8 @@ type SessionSnapshotEvent = {
   phase?: SessionPhase;
   currentPlan?: ExecutionPlan;
   messages: AgentMessage[];
+  todos?: TodoItem[];
+  todoVersion?: number;
   parentSessionId?: string;
   forkedFromMessage?: number;
 };
@@ -54,6 +59,8 @@ export type PersistedSession = {
   /** Currently active execution plan. */
   currentPlan?: ExecutionPlan;
   messages: AgentMessage[];
+  todos?: TodoItem[];
+  todoVersion?: number;
   parentSessionId?: string;
   forkedFromMessage?: number;
 };
@@ -132,6 +139,8 @@ export class SessionStore {
               phase: parsed.phase,
               currentPlan: parsed.currentPlan,
               messages: [],
+              todos: parsed.todos ?? [],
+              todoVersion: parsed.todoVersion ?? 0,
               parentSessionId: parsed.parentSessionId,
               forkedFromMessage: parsed.forkedFromMessage,
             };
@@ -147,6 +156,8 @@ export class SessionStore {
               phase: parsed.phase ?? current?.phase,
               currentPlan: parsed.currentPlan ?? current?.currentPlan,
               messages: parsed.messages,
+              todos: parsed.todos ?? current?.todos ?? [],
+              todoVersion: parsed.todoVersion ?? current?.todoVersion ?? 0,
               parentSessionId: parsed.parentSessionId ?? current?.parentSessionId,
               forkedFromMessage: parsed.forkedFromMessage ?? current?.forkedFromMessage,
             };
@@ -206,6 +217,8 @@ export class SessionStore {
       skillNames: session.skillNames,
       phase: session.phase,
       currentPlan: session.currentPlan,
+      todos: session.todos,
+      todoVersion: session.todoVersion,
       parentSessionId: session.parentSessionId,
       forkedFromMessage: session.forkedFromMessage,
     });
@@ -225,6 +238,8 @@ export class SessionStore {
       phase: session.phase,
       currentPlan: session.currentPlan,
       messages: session.messages,
+      todos: session.todos,
+      todoVersion: session.todoVersion,
       parentSessionId: session.parentSessionId,
       forkedFromMessage: session.forkedFromMessage,
     });
