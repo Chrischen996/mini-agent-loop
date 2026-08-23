@@ -63,7 +63,7 @@ export function validateTodoSnapshot(value: unknown): TodoItem[] {
   });
 }
 
-export function createTodoTool(onUpdate: (todos: TodoItem[]) => void): Tool {
+export function createTodoTool(onUpdate: (todos: TodoItem[]) => void | Promise<void>): Tool {
   return {
     name: "todo_write",
     displayName: "Update todos",
@@ -96,22 +96,32 @@ export function createTodoTool(onUpdate: (todos: TodoItem[]) => void): Tool {
       required: ["todos"],
     },
     execute: async (args) => {
+      let todos: TodoItem[];
       try {
-        const todos = validateTodoSnapshot(args?.todos);
-        onUpdate(todos);
-        const counts = todos.reduce(
-          (result, todo) => ({ ...result, [todo.status]: result[todo.status] + 1 }),
-          { pending: 0, in_progress: 0, completed: 0 },
-        );
-        return {
-          content: `Todo list updated: pending=${counts.pending}, in_progress=${counts.in_progress}, completed=${counts.completed}`,
-        };
+        todos = validateTodoSnapshot(args?.todos);
       } catch (error) {
         return {
           content: `Invalid todo snapshot: ${error instanceof Error ? error.message : String(error)}`,
           isError: true,
         };
       }
+
+      try {
+        await onUpdate(todos);
+      } catch (error) {
+        return {
+          content: `Todo update failed: ${error instanceof Error ? error.message : String(error)}`,
+          isError: true,
+        };
+      }
+
+      const counts = todos.reduce(
+        (result, todo) => ({ ...result, [todo.status]: result[todo.status] + 1 }),
+        { pending: 0, in_progress: 0, completed: 0 },
+      );
+      return {
+        content: `Todo list updated: pending=${counts.pending}, in_progress=${counts.in_progress}, completed=${counts.completed}`,
+      };
     },
   };
 }
