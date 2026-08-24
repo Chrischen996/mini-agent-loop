@@ -49,8 +49,10 @@ export async function parsePlanTurnOverride(
     try {
       const doc = await loadPlanDocument(cwd);
       if (!doc) {
+        dispatch({ type: "SET_TODO_PLAN", plan: undefined });
         dispatch({ type: "ADD_NOTICE", title: "计划", text: "当前没有保存的计划。使用 /plan <任务> 生成。" });
       } else {
+        dispatch({ type: "SET_TODO_PLAN", plan: doc });
         dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
       }
     } catch (err) {
@@ -63,6 +65,7 @@ export async function parsePlanTurnOverride(
     setInput("");
     try {
       const doc = await approveCurrentPlan(cwd, "user");
+      dispatch({ type: "SET_TODO_PLAN", plan: doc });
       dispatch({
         type: "ADD_NOTICE",
         title: "计划已批准",
@@ -78,6 +81,7 @@ export async function parsePlanTurnOverride(
     setInput("");
     try {
       const doc = await rejectCurrentPlan(cwd);
+      dispatch({ type: "SET_TODO_PLAN", plan: doc });
       dispatch({ type: "ADD_NOTICE", title: "计划已拒绝", text: `id=${doc.id} status=${doc.status}` });
     } catch (err) {
       dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
@@ -108,6 +112,7 @@ export async function parsePlanTurnOverride(
     setInput("");
     try {
       const { archivedPath, document } = await archiveCurrentPlan(cwd);
+      dispatch({ type: "SET_TODO_PLAN", plan: document });
       dispatch({
         type: "ADD_NOTICE",
         title: "计划已归档",
@@ -128,6 +133,7 @@ export async function parsePlanTurnOverride(
       try {
         const doc = await loadPlanDocument(cwd);
         if (doc) {
+          dispatch({ type: "SET_TODO_PLAN", plan: doc });
           dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
         } else {
           dispatch({ type: "ADD_NOTICE", title: "计划", text: "用法: /plan <任务>" });
@@ -139,7 +145,7 @@ export async function parsePlanTurnOverride(
     }
     planCaptureRef.current = { prompt: task };
     execCaptureRef.current = null;
-    if (!switchPermissionMode(permissionManager, "plan")) {
+    if (switchPermissionMode(permissionManager, "plan")) {
       dispatch({ type: "SET_PERMISSION_MODE", mode: "plan" });
     }
     return {
@@ -164,6 +170,7 @@ export async function parsePlanTurnOverride(
         title: isRetry ? "重试计划" : "执行计划",
         text: `id=${prepared.document.id} status=executing\nprompt: ${prepared.document.prompt}`,
       });
+      dispatch({ type: "SET_TODO_PLAN", plan: prepared.document });
     } catch (err) {
       setInput("");
       dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
@@ -172,7 +179,7 @@ export async function parsePlanTurnOverride(
     execCaptureRef.current = { mode: isRetry ? "retry" : "run" };
     planCaptureRef.current = null;
     const previousMode = permissionManager.getMode();
-    if (!switchPermissionMode(permissionManager, "bypass")) {
+    if (switchPermissionMode(permissionManager, "bypass")) {
       dispatch({ type: "SET_PERMISSION_MODE", mode: "bypass" });
     }
     return {
@@ -208,6 +215,7 @@ export async function finalizePlanCapture(deps: FinalizePlanDeps): Promise<void>
   }
   try {
     const doc = await createAndSavePlan(cwd, capture.prompt, answer);
+    dispatch({ type: "SET_TODO_PLAN", plan: doc });
     dispatch({
       type: "ADD_NOTICE",
       title: "计划已保存",
@@ -245,6 +253,7 @@ export async function finalizeExecCapture(deps: FinalizeExecCaptureDeps): Promis
         summary,
         workspaceRoot: cwd,
       });
+      dispatch({ type: "SET_TODO_PLAN", plan: completed });
       const audit = completed.execution?.auditReport
         ? `\n${completed.execution.auditReport.slice(0, 400)}`
         : "";
@@ -259,6 +268,7 @@ export async function finalizeExecCapture(deps: FinalizeExecCaptureDeps): Promis
         error: errorMessage ?? "execution failed",
         workspaceRoot: cwd,
       });
+      dispatch({ type: "SET_TODO_PLAN", plan: failed });
       const audit = failed.execution?.auditReport
         ? `\n${failed.execution.auditReport.slice(0, 400)}`
         : "";

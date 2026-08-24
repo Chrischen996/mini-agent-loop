@@ -5,8 +5,27 @@ import {
   preserveScrollOnAppend,
   tuiReducer,
 } from "../src/tui/state.ts";
+import { createPlanDocument } from "../src/plan/document.ts";
 
 describe("TUI sidebar state", () => {
+  it("stores the file-backed plan used by the Todo panel", () => {
+    const plan = createPlanDocument({
+      prompt: "task",
+      rawMarkdown: "1. Read src/a.ts\n2. Write src/a.ts",
+      cwd: "/tmp",
+    });
+    let state = createInitialState("test-model");
+
+    state = tuiReducer(state, { type: "SET_TODO_PLAN", plan });
+    assert.equal(state.todoPlan?.id, plan.id);
+
+    state = tuiReducer(state, { type: "RESET" });
+    assert.equal(state.todoPlan?.id, plan.id);
+
+    state = tuiReducer(state, { type: "SET_TODO_PLAN", plan: undefined });
+    assert.equal(state.todoPlan, undefined);
+  });
+
   it("tracks, deduplicates, sends, and clears image attachments", () => {
     const image = { path: "/tmp/screenshot.png", mimeType: "image/png", size: 42 };
     let state = createInitialState("test-model");

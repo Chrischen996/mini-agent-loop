@@ -5,6 +5,7 @@ import type { SubagentEvent } from "../subagent/types.ts";
 import { PERMISSION_MODES, type PermissionMode } from "../permissions.ts";
 import type { SessionPhase, ExecutionPlan, PlanActEvent } from "../plan-act/types.ts";
 import type { TodoItem } from "../tools/todo.ts";
+import type { PlanDocument } from "../plan/document.ts";
 
 export type { PermissionMode } from "../permissions.ts";
 export type { SessionPhase } from "../plan-act/types.ts";
@@ -95,6 +96,8 @@ export type TuiState = {
   phase: SessionPhase;
   /** Currently active execution plan. */
   currentPlan?: ExecutionPlan;
+  /** Persisted file-backed plan shown as the Todo list in the TUI. */
+  todoPlan?: PlanDocument;
   /** Pending permission request shown to the user while execution waits. */
   pendingPermission?: PendingPermissionState;
   /**
@@ -126,6 +129,7 @@ export type TuiAction =
   | { type: "SET_PERMISSION_MODE"; mode: PermissionMode }
   | { type: "APPROVE_PLAN"; planId: string }
   | { type: "REJECT_PLAN"; planId: string; reason?: string }
+  | { type: "SET_TODO_PLAN"; plan?: PlanDocument }
   | { type: "CLEAR_PENDING_PERMISSION" }
   | { type: "TOGGLE_MESSAGE_THINKING"; index?: number }
   | { type: "SET_FOCUSED_MESSAGE"; index: number }
@@ -208,6 +212,7 @@ export function createInitialState(modelName: string): TuiState {
     contextCompactions: [],
     scrollOffset: 0,
     phase: "planning",
+    todoPlan: undefined,
   };
 }
 
@@ -260,6 +265,13 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         ...createInitialState(state.modelName),
         thinkingMode: state.thinkingMode,
         permissionMode: state.permissionMode,
+        todoPlan: state.todoPlan,
+      };
+
+    case "SET_TODO_PLAN":
+      return {
+        ...state,
+        todoPlan: action.plan,
       };
 
     case "MODEL_CHANGED":

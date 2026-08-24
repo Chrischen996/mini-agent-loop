@@ -1,9 +1,39 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildLegacyFrameOutput, buildLegacyFrameRowCount } from "../src/tui/legacy-render.ts";
+import { buildLegacyFrameLines, buildLegacyFrameOutput, buildLegacyFrameRowCount } from "../src/tui/legacy-render.ts";
+import { createPlanDocument } from "../src/plan/document.ts";
 import { getMessageFeedHeight, getPickerLayout, getTuiViewportHeight } from "../src/tui/layout.ts";
 
 describe("legacy TUI renderer", () => {
+  it("renders the persisted Todo plan and current step statuses", () => {
+    const plan = createPlanDocument({
+      prompt: "task",
+      rawMarkdown: "1. Read\n2. Write",
+      cwd: "/tmp",
+    });
+    plan.status = "executing";
+    plan.steps![0]!.status = "done";
+    plan.steps![1]!.status = "doing";
+
+    const lines = buildLegacyFrameLines({
+      history: [],
+      streamingText: "",
+      tools: [],
+      busy: false,
+      input: "",
+      status: "就绪",
+      permissionMode: "plan",
+      thinkingLevel: "off",
+      todoPlan: plan,
+    });
+
+    const rendered = lines.join("\n");
+    assert.match(rendered, /TODO/);
+    assert.match(rendered, /执行中/);
+    assert.match(rendered, /1\. Read/);
+    assert.match(rendered, /2\. Write/);
+  });
+
   it("updates frames without clearing the entire terminal", () => {
     const output = buildLegacyFrameOutput(["header", "thinking"], 2);
     assert.equal(output.includes("\x1b[2J"), false);
@@ -28,6 +58,12 @@ describe("legacy TUI renderer", () => {
 });
 
 describe("Ink TUI viewport", () => {
+  it("reserves rows for the visible Todo panel", () => {
+    const withoutTodo = getMessageFeedHeight({ termRows: 30 });
+    const withTodo = getMessageFeedHeight({ termRows: 30, todoRows: 4 });
+    assert.equal(withoutTodo - withTodo, 4);
+  });
+
   it("always leaves one terminal row available for Ink's cursor protocol", () => {
     assert.equal(getTuiViewportHeight(24), 23);
     assert.equal(getTuiViewportHeight(1), 1);

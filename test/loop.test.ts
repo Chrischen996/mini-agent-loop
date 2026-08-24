@@ -906,6 +906,42 @@ describe("runAgentTurn", () => {
     assert.equal(noticeCount, 1);
   });
 
+  it("preserves conversation history when permission mode changes before a follow-up turn", async () => {
+    const observed: AgentMessage[][] = [];
+    const chat = async (
+      _config: typeof dummyLlm,
+      messages: AgentMessage[],
+    ): Promise<import("../src/types.ts").AssistantMessage> => {
+      observed.push(messages.map((message) => ({ ...message })));
+      return { role: "assistant", content: "ack" };
+    };
+
+    const first = await runAgentTurn(createAgentHistory(undefined, "plan"), "first request", {
+      llm: dummyLlm,
+      tools: [],
+      chat,
+      permissionMode: "plan",
+    });
+    await runAgentTurn(first, "follow-up request", {
+      llm: dummyLlm,
+      tools: [],
+      chat,
+      permissionMode: "bypass",
+    });
+
+    const secondTurn = observed[1]!;
+    assert.deepEqual(
+      secondTurn
+        .filter((message) => message.role === "user")
+        .map((message) => contentAsString(message.content)),
+      ["first request", "follow-up request"],
+    );
+    const system = secondTurn.find((message) => message.role === "system");
+    assert.ok(system && typeof system.content === "string");
+    assert.match(system.content, /mode=bypass/);
+    assert.doesNotMatch(system.content, /mode=plan/);
+  });
+
   it("buildSystemPrompt includes Permission Mode Awareness section", () => {
     const prompt = buildSystemPrompt("plan");
     assert.ok(prompt.includes("Permission Mode Awareness"));

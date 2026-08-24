@@ -9,7 +9,7 @@ import type { CodebaseSemanticProvider } from "../codebase/deepwiki-provider.ts"
 import { createWebAccessTools } from "../web-access/index.ts";
 import { createGitTools } from "./git.ts";
 import { createValidationTool } from "./validation.ts";
-import { createSandboxRunner, type SandboxConfig, type SandboxRunner } from "../sandbox/index.ts";
+import { createSandboxRunner, DEFAULT_SANDBOX_CONFIG, type SandboxConfig, type SandboxRunner } from "../sandbox/index.ts";
 
 export type { JsonSchema, Tool, ToolCapabilities, ToolResult } from "./types.ts";
 export type { ReadArgs } from "./read.ts";
@@ -67,7 +67,9 @@ export function createDefaultTools(cwd: string, selection: ToolSelection = {}): 
 type CoreToolOptions = { sandboxRunner?: SandboxRunner; sandboxConfig?: SandboxConfig };
 
 function createCoreTools(cwd: string, options: CoreToolOptions = {}): Tool[] {
-  const bashTool = createBashTool(cwd, options.sandboxRunner ? { runner: options.sandboxRunner, config: options.sandboxConfig! } : undefined);
+  const bashTool = createBashTool(cwd, options.sandboxRunner
+    ? { runner: options.sandboxRunner, config: { ...DEFAULT_SANDBOX_CONFIG, ...options.sandboxConfig } }
+    : undefined);
   return [
     createReadTool(cwd) as Tool,
     bashTool as Tool,

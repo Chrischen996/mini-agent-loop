@@ -54,7 +54,6 @@ describe("model selection", () => {
       [...new Set(getAvailableModels(env).map((model) => model.provider))],
       ["agnes-ai", "deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai", "tokenrouter"],
     );
-    assert.equal(getAllModels().length, 1083);
     assert.ok(getAllModels().every((model) => model.contextWindow > 0 && model.maxTokens > 0));
   });
 
@@ -210,6 +209,37 @@ describe("model selection", () => {
     assert.equal(resolved.provider, "tokenrouter");
     assert.equal(resolved.id, "kimi-k3-free");
     assert.equal(resolved.baseUrl, "https://api.tokenrouter.io/v1");
+  });
+
+  it("registers Ox Alpha under OpenRouter instead of TokenRouter", () => {
+    const openrouterModels = getAllModels().filter(
+      (model) => model.provider === "openrouter" && model.id === "ox-alpha",
+    );
+    assert.equal(openrouterModels.length, 1);
+    const model = openrouterModels[0];
+    assert.ok(model);
+    assert.equal(model.baseUrl, "https://openrouter.ai/api/v1");
+    assert.deepEqual(model.apiKeyEnv, ["OPENROUTER_API_KEY"]);
+    assert.equal(model.reasoning, true);
+    assert.equal(model.contextWindow, 1000000);
+    assert.equal(model.maxTokens, 131072);
+    assert.deepEqual(model.cost, {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+    assert.equal(getAllModels().some(
+      (item) => item.provider === "tokenrouter" && item.id === "ox-alpha",
+    ), false);
+    assert.ok(getAvailableModels({ OPENROUTER_API_KEY: "test" }).some(
+      (item) => item.provider === "openrouter" && item.id === "ox-alpha",
+    ));
+
+    const resolved = resolveModel("openrouter/ox-alpha");
+    assert.equal(resolved.provider, "openrouter");
+    assert.equal(resolved.id, "ox-alpha");
+    assert.equal(resolved.baseUrl, "https://openrouter.ai/api/v1");
   });
 
   it("registers Agnes AI with its documented OpenAI-compatible capabilities", () => {

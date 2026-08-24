@@ -3,6 +3,7 @@ import { thinkingLevelToDisplay } from "../think-intensity.ts";
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import type { AgentMessage } from "../types.ts";
 import type { PermissionMode } from "../permissions.ts";
+import type { PlanDocument, PlanStepStatus } from "../plan/document.ts";
 import { countTerminalRows, terminalStringWidth } from "./terminal-width.ts";
 
 export type LegacyToolView = {
@@ -10,6 +11,11 @@ export type LegacyToolView = {
   name: string;
   status: "running" | "done" | "error";
   preview?: string;
+};
+
+export type LegacyNotice = {
+  title?: string;
+  text: string;
 };
 
 export type LegacyTuiState = {
@@ -22,6 +28,8 @@ export type LegacyTuiState = {
   status: string;
   permissionMode: PermissionMode;
   thinkingLevel: ModelThinkingLevel;
+  todoPlan?: PlanDocument;
+  notice?: LegacyNotice;
 };
 
 const ANSI = {
@@ -43,6 +51,49 @@ function short(value: string, max = 160): string {
   return oneLine.length > max ? `${oneLine.slice(0, max)}...` : oneLine;
 }
 
+const TODO_STATUS_LABELS: Record<PlanDocument["status"], string> = {
+  pending: "待审批",
+  approved: "已批准",
+  rejected: "已拒绝",
+  executing: "执行中",
+  completed: "已完成",
+  failed: "失败",
+};
+
+const TODO_STEP_ICONS: Record<PlanStepStatus, string> = {
+  todo: "☐",
+  doing: "…",
+  done: "✓",
+  skipped: "-",
+  failed: "✗",
+};
+
+function todoStepText(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  return normalized.length > 100 ? `${normalized.slice(0, 97)}...` : normalized;
+}
+
+function appendTodoLines(lines: string[], plan: PlanDocument): void {
+  const steps = plan.steps ?? [];
+  const done = steps.filter((step) => step.status === "done").length;
+  lines.push(
+    `${ANSI.cyan}TODO${ANSI.reset} [${TODO_STATUS_LABELS[plan.status]}] ${done}/${steps.length}`,
+  );
+  if (steps.length === 0) {
+    lines.push(`${ANSI.dim}暂无结构化步骤${ANSI.reset}`);
+    return;
+  }
+  const visibleSteps = steps.slice(0, 8);
+  for (const step of visibleSteps) {
+    const status = step.status ?? "todo";
+    const color = status === "done" ? ANSI.green : status === "failed" ? ANSI.red : status === "doing" ? ANSI.yellow : ANSI.dim;
+    lines.push(`${color}${TODO_STEP_ICONS[status]}${ANSI.reset} ${step.index}. ${todoStepText(step.text)}`);
+  }
+  if (steps.length > visibleSteps.length) {
+    lines.push(`${ANSI.dim}... 还有 ${steps.length - visibleSteps.length} 项${ANSI.reset}`);
+  }
+}
+
 export function buildLegacyFrameLines(state: LegacyTuiState): string[] {
   const lines: string[] = [
     `${ANSI.cyan}mini-agent TUI${ANSI.reset} ${ANSI.dim}(Ctrl+R 快切思考，Shift+↑↓ 精调，Shift+Tab 切换权限，输入 /clear 清空会话)${ANSI.reset}`,
@@ -53,6 +104,18 @@ export function buildLegacyFrameLines(state: LegacyTuiState): string[] {
     if (message.role === "user") lines.push(`${ANSI.green}> ${ANSI.reset}${contentAsString(message.content)}`);
     if (message.role === "assistant" && message.content) lines.push(`${ANSI.cyan}assistant:${ANSI.reset} ${message.content}`);
     if (message.role === "tool") lines.push(`${ANSI.dim}[${message.name}] ${short(contentAsString(message.content))}${ANSI.reset}`);
+  }
+
+  if (state.todoPlan) {
+    appendTodoLines(lines, state.todoPlan);
+    lines.push("");
+  }
+
+  if (state.notice) {
+    if (state.notice.title) lines.push(`${ANSI.cyan}${state.notice.title}:${ANSI.reset}`);
+    const noticeLines = state.notice.text.split("\n");
+    lines.push(...noticeLines.slice(0, 8).map((line) => `${ANSI.dim}${line}${ANSI.reset}`));
+    if (noticeLines.length > 8) lines.push(`${ANSI.dim}...${ANSI.reset}`);
   }
 
   if (state.pendingUser) {

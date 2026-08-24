@@ -25,6 +25,7 @@ import {
 import { createTools } from "../tools/index.ts";
 import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
+import { loadPlanDocument } from "../plan/index.ts";
 import { PERMISSION_MODES, PermissionManager, type PermissionMode } from "../permissions.ts";
 import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 import { createSubagentTool, createSubagentBatchTool, defaultProfiles } from "../subagent/index.ts";
@@ -45,6 +46,12 @@ import {
   LEGACY_ANSI,
   type LegacyTuiState,
 } from "./legacy-render.ts";
+import {
+  finalizeExecCapture,
+  finalizePlanCapture,
+  parsePlanTurnOverride,
+} from "./plan-commands.ts";
+import type { TuiAction } from "./state.ts";
 
 function short(value: string, max = 160): string {
   const oneLine = value.replace(/\s+/g, " ").trim();
@@ -150,8 +157,27 @@ async function main(): Promise<void> {
     status: "就绪",
     permissionMode: "plan" as PermissionMode,
     thinkingLevel: activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off"),
+    todoPlan: (await loadPlanDocument(cwd).catch(() => null)) ?? undefined,
   };
   const permissionManager = new PermissionManager(state.permissionMode);
+  const planCaptureRef = { current: null as { prompt: string } | null };
+  const execCaptureRef = { current: null as { mode: "run" | "retry" } | null };
+  const dispatchPlanAction = (action: TuiAction): void => {
+    switch (action.type) {
+      case "SET_TODO_PLAN":
+        state.todoPlan = action.plan;
+        break;
+      case "SET_PERMISSION_MODE":
+        state.permissionMode = action.mode;
+        break;
+      case "ADD_NOTICE":
+        state.notice = { title: action.title, text: action.text };
+        state.status = action.title ?? action.text.split("\n")[0] ?? state.status;
+        break;
+      default:
+        break;
+    }
+  };
   let cursorCol = 0;   // column offset within current line of multi-line input
   let cursorRow = 0;   // which line (0-indexed) the cursor is on
   // Set up audit logging
@@ -281,10 +307,28 @@ async function main(): Promise<void> {
       return;
     }
 
+    const planTurnOverride = await parsePlanTurnOverride(text, {
+      cwd,
+      dispatch: dispatchPlanAction,
+      setInput: (value) => {
+        state.input = value;
+        cursorCol = 0;
+        cursorRow = 0;
+      },
+      planCaptureRef,
+      execCaptureRef,
+      permissionManager,
+    });
+    if (planTurnOverride === null) {
+      state.pendingUser = undefined;
+      render(state);
+      return;
+    }
+
     state.input = "";
     cursorCol = 0;
     cursorRow = 0;
-    state.pendingUser = text;
+    state.pendingUser = planTurnOverride?.displayText ?? text;
     state.streamingText = "";
     state.busy = true;
     state.status = "请求模型中...";
@@ -296,7 +340,9 @@ async function main(): Promise<void> {
       activeLlm = turnLlm;
       state.thinkingLevel = turnLlm.thinkingLevel ?? (turnLlm.reasoning ? "medium" : "off");
     }
-    const thinkingMode = parsedThinking.intensity
+    const thinkingMode = planTurnOverride
+      ? loadThinkingModeFromEnv()
+      : parsedThinking.intensity
       ? "fixed"
       : parseThinkingCommandMode(text) ?? loadThinkingModeFromEnv();
     render(state);
@@ -310,8 +356,10 @@ async function main(): Promise<void> {
       },
       abortController.signal,
     );
+    let turnSucceeded = false;
+    let turnErrorMessage: string | undefined;
     try {
-      state.history = await runAgentTurn(state.history, text, {
+      state.history = await runAgentTurn(state.history, planTurnOverride?.prompt ?? text, {
         llm: turnLlm,
         tools,
         autoSubagent,
@@ -335,6 +383,7 @@ async function main(): Promise<void> {
           render(state);
         },
       });
+      turnSucceeded = true;
       state.pendingUser = undefined;
       render(state);
     } catch (error) {
@@ -348,10 +397,31 @@ async function main(): Promise<void> {
       }
       state.pendingUser = undefined;
       state.busy = false;
-      state.status = `错误: ${error instanceof Error ? error.message : String(error)}`;
+      turnErrorMessage = error instanceof Error ? error.message : String(error);
+      state.status = `错误: ${turnErrorMessage}`;
       render(state);
     } finally {
       permissionTurn.close();
+      if (planTurnOverride?.restoreMode !== undefined && permissionManager.getMode() !== planTurnOverride.restoreMode) {
+        permissionManager.setMode(planTurnOverride.restoreMode);
+        dispatchPlanAction({ type: "SET_PERMISSION_MODE", mode: planTurnOverride.restoreMode });
+      }
+      await finalizePlanCapture({
+        cwd,
+        planCaptureRef,
+        history: state.history,
+        succeeded: turnSucceeded,
+        dispatch: dispatchPlanAction,
+      });
+      await finalizeExecCapture({
+        cwd,
+        execCaptureRef,
+        history: state.history,
+        succeeded: turnSucceeded,
+        errorMessage: turnErrorMessage,
+        dispatch: dispatchPlanAction,
+      });
+      render(state);
     }
   };
 

@@ -2,7 +2,6 @@ import { useInput, type Key } from "ink";
 import { useCallback } from "react";
 import { resolvePendingPermissionDecision } from "../pending-permission.ts";
 import { nextPermissionMode, switchPermissionMode } from "../permission-utils.ts";
-import { buildSystemPrompt, createAgentHistory } from "../../loop.ts";
 import type { Dispatch } from "react";
 import type { TuiAction } from "../state.ts";
 import type { PermissionDecision, PermissionManager, PermissionTurnContext } from "../../permissions.ts";
@@ -13,7 +12,6 @@ export type UseKeyboardHandlerDeps = {
   abortRef: React.MutableRefObject<AbortController>;
   copyResolvedText: (target?: import("../copy-text.ts").CopyTarget) => Promise<void>;
   getPermissionManager: () => PermissionManager;
-  historyRef: React.MutableRefObject<import("../../types.ts").AgentMessage[]>;
   adjustThinkingLevel: (direction: "increase" | "decrease", wrap?: boolean) => void;
   resolvePendingPermission: (decision: PermissionDecision) => boolean;
   dispatch: Dispatch<TuiAction>;
@@ -28,7 +26,7 @@ export type UseKeyboardHandlerDeps = {
 
 export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
   const {
-    exit, abortRef, copyResolvedText, getPermissionManager, historyRef,
+    exit, abortRef, copyResolvedText, getPermissionManager,
     adjustThinkingLevel, resolvePendingPermission, dispatch,
     acMode, setAcMode, state, feedHeight, handleAutocompleteKey,
     suppressInputEchoRef, pendingPermissionRef,
@@ -64,10 +62,6 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
       const next = nextPermissionMode(permissionManager.getMode());
       if (switchPermissionMode(permissionManager, next)) {
         dispatch({ type: "SET_PERMISSION_MODE", mode: next });
-      }
-      if (historyRef.current.length > 0) {
-        const newPrompt = buildSystemPrompt(next);
-        historyRef.current = createAgentHistory(newPrompt, next);
       }
       setAcMode(null);
       return;

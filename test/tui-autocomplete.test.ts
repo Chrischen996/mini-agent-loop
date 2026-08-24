@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   currentAutocompleteNavIndex,
   extractInlineModelQuery,
+  isExactSlashCommand,
   isCommandPaletteInput,
   isOverlayAcMode,
   isPickerAcMode,
@@ -65,6 +66,12 @@ describe("autocomplete input resolution", () => {
     const matches = matchSlashCommands("/pl", SLASH_COMMANDS);
     assert.ok(matches.every((command) => command.name.startsWith("pl")));
     assert.ok(matches.some((command) => command.name === "plan"));
+  });
+
+  it("recognizes a fully typed slash command for direct submission", () => {
+    assert.equal(isExactSlashCommand("/plan-show", "plan-show"), true);
+    assert.equal(isExactSlashCommand(" /PLAN-SHOW ", "plan-show"), true);
+    assert.equal(isExactSlashCommand("/plan", "plan-show"), false);
   });
 
   it("keeps bare /model on the command palette instead of the model picker", () => {

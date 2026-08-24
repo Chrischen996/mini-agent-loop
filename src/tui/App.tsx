@@ -4,8 +4,11 @@ import { Box, Text, useApp, useStdout } from "ink";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
+import { TodoPanel, TodoItemsPanel } from "./components/TodoPanel.tsx";
+import { getTodoPanelRows, getTodoItemRows } from "./components/TodoPanel.tsx";
 import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
 import { parseSlashCommand } from "./slash-commands.ts";
+import { isExactSlashCommand } from "./autocomplete.ts";
 import { useAutocomplete } from "./hooks/useAutocomplete.ts";
 import { tuiReducer, createInitialState } from "./state.ts";
 import {
@@ -67,7 +70,6 @@ import { useKeyboardHandler } from "./hooks/useKeyboardHandler.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
 import { PromptInput } from "./components/PromptInput.tsx";
-import { getTodoPanelRows, TodoPanel } from "./components/TodoPanel.tsx";
 import {
   sanitizeInput,
   shouldAcceptAutocompleteOnEnter,
@@ -83,6 +85,7 @@ import {
   finalizePlanCapture,
   parsePlanTurnOverride,
 } from "./plan-commands.ts";
+import { loadPlanDocument } from "../plan/index.ts";
 import {
   applySkillCommand,
   defaultSkillRegistry,
@@ -250,6 +253,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     void discoverWorkspaceSkills(cwd).catch(() => { /* non-fatal */ });
   }, [cwd]);
 
+  useEffect(() => {
+    void loadPlanDocument(cwd)
+      .then((plan) => dispatch({ type: "SET_TODO_PLAN", plan: plan ?? undefined }))
+      .catch(() => { /* a missing or unreadable plan is non-fatal */ });
+  }, [cwd]);
+
   // ── model switching ─────────────────────────────────────────────────────
 
   const selectModelRef = useCallback((reference: string, overrides: ModelSwitchOverrides = {}) => {
@@ -286,17 +295,19 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         : acMode === "model" || acMode === "model-picker" ? Math.min(12, modelCandidates.length)
           : acMode === "profile-list" ? Math.min(10, profileListState?.profiles.length ?? 0)
             : acMode ? 4 : 0;
+  const todoRows = getTodoPanelRows(state.todoPlan);
+  const todoItemRows = getTodoItemRows(state.todos);
   const pickerLayout = getPickerLayout({
     termRows: stdout?.rows,
     requestedItems: requestedPickerItems,
     hasPendingImages: state.pendingImages.length > 0,
-    todoRows: getTodoPanelRows(state.todos),
+    todoRows: Math.max(todoRows, todoItemRows),
     extraRows: acMode === "model" || acMode === "model-picker" || acMode === "file" ? 3 : 2,
   });
   const feedHeight = getMessageFeedHeight({
     termRows: stdout?.rows,
     hasPendingImages: state.pendingImages.length > 0,
-    todoRows: getTodoPanelRows(state.todos),
+    todoRows: Math.max(todoRows, todoItemRows),
     pickerRows: pickerLayout.totalRows,
   });
 
@@ -326,7 +337,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   // ── keyboard handler ─────────────────────────────────────────────────────
 
   useKeyboardHandler({
-    exit, abortRef, copyResolvedText, getPermissionManager, historyRef,
+    exit, abortRef, copyResolvedText, getPermissionManager,
     adjustThinkingLevel, resolvePendingPermission, dispatch,
     acMode, setAcMode, state, feedHeight, handleAutocompleteKey,
     suppressInputEchoRef, pendingPermissionRef,
@@ -509,7 +520,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       planCaptureRef,
       execCaptureRef,
       permissionManager: getPermissionManager(),
-    }) ?? null;
+    });
+    if (planTurnOverride === null) {
+      return;
+    }
 
     // /profiles: show profile list
     if (/^\/profiles?$/i.test(trimmed)) {
@@ -828,6 +842,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     <Box flexDirection="column" width={termWidth} height={termHeight} overflow="hidden">
       <Header />
 
+      {state.todoPlan && <TodoPanel plan={state.todoPlan} />}
+
       <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
         <MessageFeed
           messages={state.messages}
@@ -861,7 +877,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       </Box>
 
       <Box flexDirection="column" flexShrink={0}>
-        <TodoPanel todos={state.todos} width={termWidth} />
+        <TodoItemsPanel todos={state.todos} width={termWidth} />
         {state.pendingImages.length > 0 && (
           <Box paddingX={1} gap={1}>
             {state.pendingImages.map((img, idx) => (
@@ -886,6 +902,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               onSubmit={(val) => {
                 if (shouldAcceptAutocompleteOnEnter(acMode)) {
                   if (acMode === "command") {
+                    const selectedCommand = cmdCandidates[acIndex];
+                    if (selectedCommand && isExactSlashCommand(val, selectedCommand.name)) {
+                      void handleSubmit(val);
+                      return;
+                    }
                     acceptCommand(acIndex);
                     return;
                   }
