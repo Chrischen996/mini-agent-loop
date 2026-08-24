@@ -1,4 +1,4 @@
-import type { PermissionMode, PermissionTurnContext } from "../permissions.ts";
+import type { PermissionMode } from "../permissions.ts";
 import type { Dispatch, MutableRefObject } from "react";
 import type { TuiAction } from "./state.ts";
 import type { AgentMessage } from "../types.ts";
@@ -194,7 +194,7 @@ export type FinalizePlanDeps = {
   dispatch: Dispatch<TuiAction>;
 };
 
-export function finalizePlanCapture(deps: FinalizePlanDeps): void {
+export async function finalizePlanCapture(deps: FinalizePlanDeps): Promise<void> {
   const { cwd, planCaptureRef, history, succeeded, dispatch } = deps;
   const capture = planCaptureRef.current;
   if (!capture) return;
@@ -206,22 +206,20 @@ export function finalizePlanCapture(deps: FinalizePlanDeps): void {
     dispatch({ type: "ADD_NOTICE", title: "计划", text: "Agent 未返回可保存的计划内容。" });
     return;
   }
-  (async () => {
-    try {
-      const doc = await createAndSavePlan(cwd, capture.prompt, answer);
-      dispatch({
-        type: "ADD_NOTICE",
-        title: "计划已保存",
-        text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}\n\n使用 /plan-approve 批准，然后 /plan-run 执行。`,
-      });
-    } catch (err) {
-      dispatch({
-        type: "ADD_NOTICE",
-        title: "计划保存失败",
-        text: err instanceof Error ? err.message : String(err),
-      });
-    }
-  })();
+  try {
+    const doc = await createAndSavePlan(cwd, capture.prompt, answer);
+    dispatch({
+      type: "ADD_NOTICE",
+      title: "计划已保存",
+      text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}\n\n使用 /plan-approve 批准，然后 /plan-run 执行。`,
+    });
+  } catch (err) {
+    dispatch({
+      type: "ADD_NOTICE",
+      title: "计划保存失败",
+      text: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 export type FinalizeExecCaptureDeps = {
@@ -233,50 +231,48 @@ export type FinalizeExecCaptureDeps = {
   dispatch: Dispatch<TuiAction>;
 };
 
-export function finalizeExecCapture(deps: FinalizeExecCaptureDeps): void {
+export async function finalizeExecCapture(deps: FinalizeExecCaptureDeps): Promise<void> {
   const { cwd, execCaptureRef, history, succeeded, errorMessage, dispatch } = deps;
   const capture = execCaptureRef.current;
   if (!capture) return;
   execCaptureRef.current = null;
-  (async () => {
-    try {
-      if (succeeded) {
-        const lastAssistant = lastAssistantMessage(history);
-        const summary = assistantContentAsString(lastAssistant).slice(0, 500) || undefined;
-        const completed = await markPlanExecutionResult(cwd, {
-          ok: true,
-          summary,
-          workspaceRoot: cwd,
-        });
-        const audit = completed.execution?.auditReport
-          ? `\n${completed.execution.auditReport.slice(0, 400)}`
-          : "";
-        dispatch({
-          type: "ADD_NOTICE",
-          title: "计划执行完成",
-          text: `id=${completed.id} status=${completed.status}${audit}`,
-        });
-      } else {
-        const failed = await markPlanExecutionResult(cwd, {
-          ok: false,
-          error: errorMessage ?? "execution failed",
-          workspaceRoot: cwd,
-        });
-        const audit = failed.execution?.auditReport
-          ? `\n${failed.execution.auditReport.slice(0, 400)}`
-          : "";
-        dispatch({
-          type: "ADD_NOTICE",
-          title: "计划执行失败",
-          text: `id=${failed.id} status=${failed.status}\n${errorMessage ?? ""}${audit}`,
-        });
-      }
-    } catch (err) {
+  try {
+    if (succeeded) {
+      const lastAssistant = lastAssistantMessage(history);
+      const summary = assistantContentAsString(lastAssistant).slice(0, 500) || undefined;
+      const completed = await markPlanExecutionResult(cwd, {
+        ok: true,
+        summary,
+        workspaceRoot: cwd,
+      });
+      const audit = completed.execution?.auditReport
+        ? `\n${completed.execution.auditReport.slice(0, 400)}`
+        : "";
       dispatch({
         type: "ADD_NOTICE",
-        title: "计划结果记录失败",
-        text: err instanceof Error ? err.message : String(err),
+        title: "计划执行完成",
+        text: `id=${completed.id} status=${completed.status}${audit}`,
+      });
+    } else {
+      const failed = await markPlanExecutionResult(cwd, {
+        ok: false,
+        error: errorMessage ?? "execution failed",
+        workspaceRoot: cwd,
+      });
+      const audit = failed.execution?.auditReport
+        ? `\n${failed.execution.auditReport.slice(0, 400)}`
+        : "";
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "计划执行失败",
+        text: `id=${failed.id} status=${failed.status}\n${errorMessage ?? ""}${audit}`,
       });
     }
-  })();
+  } catch (err) {
+    dispatch({
+      type: "ADD_NOTICE",
+      title: "计划结果记录失败",
+      text: err instanceof Error ? err.message : String(err),
+    });
+  }
 }

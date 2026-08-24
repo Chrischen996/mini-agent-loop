@@ -1,19 +1,7 @@
 import { createBashTool } from "./bash.ts";
 import { createReadTool } from "./read.ts";
 import { createWriteTool } from "./write.ts";
-import {
-  createCopyTool,
-  createDeleteTool,
-  createEditTool,
-  createFindTool,
-  createGrepTool,
-  createListTool,
-  createLsTool,
-  createMkdirTool,
-  createMoveTool,
-  createPatchTool,
-  createSearchTool,
-} from "./workspace-tools.ts";
+import { createEditTool, createFindTool, createGrepTool, createLsTool } from "./workspace-tools.ts";
 import type { Tool } from "./types.ts";
 import { createRepositoryStoreFromEnv, RepositoryStore } from "../codebase/repository-store.ts";
 import { createCodebaseTools } from "../codebase/tools.ts";
@@ -76,11 +64,9 @@ export function createDefaultTools(cwd: string, selection: ToolSelection = {}): 
   return all.filter((tool) => selected.includes(tool.name as ToolName) && !excluded.has(tool.name as ToolName));
 }
 
-/** All seven Pi coding-agent tools, before active-tool filtering. */
-export function createAllTools(
-  cwd: string,
-  options: { sandboxRunner?: SandboxRunner; sandboxConfig?: SandboxConfig } = {},
-): Tool[] {
+type CoreToolOptions = { sandboxRunner?: SandboxRunner; sandboxConfig?: SandboxConfig };
+
+function createCoreTools(cwd: string, options: CoreToolOptions = {}): Tool[] {
   const bashTool = createBashTool(cwd, options.sandboxRunner ? { runner: options.sandboxRunner, config: options.sandboxConfig! } : undefined);
   return [
     createReadTool(cwd) as Tool,
@@ -90,9 +76,19 @@ export function createAllTools(
     createGrepTool(cwd) as Tool,
     createFindTool(cwd) as Tool,
     createLsTool(cwd) as Tool,
-    ...createGitTools(cwd),
-    createValidationTool(cwd),
   ];
+}
+
+function createGitAndValidationTools(cwd: string): Tool[] {
+  return [...createGitTools(cwd), createValidationTool(cwd)];
+}
+
+/** All local coding-agent tools, before active-tool filtering. */
+export function createAllTools(
+  cwd: string,
+  options: CoreToolOptions = {},
+): Tool[] {
+  return [...createCoreTools(cwd, options), ...createGitAndValidationTools(cwd)];
 }
 
 export function createTools(
@@ -110,7 +106,7 @@ export function createTools(
     sandbox?: SandboxConfig;
   } = {},
 ): Tool[] {
-  const baseTools = createAllTools(cwd, {
+  const baseTools = createCoreTools(cwd, {
     sandboxRunner: options.sandboxRunner,
     sandboxConfig: options.sandboxConfig ?? options.sandbox,
   });
@@ -123,7 +119,7 @@ export function createTools(
     ? options.tools.filter((name) => name.startsWith("git_") || name === "validate_workspace")
     : ["git_status", "git_diff", "git_checkpoint", "git_undo", "git_branch_isolate", "validate_workspace"] as ToolName[];
   const existingNames = new Set(tools.map((tool) => tool.name));
-  tools.push(...[...createGitTools(cwd), createValidationTool(cwd)].filter((tool) =>
+  tools.push(...createGitAndValidationTools(cwd).filter((tool) =>
     !existingNames.has(tool.name)
       && selectedGit.includes(tool.name as ToolName)
       && !options.excludeTools?.includes(tool.name as ToolName)));

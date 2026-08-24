@@ -41,14 +41,6 @@ export type WorkflowStep = {
   status: "pending" | "running" | "done" | "error";
 };
 
-export type TimelineEvent = {
-  id: string;
-  timestamp: number;
-  icon: "✓" | "▶" | "✗" | "•";
-  label: string;
-  detail?: string;
-};
-
 export type SubagentInnerEvent = {
   type: string;
   label: string;

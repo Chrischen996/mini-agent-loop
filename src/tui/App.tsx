@@ -1,16 +1,14 @@
 import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from "react";
 import { randomUUID } from "node:crypto";
-import { Box, Text, useApp, useInput, useStdout, type Key } from "ink";
+import { Box, Text, useApp, useStdout } from "ink";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
-import { resolvePendingPermissionDecision } from "./pending-permission.ts";
 import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
 import { parseSlashCommand } from "./slash-commands.ts";
 import { useAutocomplete } from "./hooks/useAutocomplete.ts";
 import { tuiReducer, createInitialState } from "./state.ts";
 import {
-  buildSystemPrompt,
   createAgentHistory,
   MaxTurnsExceededError,
   runAgentTurn,
@@ -19,7 +17,7 @@ import {
 } from "../loop.ts";
 import { LlmTimeoutError } from "../llm/retry.ts";
 import { formatLlmTimeoutMessage } from "./turn-helpers.ts";
-import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
+import { loadLlmConfigFromEnv, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
 import {
   buildIntenseLlm,
   cycleThinkingLevel,
@@ -30,16 +28,13 @@ import {
 } from "../think-intensity.ts";
 import { loadThinkingModeFromEnv } from "../thinking-policy.ts";
 import { adaptHistoryForModel } from "../message-adapter.ts";
-import { findExactModelReferenceMatch, getAllModels, resolveModel, type ModelRef } from "../models.ts";
+import { findExactModelReferenceMatch, getAllModels } from "../models.ts";
 import {
-  hasGatewayOverrides,
   parseModelCommand,
   shouldSubmitTypedModelCommand,
 } from "./model-command.ts";
 import {
   activateProfile,
-  listProfiles,
-  loadProfileStore,
   removeProfile,
   saveProfile,
 } from "../profile-store.ts";
@@ -51,19 +46,12 @@ import { createAllTools, createTodoTool, createTools } from "../tools/index.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
 import type { AgentMessage, MessageContent } from "../types.ts";
 import type { ImageAttachment } from "./state.ts";
-import {
-  createSubagentTool,
-  createSubagentBatchTool,
-  defaultProfiles,
-  loadAutoSubagentOptionsFromEnv,
-} from "../subagent/index.ts";
+import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
 import {
-  PERMISSION_MODES,
   PermissionManager,
   PermissionModeChangedError,
   type PermissionDecision,
-  type PermissionMode,
   type PermissionTurnContext,
 } from "../permissions.ts";
 import { TurnEventBuffer } from "./stream-buffer.ts";
@@ -81,30 +69,20 @@ import { TUI_COLORS as C } from "./theme.ts";
 import { PromptInput } from "./components/PromptInput.tsx";
 import { getTodoPanelRows, TodoPanel } from "./components/TodoPanel.tsx";
 import {
-  parseAtRefs,
   sanitizeInput,
   shouldAcceptAutocompleteOnEnter,
 } from "./input-utils.ts";
 import {
   imageAttachmentToPart,
   loadImageAttachment,
-  MAX_TUI_IMAGES,
-  readClipboardImage,
 } from "./image-attachments.ts";
 import { writeClipboardText } from "./clipboard.ts";
 import { formatCopyResultNotice, parseCopyCommand, resolveCopyTarget } from "./copy-text.ts";
 import {
-  PLAN_ONLY_SUFFIX,
-  approveCurrentPlan,
-  archiveCurrentPlan,
-  createAndSavePlan,
-  formatPlanDocumentPreview,
-  listPlanHistory,
-  loadPlanDocument,
-  markPlanExecutionResult,
-  preparePlanForExecution,
-  rejectCurrentPlan,
-} from "../plan/index.ts";
+  finalizeExecCapture,
+  finalizePlanCapture,
+  parsePlanTurnOverride,
+} from "./plan-commands.ts";
 import {
   applySkillCommand,
   defaultSkillRegistry,
@@ -113,7 +91,6 @@ import {
 } from "../skills/index.ts";
 
 import { Overlays } from "./components/Overlays.tsx";
-import type { ModelSetupState } from "./types.ts";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
 
@@ -525,158 +502,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
 
-    // ── Plan workflow slash commands ───────────────────────────────────────
-    // Extracted as local helper for readability
-    const handlePlanTurnOverride = async (): Promise<{
-      displayText: string;
-      prompt: string;
-      forceMode?: PermissionMode;
-      restoreMode?: PermissionMode;
-    } | null | undefined> => {
-      // /plan-show /plan-approve /plan-reject /plan-history /plan-archive — no agent turn
-      if (trimmed === "/plan-show") {
-        setInput("");
-        try {
-          const doc = await loadPlanDocument(cwd);
-          if (!doc) {
-            dispatch({ type: "ADD_NOTICE", title: "计划", text: "当前没有保存的计划。使用 /plan <任务> 生成。" });
-          } else {
-            dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
-          }
-        } catch (err) {
-          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-        }
-        return null;
-      }
-      if (trimmed === "/plan-approve") {
-        setInput("");
-        try {
-          const doc = await approveCurrentPlan(cwd, "user");
-          dispatch({
-            type: "ADD_NOTICE",
-            title: "计划已批准",
-            text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}`,
-          });
-        } catch (err) {
-          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-        }
-        return null;
-      }
-      if (trimmed === "/plan-reject") {
-        setInput("");
-        try {
-          const doc = await rejectCurrentPlan(cwd);
-          dispatch({ type: "ADD_NOTICE", title: "计划已拒绝", text: `id=${doc.id} status=${doc.status}` });
-        } catch (err) {
-          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-        }
-        return null;
-      }
-      if (trimmed === "/plan-history") {
-        setInput("");
-        try {
-          const history = await listPlanHistory(cwd);
-          if (history.length === 0) {
-            dispatch({ type: "ADD_NOTICE", title: "计划历史", text: "尚无归档计划。" });
-          } else {
-            const lines = history.map((doc: any) => {
-              const promptSlice = doc.prompt.length > 60 ? `${doc.prompt.slice(0, 60)}…` : doc.prompt;
-              return `${doc.id}  ${doc.status.padEnd(10)}  ${doc.updatedAt}  ${promptSlice}`;
-            });
-            dispatch({ type: "ADD_NOTICE", title: "计划历史", text: lines.join("\n") });
-          }
-        } catch (err) {
-          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-        }
-        return null;
-      }
-      if (trimmed === "/plan-archive") {
-        setInput("");
-        try {
-          const { archivedPath, document } = await archiveCurrentPlan(cwd);
-          dispatch({
-            type: "ADD_NOTICE",
-            title: "计划已归档",
-            text: `id=${document.id}\npath=${archivedPath}`,
-          });
-        } catch (err) {
-          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-        }
-        return null;
-      }
-
-      // /plan [task] — generate a plan via agent turn in plan mode
-      const planMatch = trimmed.match(/^\/plan(?:\s+(.*))?$/i);
-      if (planMatch && !trimmed.startsWith("/plan-")) {
-        const task = (planMatch[1] ?? "").trim();
-        if (!task) {
-          setInput("");
-          try {
-            const doc = await loadPlanDocument(cwd);
-            if (doc) {
-              dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
-            } else {
-              dispatch({ type: "ADD_NOTICE", title: "计划", text: "用法: /plan <任务>" });
-            }
-          } catch (err) {
-            dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-          }
-          return null;
-        }
-        planCaptureRef.current = { prompt: task };
-        execCaptureRef.current = null;
-        const permissionManager = getPermissionManager();
-        if (permissionManager.getMode() !== "plan") {
-          permissionManager.setMode("plan");
-          dispatch({ type: "SET_PERMISSION_MODE", mode: "plan" });
-        }
-        return {
-          displayText: `/plan ${task}`,
-          prompt: task + PLAN_ONLY_SUFFIX,
-          forceMode: "plan",
-        };
-      }
-
-      // /plan-run and /plan-retry — execute approved plan in bypass mode
-      if (trimmed === "/plan-run" || trimmed === "/plan-retry") {
-        const isRetry = trimmed === "/plan-retry";
-        let executionPromptSuffix: string;
-        try {
-          const prepared = await preparePlanForExecution(cwd, {
-            yes: false,
-            workspaceRoot: cwd,
-          });
-          executionPromptSuffix = prepared.executionPromptSuffix;
-          dispatch({
-            type: "ADD_NOTICE",
-            title: isRetry ? "重试计划" : "执行计划",
-            text: `id=${prepared.document.id} status=executing\nprompt: ${prepared.document.prompt}`,
-          });
-        } catch (err) {
-          setInput("");
-          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-          return null;
-        }
-        execCaptureRef.current = { mode: isRetry ? "retry" : "run" };
-        planCaptureRef.current = null;
-        const permissionManager = getPermissionManager();
-        const previousMode = permissionManager.getMode();
-        if (previousMode !== "bypass") {
-          permissionManager.setMode("bypass");
-          dispatch({ type: "SET_PERMISSION_MODE", mode: "bypass" });
-        }
-        return {
-          displayText: trimmed,
-          prompt: `Execute the approved plan.${executionPromptSuffix}`,
-          forceMode: "bypass",
-          restoreMode: previousMode,
-        };
-      }
-
-      return undefined; // not a plan command
-    };
-
-    const planTurnOverride = await handlePlanTurnOverride() ?? null;
+    const planTurnOverride = await parsePlanTurnOverride(trimmed, {
+      cwd,
+      dispatch,
+      setInput,
+      planCaptureRef,
+      execCaptureRef,
+      permissionManager: getPermissionManager(),
+    }) ?? null;
 
     // /profiles: show profile list
     if (/^\/profiles?$/i.test(trimmed)) {
@@ -944,80 +777,21 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         }
       }
 
-      // After a /plan generation turn, persist the assistant answer as a plan document.
-      if (planCaptureRef.current) {
-        const capture = planCaptureRef.current;
-        planCaptureRef.current = null;
-        if (turnSucceeded) {
-          const lastAssistant = [...historyRef.current].reverse().find((m) => m.role === "assistant");
-          const answer = lastAssistant && lastAssistant.role === "assistant" ? lastAssistant.content : "";
-          if (answer.trim()) {
-            try {
-              const doc = await createAndSavePlan(cwd, capture.prompt, answer);
-              dispatch({
-                type: "ADD_NOTICE",
-                title: "计划已保存",
-                text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}\n\n使用 /plan-approve 批准，然后 /plan-run 执行。`,
-              });
-            } catch (err) {
-              dispatch({
-                type: "ADD_NOTICE",
-                title: "计划保存失败",
-                text: err instanceof Error ? err.message : String(err),
-              });
-            }
-          } else {
-            dispatch({ type: "ADD_NOTICE", title: "计划", text: "Agent 未返回可保存的计划内容。" });
-          }
-        }
-      }
-
-      // After a /plan-run or /plan-retry turn, mark execution result.
-      if (execCaptureRef.current) {
-        execCaptureRef.current = null;
-        try {
-          if (turnSucceeded) {
-            const lastAssistant = [...historyRef.current].reverse().find((m) => m.role === "assistant");
-            const summary =
-              lastAssistant && lastAssistant.role === "assistant"
-                ? String(lastAssistant.content).slice(0, 500)
-                : undefined;
-            const completed = await markPlanExecutionResult(cwd, {
-              ok: true,
-              summary,
-              workspaceRoot: cwd,
-            });
-            const audit = completed.execution?.auditReport
-              ? `\n${completed.execution.auditReport.slice(0, 400)}`
-              : "";
-            dispatch({
-              type: "ADD_NOTICE",
-              title: "计划执行完成",
-              text: `id=${completed.id} status=${completed.status}${audit}`,
-            });
-          } else {
-            const failed = await markPlanExecutionResult(cwd, {
-              ok: false,
-              error: turnErrorMessage ?? "execution failed",
-              workspaceRoot: cwd,
-            });
-            const audit = failed.execution?.auditReport
-              ? `\n${failed.execution.auditReport.slice(0, 400)}`
-              : "";
-            dispatch({
-              type: "ADD_NOTICE",
-              title: "计划执行失败",
-              text: `id=${failed.id} status=${failed.status}\n${turnErrorMessage ?? ""}${audit}`,
-            });
-          }
-        } catch (err) {
-          dispatch({
-            type: "ADD_NOTICE",
-            title: "计划结果记录失败",
-            text: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
+      await finalizePlanCapture({
+        cwd,
+        planCaptureRef,
+        history: historyRef.current,
+        succeeded: turnSucceeded,
+        dispatch,
+      });
+      await finalizeExecCapture({
+        cwd,
+        execCaptureRef,
+        history: historyRef.current,
+        succeeded: turnSucceeded,
+        errorMessage: turnErrorMessage,
+        dispatch,
+      });
     }
   }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit]);
 
