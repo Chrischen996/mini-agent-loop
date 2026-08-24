@@ -6,6 +6,8 @@ import { PERMISSION_MODES, type PermissionMode } from "../permissions.ts";
 import type { SessionPhase, ExecutionPlan, PlanActEvent } from "../plan-act/types.ts";
 import type { TodoItem } from "../tools/todo.ts";
 import type { PlanDocument } from "../plan/document.ts";
+import { isTodoRevisionNewer, nextTodoRevision, TODO_WRITE_TOOL_NAME, type TodoItem, type TodoViewMode } from "../todo.ts";
+import { executionPlanToTodoItems } from "./todo-format.ts";
 
 export type { PermissionMode } from "../permissions.ts";
 export type { SessionPhase } from "../plan-act/types.ts";
@@ -98,6 +100,10 @@ export type TuiState = {
   currentPlan?: ExecutionPlan;
   /** Persisted file-backed plan shown as the Todo list in the TUI. */
   todoPlan?: PlanDocument;
+  /** Session-scoped TodoWrite list; it takes precedence over todoPlan while active. */
+  todoItems?: TodoItem[];
+  todoRevision: number;
+  todoViewMode: TodoViewMode;
   /** Pending permission request shown to the user while execution waits. */
   pendingPermission?: PendingPermissionState;
   /**
@@ -130,6 +136,9 @@ export type TuiAction =
   | { type: "APPROVE_PLAN"; planId: string }
   | { type: "REJECT_PLAN"; planId: string; reason?: string }
   | { type: "SET_TODO_PLAN"; plan?: PlanDocument }
+  | { type: "SET_TODO_ITEMS"; todos: TodoItem[]; revision: number }
+  | { type: "CLEAR_TODO_ITEMS" }
+  | { type: "SET_TODO_VIEW_MODE"; mode: TodoViewMode }
   | { type: "CLEAR_PENDING_PERMISSION" }
   | { type: "TOGGLE_MESSAGE_THINKING"; index?: number }
   | { type: "SET_FOCUSED_MESSAGE"; index: number }
@@ -173,6 +182,21 @@ function toolPaths(args: Record<string, unknown>): string[] {
   return paths;
 }
 
+function updateExecutionTodo(
+  state: TuiState,
+  stepId: string,
+  status: TodoItem["status"],
+  error?: string,
+): TuiState {
+  const items = state.todoItems ?? (state.currentPlan ? executionPlanToTodoItems(state.currentPlan) : []);
+  if (items.length === 0) return state;
+  return {
+    ...state,
+    todoItems: items.map((item) => item.id === stepId ? { ...item, status, ...(error ? { error } : {}) } : item),
+    todoRevision: nextTodoRevision(),
+  };
+}
+
 function resultPreview(content: unknown): string {
   if (typeof content === "string") return shortPreview(content, 180);
   if (Array.isArray(content)) {
@@ -213,6 +237,9 @@ export function createInitialState(modelName: string): TuiState {
     scrollOffset: 0,
     phase: "planning",
     todoPlan: undefined,
+    todoItems: undefined,
+    todoRevision: 0,
+    todoViewMode: "expanded",
   };
 }
 
@@ -266,13 +293,35 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         thinkingMode: state.thinkingMode,
         permissionMode: state.permissionMode,
         todoPlan: state.todoPlan,
+        todoViewMode: state.todoViewMode,
+        todoRevision: nextTodoRevision(),
       };
 
     case "SET_TODO_PLAN":
       return {
         ...state,
         todoPlan: action.plan,
+        todoItems: undefined,
+        todoRevision: nextTodoRevision(),
       };
+
+    case "SET_TODO_ITEMS":
+      if (!isTodoRevisionNewer(state.todoRevision, action.revision)) return state;
+      return {
+        ...state,
+        todoItems: action.todos,
+        todoRevision: action.revision,
+      };
+
+    case "CLEAR_TODO_ITEMS":
+      return {
+        ...state,
+        todoItems: undefined,
+        todoRevision: nextTodoRevision(),
+      };
+
+    case "SET_TODO_VIEW_MODE":
+      return { ...state, todoViewMode: action.mode };
 
     case "MODEL_CHANGED":
       return { ...state, modelName: action.modelName, status: "就绪", usedTokens: 0, contextTokens: 0 };
@@ -382,6 +431,15 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     case "LOOP_EVENT": {
       const event = action.event;
       switch (event.type) {
+        case "todo_updated":
+          if (!isTodoRevisionNewer(state.todoRevision, event.revision)) return state;
+          return {
+            ...state,
+            todoItems: event.todos,
+            todoRevision: event.revision,
+            status: "任务列表已更新",
+          };
+
         case "assistant_delta":
           return {
             ...state,
@@ -504,8 +562,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           };
 
         case "tool_start": {
-          if (event.call.name === "todo_write") {
-            return { ...state, status: "更新任务清单..." };
+          if (event.call.name === TODO_WRITE_TOOL_NAME) {
+            return { ...state, status: "更新任务列表..." };
           }
           const rawArgs = (event.call.arguments ?? {}) as Record<string, unknown>;
           const args = shortPreview(JSON.stringify(rawArgs), 120);
@@ -549,10 +607,10 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         }
 
         case "tool_end": {
-          if (event.call.name === "todo_write") {
+          if (event.call.name === TODO_WRITE_TOOL_NAME) {
             return {
               ...state,
-              status: event.result.isError ? "任务清单更新失败" : "任务清单已更新",
+              status: event.result.isError ? "任务列表更新失败" : "任务列表已更新",
             };
           }
           const now = Date.now();
@@ -638,6 +696,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             phase: "review",
             currentPlan: event.plan,
+            todoItems: executionPlanToTodoItems(event.plan),
+            todoRevision: nextTodoRevision(),
             status: "计划已生成，等待审批 (A=批准 / R=拒绝)",
           };
         case "plan_approved":
@@ -668,11 +728,20 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         case "acting_started":
           return { ...state, phase: "acting", status: "执行计划..." };
         case "step_started":
-          return { ...state, status: `执行: ${event.step.description.slice(0, 30)}...` };
+          return {
+            ...updateExecutionTodo(state, event.stepId, "in_progress"),
+            status: `执行: ${event.step.description.slice(0, 30)}...`,
+          };
         case "step_completed":
-          return { ...state, status: "步骤完成" };
+          return {
+            ...updateExecutionTodo(state, event.stepId, "completed"),
+            status: "步骤完成",
+          };
         case "step_failed":
-          return { ...state, status: `步骤失败: ${event.error.slice(0, 50)}` };
+          return {
+            ...updateExecutionTodo(state, event.stepId, "failed", event.error),
+            status: `步骤失败: ${event.error.slice(0, 50)}`,
+          };
         case "all_steps_completed":
           return {
             ...state,
@@ -680,6 +749,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             currentPlan: state.currentPlan
               ? { ...state.currentPlan, status: "completed" as const }
               : undefined,
+            todoItems: state.todoItems?.map((item) => ({ ...item, status: "completed" })),
+            todoRevision: nextTodoRevision(),
             status: "计划执行完成",
           };
         case "execution_failed":
@@ -689,6 +760,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             currentPlan: state.currentPlan
               ? { ...state.currentPlan, status: "failed" as const }
               : undefined,
+            todoItems: state.todoItems?.map((item) => item.status === "completed" ? item : { ...item, status: "failed" }),
+            todoRevision: nextTodoRevision(),
             status: "执行失败",
           };
         default:

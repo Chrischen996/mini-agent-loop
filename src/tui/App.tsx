@@ -4,8 +4,8 @@ import { Box, Text, useApp, useStdout } from "ink";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
-import { TodoPanel, TodoItemsPanel } from "./components/TodoPanel.tsx";
-import { getTodoPanelRows, getTodoItemRows } from "./components/TodoPanel.tsx";
+import { TodoPanel } from "./components/TodoPanel.tsx";
+import { getTodoPanelRows } from "./todo-format.ts";
 import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
 import { parseSlashCommand } from "./slash-commands.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
@@ -45,7 +45,7 @@ import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
 } from "../preprocessors/index.ts";
-import { createAllTools, createTodoTool, createTools } from "../tools/index.ts";
+import { createAllTools, createTools } from "../tools/index.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
 import type { AgentMessage, MessageContent } from "../types.ts";
 import type { ImageAttachment } from "./state.ts";
@@ -62,6 +62,7 @@ import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./l
 import { estimateViewportContentHeight } from "./message-viewport.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
+import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
 import { addPendingImage, handlePasteImage } from "./image-handler.ts";
 import { startModelSetup, commitModelSetup, openProfileList } from "./profile-manager.ts";
 import { selectModel } from "./model-switcher.ts";
@@ -139,10 +140,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   }, [llm, vision]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
-  const todoToolRef = useRef<ReturnType<typeof createTodoTool> | null>(null);
-  if (!todoToolRef.current) {
-    todoToolRef.current = createTodoTool((todos) => dispatch({ type: "SET_TODOS", todos }));
-  }
   // Generate a stable conversation session ID on startup
   const [conversationId, setConversationId] = useState(() => process.env.MINI_AGENT_SESSION_ID ?? randomUUID());
   
@@ -295,8 +292,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         : acMode === "model" || acMode === "model-picker" ? Math.min(12, modelCandidates.length)
           : acMode === "profile-list" ? Math.min(10, profileListState?.profiles.length ?? 0)
             : acMode ? 4 : 0;
-  const todoRows = getTodoPanelRows(state.todoPlan);
-  const todoItemRows = getTodoItemRows(state.todos);
+  const todoRows = getTodoPanelRows(
+    { plan: state.todoPlan, todos: state.todoItems },
+    state.todoViewMode,
+  );
   const pickerLayout = getPickerLayout({
     termRows: stdout?.rows,
     requestedItems: requestedPickerItems,
@@ -455,6 +454,20 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         }
       }
       dispatch({ type: "ADD_NOTICE", title: "上下文统计", text: lines.join("\n") });
+      setInput("");
+      return;
+    }
+
+    const todoCommand = parseTodoCommand(trimmed);
+    if (todoCommand) {
+      if (todoCommand === "clear") {
+        dispatch({ type: "CLEAR_TODO_ITEMS" });
+      } else {
+        dispatch({
+          type: "SET_TODO_VIEW_MODE",
+          mode: todoViewModeForCommand(todoCommand, state.todoViewMode),
+        });
+      }
       setInput("");
       return;
     }
@@ -685,12 +698,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         try {
           historyRef.current = await runAgentTurn(historyRef.current, currentUserText, {
             llm: { ...turnLlm, sessionId: conversationId },
-            tools: () => {
-              const baseTools = resolveToolProvider(agentToolsRef.current);
-              const hasTodoTool = baseTools.some((tool) => tool.name === "todo_write");
-              const tuiTools = hasTodoTool ? baseTools : [...baseTools, todoToolRef.current!];
-              return [...tuiTools, ...getSubagentTools(turnLlm)];
-            },
+            tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools(turnLlm)],
             autoSubagent,
             preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
             signal: abortRef.current.signal,
@@ -842,7 +850,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     <Box flexDirection="column" width={termWidth} height={termHeight} overflow="hidden">
       <Header />
 
-      {state.todoPlan && <TodoPanel plan={state.todoPlan} />}
+      {(state.todoPlan || state.todoItems) && (
+        <TodoPanel
+          plan={state.todoPlan}
+          todos={state.todoItems}
+          viewMode={state.todoViewMode}
+        />
+      )}
 
       <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
         <MessageFeed
@@ -877,7 +891,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       </Box>
 
       <Box flexDirection="column" flexShrink={0}>
-        <TodoItemsPanel todos={state.todos} width={termWidth} />
+
         {state.pendingImages.length > 0 && (
           <Box paddingX={1} gap={1}>
             {state.pendingImages.map((img, idx) => (

@@ -6,6 +6,7 @@ import {
   tuiReducer,
 } from "../src/tui/state.ts";
 import { createPlanDocument } from "../src/plan/document.ts";
+import { nextTodoRevision, type TodoItem } from "../src/todo.ts";
 
 describe("TUI sidebar state", () => {
   it("stores the file-backed plan used by the Todo panel", () => {
@@ -24,6 +25,56 @@ describe("TUI sidebar state", () => {
 
     state = tuiReducer(state, { type: "SET_TODO_PLAN", plan: undefined });
     assert.equal(state.todoPlan, undefined);
+  });
+
+  it("stores TodoWrite updates and ignores older revisions", () => {
+    const todos: TodoItem[] = [{
+      id: "todo-1",
+      content: "Implement task",
+      activeForm: "Implementing task",
+      status: "in_progress",
+      source: "model",
+    }];
+    let state = createInitialState("test-model");
+    const firstRevision = nextTodoRevision();
+    state = tuiReducer(state, { type: "SET_TODO_ITEMS", todos, revision: firstRevision });
+    assert.equal(state.todoItems?.[0]?.status, "in_progress");
+
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "todo_updated", todos: [{ ...todos[0]!, status: "completed" }], revision: firstRevision - 1 },
+    });
+    assert.equal(state.todoItems?.[0]?.status, "in_progress");
+
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "todo_updated", todos: [{ ...todos[0]!, status: "completed" }], revision: nextTodoRevision() },
+    });
+    assert.equal(state.todoItems?.[0]?.status, "completed");
+  });
+
+  it("accepts the first TodoWrite update after a plan revision", () => {
+    const plan = createPlanDocument({
+      prompt: "task",
+      rawMarkdown: "1. Read src/a.ts",
+      cwd: "/tmp",
+    });
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "SET_TODO_PLAN", plan });
+    const todos: TodoItem[] = [{
+      id: "todo-1",
+      content: "Read files",
+      activeForm: "Reading files",
+      status: "in_progress",
+      source: "model",
+    }];
+
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "todo_updated", todos, revision: nextTodoRevision() },
+    });
+
+    assert.equal(state.todoItems?.[0]?.content, "Read files");
   });
 
   it("tracks, deduplicates, sends, and clears image attachments", () => {

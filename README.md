@@ -559,7 +559,7 @@ responsible for changing the model, while these shortcuts only change the
 current session configuration and never rewrite the user prompt. The setting
 is provider-neutral: it does not automatically switch providers or models.
 The default is `medium` for reasoning-capable models and `off` otherwise;
-`DEFAULT_THINKING_INTENSITY=low|med|high|xhigh` overrides the startup default.
+`DEFAULT_THINKING_INTENSITY=low|med|high|xhigh|ultra` overrides the startup default.
 Profiles may persist an optional `thinkingLevel`.
 
 ## Test (offline)

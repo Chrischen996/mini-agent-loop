@@ -27,6 +27,7 @@ import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
 import { loadPlanDocument } from "../plan/index.ts";
 import { PERMISSION_MODES, PermissionManager, type PermissionMode } from "../permissions.ts";
+import { isTodoRevisionNewer, nextTodoRevision, TODO_WRITE_TOOL_NAME } from "../todo.ts";
 import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 import { createSubagentTool, createSubagentBatchTool, defaultProfiles } from "../subagent/index.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
@@ -51,6 +52,7 @@ import {
   finalizePlanCapture,
   parsePlanTurnOverride,
 } from "./plan-commands.ts";
+import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
 import type { TuiAction } from "./state.ts";
 
 function short(value: string, max = 160): string {
@@ -77,6 +79,13 @@ function render(state: TuiState): void {
 
 function handleEvent(state: TuiState, event: LoopEvent): void {
   switch (event.type) {
+    case "todo_updated":
+      if (isTodoRevisionNewer(state.todoRevision, event.revision)) {
+        state.todoItems = event.todos;
+        state.todoRevision = event.revision;
+      }
+      state.status = "任务列表已更新";
+      break;
     case "assistant_delta":
       state.streamingText += event.text;
       state.status = "模型输出中...";
@@ -89,10 +98,18 @@ function handleEvent(state: TuiState, event: LoopEvent): void {
       state.status = `上下文已压缩 ${event.beforeTokens} → ${event.afterTokens} tokens`;
       break;
     case "tool_start":
+      if (event.call.name === TODO_WRITE_TOOL_NAME) {
+        state.status = "更新任务列表...";
+        break;
+      }
       state.tools.push({ id: event.call.id, name: event.call.name, status: "running" });
       state.status = `正在执行 ${event.call.name}...`;
       break;
     case "tool_end": {
+      if (event.call.name === TODO_WRITE_TOOL_NAME) {
+        state.status = event.result.isError ? "任务列表更新失败" : "任务列表已更新";
+        break;
+      }
       const current = state.tools.find((tool) => tool.id === event.call.id);
       if (current) {
         current.status = event.result.isError ? "error" : "done";
@@ -158,6 +175,9 @@ async function main(): Promise<void> {
     permissionMode: "plan" as PermissionMode,
     thinkingLevel: activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off"),
     todoPlan: (await loadPlanDocument(cwd).catch(() => null)) ?? undefined,
+    todoItems: undefined,
+    todoRevision: 0,
+    todoViewMode: "expanded",
   };
   const permissionManager = new PermissionManager(state.permissionMode);
   const planCaptureRef = { current: null as { prompt: string } | null };
@@ -166,6 +186,21 @@ async function main(): Promise<void> {
     switch (action.type) {
       case "SET_TODO_PLAN":
         state.todoPlan = action.plan;
+        state.todoItems = undefined;
+        state.todoRevision = nextTodoRevision();
+        break;
+      case "SET_TODO_ITEMS":
+        if (isTodoRevisionNewer(state.todoRevision, action.revision)) {
+          state.todoItems = action.todos;
+          state.todoRevision = action.revision;
+        }
+        break;
+      case "CLEAR_TODO_ITEMS":
+        state.todoItems = undefined;
+        state.todoRevision = nextTodoRevision();
+        break;
+      case "SET_TODO_VIEW_MODE":
+        state.todoViewMode = action.mode;
         break;
       case "SET_PERMISSION_MODE":
         state.permissionMode = action.mode;
@@ -293,6 +328,20 @@ async function main(): Promise<void> {
       state.history = createAgentHistory(undefined, state.permissionMode);
       state.tools = [];
       state.status = "已清空会话";
+      state.todoItems = undefined;
+      state.todoRevision = nextTodoRevision();
+      render(state);
+      return;
+    }
+    const todoCommand = parseTodoCommand(text);
+    if (todoCommand) {
+      if (todoCommand === "clear") {
+        state.todoItems = undefined;
+        state.todoRevision = nextTodoRevision();
+      } else {
+        state.todoViewMode = todoViewModeForCommand(todoCommand, state.todoViewMode ?? "expanded");
+      }
+      state.input = "";
       render(state);
       return;
     }

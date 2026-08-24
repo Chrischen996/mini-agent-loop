@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { buildLegacyFrameLines, buildLegacyFrameOutput, buildLegacyFrameRowCount } from "../src/tui/legacy-render.ts";
 import { createPlanDocument } from "../src/plan/document.ts";
+import type { TodoItem } from "../src/todo.ts";
 import { getMessageFeedHeight, getPickerLayout, getTuiViewportHeight } from "../src/tui/layout.ts";
 
 describe("legacy TUI renderer", () => {
@@ -32,6 +33,31 @@ describe("legacy TUI renderer", () => {
     assert.match(rendered, /执行中/);
     assert.match(rendered, /1\. Read/);
     assert.match(rendered, /2\. Write/);
+  });
+
+  it("renders dynamic TodoWrite items with completed strike-through", () => {
+    const todos: TodoItem[] = [
+      { id: "todo-1", content: "Read files", activeForm: "Reading files", status: "completed", source: "model" },
+      { id: "todo-2", content: "Edit code", activeForm: "Editing code", status: "in_progress", source: "model" },
+    ];
+    const lines = buildLegacyFrameLines({
+      history: [],
+      streamingText: "",
+      tools: [],
+      busy: false,
+      input: "",
+      status: "就绪",
+      permissionMode: "plan",
+      thinkingLevel: "off",
+      todoItems: todos,
+      todoRevision: 1,
+      todoViewMode: "expanded",
+    });
+    const rendered = lines.join("\n");
+    assert.match(rendered, /TODO/);
+    assert.match(rendered, /Read files/);
+    assert.match(rendered, /Edit code/);
+    assert.match(rendered, /\x1b\[9m/);
   });
 
   it("updates frames without clearing the entire terminal", () => {

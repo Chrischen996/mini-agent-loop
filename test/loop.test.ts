@@ -14,6 +14,7 @@ import { contentAsString } from "../src/content.ts";
 import { makeLlmConfig } from "../src/llm/index.ts";
 import { LlmTimeoutError } from "../src/llm/retry.ts";
 import { createDefaultTools, createReadTool } from "../src/tools/index.ts";
+import { createTodoWriteTool } from "../src/tools/todo-write.ts";
 import type { Tool } from "../src/tools/types.ts";
 import { PermissionManager } from "../src/permissions.ts";
 import {
@@ -39,6 +40,39 @@ const dummyLlm = makeLlmConfig({
 });
 
 describe("runAgentLoop", () => {
+  it("emits todo_updated without adding a visible TodoWrite result to the model contract", async () => {
+    let calls = 0;
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+    const messages = await runAgentLoop("track this work", {
+      llm: dummyLlm,
+      tools: [createTodoWriteTool() as Tool],
+      onEvent: (event) => events.push(event),
+      chat: async () => {
+        calls += 1;
+        return calls === 1
+          ? {
+              role: "assistant",
+              content: "",
+              toolCalls: [{
+                id: "todo_1",
+                name: "TodoWrite",
+                arguments: {
+                  todos: [
+                    { content: "Track work", activeForm: "Tracking work", status: "in_progress" },
+                  ],
+                },
+              }],
+            }
+          : { role: "assistant", content: "done" };
+      },
+    });
+
+    const todoEvent = events.find((event) => event.type === "todo_updated");
+    assert.ok(todoEvent && todoEvent.type === "todo_updated");
+    assert.equal(todoEvent.todos[0]?.status, "in_progress");
+    assert.ok(messages.some((message) => message.role === "tool" && message.name === "TodoWrite"));
+  });
+
   it("enforces an exhausted global token budget before the parent model call", async () => {
     let chatCalled = false;
     await assert.rejects(

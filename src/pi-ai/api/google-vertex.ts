@@ -39,6 +39,7 @@ import {
 	retainThoughtSignature,
 } from "./google-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
+import { toBaseEffortLevel, type BaseEffortLevel } from "../thinking-levels.ts";
 
 export interface GoogleVertexOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "any";
@@ -312,7 +313,7 @@ export const streamSimple: StreamFunction<"google-vertex", SimpleStreamOptions> 
 	}
 
 	const clampedReasoning = clampThinkingLevel(model, options.reasoning);
-	const effort = (clampedReasoning === "off" ? "high" : clampedReasoning) as ClampedThinkingLevel;
+	const effort = toBaseEffortLevel(clampedReasoning === "off" ? "high" : clampedReasoning)!;
 	const geminiModel = model as unknown as Model<"google-generative-ai">;
 
 	if (isGemini3ProModel(geminiModel) || isGemini3FlashModel(geminiModel)) {
@@ -498,7 +499,7 @@ function buildParams(
 	return params;
 }
 
-type ClampedThinkingLevel = Exclude<PiThinkingLevel, "xhigh" | "max">;
+type ClampedThinkingLevel = BaseEffortLevel;
 
 function isGemini3ProModel(model: Model<"google-generative-ai">): boolean {
 	return /gemini-3(?:\.\d+)?-pro/.test(model.id.toLowerCase());

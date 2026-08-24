@@ -9,6 +9,7 @@ import type { CodebaseSemanticProvider } from "../codebase/deepwiki-provider.ts"
 import { createWebAccessTools } from "../web-access/index.ts";
 import { createGitTools } from "./git.ts";
 import { createValidationTool } from "./validation.ts";
+import { createTodoWriteTool } from "./todo-write.ts";
 import { createSandboxRunner, DEFAULT_SANDBOX_CONFIG, type SandboxConfig, type SandboxRunner } from "../sandbox/index.ts";
 
 export type { JsonSchema, Tool, ToolCapabilities, ToolResult } from "./types.ts";
@@ -16,8 +17,8 @@ export type { ReadArgs } from "./read.ts";
 export type { WriteArgs } from "./write.ts";
 export type { SandboxConfig } from "../sandbox/index.ts";
 export type { BashArgs } from "./bash.ts";
-export { createTodoTool } from "./todo.ts";
-export type { TodoItem, TodoStatus, TodoWriteArgs } from "./todo.ts";
+export type { TodoWriteArgs } from "./todo-write.ts";
+export { createTodoWriteTool } from "./todo-write.ts";
 export { createBashTool } from "./bash.ts";
 export { createReadTool } from "./read.ts";
 export { createWriteTool } from "./write.ts";
@@ -42,7 +43,7 @@ export type ToolName =
   | "codebase_open" | "codebase_search" | "codebase_read" | "codebase_explain"
   | "web_search" | "fetch_content" | "get_search_content" | "source_check"
   | "subagent" | "git_status" | "git_diff" | "git_checkpoint" | "git_undo" | "git_branch_isolate"
-  | "validate_workspace" | "todo_write";
+  | "validate_workspace" | "TodoWrite";
 
 const WEB_ACCESS_TOOL_NAMES = new Set<ToolName>([
   "web_search",
@@ -56,12 +57,17 @@ export type ToolSelection = {
   excludeTools?: ToolName[];
 };
 
-/** Pi-compatible default: only the four primary tools are active. */
-export function createDefaultTools(cwd: string, selection: ToolSelection = {}): Tool[] {
-  const all = createAllTools(cwd);
-  const selected = selection.tools ?? ["read", "bash", "edit", "write"];
+const DEFAULT_TOOL_NAMES: ToolName[] = ["read", "bash", "edit", "write", "TodoWrite"];
+
+function selectTools(all: Tool[], selection: ToolSelection): Tool[] {
+  const selected = selection.tools ?? DEFAULT_TOOL_NAMES;
   const excluded = new Set(selection.excludeTools ?? []);
   return all.filter((tool) => selected.includes(tool.name as ToolName) && !excluded.has(tool.name as ToolName));
+}
+
+/** Pi-compatible default: core coding tools plus the session-only TodoWrite tool. */
+export function createDefaultTools(cwd: string, selection: ToolSelection = {}): Tool[] {
+  return selectTools(createAllTools(cwd), selection);
 }
 
 type CoreToolOptions = { sandboxRunner?: SandboxRunner; sandboxConfig?: SandboxConfig };
@@ -75,6 +81,7 @@ function createCoreTools(cwd: string, options: CoreToolOptions = {}): Tool[] {
     bashTool as Tool,
     createEditTool(cwd) as Tool,
     createWriteTool(cwd) as Tool,
+    createTodoWriteTool() as Tool,
     createGrepTool(cwd) as Tool,
     createFindTool(cwd) as Tool,
     createLsTool(cwd) as Tool,
@@ -113,9 +120,7 @@ export function createTools(
     sandboxConfig: options.sandboxConfig ?? options.sandbox,
   });
 
-  const selected = options.tools ?? ["read", "bash", "edit", "write"];
-  const excluded = new Set(options.excludeTools ?? []);
-  const tools = baseTools.filter((t) => selected.includes(t.name as ToolName) && !excluded.has(t.name as ToolName));
+  const tools = selectTools(baseTools, options);
 
   const selectedGit = options.tools
     ? options.tools.filter((name) => name.startsWith("git_") || name === "validate_workspace")

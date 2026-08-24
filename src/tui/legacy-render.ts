@@ -3,7 +3,16 @@ import { thinkingLevelToDisplay } from "../think-intensity.ts";
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import type { AgentMessage } from "../types.ts";
 import type { PermissionMode } from "../permissions.ts";
-import type { PlanDocument, PlanStepStatus } from "../plan/document.ts";
+import type { PlanDocument } from "../plan/document.ts";
+import { todoSummary, type TodoItem, type TodoViewMode } from "../todo.ts";
+import {
+  resolveTodoItems,
+  todoColor,
+  todoIcon,
+  todoText,
+  TODO_PANEL_MAX_VISIBLE_ITEMS,
+  TODO_PLAN_STATUS_LABELS,
+} from "./todo-format.ts";
 import { countTerminalRows, terminalStringWidth } from "./terminal-width.ts";
 
 export type LegacyToolView = {
@@ -29,6 +38,9 @@ export type LegacyTuiState = {
   permissionMode: PermissionMode;
   thinkingLevel: ModelThinkingLevel;
   todoPlan?: PlanDocument;
+  todoItems?: TodoItem[];
+  todoRevision?: number;
+  todoViewMode?: TodoViewMode;
   notice?: LegacyNotice;
 };
 
@@ -43,6 +55,7 @@ const ANSI = {
   green: "\x1b[32m",
   yellow: "\x1b[33m",
   red: "\x1b[31m",
+  strike: "\x1b[9m",
   moveTo: (row: number, col: number) => `\x1b[${row};${col}H`,
 };
 
@@ -51,46 +64,44 @@ function short(value: string, max = 160): string {
   return oneLine.length > max ? `${oneLine.slice(0, max)}...` : oneLine;
 }
 
-const TODO_STATUS_LABELS: Record<PlanDocument["status"], string> = {
-  pending: "待审批",
-  approved: "已批准",
-  rejected: "已拒绝",
-  executing: "执行中",
-  completed: "已完成",
-  failed: "失败",
-};
-
-const TODO_STEP_ICONS: Record<PlanStepStatus, string> = {
-  todo: "☐",
-  doing: "…",
-  done: "✓",
-  skipped: "-",
-  failed: "✗",
-};
-
-function todoStepText(text: string): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length > 100 ? `${normalized.slice(0, 97)}...` : normalized;
-}
-
-function appendTodoLines(lines: string[], plan: PlanDocument): void {
-  const steps = plan.steps ?? [];
-  const done = steps.filter((step) => step.status === "done").length;
+function appendTodoLines(
+  lines: string[],
+  plan: PlanDocument | undefined,
+  todos: readonly TodoItem[] | undefined,
+  viewMode: TodoViewMode,
+): void {
+  if (viewMode === "hidden") return;
+  const items = resolveTodoItems({ plan, todos });
+  const summary = todoSummary(items);
+  const planStatus = plan ? ` [${TODO_PLAN_STATUS_LABELS[plan.status]}]` : "";
   lines.push(
-    `${ANSI.cyan}TODO${ANSI.reset} [${TODO_STATUS_LABELS[plan.status]}] ${done}/${steps.length}`,
+    `${ANSI.cyan}TODO${ANSI.reset}${planStatus} ${summary.completed}/${summary.total}` +
+      (summary.inProgress > 0 ? ` ${ANSI.yellow}${summary.inProgress} 执行中${ANSI.reset}` : "") +
+      (summary.failed > 0 ? ` ${ANSI.red}${summary.failed} 失败${ANSI.reset}` : ""),
   );
-  if (steps.length === 0) {
+  if (viewMode === "compact") {
+    const current = items.find((item) => item.status === "in_progress");
+    lines.push(`${ANSI.dim}${current?.activeForm ?? "任务列表已折叠"}${ANSI.reset}`);
+    return;
+  }
+  if (items.length === 0) {
     lines.push(`${ANSI.dim}暂无结构化步骤${ANSI.reset}`);
     return;
   }
-  const visibleSteps = steps.slice(0, 8);
-  for (const step of visibleSteps) {
-    const status = step.status ?? "todo";
-    const color = status === "done" ? ANSI.green : status === "failed" ? ANSI.red : status === "doing" ? ANSI.yellow : ANSI.dim;
-    lines.push(`${color}${TODO_STEP_ICONS[status]}${ANSI.reset} ${step.index}. ${todoStepText(step.text)}`);
+  const visibleItems = items.slice(0, TODO_PANEL_MAX_VISIBLE_ITEMS);
+  for (const [index, item] of visibleItems.entries()) {
+    const color = {
+      green: ANSI.green,
+      red: ANSI.red,
+      yellow: ANSI.yellow,
+      gray: ANSI.dim,
+    }[todoColor(item.status)];
+    const strike = item.status === "completed" ? ANSI.strike : "";
+    const number = item.source === "plan" ? `${index + 1}. ` : "";
+    lines.push(`${color}${strike}${todoIcon(item.status)}${ANSI.reset} ${strike}${number}${todoText(item.content)}${ANSI.reset}`);
   }
-  if (steps.length > visibleSteps.length) {
-    lines.push(`${ANSI.dim}... 还有 ${steps.length - visibleSteps.length} 项${ANSI.reset}`);
+  if (items.length > visibleItems.length) {
+    lines.push(`${ANSI.dim}... 还有 ${items.length - visibleItems.length} 项${ANSI.reset}`);
   }
 }
 
@@ -106,8 +117,8 @@ export function buildLegacyFrameLines(state: LegacyTuiState): string[] {
     if (message.role === "tool") lines.push(`${ANSI.dim}[${message.name}] ${short(contentAsString(message.content))}${ANSI.reset}`);
   }
 
-  if (state.todoPlan) {
-    appendTodoLines(lines, state.todoPlan);
+  if (state.todoPlan || state.todoItems) {
+    appendTodoLines(lines, state.todoPlan, state.todoItems, state.todoViewMode ?? "expanded");
     lines.push("");
   }
 

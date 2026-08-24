@@ -28,6 +28,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
+import { ALL_THINKING_LEVELS, THINKING_EFFORT_LEVELS } from "./pi-ai/thinking-levels.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -81,12 +82,10 @@ function validateProfile(name: string, raw: unknown): ModelProfile {
   if (typeof p.apiKey !== "string") {
     throw new ProfileStoreValidationError(`Profile "${name}".apiKey must be a string`);
   }
-  const validThinkingLevels = new Set<ModelThinkingLevel>([
-    "off", "minimal", "low", "medium", "high", "xhigh", "max",
-  ]);
+  const validThinkingLevels = new Set(ALL_THINKING_LEVELS);
   if (p.thinkingLevel !== undefined && !validThinkingLevels.has(p.thinkingLevel as ModelThinkingLevel)) {
     throw new ProfileStoreValidationError(
-      `Profile "${name}".thinkingLevel must be one of off, minimal, low, medium, high, xhigh, or max`,
+      `Profile "${name}".thinkingLevel must be one of ${THINKING_EFFORT_LEVELS.join(",")}, or off`,
     );
   }
   return {

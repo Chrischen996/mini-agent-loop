@@ -23,6 +23,8 @@ describe("thinking intensity parsing", () => {
     assert.equal(parseThinkingIntensityCommand("  /THINK:MED do this"), "med");
     assert.equal(parseThinkingIntensityCommand("do this /think:high"), null);
     assert.equal(parseThinkingIntensityCommand("/think:xhigh"), "xhigh");
+    assert.equal(parseThinkingIntensityCommand("/think:ultra solve this"), "ultra");
+    assert.equal(parseThinkingIntensityCommand("  /THINK:ULTRA solve this"), "ultra");
     assert.equal(parseThinkingIntensityCommand("/think:off do this"), "off");
     assert.equal(parseThinkingIntensityCommand("/think:highest do this"), null);
     assert.equal(parseThinkingIntensityCommand("prefix/think:high do this"), null);
@@ -75,6 +77,7 @@ describe("thinking intensity model levels", () => {
     assert.equal(intensityToModelThinkingLevel("med"), "medium");
     assert.equal(intensityToModelThinkingLevel("high"), "high");
     assert.equal(intensityToModelThinkingLevel("xhigh"), "xhigh");
+    assert.equal(intensityToModelThinkingLevel("ultra"), "ultra");
   });
 
   it("changes only thinkingLevel in the LLM config", () => {
@@ -164,5 +167,38 @@ describe("thinking intensity model levels", () => {
     } as Parameters<typeof getThinkingLevelChoices>[0];
     assert.deepEqual(getThinkingLevelChoices(explicitMax), ["minimal", "low", "medium", "high", "max"]);
     assert.equal(clampThinkingLevelForModel(explicitMax, "xhigh"), "max");
+  });
+
+  it("offers ultra only with an explicit provider mapping and clamps it down otherwise", () => {
+    const withoutUltra = {
+      reasoning: true,
+      piModel: { thinkingLevelMap: { xhigh: "xhigh", max: "max" } },
+    } as Parameters<typeof getThinkingLevelChoices>[0];
+    assert.deepEqual(getThinkingLevelChoices(withoutUltra), [
+      "minimal", "low", "medium", "high", "xhigh", "max",
+    ]);
+    assert.equal(clampThinkingLevelForModel(withoutUltra, "ultra"), "max");
+    assert.equal(
+      cycleThinkingLevel({ ...withoutUltra, thinkingLevel: "max" }, "increase"),
+      "max",
+    );
+    assert.equal(
+      cycleThinkingLevel({ ...withoutUltra, thinkingLevel: "max" }, "increase", { wrap: true }),
+      "minimal",
+    );
+
+    const withUltra = {
+      reasoning: true,
+      piModel: { thinkingLevelMap: { xhigh: "xhigh", max: "max", ultra: "ultra" } },
+    } as Parameters<typeof getThinkingLevelChoices>[0];
+    assert.deepEqual(getThinkingLevelChoices(withUltra), [
+      "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    ]);
+    assert.equal(clampThinkingLevelForModel(withUltra, "ultra"), "ultra");
+    assert.equal(cycleThinkingLevel({ ...withUltra, thinkingLevel: "max" }, "increase"), "ultra");
+  });
+
+  it("labels ultra consistently for the status bar", () => {
+    assert.equal(thinkingLevelToDisplay("ultra"), "超限");
   });
 });

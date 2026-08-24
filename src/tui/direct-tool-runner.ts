@@ -4,6 +4,7 @@ import type { PermissionManager } from "../permissions.ts";
 import type { ToolProvider } from "../tools/types.ts";
 import { resolveToolProvider } from "../tools/types.ts";
 import { ToolExecutionBroker } from "../runtime/tool-execution-broker.ts";
+import { nextTodoRevision } from "../todo.ts";
 
 export type DirectToolRunnerDeps = {
   allTools: ToolProvider;
@@ -49,6 +50,12 @@ export async function runDirectTool(
       signal: abortSignal,
       permissionTurn,
     });
+    if (result.todoUpdate) {
+      dispatch({
+        type: "LOOP_EVENT",
+        event: { type: "todo_updated", todos: result.todoUpdate, revision: nextTodoRevision() },
+      });
+    }
     dispatch({ type: "LOOP_EVENT", event: { type: "tool_end", call: fakeCall, result } });
   } catch (err) {
     dispatch({

@@ -2,8 +2,14 @@
 
 import type { LlmConfig } from "./llm/config.ts";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
+import {
+  clampToAvailableLevels,
+  modelSupportsMappedLevel,
+  THINKING_EFFORT_LEVELS,
+  THINKING_LEVEL_DISPLAY_LABELS,
+} from "./pi-ai/thinking-levels.ts";
 
-export type ThinkingIntensity = "off" | "low" | "med" | "high" | "xhigh";
+export type ThinkingIntensity = "off" | "low" | "med" | "high" | "xhigh" | "ultra";
 export type ThinkingCommandMode = "adaptive";
 
 /** The default user-facing intensity when no explicit setting is present. */
@@ -15,10 +21,11 @@ export const THINKING_INTENSITY_TO_MODEL_LEVEL: Readonly<Record<ThinkingIntensit
   med: "medium",
   high: "high",
   xhigh: "xhigh",
+  ultra: "ultra",
 };
 
 /** Only a leading, standalone command changes the request. */
-const THINKING_COMMAND_RE = /^\s*\/think:(off|low|med|high|xhigh|auto)(?=$|\s)/i;
+const THINKING_COMMAND_RE = /^\s*\/think:(off|low|med|high|xhigh|ultra|auto)(?=$|\s)/i;
 
 export type ThinkingIntensityPrompt = {
   intensity: ThinkingIntensity | null;
@@ -102,26 +109,13 @@ export type ThinkingLlmConfig = LlmConfig & { thinkingLevel: ModelThinkingLevel 
  * Stable UI order used by the direct effort shortcuts. Provider/model catalogs
  * can explicitly mark unavailable levels with `thinkingLevelMap`.
  */
-export const THINKING_LEVEL_ORDER: readonly ModelThinkingLevel[] = [
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-];
+export const THINKING_LEVEL_ORDER: readonly ModelThinkingLevel[] = THINKING_EFFORT_LEVELS;
 
 function modelSupportsLevel(
   config: Pick<LlmConfig, "reasoning" | "piModel">,
   level: ModelThinkingLevel,
 ): boolean {
-  if (!config.reasoning) return level === "off";
-  const mapped = config.piModel?.thinkingLevelMap?.[level];
-  if (mapped === null) return false;
-  // Pi requires an explicit provider mapping for its two extended levels.
-  // Lower levels use the provider default when their mapping is omitted.
-  if (level === "xhigh" || level === "max") return mapped !== undefined;
-  return true;
+  return modelSupportsMappedLevel(config.reasoning, config.piModel?.thinkingLevelMap, level);
 }
 
 /** Return the effort levels that can be selected for the active model. */
@@ -159,31 +153,12 @@ export function clampThinkingLevelForModel(
   requested: ModelThinkingLevel,
 ): ModelThinkingLevel {
   if (!config.reasoning || requested === "off") return "off";
-  const choices = getThinkingLevelChoices(config);
-  if (choices.includes(requested)) return requested;
-  const requestedIndex = THINKING_LEVEL_ORDER.indexOf(requested);
-  for (let index = requestedIndex; index < THINKING_LEVEL_ORDER.length; index += 1) {
-    const candidate = THINKING_LEVEL_ORDER[index];
-    if (candidate && choices.includes(candidate)) return candidate;
-  }
-  for (let index = requestedIndex - 1; index >= 0; index -= 1) {
-    const candidate = THINKING_LEVEL_ORDER[index];
-    if (candidate && choices.includes(candidate)) return candidate;
-  }
-  return choices[0] ?? "medium";
+  const choices = new Set(getThinkingLevelChoices(config));
+  return clampToAvailableLevels(requested, (candidate) => choices.has(candidate));
 }
 
 export function thinkingLevelToDisplay(level: ModelThinkingLevel): string {
-  const labels: Record<ModelThinkingLevel, string> = {
-    off: "关闭",
-    minimal: "最小",
-    low: "低",
-    medium: "中",
-    high: "高",
-    xhigh: "极高",
-    max: "最大",
-  };
-  return labels[level];
+  return THINKING_LEVEL_DISPLAY_LABELS[level];
 }
 
 /** Apply an intensity to the current model without changing provider/model. */
@@ -209,16 +184,24 @@ export function intensityToDisplay(intensity: ThinkingIntensity): string {
     med: "平衡 (Med)",
     high: "深度 (High)",
     xhigh: "极致 (X-High)",
+    ultra: "超限 (Ultra)",
   };
   return map[intensity];
 }
 
 export function getIntensities(): ThinkingIntensity[] {
-  return ["off", "low", "med", "high", "xhigh"];
+  return ["off", "low", "med", "high", "xhigh", "ultra"];
 }
 
 export function isValidIntensity(test: unknown): test is ThinkingIntensity {
-  return test === "off" || test === "low" || test === "med" || test === "high" || test === "xhigh";
+  return (
+    test === "off"
+    || test === "low"
+    || test === "med"
+    || test === "high"
+    || test === "xhigh"
+    || test === "ultra"
+  );
 }
 
 /** Resolve the default intensity from the legacy environment variable. */

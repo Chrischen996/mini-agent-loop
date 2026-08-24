@@ -52,6 +52,7 @@ import {
   type AutoSubagentOptions,
 } from "./subagent/auto.ts";
 import { resolveToolProvider, type Tool, type ToolProvider, type ToolResult } from "./tools/types.ts";
+import { nextTodoRevision, type TodoItem } from "./todo.ts";
 import type { SubagentEvent } from "./subagent/types.ts";
 import type {
   AgentMessage,
@@ -229,6 +230,7 @@ export type LoopEvent =
   | { type: "max_turns"; maxTurns: number; messages: AgentMessage[] }
   | { type: "tool_start"; call: ToolCall }
   | { type: "tool_end"; call: ToolCall; result: ToolResult }
+  | { type: "todo_updated"; todos: TodoItem[]; revision: number }
   | {
       type: "auto_subagent";
       shouldDelegate: boolean;
@@ -282,6 +284,18 @@ export type LoopEvent =
       errorMessage: string;
     }
   | SubagentEvent;
+
+function emitTodoUpdate(
+  onEvent: ((event: LoopEvent) => void) | undefined,
+  result: ToolResult,
+): void {
+  if (!result.todoUpdate) return;
+  onEvent?.({
+    type: "todo_updated",
+    todos: result.todoUpdate,
+    revision: nextTodoRevision(),
+  });
+}
 
 const PERMISSION_MODE_MARKER = "\n[MODE]\n";
 
@@ -398,6 +412,7 @@ export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string): str
     "",
     "### Task Execution",
     "Complete ALL steps in a single response. Do not stop mid-task to report progress.",
+    "For multi-step tasks, use TodoWrite to keep a concise task list updated. Use one in_progress task at a time, mark completed tasks as completed, and replace the full list on each update.",
     "Only produce a final text response (without tool calls) when the entire task is truly done.",
     "Use clear markdown formatting: headers, lists, code blocks, bold for file names.",
   ];
@@ -1013,6 +1028,7 @@ async function runAgentTurnInternal(
           }
         }
 
+        emitTodoUpdate(onEvent, result);
         toolMessages.push({
           role: "tool",
           toolCallId: call.id,
@@ -1093,6 +1109,7 @@ async function runAgentTurnInternal(
           isError: result.isError,
         });
         completedToolIds.add(call.id);
+        emitTodoUpdate(onEvent, result);
         onEvent?.({ type: "tool_end", call, result });
       }
     }

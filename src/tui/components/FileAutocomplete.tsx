@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { TUI_COLORS as C } from "../theme.ts";
+import { TODO_COMMAND_USAGE } from "../todo-commands.ts";
 
 // ─── Command palette ─────────────────────────────────────────────────────────
 
@@ -20,6 +21,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "find",  usage: "/find <glob> [path]",   description: "按 glob 查找文件" },
   { name: "grep",  usage: "/grep <pattern> [path]", description: "搜索文件内容" },
   { name: "clear", usage: "/clear",                 description: "清空对话" },
+  { name: "tasks", usage: TODO_COMMAND_USAGE, description: "显示或管理 Todo 任务" },
   { name: "context", usage: "/context",             description: "显示上下文/token 统计" },
   { name: "plan", usage: "/plan [task]",            description: "生成执行计划（plan mode）" },
   { name: "plan-show", usage: "/plan-show",         description: "显示当前计划" },

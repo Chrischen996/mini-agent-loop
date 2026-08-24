@@ -22,6 +22,7 @@ function loadNodeOs(): typeof NodeOs | null {
 const _os: typeof NodeOs | null = loadNodeOs();
 
 import { clampThinkingLevel } from "../models.ts";
+import { demoteUltra } from "../thinking-levels.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	Api,
@@ -466,7 +467,7 @@ export const streamSimple: StreamFunction<"openai-codex-responses", SimpleStream
 
 	const base = buildBaseOptions(model, context, options, apiKey);
 	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
-	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
+	const reasoningEffort = clampedReasoning === "off" ? undefined : demoteUltra(clampedReasoning);
 
 	return stream(model, context, {
 		...base,
