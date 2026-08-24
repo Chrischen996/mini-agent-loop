@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { applyTodoCommand, parseTodoCommand, type TodoCommand } from "../src/tui/todo-commands.ts";
+import { applyTodoCommand, executeTodoCommand, parseTodoCommand, type TodoCommand } from "../src/tui/todo-commands.ts";
 import { parseSlashCommand } from "../src/tui/slash-commands.ts";
 import { PATH_COMMANDS } from "../src/tui/slash-commands.ts";
 import { SLASH_COMMANDS } from "../src/tui/components/FileAutocomplete.tsx";
 import type { TodoItem } from "../src/tools/todo.ts";
+import { createInitialState, tuiReducer, type TuiAction } from "../src/tui/state.ts";
 
 const todos: TodoItem[] = [
   { id: "todo-1", content: "First", status: "pending" },
@@ -80,5 +81,28 @@ describe("manual todo commands", () => {
     assert.deepEqual(cleared.todos, []);
     assert.ok(SLASH_COMMANDS.some((command) => command.name === "todo"));
     assert.equal(PATH_COMMANDS.has("todo"), false);
+  });
+
+  it("dispatches todo updates and notices without creating a user turn", () => {
+    let state = createInitialState("test");
+    const actions: TuiAction[] = [];
+    const dispatch = (action: TuiAction) => {
+      actions.push(action);
+      state = tuiReducer(state, action);
+    };
+    const command = parseTodoCommand("/todo add Ship it");
+    assert.ok(command);
+    executeTodoCommand(state.todos, command, dispatch);
+
+    assert.deepEqual(state.todos, [{ id: "todo-1", content: "Ship it", status: "pending" }]);
+    assert.deepEqual(actions.map((action) => action.type), ["SET_TODOS", "ADD_NOTICE"]);
+    assert.match((actions[1] as Extract<TuiAction, { type: "ADD_NOTICE" }>).text, /Ship it/);
+
+    actions.length = 0;
+    const failed = parseTodoCommand("/todo delete missing");
+    assert.ok(failed);
+    executeTodoCommand(state.todos, failed, dispatch);
+    assert.deepEqual(actions.map((action) => action.type), ["ADD_NOTICE"]);
+    assert.deepEqual(state.todos, [{ id: "todo-1", content: "Ship it", status: "pending" }]);
   });
 });

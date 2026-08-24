@@ -7,6 +7,7 @@ import { StatusBar } from "./components/StatusBar.tsx";
 import { resolvePendingPermissionDecision } from "./pending-permission.ts";
 import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
 import { parseSlashCommand } from "./slash-commands.ts";
+import { executeTodoCommand } from "./todo-commands.ts";
 import { useAutocomplete } from "./hooks/useAutocomplete.ts";
 import { tuiReducer, createInitialState } from "./state.ts";
 import {
@@ -716,6 +717,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const slashCmd = parseSlashCommand(trimmed);
     if (slashCmd) {
       setInput("");
+      if (slashCmd.cmd === "todo") {
+        executeTodoCommand(state.todos, slashCmd.todo, dispatch);
+        return;
+      }
       dispatch({ type: "USER_MESSAGE", text: trimmed });
       switch (slashCmd.cmd) {
         case "read": await runDirectToolRef("read", { path: slashCmd.path }); break;

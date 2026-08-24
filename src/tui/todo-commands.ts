@@ -1,4 +1,5 @@
 import type { TodoItem, TodoStatus } from "../tools/todo.ts";
+import type { TuiAction } from "./state.ts";
 
 export type TodoCommand =
   | { action: "list" }
@@ -13,6 +14,8 @@ export type TodoCommand =
 export type TodoCommandResult =
   | { ok: true; todos: TodoItem[] }
   | { ok: false; todos: TodoItem[]; error: string };
+
+type TodoDispatch = (action: Extract<TuiAction, { type: "SET_TODOS" | "ADD_NOTICE" }>) => void;
 
 function cloneTodos(todos: TodoItem[]): TodoItem[] {
   return todos.map((todo) => ({ ...todo }));
@@ -88,4 +91,24 @@ export function applyTodoCommand(todos: TodoItem[], command: TodoCommand): TodoC
     ? "in_progress"
     : command.action === "pending" ? "pending" : "completed";
   return { ok: true, todos: withStatus(previous, command.id, status) };
+}
+
+function formatTodoNotice(todos: TodoItem[]): string {
+  if (todos.length === 0) return "Todo list is empty.";
+  return todos.map((todo) => `${todo.id} [${todo.status}] ${todo.content}`).join("\n");
+}
+
+export function executeTodoCommand(
+  todos: TodoItem[],
+  command: TodoCommand,
+  dispatch: TodoDispatch,
+): TodoCommandResult {
+  const result = applyTodoCommand(todos, command);
+  if (!result.ok) {
+    dispatch({ type: "ADD_NOTICE", title: "Todo", text: `Todo command failed: ${result.error}` });
+    return result;
+  }
+  dispatch({ type: "SET_TODOS", todos: result.todos });
+  dispatch({ type: "ADD_NOTICE", title: "Todo", text: formatTodoNotice(result.todos) });
+  return result;
 }
