@@ -17,6 +17,36 @@ const llm = makeLlmConfig({
 });
 
 describe("agent server", () => {
+  it("serves the web todo shell and static assets", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-server-web-static-"));
+    try {
+      const app = createAgentServer({
+        llm,
+        tools: [],
+        chat: async () => ({ role: "assistant", content: "unused" }),
+        dataDir,
+      });
+      const page = await request(app).get("/");
+      assert.equal(page.status, 200);
+      assert.match(page.headers["content-type"] ?? "", /text\/html/);
+      assert.match(page.text, /agent-todo-app/);
+      assert.match(page.text, /todo-list/);
+
+      const script = await request(app).get("/app.js");
+      assert.equal(script.status, 200);
+      assert.match(script.headers["content-type"] ?? "", /javascript/);
+      assert.match(script.text, /EventSource/);
+      assert.match(script.text, /todo_updated/);
+
+      const styles = await request(app).get("/styles.css");
+      assert.equal(styles.status, 200);
+      assert.match(styles.headers["content-type"] ?? "", /css/);
+      assert.match(styles.text, /@media.*720px/s);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("exposes session permission mode and approval APIs", async () => {
     const app = createAgentServer({
       llm,

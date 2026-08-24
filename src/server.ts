@@ -1059,6 +1059,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
   app.use((_request, _response, next) => {
     void Promise.all([restorePromise, skillDiscovery, instructionDiscovery]).then(() => next()).catch(next);
   });
+  app.use(express.static(path.join(PACKAGE_ROOT, "web")));
 
   const startSessionJob = async (session: Session, jobId: string, lease: SessionExecutionLease): Promise<void> => {
     try {

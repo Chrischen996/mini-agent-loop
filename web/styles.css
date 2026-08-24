@@ -1,0 +1,25 @@
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background: #12161b; color: #e7edf2; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: #12161b; }
+button, input, select { font: inherit; }
+button { border: 1px solid #36434f; border-radius: 5px; background: #1d2730; color: #dce6ed; padding: 7px 10px; cursor: pointer; }
+button:hover { border-color: #6fa6c5; background: #263541; }
+.app-shell { width: min(860px, calc(100% - 32px)); margin: 0 auto; padding: 36px 0 48px; }
+.topbar, .status-row, .section-heading, .form-row, .todo-item { display: flex; align-items: center; }
+.topbar { justify-content: space-between; gap: 20px; border-bottom: 1px solid #29343d; padding-bottom: 22px; }
+.eyebrow { margin: 0 0 6px; color: #7fb3ce; font-size: 11px; letter-spacing: 1.5px; }
+h1, h2 { margin: 0; font-weight: 600; } h1 { font-size: 25px; } h2 { font-size: 16px; }
+.session-picker { color: #91a2ae; font-size: 12px; display: grid; gap: 5px; }
+select, input { border: 1px solid #36434f; border-radius: 5px; background: #182129; color: #e7edf2; padding: 8px 10px; }
+.status-row { justify-content: space-between; color: #91a2ae; font-size: 13px; padding: 17px 0; }
+.status-dot::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: #a2abb2; }
+.status-dot.live::before { background: #6fbd88; } .status-dot.warning::before { background: #d5a55f; }
+.todo-section { border-top: 1px solid #29343d; padding-top: 20px; }
+.section-heading { justify-content: space-between; margin-bottom: 12px; }
+.todo-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 7px; }
+.todo-item { justify-content: space-between; gap: 14px; padding: 11px 12px; border: 1px solid #2b3741; border-radius: 6px; background: #182129; }
+.todo-content { min-width: 0; display: grid; gap: 3px; } .todo-id { color: #7fb3ce; font-size: 11px; } .todo-text { overflow-wrap: anywhere; }
+.todo-item.completed .todo-text { color: #8e9ba4; text-decoration: line-through; } .todo-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.empty-state { color: #71808c; padding: 22px 0; text-align: center; } .add-form { margin-top: 24px; display: grid; gap: 7px; color: #91a2ae; font-size: 12px; }
+.form-row { gap: 8px; } .form-row input { flex: 1; min-width: 0; } .notice { min-height: 20px; color: #7fc595; font-size: 13px; } .notice.error { color: #e19a91; }
+@media (max-width: 720px) { .app-shell { width: min(100% - 20px, 560px); padding-top: 22px; } .topbar { align-items: flex-start; flex-direction: column; } .todo-item { align-items: flex-start; flex-direction: column; } .todo-actions { width: 100%; } .todo-actions button { flex: 1; } }
