@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import request from "supertest";
 import { contentAsString } from "../src/content.ts";
 import { makeLlmConfig } from "../src/llm/index.ts";
-import { createAgentServer } from "../src/server.ts";
+import { createAgentServer, createTodoUpdateQueue, type TodoSessionState } from "../src/server.ts";
 import type { Tool } from "../src/tools/types.ts";
 import type { AgentMessage, AssistantMessage } from "../src/types.ts";
 
@@ -313,6 +313,150 @@ describe("agent server", () => {
         { id: "inspect", content: "Inspect code", status: "in_progress" },
       ]);
       assert.equal((fork.body as { todoVersion: number }).todoVersion, 1);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes concurrent todo updates and continues after a rejected write", async () => {
+    const state: TodoSessionState = { todos: [], todoVersion: 0 };
+    const saveOrder: string[] = [];
+    let releaseFirstSave: (() => void) | undefined;
+    let firstSaveStarted: (() => void) | undefined;
+    const firstSaveReady = new Promise<void>((resolve) => { firstSaveStarted = resolve; });
+    const firstSaveRelease = new Promise<void>((resolve) => { releaseFirstSave = resolve; });
+    let saveCalls = 0;
+    const update = createTodoUpdateQueue(state, async () => {
+      saveCalls += 1;
+      saveOrder.push(state.todos[0]?.content ?? "");
+      if (saveCalls === 1) {
+        firstSaveStarted?.();
+        await firstSaveRelease;
+      }
+    });
+
+    const first = update([{ id: "first", content: "First", status: "in_progress" }]);
+    await firstSaveReady;
+    const second = update([{ id: "second", content: "Second", status: "in_progress" }]);
+    assert.equal(saveCalls, 1);
+    releaseFirstSave?.();
+    await Promise.all([first, second]);
+
+    assert.deepEqual(saveOrder, ["First", "Second"]);
+    assert.deepEqual(state.todos, [{ id: "second", content: "Second", status: "in_progress" }]);
+    assert.equal(state.todoVersion, 2);
+
+    const rejectedState: TodoSessionState = { todos: [], todoVersion: 0 };
+    let rejectNext = true;
+    const rejectedUpdate = createTodoUpdateQueue(rejectedState, async () => {
+      if (rejectNext) {
+        rejectNext = false;
+        throw new Error("persist failed");
+      }
+    });
+    await assert.rejects(
+      rejectedUpdate([{ id: "failed", content: "Failed", status: "in_progress" }]),
+      /persist failed/,
+    );
+    await rejectedUpdate([{ id: "recovered", content: "Recovered", status: "in_progress" }]);
+    assert.deepEqual(rejectedState.todos, [{ id: "recovered", content: "Recovered", status: "in_progress" }]);
+    assert.equal(rejectedState.todoVersion, 1);
+  });
+
+  it("replaces a caller-provided todo_write tool with the session-bound tool", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-server-duplicate-todo-"));
+    const callerTodoTool: Tool = {
+      name: "todo_write",
+      description: "caller todo",
+      parameters: { type: "object" },
+      execute: async () => ({ content: "caller tool used" }),
+    };
+    let call = 0;
+    const app = createAgentServer({
+      llm,
+      tools: [callerTodoTool],
+      permissionMode: "bypass",
+      dataDir,
+      chat: async (_config, _messages, tools = []) => {
+        call += 1;
+        assert.equal(tools.filter((tool) => tool.name === "todo_write").length, 1);
+        if (call === 1) {
+          return {
+            role: "assistant",
+            content: "",
+            toolCalls: [{
+              id: "replace-todo-write",
+              name: "todo_write",
+              arguments: { todos: [{ id: "bound", content: "Bound", status: "in_progress" }] },
+            }],
+          };
+        }
+        return { role: "assistant", content: "session tool used" };
+      },
+    });
+    try {
+      const created = await request(app).post("/api/sessions");
+      const sessionId = (created.body as { id: string }).id;
+      const response = await request(app)
+        .post(`/api/sessions/${sessionId}/messages`)
+        .field("prompt", "update todo");
+      assert.equal(response.status, 200);
+      assert.match(response.text, /session tool used/);
+      assert.doesNotMatch(response.text, /caller tool used/);
+      const session = await request(app).get(`/api/sessions/${sessionId}`);
+      assert.deepEqual((session.body as { todos: unknown[] }).todos, [
+        { id: "bound", content: "Bound", status: "in_progress" },
+      ]);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to an empty todo state for corrupt persisted todo data", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-server-corrupt-todos-"));
+    const writeSession = async (sessionId: string, todos: unknown, todoVersion: unknown): Promise<void> => {
+      const sessionDir = path.join(dataDir, "sessions", sessionId);
+      await mkdir(sessionDir, { recursive: true });
+      await writeFile(
+        path.join(sessionDir, "events.jsonl"),
+        [
+          JSON.stringify({ type: "session_created", sessionId, createdAt: Date.now(), messages: [], todos, todoVersion }),
+          JSON.stringify({ type: "session_snapshot", sessionId, createdAt: Date.now(), messages: [], todos, todoVersion }),
+        ].join("\n") + "\n",
+        "utf8",
+      );
+    };
+    const corruptSessionId = "corrupt-todos";
+    const badVersionSessionId = "bad-todo-version";
+    await writeSession(
+      corruptSessionId,
+      [{ id: "duplicate", content: "One", status: "pending" }, { id: "duplicate", content: "Two", status: "pending" }],
+      "bad",
+    );
+    await writeSession(
+      badVersionSessionId,
+      [{ id: "valid", content: "Valid", status: "completed" }],
+      -1,
+    );
+
+    try {
+      const app = createAgentServer({
+        llm,
+        tools: [],
+        chat: async () => ({ role: "assistant", content: "unused" }),
+        dataDir,
+      });
+      const corrupt = await request(app).get(`/api/sessions/${corruptSessionId}`);
+      assert.equal(corrupt.status, 200);
+      assert.deepEqual((corrupt.body as { todos: unknown[] }).todos, []);
+      assert.equal((corrupt.body as { todoVersion: number }).todoVersion, 0);
+
+      const badVersion = await request(app).get(`/api/sessions/${badVersionSessionId}`);
+      assert.equal(badVersion.status, 200);
+      assert.deepEqual((badVersion.body as { todos: unknown[] }).todos, [
+        { id: "valid", content: "Valid", status: "completed" },
+      ]);
+      assert.equal((badVersion.body as { todoVersion: number }).todoVersion, 0);
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }

@@ -168,6 +168,40 @@ type Session = {
   todoVersion: number;
 };
 
+export type TodoSessionState = {
+  todos: TodoItem[];
+  todoVersion: number;
+};
+
+export function createTodoUpdateQueue(
+  state: TodoSessionState,
+  save: () => Promise<void>,
+): (snapshot: unknown) => Promise<void> {
+  let tail = Promise.resolve();
+  return (snapshot) => {
+    const update = tail.then(async () => {
+      const todos = validateTodoSnapshot(snapshot);
+      const previousTodos = state.todos;
+      const previousVersion = state.todoVersion;
+      state.todos = todos;
+      state.todoVersion = previousVersion + 1;
+      try {
+        await save();
+      } catch (error) {
+        state.todos = previousTodos;
+        state.todoVersion = previousVersion;
+        throw error;
+      }
+    });
+    tail = update.then(() => undefined, () => undefined);
+    return update;
+  };
+}
+
+function normalizeTodoVersion(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
 export type AgentServerOptions = {
   llm: LlmConfig;
   tools?: ToolProvider;
@@ -857,20 +891,37 @@ export function createAgentServer(options: AgentServerOptions): Express {
     forkedFromMessage: session.forkedFromMessage,
   });
   const saveSession = (session: Session): Promise<void> => sessionStore.save(persistedSession(session));
-  const updateSessionTodos = async (session: Session, snapshot: unknown): Promise<void> => {
-    const todos = validateTodoSnapshot(snapshot);
-    session.todos = todos;
-    session.todoVersion += 1;
-    await saveSession(session);
+  const todoUpdateQueues = new WeakMap<Session, (snapshot: unknown) => Promise<void>>();
+  const createSessionTodoTool = (session: Session): Tool => {
+    let updateTodos = todoUpdateQueues.get(session);
+    if (!updateTodos) {
+      updateTodos = createTodoUpdateQueue(session, () => saveSession(session));
+      todoUpdateQueues.set(session, updateTodos);
+    }
+    return createTodoTool(updateTodos);
   };
-  const createSessionTodoTool = (session: Session): Tool =>
-    createTodoTool((todos) => updateSessionTodos(session, todos));
   const addSessionTodoTool = (session: Session, baseTools: ToolProvider): ToolProvider => {
     const todoTool = createSessionTodoTool(session);
-    return () => [...resolveToolProvider(baseTools), todoTool];
+    return () => [
+      ...resolveToolProvider(baseTools).filter((tool) => tool.name !== "todo_write"),
+      todoTool,
+    ];
   };
   const restoreSessions = sessionStore.loadAll().then((restored) => {
     return Promise.all([...restored.values()].map(async (persisted) => {
+      let restoredTodos: TodoItem[] = [];
+      let restoredTodoVersion = 0;
+      if (persisted.todos !== undefined) {
+        try {
+          restoredTodos = validateTodoSnapshot(persisted.todos);
+          restoredTodoVersion = normalizeTodoVersion(persisted.todoVersion);
+        } catch {
+          restoredTodos = [];
+          restoredTodoVersion = 0;
+        }
+      } else {
+        restoredTodoVersion = normalizeTodoVersion(persisted.todoVersion);
+      }
       const session: Session = {
         id: persisted.id,
         messages: persisted.messages,
@@ -881,8 +932,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
         thinkingLevel: persisted.thinkingLevel,
         thinkingMode: persisted.thinkingMode,
         skillNames: persisted.skillNames ?? [...defaultSkillNames],
-        todos: persisted.todos ?? [],
-        todoVersion: persisted.todoVersion ?? 0,
+        todos: restoredTodos,
+        todoVersion: restoredTodoVersion,
         parentSessionId: persisted.parentSessionId,
         forkedFromMessage: persisted.forkedFromMessage,
       };
@@ -2560,7 +2611,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         // Use the per-session model and thinking level, otherwise fall back to
         // the server default. A /think command is applied before the first
         // model request and is retained for subsequent messages in this session.
-      const sessionLlm = session.llmOverride ?? options.llm;
+        const sessionLlm = session.llmOverride ?? options.llm;
         const effectiveLlm = input.thinkingLevel
           ? withThinkingLevel(sessionLlm, input.thinkingLevel)
           : sessionLlm;
