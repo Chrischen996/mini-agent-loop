@@ -5,6 +5,7 @@ import { createInitialState, tuiReducer } from "../src/tui/state.ts";
 import { getMessageFeedHeight, getPickerLayout } from "../src/tui/layout.ts";
 import type { TodoItem } from "../src/tools/todo.ts";
 import { confirmTodoEditor, createTodoEditorState, reduceTodoEditor, type TodoEditorAction } from "../src/tui/todo-editor.ts";
+import { routeTodoEditorKey } from "../src/tui/hooks/useKeyboardHandler.ts";
 
 describe("TUI todo state", () => {
   const todos: TodoItem[] = [
@@ -66,6 +67,18 @@ describe("TUI todo state", () => {
     const confirmed = confirmTodoEditor(editor);
     assert.deepEqual(confirmed.todos, [{ id: "b", content: "Running", status: "in_progress" }]);
     assert.equal(confirmed, editor);
+  });
+
+  it("routes editor keys by mode and preserves global guards", () => {
+    const key = (overrides: Record<string, boolean> = {}) => overrides as never;
+    assert.equal(routeTodoEditorKey({ editorOpen: false, mode: "select", acMode: null, busy: false, pendingPermission: false, ch: "t", key: key({ ctrl: true, shift: true }) }), "open");
+    assert.equal(routeTodoEditorKey({ editorOpen: false, mode: "select", acMode: "command", busy: false, pendingPermission: false, ch: "t", key: key({ ctrl: true, shift: true }) }), "none");
+    assert.equal(routeTodoEditorKey({ editorOpen: false, mode: "select", acMode: null, busy: true, pendingPermission: false, ch: "t", key: key({ ctrl: true, shift: true }) }), "none");
+    assert.equal(routeTodoEditorKey({ editorOpen: false, mode: "select", acMode: null, busy: false, pendingPermission: false, ch: "t", key: key({ ctrl: true, shift: false }) }), "thinking");
+    assert.equal(routeTodoEditorKey({ editorOpen: true, mode: "select", acMode: null, busy: true, pendingPermission: false, ch: "d", key: key() }), "delete");
+    assert.equal(routeTodoEditorKey({ editorOpen: true, mode: "select", acMode: null, busy: true, pendingPermission: false, ch: "x", key: key({ escape: true }) }), "close");
+    assert.equal(routeTodoEditorKey({ editorOpen: true, mode: "add", acMode: null, busy: false, pendingPermission: false, ch: "x", key: key() }), "prompt");
+    assert.equal(routeTodoEditorKey({ editorOpen: true, mode: "edit", acMode: null, busy: false, pendingPermission: true, ch: "x", key: key() }), "permission");
   });
 
   it("replaces the independent todo snapshot", () => {

@@ -8,9 +8,8 @@ function symbol(status: string): string {
   return status === "completed" ? "✓" : status === "in_progress" ? "▶" : "○";
 }
 
-export function TodoEditor({ state, onCommit, onCancel, onStateChange, onConfirm }: {
+export function TodoEditor({ state, onCancel, onStateChange, onConfirm }: {
   state: TodoEditorState;
-  onCommit: (todos: TodoEditorState["todos"]) => void;
   onCancel: () => void;
   onStateChange: (value: string) => void;
   onConfirm: () => void;

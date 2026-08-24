@@ -24,7 +24,6 @@ export type OverlaysProps = {
   profileListState?: ProfileListState | null;
   pickerItemRows: number;
   todoEditorState?: TodoEditorState;
-  onTodoCommit?: (todos: TodoEditorState["todos"]) => void;
   onTodoCancel?: () => void;
   onTodoInput?: (value: string) => void;
   onTodoConfirm?: () => void;
@@ -46,13 +45,12 @@ export function Overlays({
   profileListState,
   pickerItemRows,
   todoEditorState,
-  onTodoCommit,
   onTodoCancel,
   onTodoInput,
   onTodoConfirm,
 }: OverlaysProps): React.ReactElement | null {
-  if (todoEditorState && onTodoCommit && onTodoCancel && onTodoInput && onTodoConfirm) {
-    return <TodoEditor state={todoEditorState} onCommit={onTodoCommit} onCancel={onTodoCancel} onStateChange={onTodoInput} onConfirm={onTodoConfirm} />;
+  if (todoEditorState && onTodoCancel && onTodoInput && onTodoConfirm) {
+    return <TodoEditor state={todoEditorState} onCancel={onTodoCancel} onStateChange={onTodoInput} onConfirm={onTodoConfirm} />;
   }
   if (!acMode) return null;
 

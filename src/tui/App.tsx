@@ -351,26 +351,29 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   // ── keyboard handler ─────────────────────────────────────────────────────
 
+  const commitTodoEditor = useCallback(() => {
+    if (!todoEditorState) return;
+    const next = confirmTodoEditor(todoEditorState);
+    if (next.error) {
+      setTodoEditorState(next);
+      return;
+    }
+    dispatch({ type: "SET_TODOS", todos: next.todos });
+    dispatch({ type: "ADD_NOTICE", title: "Todo", text: "Todo list updated." });
+    setTodoEditorState(null);
+  }, [todoEditorState]);
+
   useKeyboardHandler({
     exit, abortRef, copyResolvedText, getPermissionManager, historyRef,
     adjustThinkingLevel, resolvePendingPermission, dispatch,
     acMode, setAcMode, state, feedHeight, handleAutocompleteKey,
     suppressInputEchoRef, pendingPermissionRef,
     todoEditorOpen: todoEditorState !== null,
+    todoEditorMode: todoEditorState?.mode ?? "select",
     openTodoEditor: () => setTodoEditorState(createTodoEditorState(state.todos)),
     closeTodoEditor: () => setTodoEditorState(null),
     todoEditorAction: (action) => setTodoEditorState((current) => current ? reduceTodoEditor(current, action) : current),
-    commitTodoEditor: () => {
-      if (!todoEditorState) return;
-      const next = confirmTodoEditor(todoEditorState);
-      if (next.error) {
-        setTodoEditorState(next);
-        return;
-      }
-      dispatch({ type: "SET_TODOS", todos: next.todos });
-      dispatch({ type: "ADD_NOTICE", title: "Todo", text: "Todo list updated." });
-      setTodoEditorState(null);
-    },
+    commitTodoEditor,
   });
 
   // ── direct tool invocation ────────────────────────────────────────────────
@@ -1106,24 +1109,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           profileListState={profileListState}
           pickerItemRows={pickerLayout.itemRows}
           todoEditorState={todoEditorState ?? undefined}
-          onTodoCommit={() => {
-            if (!todoEditorState || todoEditorState.mode === "select") return;
-            const next = confirmTodoEditor(todoEditorState);
-            if (next.error) { setTodoEditorState(next); return; }
-            dispatch({ type: "SET_TODOS", todos: next.todos });
-            dispatch({ type: "ADD_NOTICE", title: "Todo", text: "Todo list updated." });
-            setTodoEditorState(null);
-          }}
           onTodoCancel={() => setTodoEditorState(null)}
           onTodoInput={(value) => setTodoEditorState((current) => current ? reduceTodoEditor(current, { type: "INPUT", value }) : current)}
-          onTodoConfirm={() => {
-            if (!todoEditorState) return;
-            const next = confirmTodoEditor(todoEditorState);
-            if (next.error) { setTodoEditorState(next); return; }
-            dispatch({ type: "SET_TODOS", todos: next.todos });
-            dispatch({ type: "ADD_NOTICE", title: "Todo", text: "Todo list updated." });
-            setTodoEditorState(null);
-          }}
+          onTodoConfirm={commitTodoEditor}
         />
       </Box>
 
