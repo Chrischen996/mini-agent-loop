@@ -85,4 +85,29 @@ describe("todo SSE API", () => {
       await rm(dataDir, { recursive: true, force: true });
     }
   });
+
+  it("closes todo SSE readers when the session is deleted", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-server-todo-delete-sse-"));
+    const app = createAgentServer({ llm, tools: [], dataDir, chat: async () => ({ role: "assistant", content: "unused" }) });
+    const { server, baseUrl } = await listen(app);
+    try {
+      const created = await fetch(`${baseUrl}/api/sessions`, { method: "POST" });
+      const { id } = await created.json() as { id: string };
+      const events = await fetch(`${baseUrl}/api/sessions/${id}/todos/events`);
+      const reader = events.body?.getReader();
+      assert.ok(reader);
+      await readFrame(reader, new TextDecoder());
+
+      const deleted = await fetch(`${baseUrl}/api/sessions/${id}`, { method: "DELETE" });
+      assert.equal(deleted.status, 204);
+      const closed = await reader.read();
+      assert.equal(closed.done, true);
+
+      const missing = await fetch(`${baseUrl}/api/sessions/${id}/todos`);
+      assert.equal(missing.status, 404);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
 });

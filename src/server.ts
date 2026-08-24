@@ -166,6 +166,7 @@ type Session = {
   planHistory?: import('./plan-act/types.js').ExecutionPlan[];
   todos: TodoItem[];
   todoVersion: number;
+  deleting?: boolean;
 };
 
 export type TodoSessionState = {
@@ -185,16 +186,33 @@ export class TodoVersionConflict extends Error {
   }
 }
 
+export class TodoSessionInactiveError extends Error {
+  constructor() {
+    super("Todo session is inactive or deleted");
+    this.name = "TodoSessionInactiveError";
+  }
+}
+
+export type TodoUpdateQueue = ((
+  snapshot: unknown,
+  options?: { source?: TodoUpdateSource; expectedVersion?: number },
+) => Promise<void>) & {
+  drain: () => Promise<void>;
+  waitForIdle: () => Promise<void>;
+};
+
 export function createTodoUpdateQueue(
   state: TodoSessionState,
   save: () => Promise<void>,
   onUpdated?: (todos: TodoItem[], version: number, source: TodoUpdateSource) => void | Promise<void>,
-): (snapshot: unknown, options?: { source?: TodoUpdateSource; expectedVersion?: number }) => Promise<void> {
+  options: { isActive?: () => boolean } = {},
+): TodoUpdateQueue {
   let tail = Promise.resolve();
-  return (snapshot, options = {}) => {
+  const update = (snapshot: unknown, updateOptions: { source?: TodoUpdateSource; expectedVersion?: number } = {}) => {
     const update = tail.then(async () => {
+      if (options.isActive && !options.isActive()) throw new TodoSessionInactiveError();
       const todos = validateTodoSnapshot(snapshot);
-      if (options.expectedVersion !== undefined && state.todoVersion !== options.expectedVersion) {
+      if (updateOptions.expectedVersion !== undefined && state.todoVersion !== updateOptions.expectedVersion) {
         throw new TodoVersionConflict(state.todos, state.todoVersion);
       }
       const previousTodos = state.todos;
@@ -208,11 +226,14 @@ export function createTodoUpdateQueue(
         state.todoVersion = previousVersion;
         throw error;
       }
-      await onUpdated?.(todos, state.todoVersion, options.source ?? "agent");
+      await onUpdated?.(todos, state.todoVersion, updateOptions.source ?? "agent");
     });
     tail = update.then(() => undefined, () => undefined);
     return update;
   };
+  update.drain = () => tail;
+  update.waitForIdle = update.drain;
+  return update;
 }
 
 function normalizeTodoVersion(value: unknown): number {
@@ -908,7 +929,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     forkedFromMessage: session.forkedFromMessage,
   });
   const saveSession = (session: Session): Promise<void> => sessionStore.save(persistedSession(session));
-  const todoUpdateQueues = new WeakMap<Session, ReturnType<typeof createTodoUpdateQueue>>();
+  const todoUpdateQueues = new WeakMap<Session, TodoUpdateQueue>();
   const todoSubscribers = new Map<Session, Set<Response>>();
   const removeTodoSubscriber = (session: Session, response: Response): void => {
     const subscribers = todoSubscribers.get(session);
@@ -931,13 +952,26 @@ export function createAgentServer(options: AgentServerOptions): Express {
       }
     }
   };
-  const getSessionTodoUpdateQueue = (session: Session): ReturnType<typeof createTodoUpdateQueue> => {
+  const closeTodoSubscribers = (session: Session): void => {
+    const subscribers = todoSubscribers.get(session);
+    if (!subscribers) return;
+    todoSubscribers.delete(session);
+    for (const response of subscribers) {
+      try {
+        if (!response.writableEnded) response.end();
+      } catch {
+        response.destroy();
+      }
+    }
+  };
+  const getSessionTodoUpdateQueue = (session: Session): TodoUpdateQueue => {
     let updateTodos = todoUpdateQueues.get(session);
     if (!updateTodos) {
       updateTodos = createTodoUpdateQueue(
         session,
         () => saveSession(session),
         (todos, version, source) => broadcastTodoUpdate(session, todos, version, source),
+        { isActive: () => sessions.get(session.id) === session && !session.deleting },
       );
       todoUpdateQueues.set(session, updateTodos);
     }
@@ -2608,6 +2642,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     try {
+      session.deleting = true;
+      closeTodoSubscribers(session);
+      await getSessionTodoUpdateQueue(session).drain();
       sessions.delete(request.params.id);
       await sessionStore.remove(request.params.id);
       void documentStore.removeSession(request.params.id);

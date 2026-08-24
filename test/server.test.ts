@@ -363,6 +363,42 @@ describe("agent server", () => {
     assert.equal(rejectedState.todoVersion, 1);
   });
 
+  it("drains active todo writes and rejects queued writes after deactivation", async () => {
+    const state: TodoSessionState = { todos: [], todoVersion: 0 };
+    let active = true;
+    let markSaveStarted: (() => void) | undefined;
+    let releaseSave: (() => void) | undefined;
+    const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
+    const saveRelease = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    let saveCalls = 0;
+    const queue = createTodoUpdateQueue(
+      state,
+      async () => {
+        saveCalls += 1;
+        if (saveCalls === 1) {
+          markSaveStarted?.();
+          await saveRelease;
+        }
+      },
+      undefined,
+      { isActive: () => active },
+    );
+
+    const first = queue([{ id: "first", content: "First", status: "pending" }]);
+    await saveStarted;
+    const second = queue([{ id: "second", content: "Second", status: "pending" }]);
+    active = false;
+    releaseSave?.();
+
+    await first;
+    await assert.rejects(second, /inactive|deleted/i);
+    await queue.drain();
+    assert.equal(saveCalls, 1);
+    assert.deepEqual(state.todos, [{ id: "first", content: "First", status: "pending" }]);
+  });
+
   it("exposes session todo REST APIs with optimistic version checks", async () => {
     const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-server-todo-rest-"));
     try {
