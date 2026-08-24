@@ -31,12 +31,21 @@ describe("agent server", () => {
       assert.match(page.headers["content-type"] ?? "", /text\/html/);
       assert.match(page.text, /agent-todo-app/);
       assert.match(page.text, /todo-list/);
+      assert.match(page.text, /pending/);
+      assert.match(page.text, /in_progress/);
+      assert.match(page.text, /completed/);
 
       const script = await request(app).get("/app.js");
       assert.equal(script.status, 200);
       assert.match(script.headers["content-type"] ?? "", /javascript/);
       assert.match(script.text, /EventSource/);
       assert.match(script.text, /todo_updated/);
+      assert.match(script.text, /generation|requestSequence/);
+      assert.match(script.text, /textContent/);
+      assert.match(script.text, /version/);
+      assert.match(script.text, /nextTodoId/);
+      assert.match(script.text, /todo-/);
+      assert.match(script.text, /setTimeout/);
 
       const styles = await request(app).get("/styles.css");
       assert.equal(styles.status, 200);
