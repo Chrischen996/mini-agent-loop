@@ -363,6 +363,48 @@ describe("agent server", () => {
     assert.equal(rejectedState.todoVersion, 1);
   });
 
+  it("exposes session todo REST APIs with optimistic version checks", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-server-todo-rest-"));
+    try {
+      const app = createAgentServer({
+        llm,
+        tools: [],
+        chat: async () => ({ role: "assistant", content: "unused" }),
+        dataDir,
+      });
+      const created = await request(app).post("/api/sessions");
+      const sessionId = (created.body as { id: string }).id;
+      const todos = [{ id: "web", content: "Edit from web", status: "in_progress" }];
+
+      const initial = await request(app).get(`/api/sessions/${sessionId}/todos`);
+      assert.equal(initial.status, 200);
+      assert.deepEqual(initial.body, { todos: [], version: 0 });
+
+      const updated = await request(app)
+        .put(`/api/sessions/${sessionId}/todos`)
+        .send({ todos, version: 0 });
+      assert.equal(updated.status, 200);
+      assert.deepEqual(updated.body, { todos, version: 1 });
+
+      const conflict = await request(app)
+        .put(`/api/sessions/${sessionId}/todos`)
+        .send({ todos: [], version: 0 });
+      assert.equal(conflict.status, 409);
+      assert.deepEqual(conflict.body, { todos, version: 1 });
+
+      const invalid = await request(app)
+        .put(`/api/sessions/${sessionId}/todos`)
+        .send({ todos: [{ id: "bad", content: "", status: "pending" }] });
+      assert.equal(invalid.status, 400);
+      assert.match(invalid.body.error, /content/i);
+
+      const unknown = await request(app).get("/api/sessions/missing/todos");
+      assert.equal(unknown.status, 404);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("replaces a caller-provided todo_write tool with the session-bound tool", async () => {
     const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-server-duplicate-todo-"));
     const callerTodoTool: Tool = {

@@ -173,14 +173,30 @@ export type TodoSessionState = {
   todoVersion: number;
 };
 
+export type TodoUpdateSource = "agent" | "web";
+
+export class TodoVersionConflict extends Error {
+  constructor(
+    public readonly todos: TodoItem[],
+    public readonly version: number,
+  ) {
+    super("Todo version conflict");
+    this.name = "TodoVersionConflict";
+  }
+}
+
 export function createTodoUpdateQueue(
   state: TodoSessionState,
   save: () => Promise<void>,
-): (snapshot: unknown) => Promise<void> {
+  onUpdated?: (todos: TodoItem[], version: number, source: TodoUpdateSource) => void | Promise<void>,
+): (snapshot: unknown, options?: { source?: TodoUpdateSource; expectedVersion?: number }) => Promise<void> {
   let tail = Promise.resolve();
-  return (snapshot) => {
+  return (snapshot, options = {}) => {
     const update = tail.then(async () => {
       const todos = validateTodoSnapshot(snapshot);
+      if (options.expectedVersion !== undefined && state.todoVersion !== options.expectedVersion) {
+        throw new TodoVersionConflict(state.todos, state.todoVersion);
+      }
       const previousTodos = state.todos;
       const previousVersion = state.todoVersion;
       state.todos = todos;
@@ -192,6 +208,7 @@ export function createTodoUpdateQueue(
         state.todoVersion = previousVersion;
         throw error;
       }
+      await onUpdated?.(todos, state.todoVersion, options.source ?? "agent");
     });
     tail = update.then(() => undefined, () => undefined);
     return update;
@@ -891,13 +908,43 @@ export function createAgentServer(options: AgentServerOptions): Express {
     forkedFromMessage: session.forkedFromMessage,
   });
   const saveSession = (session: Session): Promise<void> => sessionStore.save(persistedSession(session));
-  const todoUpdateQueues = new WeakMap<Session, (snapshot: unknown) => Promise<void>>();
-  const createSessionTodoTool = (session: Session): Tool => {
+  const todoUpdateQueues = new WeakMap<Session, ReturnType<typeof createTodoUpdateQueue>>();
+  const todoSubscribers = new Map<Session, Set<Response>>();
+  const removeTodoSubscriber = (session: Session, response: Response): void => {
+    const subscribers = todoSubscribers.get(session);
+    subscribers?.delete(response);
+    if (subscribers?.size === 0) todoSubscribers.delete(session);
+  };
+  const broadcastTodoUpdate = (session: Session, todos: TodoItem[], version: number, source: TodoUpdateSource): void => {
+    const subscribers = todoSubscribers.get(session);
+    if (!subscribers) return;
+    const frame = `event: todo_updated\ndata: ${JSON.stringify({ todos, version, source })}\n\n`;
+    for (const response of [...subscribers]) {
+      try {
+        if (response.writableEnded) {
+          removeTodoSubscriber(session, response);
+        } else {
+          response.write(frame);
+        }
+      } catch {
+        removeTodoSubscriber(session, response);
+      }
+    }
+  };
+  const getSessionTodoUpdateQueue = (session: Session): ReturnType<typeof createTodoUpdateQueue> => {
     let updateTodos = todoUpdateQueues.get(session);
     if (!updateTodos) {
-      updateTodos = createTodoUpdateQueue(session, () => saveSession(session));
+      updateTodos = createTodoUpdateQueue(
+        session,
+        () => saveSession(session),
+        (todos, version, source) => broadcastTodoUpdate(session, todos, version, source),
+      );
       todoUpdateQueues.set(session, updateTodos);
     }
+    return updateTodos;
+  };
+  const createSessionTodoTool = (session: Session): Tool => {
+    const updateTodos = getSessionTodoUpdateQueue(session);
     return createTodoTool(updateTodos);
   };
   const addSessionTodoTool = (session: Session, baseTools: ToolProvider): ToolProvider => {
@@ -2423,6 +2470,68 @@ export function createAgentServer(options: AgentServerOptions): Express {
         .filter((message) => message.role !== "system")
         .map(safeMessage),
     });
+  });
+
+  app.get("/api/sessions/:id/todos", (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    response.json({ todos: session.todos, version: session.todoVersion });
+  });
+
+  app.put("/api/sessions/:id/todos", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    let todos: TodoItem[];
+    try {
+      todos = validateTodoSnapshot(request.body?.todos);
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    const expectedVersion = typeof request.body?.version === "number"
+      ? request.body.version
+      : undefined;
+    try {
+      await getSessionTodoUpdateQueue(session)(todos, { source: "web", expectedVersion });
+    } catch (error) {
+      if (error instanceof TodoVersionConflict) {
+        response.status(409).json({ todos: error.todos, version: error.version });
+        return;
+      }
+      response.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    response.json({ todos: session.todos, version: session.todoVersion });
+  });
+
+  app.get("/api/sessions/:id/todos/events", (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) {
+      response.status(404).json({ error: "Session not found" });
+      return;
+    }
+    response.status(200).set({
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+    });
+    response.flushHeaders();
+    const subscribers = todoSubscribers.get(session) ?? new Set<Response>();
+    subscribers.add(response);
+    todoSubscribers.set(session, subscribers);
+    const onClose = () => removeTodoSubscriber(session, response);
+    response.on("close", onClose);
+    try {
+      response.write(`data: ${JSON.stringify({ todos: session.todos, version: session.todoVersion })}\n\n`);
+    } catch {
+      removeTodoSubscriber(session, response);
+    }
   });
 
   app.get("/api/sessions/:id/skills", (request, response) => {
