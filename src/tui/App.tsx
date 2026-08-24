@@ -7,6 +7,7 @@ import { StatusBar } from "./components/StatusBar.tsx";
 import { resolvePendingPermissionDecision } from "./pending-permission.ts";
 import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
 import { parseSlashCommand } from "./slash-commands.ts";
+import { confirmTodoEditor, createTodoEditorState, reduceTodoEditor, type TodoEditorState } from "./todo-editor.ts";
 import { executeTodoCommand } from "./todo-commands.ts";
 import { useAutocomplete } from "./hooks/useAutocomplete.ts";
 import { tuiReducer, createInitialState } from "./state.ts";
@@ -160,6 +161,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   }, [llm, vision]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
+  const [todoEditorState, setTodoEditorState] = useState<TodoEditorState | null>(null);
   const todoToolRef = useRef<ReturnType<typeof createTodoTool> | null>(null);
   if (!todoToolRef.current) {
     todoToolRef.current = createTodoTool((todos) => dispatch({ type: "SET_TODOS", todos }));
@@ -354,6 +356,21 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     adjustThinkingLevel, resolvePendingPermission, dispatch,
     acMode, setAcMode, state, feedHeight, handleAutocompleteKey,
     suppressInputEchoRef, pendingPermissionRef,
+    todoEditorOpen: todoEditorState !== null,
+    openTodoEditor: () => setTodoEditorState(createTodoEditorState(state.todos)),
+    closeTodoEditor: () => setTodoEditorState(null),
+    todoEditorAction: (action) => setTodoEditorState((current) => current ? reduceTodoEditor(current, action) : current),
+    commitTodoEditor: () => {
+      if (!todoEditorState) return;
+      const next = confirmTodoEditor(todoEditorState);
+      if (next.error) {
+        setTodoEditorState(next);
+        return;
+      }
+      dispatch({ type: "SET_TODOS", todos: next.todos });
+      dispatch({ type: "ADD_NOTICE", title: "Todo", text: "Todo list updated." });
+      setTodoEditorState(null);
+    },
   });
 
   // ── direct tool invocation ────────────────────────────────────────────────
@@ -1088,6 +1105,25 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           pendingProfileSetup={pendingProfileSetup}
           profileListState={profileListState}
           pickerItemRows={pickerLayout.itemRows}
+          todoEditorState={todoEditorState ?? undefined}
+          onTodoCommit={() => {
+            if (!todoEditorState || todoEditorState.mode === "select") return;
+            const next = confirmTodoEditor(todoEditorState);
+            if (next.error) { setTodoEditorState(next); return; }
+            dispatch({ type: "SET_TODOS", todos: next.todos });
+            dispatch({ type: "ADD_NOTICE", title: "Todo", text: "Todo list updated." });
+            setTodoEditorState(null);
+          }}
+          onTodoCancel={() => setTodoEditorState(null)}
+          onTodoInput={(value) => setTodoEditorState((current) => current ? reduceTodoEditor(current, { type: "INPUT", value }) : current)}
+          onTodoConfirm={() => {
+            if (!todoEditorState) return;
+            const next = confirmTodoEditor(todoEditorState);
+            if (next.error) { setTodoEditorState(next); return; }
+            dispatch({ type: "SET_TODOS", todos: next.todos });
+            dispatch({ type: "ADD_NOTICE", title: "Todo", text: "Todo list updated." });
+            setTodoEditorState(null);
+          }}
         />
       </Box>
 
@@ -1112,7 +1148,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               onPasteImage={handlePasteImageRef}
               onTab={handleTabAt}
               pasteEnabled={!state.pendingPermission}
-              focus={!state.pendingPermission}
+              focus={!state.pendingPermission && todoEditorState === null}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {
                 if (shouldAcceptAutocompleteOnEnter(acMode)) {

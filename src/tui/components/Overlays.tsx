@@ -5,6 +5,8 @@ import { TUI_COLORS as C } from "../theme.ts";
 import type { ModelSetupState, PendingProfileSetup, ProfileListState } from "../types.ts";
 import type { CommandDef } from "./FileAutocomplete.tsx";
 import type { AcMode } from "../input-utils.ts";
+import { TodoEditor } from "./TodoEditor.tsx";
+import type { TodoEditorState } from "../todo-editor.ts";
 
 export type OverlaysProps = {
   acMode: AcMode;
@@ -21,6 +23,11 @@ export type OverlaysProps = {
   pendingProfileSetup?: PendingProfileSetup | null;
   profileListState?: ProfileListState | null;
   pickerItemRows: number;
+  todoEditorState?: TodoEditorState;
+  onTodoCommit?: (todos: TodoEditorState["todos"]) => void;
+  onTodoCancel?: () => void;
+  onTodoInput?: (value: string) => void;
+  onTodoConfirm?: () => void;
 };
 
 export function Overlays({
@@ -38,7 +45,15 @@ export function Overlays({
   pendingProfileSetup,
   profileListState,
   pickerItemRows,
+  todoEditorState,
+  onTodoCommit,
+  onTodoCancel,
+  onTodoInput,
+  onTodoConfirm,
 }: OverlaysProps): React.ReactElement | null {
+  if (todoEditorState && onTodoCommit && onTodoCancel && onTodoInput && onTodoConfirm) {
+    return <TodoEditor state={todoEditorState} onCommit={onTodoCommit} onCancel={onTodoCancel} onStateChange={onTodoInput} onConfirm={onTodoConfirm} />;
+  }
   if (!acMode) return null;
 
   if (acMode === "command") {

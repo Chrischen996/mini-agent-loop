@@ -24,6 +24,11 @@ export type UseKeyboardHandlerDeps = {
   handleAutocompleteKey: (key: Key) => boolean;
   suppressInputEchoRef: React.MutableRefObject<boolean>;
   pendingPermissionRef: React.MutableRefObject<boolean>;
+  todoEditorOpen: boolean;
+  openTodoEditor: () => void;
+  closeTodoEditor: () => void;
+  todoEditorAction: (action: import("../todo-editor.ts").TodoEditorAction) => void;
+  commitTodoEditor: () => void;
 };
 
 export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
@@ -32,6 +37,7 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
     adjustThinkingLevel, resolvePendingPermission, dispatch,
     acMode, setAcMode, state, feedHeight, handleAutocompleteKey,
     suppressInputEchoRef, pendingPermissionRef,
+    todoEditorOpen, openTodoEditor, closeTodoEditor, todoEditorAction, commitTodoEditor,
   } = deps;
 
   useInput((_ch: string, key: Key) => {
@@ -85,6 +91,24 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
     }
     pendingPermissionRef.current = false;
 
+    if (todoEditorOpen) {
+      if (key.escape) { closeTodoEditor(); return; }
+      if (key.upArrow) { todoEditorAction({ type: "MOVE", delta: -1 }); return; }
+      if (key.downArrow) { todoEditorAction({ type: "MOVE", delta: 1 }); return; }
+      if (_ch === "a" || _ch === "A") { todoEditorAction({ type: "BEGIN_ADD" }); return; }
+      if (_ch === "e" || _ch === "E") { todoEditorAction({ type: "BEGIN_EDIT" }); return; }
+      if (_ch === "s" || _ch === "S") { todoEditorAction({ type: "CYCLE_STATUS" }); return; }
+      if (_ch === "d" || _ch === "D") { todoEditorAction({ type: "DELETE" }); return; }
+      if (key.return) { commitTodoEditor(); return; }
+      return;
+    }
+
+    if (!acMode && key.ctrl && key.shift && (_ch === "t" || _ch === "T" || _ch === "\u0014")) {
+      suppressInputEchoRef.current = true;
+      openTodoEditor();
+      return;
+    }
+
     // Plan approval shortcuts
     if (!acMode && !state.busy && state.phase === "review" && state.currentPlan) {
       if (_ch === "a" || _ch === "A") {
@@ -124,7 +148,7 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
     }
 
     // Ctrl+T: cycle thinking mode
-    if (key.ctrl && (_ch === "t" || _ch === "T" || _ch === "\u0014")) {
+    if (key.ctrl && !key.shift && (_ch === "t" || _ch === "T" || _ch === "\u0014")) {
       suppressInputEchoRef.current = true;
       dispatch({ type: "TOGGLE_THINKING_MODE" });
       return;
