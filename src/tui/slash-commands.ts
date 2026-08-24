@@ -1,9 +1,12 @@
+import { parseTodoCommand, type TodoCommand } from "./todo-commands.ts";
+
 export type SlashCommand =
   | { cmd: "read"; path: string }
   | { cmd: "bash"; command: string }
   | { cmd: "ls"; path: string }
   | { cmd: "find"; pattern: string; path: string }
   | { cmd: "grep"; pattern: string; path: string }
+  | { cmd: "todo"; todo: TodoCommand }
   | null;
 
 export function parseSlashCommand(input: string): SlashCommand {
@@ -12,6 +15,10 @@ export function parseSlashCommand(input: string): SlashCommand {
   const parts = s.slice(1).split(/\s+/);
   const cmd = parts[0]?.toLowerCase();
   switch (cmd) {
+    case "todo": {
+      const todo = parseTodoCommand(s);
+      return todo ? { cmd: "todo", todo } : null;
+    }
     case "read": { const path = parts.slice(1).join(" "); return path ? { cmd: "read", path } : null; }
     case "bash": case "sh": { const command = parts.slice(1).join(" "); return command ? { cmd: "bash", command } : null; }
     case "ls": return { cmd: "ls", path: parts[1] ?? "." };

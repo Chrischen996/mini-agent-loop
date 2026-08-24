@@ -19,6 +19,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "ls",    usage: "/ls [path]",             description: "列出目录" },
   { name: "find",  usage: "/find <glob> [path]",   description: "按 glob 查找文件" },
   { name: "grep",  usage: "/grep <pattern> [path]", description: "搜索文件内容" },
+  { name: "todo",  usage: "/todo [add|start|done|edit|delete|clear]", description: "管理当前 Todo 列表" },
   { name: "clear", usage: "/clear",                 description: "清空对话" },
   { name: "context", usage: "/context",             description: "显示上下文/token 统计" },
   { name: "plan", usage: "/plan [task]",            description: "生成执行计划（plan mode）" },
