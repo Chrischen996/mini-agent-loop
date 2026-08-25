@@ -103,6 +103,8 @@ export type TuiState = {
   todoItems?: TodoItem[];
   todoRevision: number;
   todoViewMode: TodoViewMode;
+  /** Spinner tip shown below the todo panel while no tools are active. Cleared on tool start. */
+  spinnerMessage?: string;
   /** Pending permission request shown to the user while execution waits. */
   pendingPermission?: PendingPermissionState;
   /**
@@ -138,6 +140,7 @@ export type TuiAction =
   | { type: "SET_TODO_ITEMS"; todos: TodoItem[]; revision: number }
   | { type: "CLEAR_TODO_ITEMS" }
   | { type: "SET_TODO_VIEW_MODE"; mode: TodoViewMode }
+  | { type: "CLEAR_SPINNER_MESSAGE" }
   | { type: "CLEAR_PENDING_PERMISSION" }
   | { type: "TOGGLE_MESSAGE_THINKING"; index?: number }
   | { type: "SET_FOCUSED_MESSAGE"; index: number }
@@ -239,6 +242,7 @@ export function createInitialState(modelName: string): TuiState {
     todoItems: undefined,
     todoRevision: 0,
     todoViewMode: "expanded",
+    spinnerMessage: undefined,
   };
 }
 
@@ -321,7 +325,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
 
     case "SET_TODO_VIEW_MODE":
       return { ...state, todoViewMode: action.mode };
-
+    case "CLEAR_SPINNER_MESSAGE":
+      return { ...state, spinnerMessage: undefined };
     case "MODEL_CHANGED":
       return { ...state, modelName: action.modelName, status: "就绪", usedTokens: 0, contextTokens: 0 };
 
@@ -432,11 +437,13 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       switch (event.type) {
         case "todo_updated":
           if (!isTodoRevisionNewer(state.todoRevision, event.revision)) return state;
+          const nextTodoTask = event.todos.find(t => t.status !== "completed");
           return {
             ...state,
             todoItems: event.todos,
             todoRevision: event.revision,
             status: "任务列表已更新",
+            spinnerMessage: nextTodoTask ? `▶ ${nextTodoTask.activeForm}` : undefined,
           };
 
         case "assistant_delta":
@@ -597,6 +604,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             touchedFiles: [...state.touchedFiles, ...paths.filter((path) => !state.touchedFiles.includes(path))].slice(-50),
             toolCards: [...state.toolCards.filter((item) => item.id !== sidebarCard.id), sidebarCard],
             status: `${event.call.name}...`,
+            spinnerMessage: undefined,
             scrollOffset: preserveScrollOnAppend(
               state.scrollOffset,
               state.messages.length,
@@ -645,6 +653,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             steps: updatedSteps,
             toolCards: updatedCards,
             status: event.result.isError ? `${event.call.name} 失败` : `${event.call.name} 完成`,
+            spinnerMessage: undefined,
           };
         }
 

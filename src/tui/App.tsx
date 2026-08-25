@@ -110,6 +110,8 @@ import {
 } from "../skills/index.ts";
 
 import { Overlays } from "./components/Overlays.tsx";
+import { PermissionPanel } from "./components/PermissionPanel.tsx";
+import { PlanApprovalBar } from "./components/PlanApprovalBar.tsx";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
 
@@ -311,18 +313,26 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     { plan: state.todoPlan, todos: state.todoItems },
     state.todoViewMode,
   );
+  // Approval chrome: the permission card / plan approval bar render between
+  // the feed and the input row; reserve their rows in every height budget.
+  const permissionRows = state.pendingPermission ? 4 : 0;
+  const planApprovalRows = state.phase === "review" && state.currentPlan ? 3 : 0;
   const pickerLayout = getPickerLayout({
     termRows: stdout?.rows,
     requestedItems: requestedPickerItems,
     hasPendingImages: state.pendingImages.length > 0,
     todoRows,
     extraRows: acMode === "model" || acMode === "model-picker" || acMode === "file" ? 3 : 2,
+    permissionRows,
+    planApprovalRows,
   });
   const feedHeight = getMessageFeedHeight({
     termRows: stdout?.rows,
     hasPendingImages: state.pendingImages.length > 0,
     todoRows,
     pickerRows: pickerLayout.totalRows,
+    permissionRows,
+    planApprovalRows,
   });
 
   const copyResolvedText = useCallback(async (target: import("./copy-text.ts").CopyTarget = "auto") => {
@@ -353,7 +363,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   useKeyboardHandler({
     exit, abortRef, copyResolvedText, getPermissionManager,
     adjustThinkingLevel, resolvePendingPermission, dispatch,
-    acMode, setAcMode, state, feedHeight, handleAutocompleteKey,
+    acMode, state, feedHeight, handleAutocompleteKey, historyRef,
     suppressInputEchoRef, pendingPermissionRef,
   });
 
@@ -863,7 +873,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   return (
     <Box flexDirection="column" width={termWidth} height={termHeight} overflow="hidden">
-      <Header />
+      <Header modelName={state.modelName} cwd={cwd} />
 
       {(state.todoPlan || state.todoItems) && (
         <TodoPanel
@@ -906,6 +916,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       </Box>
 
       <Box flexDirection="column" flexShrink={0}>
+        {state.pendingPermission && (
+          <PermissionPanel request={state.pendingPermission} />
+        )}
+        {state.phase === "review" && state.currentPlan && (
+          <PlanApprovalBar plan={state.currentPlan} />
+        )}
 
         {state.pendingImages.length > 0 && (
           <Box paddingX={1} gap={1}>
@@ -914,6 +930,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                 🖼️ {img.path.split("/").pop()}
               </Text>
             ))}
+          </Box>
+        )}
+        {state.spinnerMessage && (
+          <Box paddingX={1} paddingY={0}>
+            <Text dimColor>{state.spinnerMessage}</Text>
           </Box>
         )}
         <Box paddingX={1} gap={1} flexShrink={0}>
@@ -974,7 +995,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           modelName={state.modelName}
           tokenEstimate={state.usedTokens || state.contextTokens}
           contextWindow={llm.contextWindow}
-          cwd={cwd}
           busy={state.busy}
           status={state.status}
           queuedCount={queuedCount}
