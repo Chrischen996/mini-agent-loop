@@ -1,5 +1,5 @@
-import type { TodoItem, TodoStatus } from "../tools/todo.ts";
-import { applyTodoCommand, type TodoCommand } from "./todo-commands.ts";
+import type { TodoItem, TodoStatus } from "../todo.ts";
+import { applyTodoCommand, type LegacyTodoCommand } from "./todo-commands.ts";
 
 export type TodoEditorMode = "select" | "add" | "edit";
 
@@ -77,7 +77,7 @@ export function reduceTodoEditor(state: TodoEditorState, action: TodoEditorActio
     case "CANCEL":
       return { ...state, mode: "select", draft: "", editingId: undefined, error: undefined };
     case "CONFIRM": {
-      let command: TodoCommand;
+      let command: LegacyTodoCommand;
       if (state.mode === "add") command = { action: "add", content: state.draft };
       else if (state.mode === "edit" && state.editingId) command = { action: "edit", id: state.editingId, content: state.draft };
       else return state;

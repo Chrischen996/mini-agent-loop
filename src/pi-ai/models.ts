@@ -18,6 +18,11 @@ import type {
 	StreamOptions,
 	Usage,
 } from "./types.ts";
+import {
+	ALL_THINKING_LEVELS,
+	clampToAvailableLevels,
+	modelSupportsMappedLevel,
+} from "./thinking-levels.ts";
 
 export { type AuthModel, ModelsError, type ModelsErrorCode } from "./auth/resolve.ts";
 
@@ -405,17 +410,14 @@ export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage
 	return usage.cost;
 }
 
-const EXTENDED_THINKING_LEVELS: ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const EXTENDED_THINKING_LEVELS = ALL_THINKING_LEVELS;
 
 export function getSupportedThinkingLevels<TApi extends Api>(model: Model<TApi>): ModelThinkingLevel[] {
 	if (!model.reasoning) return ["off"];
 
-	return EXTENDED_THINKING_LEVELS.filter((level) => {
-		const mapped = model.thinkingLevelMap?.[level];
-		if (mapped === null) return false;
-		if (level === "xhigh" || level === "max") return mapped !== undefined;
-		return true;
-	});
+	return EXTENDED_THINKING_LEVELS.filter((level) =>
+		modelSupportsMappedLevel(model.reasoning, model.thinkingLevelMap, level)
+	);
 }
 
 export function clampThinkingLevel<TApi extends Api>(
@@ -423,20 +425,8 @@ export function clampThinkingLevel<TApi extends Api>(
 	level: ModelThinkingLevel,
 ): ModelThinkingLevel {
 	const availableLevels = getSupportedThinkingLevels(model);
-	if (availableLevels.includes(level)) return level;
-
-	const requestedIndex = EXTENDED_THINKING_LEVELS.indexOf(level);
-	if (requestedIndex === -1) return availableLevels[0] ?? "off";
-
-	for (let i = requestedIndex; i < EXTENDED_THINKING_LEVELS.length; i++) {
-		const candidate = EXTENDED_THINKING_LEVELS[i];
-		if (availableLevels.includes(candidate)) return candidate;
-	}
-	for (let i = requestedIndex - 1; i >= 0; i--) {
-		const candidate = EXTENDED_THINKING_LEVELS[i];
-		if (availableLevels.includes(candidate)) return candidate;
-	}
-	return availableLevels[0] ?? "off";
+	const availableSet = new Set(availableLevels);
+	return clampToAvailableLevels(level, (candidate) => availableSet.has(candidate));
 }
 
 /**

@@ -9,22 +9,29 @@ export function getTuiViewportHeight(termRows: number | undefined): number {
 
 /**
  * Estimate rows available for the scrollable message feed after chrome.
- * Header (~3) + input (~2) + status bar (~3) + optional image strip / pickers.
+ * Header (~3) + input (~2) + status bar (~4) + optional image strip / pickers
+ * / permission panel / plan approval bar.
  */
 export function getMessageFeedHeight(options: {
   termRows: number | undefined;
   hasPendingImages?: boolean;
   todoRows?: number;
   pickerRows?: number;
+  /** Rows reserved for the pending tool-permission confirmation card. */
+  permissionRows?: number;
+  /** Rows reserved for the plan approval bar during plan review. */
+  planApprovalRows?: number;
 }): number {
   const viewport = getTuiViewportHeight(options.termRows);
   const chrome =
     3 + // header border box
     2 + // input row
-    3 + // status bar border box
+    4 + // status bar border box (fixed two content rows)
     (options.hasPendingImages ? 1 : 0) +
     (options.todoRows ?? 0) +
-    (options.pickerRows ?? 0);
+    (options.pickerRows ?? 0) +
+    (options.permissionRows ?? 0) +
+    (options.planApprovalRows ?? 0);
   return Math.max(3, viewport - chrome);
 }
 
@@ -34,9 +41,13 @@ export function getPickerLayout(options: {
   hasPendingImages?: boolean;
   todoRows?: number;
   extraRows?: number;
+  permissionRows?: number;
+  planApprovalRows?: number;
 }): { itemRows: number; totalRows: number } {
   const viewport = getTuiViewportHeight(options.termRows);
-  const fixedChrome = 3 + 2 + 3 + (options.hasPendingImages ? 1 : 0) + (options.todoRows ?? 0);
+  const fixedChrome =
+    3 + 2 + 4 + (options.hasPendingImages ? 1 : 0) + (options.todoRows ?? 0) +
+    (options.permissionRows ?? 0) + (options.planApprovalRows ?? 0);
   const extraRows = options.extraRows ?? 2;
   const maxTotal = Math.max(0, viewport - fixedChrome - 3);
   const itemRows = Math.max(0, Math.min(options.requestedItems, maxTotal - extraRows));

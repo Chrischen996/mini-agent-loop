@@ -1,18 +1,33 @@
 import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from "react";
 import { randomUUID } from "node:crypto";
-import { Box, Text, useApp, useInput, useStdout, type Key } from "ink";
+import { Box, Text, useApp, useStdout } from "ink";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
-import { resolvePendingPermissionDecision } from "./pending-permission.ts";
+import { TodoPanel } from "./components/TodoPanel.tsx";
+import { getTodoPanelRows } from "./todo-format.ts";
 import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
 import { parseSlashCommand } from "./slash-commands.ts";
-import { confirmTodoEditor, createTodoEditorState, reduceTodoEditor, type TodoEditorState } from "./todo-editor.ts";
-import { executeTodoCommand } from "./todo-commands.ts";
+import { isExactSlashCommand } from "./autocomplete.ts";
+
+/** Human-readable message for an LlmTimeoutError, with partial-response preview. */
+function formatLlmTimeoutMessage(err: InstanceType<typeof LlmTimeoutError>): string {
+  const phaseLabel = err.phase === "first_response"
+    ? "first response"
+    : err.phase === "stream_idle"
+      ? "stream idle"
+      : err.phase === "total"
+        ? "total request"
+        : "request";
+  const duration = err.timeoutMs !== undefined ? `, ${Math.ceil(err.timeoutMs / 1000)}s` : "";
+  const preview = err.partialContent?.replace(/\s+/g, " ").trim().slice(0, 80);
+  return preview
+    ? `LLM timeout (${phaseLabel}${duration}) - partial response saved: ${preview}`
+    : `LLM timeout (${phaseLabel}${duration}) - no partial response received`;
+}
 import { useAutocomplete } from "./hooks/useAutocomplete.ts";
 import { tuiReducer, createInitialState } from "./state.ts";
 import {
-  buildSystemPrompt,
   createAgentHistory,
   MaxTurnsExceededError,
   runAgentTurn,
@@ -20,8 +35,7 @@ import {
   type LoopEvent,
 } from "../loop.ts";
 import { LlmTimeoutError } from "../llm/retry.ts";
-import { formatLlmTimeoutMessage } from "./turn-helpers.ts";
-import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
+import { loadLlmConfigFromEnv, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
 import {
   buildIntenseLlm,
   cycleThinkingLevel,
@@ -32,16 +46,13 @@ import {
 } from "../think-intensity.ts";
 import { loadThinkingModeFromEnv } from "../thinking-policy.ts";
 import { adaptHistoryForModel } from "../message-adapter.ts";
-import { findExactModelReferenceMatch, getAllModels, resolveModel, type ModelRef } from "../models.ts";
+import { findExactModelReferenceMatch, getAllModels } from "../models.ts";
 import {
-  hasGatewayOverrides,
   parseModelCommand,
   shouldSubmitTypedModelCommand,
 } from "./model-command.ts";
 import {
   activateProfile,
-  listProfiles,
-  loadProfileStore,
   removeProfile,
   saveProfile,
 } from "../profile-store.ts";
@@ -49,23 +60,16 @@ import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
 } from "../preprocessors/index.ts";
-import { createAllTools, createTodoTool, createTools } from "../tools/index.ts";
+import { createAllTools, createTools } from "../tools/index.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
 import type { AgentMessage, MessageContent } from "../types.ts";
 import type { ImageAttachment } from "./state.ts";
-import {
-  createSubagentTool,
-  createSubagentBatchTool,
-  defaultProfiles,
-  loadAutoSubagentOptionsFromEnv,
-} from "../subagent/index.ts";
+import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
 import {
-  PERMISSION_MODES,
   PermissionManager,
   PermissionModeChangedError,
   type PermissionDecision,
-  type PermissionMode,
   type PermissionTurnContext,
 } from "../permissions.ts";
 import { TurnEventBuffer } from "./stream-buffer.ts";
@@ -73,6 +77,9 @@ import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./l
 import { estimateViewportContentHeight } from "./message-viewport.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
+import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
+import { applyTodoCommand, type LegacyTodoCommand } from "./todo-commands.ts";
+import { createTodoEditorState, reduceTodoEditor, type TodoEditorState, type TodoEditorAction, confirmTodoEditor } from "./todo-editor.ts";
 import { addPendingImage, handlePasteImage } from "./image-handler.ts";
 import { startModelSetup, commitModelSetup, openProfileList } from "./profile-manager.ts";
 import { selectModel } from "./model-switcher.ts";
@@ -81,32 +88,23 @@ import { useKeyboardHandler } from "./hooks/useKeyboardHandler.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
 import { PromptInput } from "./components/PromptInput.tsx";
-import { getTodoPanelRows, TodoPanel } from "./components/TodoPanel.tsx";
 import {
-  parseAtRefs,
   sanitizeInput,
   shouldAcceptAutocompleteOnEnter,
+  type AcMode,
 } from "./input-utils.ts";
 import {
   imageAttachmentToPart,
   loadImageAttachment,
-  MAX_TUI_IMAGES,
-  readClipboardImage,
 } from "./image-attachments.ts";
 import { writeClipboardText } from "./clipboard.ts";
 import { formatCopyResultNotice, parseCopyCommand, resolveCopyTarget } from "./copy-text.ts";
 import {
-  PLAN_ONLY_SUFFIX,
-  approveCurrentPlan,
-  archiveCurrentPlan,
-  createAndSavePlan,
-  formatPlanDocumentPreview,
-  listPlanHistory,
-  loadPlanDocument,
-  markPlanExecutionResult,
-  preparePlanForExecution,
-  rejectCurrentPlan,
-} from "../plan/index.ts";
+  finalizeExecCapture,
+  finalizePlanCapture,
+  parsePlanTurnOverride,
+} from "./plan-commands.ts";
+import { loadPlanDocument } from "../plan/index.ts";
 import {
   applySkillCommand,
   defaultSkillRegistry,
@@ -115,9 +113,11 @@ import {
 } from "../skills/index.ts";
 
 import { Overlays } from "./components/Overlays.tsx";
-import type { ModelSetupState } from "./types.ts";
+import { PermissionPanel } from "./components/PermissionPanel.tsx";
+import { PlanApprovalBar } from "./components/PlanApprovalBar.tsx";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
+import { isTuiFeatureEnabled } from "./execution-policy.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
@@ -162,10 +162,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
   const [todoEditorState, setTodoEditorState] = useState<TodoEditorState | null>(null);
-  const todoToolRef = useRef<ReturnType<typeof createTodoTool> | null>(null);
-  if (!todoToolRef.current) {
-    todoToolRef.current = createTodoTool((todos) => dispatch({ type: "SET_TODOS", todos }));
-  }
   // Generate a stable conversation session ID on startup
   const [conversationId, setConversationId] = useState(() => process.env.MINI_AGENT_SESSION_ID ?? randomUUID());
   
@@ -276,6 +272,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     void discoverWorkspaceSkills(cwd).catch(() => { /* non-fatal */ });
   }, [cwd]);
 
+  useEffect(() => {
+    void loadPlanDocument(cwd)
+      .then((plan) => dispatch({ type: "SET_TODO_PLAN", plan: plan ?? undefined }))
+      .catch(() => { /* a missing or unreadable plan is non-fatal */ });
+  }, [cwd]);
+
   // ── model switching ─────────────────────────────────────────────────────
 
   const selectModelRef = useCallback((reference: string, overrides: ModelSwitchOverrides = {}) => {
@@ -312,18 +314,30 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         : acMode === "model" || acMode === "model-picker" ? Math.min(12, modelCandidates.length)
           : acMode === "profile-list" ? Math.min(10, profileListState?.profiles.length ?? 0)
             : acMode ? 4 : 0;
+  const todoRows = getTodoPanelRows(
+    { plan: state.todoPlan, todos: state.todoItems },
+    state.todoViewMode,
+  );
+  // Approval chrome: the permission card / plan approval bar render between
+  // the feed and the input row; reserve their rows in every height budget.
+  const permissionRows = state.pendingPermission ? 4 : 0;
+  const planApprovalRows = state.phase === "review" && state.currentPlan ? 3 : 0;
   const pickerLayout = getPickerLayout({
     termRows: stdout?.rows,
     requestedItems: requestedPickerItems,
     hasPendingImages: state.pendingImages.length > 0,
-    todoRows: getTodoPanelRows(state.todos),
+    todoRows,
     extraRows: acMode === "model" || acMode === "model-picker" || acMode === "file" ? 3 : 2,
+    permissionRows,
+    planApprovalRows,
   });
   const feedHeight = getMessageFeedHeight({
     termRows: stdout?.rows,
     hasPendingImages: state.pendingImages.length > 0,
-    todoRows: getTodoPanelRows(state.todos),
+    todoRows,
     pickerRows: pickerLayout.totalRows,
+    permissionRows,
+    planApprovalRows,
   });
 
   const copyResolvedText = useCallback(async (target: import("./copy-text.ts").CopyTarget = "auto") => {
@@ -349,8 +363,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     });
   }, [input, state.focusedMessageIndex, state.messages, state.streamingReasoning, state.streamingText]);
 
-  // ── keyboard handler ─────────────────────────────────────────────────────
-
   const commitTodoEditor = useCallback(() => {
     if (!todoEditorState) return;
     const next = confirmTodoEditor(todoEditorState);
@@ -359,20 +371,21 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
     dispatch({ type: "SET_TODOS", todos: next.todos });
-    dispatch({ type: "ADD_NOTICE", title: "Todo", text: "Todo list updated." });
     setTodoEditorState(null);
   }, [todoEditorState]);
 
+  // ── keyboard handler ─────────────────────────────────────────────────────
+
   useKeyboardHandler({
-    exit, abortRef, copyResolvedText, getPermissionManager, historyRef,
+    exit, abortRef, copyResolvedText, pasteImage: handlePasteImageRef, getPermissionManager,
     adjustThinkingLevel, resolvePendingPermission, dispatch,
-    acMode, setAcMode, state, feedHeight, handleAutocompleteKey,
+    acMode, state, feedHeight, handleAutocompleteKey, historyRef,
     suppressInputEchoRef, pendingPermissionRef,
     todoEditorOpen: todoEditorState !== null,
     todoEditorMode: todoEditorState?.mode ?? "select",
     openTodoEditor: () => setTodoEditorState(createTodoEditorState(state.todos)),
     closeTodoEditor: () => setTodoEditorState(null),
-    todoEditorAction: (action) => setTodoEditorState((current) => current ? reduceTodoEditor(current, action) : current),
+    todoEditorAction: (action: TodoEditorAction) => setTodoEditorState((current) => current ? reduceTodoEditor(current, action) : current),
     commitTodoEditor,
   });
 
@@ -492,6 +505,20 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
 
+    const todoCommand = parseTodoCommand(trimmed);
+    if (todoCommand) {
+      if (todoCommand === "clear") {
+        dispatch({ type: "CLEAR_TODO_ITEMS" });
+      } else {
+        dispatch({
+          type: "SET_TODO_VIEW_MODE",
+          mode: todoViewModeForCommand(todoCommand, state.todoViewMode),
+        });
+      }
+      setInput("");
+      return;
+    }
+
     if (/^\/paste-image$/i.test(trimmed)) {
       setInput("");
       await handlePasteImageRef();
@@ -546,158 +573,17 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
 
-    // ── Plan workflow slash commands ───────────────────────────────────────
-    // Extracted as local helper for readability
-    const handlePlanTurnOverride = async (): Promise<{
-      displayText: string;
-      prompt: string;
-      forceMode?: PermissionMode;
-      restoreMode?: PermissionMode;
-    } | null | undefined> => {
-      // /plan-show /plan-approve /plan-reject /plan-history /plan-archive — no agent turn
-      if (trimmed === "/plan-show") {
-        setInput("");
-        try {
-          const doc = await loadPlanDocument(cwd);
-          if (!doc) {
-            dispatch({ type: "ADD_NOTICE", title: "计划", text: "当前没有保存的计划。使用 /plan <任务> 生成。" });
-          } else {
-            dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
-          }
-        } catch (err) {
-          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-        }
-        return null;
-      }
-      if (trimmed === "/plan-approve") {
-        setInput("");
-        try {
-          const doc = await approveCurrentPlan(cwd, "user");
-          dispatch({
-            type: "ADD_NOTICE",
-            title: "计划已批准",
-            text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}`,
-          });
-        } catch (err) {
-          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-        }
-        return null;
-      }
-      if (trimmed === "/plan-reject") {
-        setInput("");
-        try {
-          const doc = await rejectCurrentPlan(cwd);
-          dispatch({ type: "ADD_NOTICE", title: "计划已拒绝", text: `id=${doc.id} status=${doc.status}` });
-        } catch (err) {
-          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-        }
-        return null;
-      }
-      if (trimmed === "/plan-history") {
-        setInput("");
-        try {
-          const history = await listPlanHistory(cwd);
-          if (history.length === 0) {
-            dispatch({ type: "ADD_NOTICE", title: "计划历史", text: "尚无归档计划。" });
-          } else {
-            const lines = history.map((doc: any) => {
-              const promptSlice = doc.prompt.length > 60 ? `${doc.prompt.slice(0, 60)}…` : doc.prompt;
-              return `${doc.id}  ${doc.status.padEnd(10)}  ${doc.updatedAt}  ${promptSlice}`;
-            });
-            dispatch({ type: "ADD_NOTICE", title: "计划历史", text: lines.join("\n") });
-          }
-        } catch (err) {
-          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-        }
-        return null;
-      }
-      if (trimmed === "/plan-archive") {
-        setInput("");
-        try {
-          const { archivedPath, document } = await archiveCurrentPlan(cwd);
-          dispatch({
-            type: "ADD_NOTICE",
-            title: "计划已归档",
-            text: `id=${document.id}\npath=${archivedPath}`,
-          });
-        } catch (err) {
-          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-        }
-        return null;
-      }
-
-      // /plan [task] — generate a plan via agent turn in plan mode
-      const planMatch = trimmed.match(/^\/plan(?:\s+(.*))?$/i);
-      if (planMatch && !trimmed.startsWith("/plan-")) {
-        const task = (planMatch[1] ?? "").trim();
-        if (!task) {
-          setInput("");
-          try {
-            const doc = await loadPlanDocument(cwd);
-            if (doc) {
-              dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
-            } else {
-              dispatch({ type: "ADD_NOTICE", title: "计划", text: "用法: /plan <任务>" });
-            }
-          } catch (err) {
-            dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-          }
-          return null;
-        }
-        planCaptureRef.current = { prompt: task };
-        execCaptureRef.current = null;
-        const permissionManager = getPermissionManager();
-        if (permissionManager.getMode() !== "plan") {
-          permissionManager.setMode("plan");
-          dispatch({ type: "SET_PERMISSION_MODE", mode: "plan" });
-        }
-        return {
-          displayText: `/plan ${task}`,
-          prompt: task + PLAN_ONLY_SUFFIX,
-          forceMode: "plan",
-        };
-      }
-
-      // /plan-run and /plan-retry — execute approved plan in bypass mode
-      if (trimmed === "/plan-run" || trimmed === "/plan-retry") {
-        const isRetry = trimmed === "/plan-retry";
-        let executionPromptSuffix: string;
-        try {
-          const prepared = await preparePlanForExecution(cwd, {
-            yes: false,
-            workspaceRoot: cwd,
-          });
-          executionPromptSuffix = prepared.executionPromptSuffix;
-          dispatch({
-            type: "ADD_NOTICE",
-            title: isRetry ? "重试计划" : "执行计划",
-            text: `id=${prepared.document.id} status=executing\nprompt: ${prepared.document.prompt}`,
-          });
-        } catch (err) {
-          setInput("");
-          dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
-          return null;
-        }
-        execCaptureRef.current = { mode: isRetry ? "retry" : "run" };
-        planCaptureRef.current = null;
-        const permissionManager = getPermissionManager();
-        const previousMode = permissionManager.getMode();
-        if (previousMode !== "bypass") {
-          permissionManager.setMode("bypass");
-          dispatch({ type: "SET_PERMISSION_MODE", mode: "bypass" });
-        }
-        return {
-          displayText: trimmed,
-          prompt: `Execute the approved plan.${executionPromptSuffix}`,
-          forceMode: "bypass",
-          restoreMode: previousMode,
-        };
-      }
-
-      return undefined; // not a plan command
-    };
-
-    const planTurnOverride = await handlePlanTurnOverride() ?? null;
+    const planTurnOverride = await parsePlanTurnOverride(trimmed, {
+      cwd,
+      dispatch,
+      setInput,
+      planCaptureRef,
+      execCaptureRef,
+      permissionManager: getPermissionManager(),
+    });
+    if (planTurnOverride === null) {
+      return;
+    }
 
     // /profiles: show profile list
     if (/^\/profiles?$/i.test(trimmed)) {
@@ -738,7 +624,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     if (slashCmd) {
       setInput("");
       if (slashCmd.cmd === "todo") {
-        executeTodoCommand(state.todos, slashCmd.todo, dispatch);
+        const result = applyTodoCommand(state.todos, slashCmd.todo);
+        if (result.ok) dispatch({ type: "SET_TODOS", todos: result.todos });
+        dispatch({ type: "ADD_NOTICE", title: "Todo", text: result.ok ? "Todo list updated." : result.error });
         return;
       }
       dispatch({ type: "USER_MESSAGE", text: trimmed });
@@ -863,12 +751,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         try {
           historyRef.current = await runAgentTurn(historyRef.current, currentUserText, {
             llm: { ...turnLlm, sessionId: conversationId },
-            tools: () => {
-              const baseTools = resolveToolProvider(agentToolsRef.current);
-              const hasTodoTool = baseTools.some((tool) => tool.name === "todo_write");
-              const tuiTools = hasTodoTool ? baseTools : [...baseTools, todoToolRef.current!];
-              return [...tuiTools, ...getSubagentTools(turnLlm)];
-            },
+            tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools(turnLlm)],
             autoSubagent,
             preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
             signal: abortRef.current.signal,
@@ -879,9 +762,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               workspaceId: cwd,
             } satisfies RuntimeExecutionContext,
             globalTokenBudget,
-            autoValidate: process.env.MINI_AGENT_AUTO_VALIDATE === "1",
+            autoValidate: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_VALIDATE),
             validationWorkspace: cwd,
-            autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
+            autoCheckpoint: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_CHECKPOINT),
             thinkingMode,
             runtimeRef: subagentRuntimeRef.current,
             skillNames: skillNamesRef.current,
@@ -969,80 +852,21 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         }
       }
 
-      // After a /plan generation turn, persist the assistant answer as a plan document.
-      if (planCaptureRef.current) {
-        const capture = planCaptureRef.current;
-        planCaptureRef.current = null;
-        if (turnSucceeded) {
-          const lastAssistant = [...historyRef.current].reverse().find((m) => m.role === "assistant");
-          const answer = lastAssistant && lastAssistant.role === "assistant" ? lastAssistant.content : "";
-          if (answer.trim()) {
-            try {
-              const doc = await createAndSavePlan(cwd, capture.prompt, answer);
-              dispatch({
-                type: "ADD_NOTICE",
-                title: "计划已保存",
-                text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}\n\n使用 /plan-approve 批准，然后 /plan-run 执行。`,
-              });
-            } catch (err) {
-              dispatch({
-                type: "ADD_NOTICE",
-                title: "计划保存失败",
-                text: err instanceof Error ? err.message : String(err),
-              });
-            }
-          } else {
-            dispatch({ type: "ADD_NOTICE", title: "计划", text: "Agent 未返回可保存的计划内容。" });
-          }
-        }
-      }
-
-      // After a /plan-run or /plan-retry turn, mark execution result.
-      if (execCaptureRef.current) {
-        execCaptureRef.current = null;
-        try {
-          if (turnSucceeded) {
-            const lastAssistant = [...historyRef.current].reverse().find((m) => m.role === "assistant");
-            const summary =
-              lastAssistant && lastAssistant.role === "assistant"
-                ? String(lastAssistant.content).slice(0, 500)
-                : undefined;
-            const completed = await markPlanExecutionResult(cwd, {
-              ok: true,
-              summary,
-              workspaceRoot: cwd,
-            });
-            const audit = completed.execution?.auditReport
-              ? `\n${completed.execution.auditReport.slice(0, 400)}`
-              : "";
-            dispatch({
-              type: "ADD_NOTICE",
-              title: "计划执行完成",
-              text: `id=${completed.id} status=${completed.status}${audit}`,
-            });
-          } else {
-            const failed = await markPlanExecutionResult(cwd, {
-              ok: false,
-              error: turnErrorMessage ?? "execution failed",
-              workspaceRoot: cwd,
-            });
-            const audit = failed.execution?.auditReport
-              ? `\n${failed.execution.auditReport.slice(0, 400)}`
-              : "";
-            dispatch({
-              type: "ADD_NOTICE",
-              title: "计划执行失败",
-              text: `id=${failed.id} status=${failed.status}\n${turnErrorMessage ?? ""}${audit}`,
-            });
-          }
-        } catch (err) {
-          dispatch({
-            type: "ADD_NOTICE",
-            title: "计划结果记录失败",
-            text: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
+      await finalizePlanCapture({
+        cwd,
+        planCaptureRef,
+        history: historyRef.current,
+        succeeded: turnSucceeded,
+        dispatch,
+      });
+      await finalizeExecCapture({
+        cwd,
+        execCaptureRef,
+        history: historyRef.current,
+        succeeded: turnSucceeded,
+        errorMessage: turnErrorMessage,
+        dispatch,
+      });
     }
   }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit]);
 
@@ -1077,7 +901,15 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   return (
     <Box flexDirection="column" width={termWidth} height={termHeight} overflow="hidden">
-      <Header />
+      <Header modelName={state.modelName} cwd={cwd} />
+
+      {(state.todoPlan || state.todoItems) && (
+        <TodoPanel
+          plan={state.todoPlan}
+          todos={state.todoItems}
+          viewMode={state.todoViewMode}
+        />
+      )}
 
       <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
         <MessageFeed
@@ -1116,7 +948,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       </Box>
 
       <Box flexDirection="column" flexShrink={0}>
-        <TodoPanel todos={state.todos} width={termWidth} />
+        {state.pendingPermission && (
+          <PermissionPanel request={state.pendingPermission} />
+        )}
+        {state.phase === "review" && state.currentPlan && (
+          <PlanApprovalBar plan={state.currentPlan} />
+        )}
+
         {state.pendingImages.length > 0 && (
           <Box paddingX={1} gap={1}>
             {state.pendingImages.map((img, idx) => (
@@ -1124,6 +962,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                 🖼️ {img.path.split("/").pop()}
               </Text>
             ))}
+          </Box>
+        )}
+        {state.spinnerMessage && (
+          <Box paddingX={1} paddingY={0}>
+            <Text dimColor>{state.spinnerMessage}</Text>
           </Box>
         )}
         <Box paddingX={1} gap={1} flexShrink={0}>
@@ -1141,6 +984,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               onSubmit={(val) => {
                 if (shouldAcceptAutocompleteOnEnter(acMode)) {
                   if (acMode === "command") {
+                    const selectedCommand = cmdCandidates[acIndex];
+                    if (selectedCommand && isExactSlashCommand(val, selectedCommand.name)) {
+                      void handleSubmit(val);
+                      return;
+                    }
                     acceptCommand(acIndex);
                     return;
                   }
@@ -1179,7 +1027,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           modelName={state.modelName}
           tokenEstimate={state.usedTokens || state.contextTokens}
           contextWindow={llm.contextWindow}
-          cwd={cwd}
           busy={state.busy}
           status={state.status}
           queuedCount={queuedCount}

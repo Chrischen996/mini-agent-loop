@@ -8,6 +8,8 @@ import type {
 	ThinkingLevel,
 } from "../types.ts";
 import { estimateContextTokens } from "../utils/estimate.ts";
+import type { BaseEffortLevel } from "../thinking-levels.ts";
+import { toBaseEffortLevel } from "../thinking-levels.ts";
 
 const CONTEXT_SAFETY_TOKENS = 4096;
 const MIN_MAX_TOKENS = 1;
@@ -44,8 +46,8 @@ export function buildBaseOptions(
 	};
 }
 
-export function clampReasoning(effort: ThinkingLevel | undefined): Exclude<ThinkingLevel, "xhigh" | "max"> | undefined {
-	return effort === "xhigh" || effort === "max" ? "high" : effort;
+export function clampReasoning(effort: ThinkingLevel | undefined): BaseEffortLevel | undefined {
+	return effort === undefined ? undefined : toBaseEffortLevel(effort);
 }
 
 export function adjustMaxTokensForThinking(
@@ -60,6 +62,7 @@ export function adjustMaxTokensForThinking(
 		low: 2048,
 		medium: 8192,
 		high: 16384,
+		ultra: 32768,
 	};
 	const budgets = { ...defaultBudgets, ...customBudgets };
 

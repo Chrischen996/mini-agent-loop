@@ -170,6 +170,36 @@ describe("saveProfileStore + loadProfileStore — round-trip", () => {
     const loaded = await loadProfileStore(storePath);
     assert.equal(loaded.profiles.reasoning?.thinkingLevel, "high");
   });
+
+  it("round-trips optional per-model timeout overrides", async () => {
+    const store = makeStore({
+      activeProfile: "slow-thinker",
+      profiles: {
+        "slow-thinker": {
+          ...SAMPLE_PROFILE,
+          timeoutMs: 300_000,
+          firstResponseTimeoutMs: 240_000,
+          streamIdleTimeoutMs: 90_000,
+        },
+      },
+    });
+    await saveProfileStore(store, storePath);
+    const loaded = await loadProfileStore(storePath);
+    assert.equal(loaded.profiles["slow-thinker"]?.timeoutMs, 300_000);
+    assert.equal(loaded.profiles["slow-thinker"]?.firstResponseTimeoutMs, 240_000);
+    assert.equal(loaded.profiles["slow-thinker"]?.streamIdleTimeoutMs, 90_000);
+  });
+
+  it("rejects per-model timeouts below the 1s minimum", () => {
+    assert.throws(
+      () => upsertProfile(makeStore(), "bad", { ...SAMPLE_PROFILE, timeoutMs: 500 }),
+      ProfileStoreValidationError,
+    );
+    assert.throws(
+      () => upsertProfile(makeStore(), "bad", { ...SAMPLE_PROFILE, streamIdleTimeoutMs: -1 }),
+      ProfileStoreValidationError,
+    );
+  });
 });
 
 // ─── loadProfileStore — validation errors ─────────────────────────────────────
@@ -427,5 +457,22 @@ describe("loadLlmConfigFromEnv — active profile takes precedence", () => {
     assert.equal(config.model, "gpt-4o-mini");
     assert.equal(config.baseUrl, "https://gateway.example/v1");
     assert.equal(config.apiKey, "profile-key-123");
+  });
+
+  it("loads profile timeout overrides into the active LLM config", async () => {
+    await saveProfile("slow-thinking", {
+      model: "openai/gpt-4o-mini",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "profile-key-456",
+      timeoutMs: 600_000,
+      firstResponseTimeoutMs: 300_000,
+      streamIdleTimeoutMs: 180_000,
+    }, true, storePath);
+
+    const { loadLlmConfigFromEnv } = await import("../src/llm/index.ts?t=" + Date.now());
+    const config = loadLlmConfigFromEnv();
+    assert.equal(config.timeoutMs, 600_000);
+    assert.equal(config.firstResponseTimeoutMs, 300_000);
+    assert.equal(config.streamIdleTimeoutMs, 180_000);
   });
 });

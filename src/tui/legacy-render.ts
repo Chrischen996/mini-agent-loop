@@ -3,6 +3,16 @@ import { thinkingLevelToDisplay } from "../think-intensity.ts";
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import type { AgentMessage } from "../types.ts";
 import type { PermissionMode } from "../permissions.ts";
+import type { PlanDocument } from "../plan/document.ts";
+import { todoSummary, type TodoItem, type TodoViewMode } from "../todo.ts";
+import {
+  resolveTodoItems,
+  todoColor,
+  todoIcon,
+  todoText,
+  TODO_PANEL_MAX_VISIBLE_ITEMS,
+  TODO_PLAN_STATUS_LABELS,
+} from "./todo-format.ts";
 import { countTerminalRows, terminalStringWidth } from "./terminal-width.ts";
 
 export type LegacyToolView = {
@@ -10,6 +20,23 @@ export type LegacyToolView = {
   name: string;
   status: "running" | "done" | "error";
   preview?: string;
+};
+
+export type LegacyNotice = {
+  title?: string;
+  text: string;
+};
+
+/** One auto-memory extraction outcome, rendered as an inline card. */
+export type MemoryUpdateEvent = {
+  /** Memory keys created or updated. */
+  added: string[];
+  /** Memory keys marked forgotten. */
+  forgotten: string[];
+  /** Wall-clock time of the update. */
+  at: number;
+  /** Optional key→content previews for richer display. */
+  previews?: Record<string, string>;
 };
 
 export type LegacyTuiState = {
@@ -22,6 +49,13 @@ export type LegacyTuiState = {
   status: string;
   permissionMode: PermissionMode;
   thinkingLevel: ModelThinkingLevel;
+  todoPlan?: PlanDocument;
+  todoItems?: TodoItem[];
+  todoRevision?: number;
+  todoViewMode?: TodoViewMode;
+  notice?: LegacyNotice;
+  /** Auto-memory updates from completed turns, rendered as inline cards. */
+  memoryEvents?: MemoryUpdateEvent[];
 };
 
 const ANSI = {
@@ -35,12 +69,73 @@ const ANSI = {
   green: "\x1b[32m",
   yellow: "\x1b[33m",
   red: "\x1b[31m",
+  strike: "\x1b[9m",
   moveTo: (row: number, col: number) => `\x1b[${row};${col}H`,
 };
 
 function short(value: string, max = 160): string {
   const oneLine = value.replace(/\s+/g, " ").trim();
   return oneLine.length > max ? `${oneLine.slice(0, max)}...` : oneLine;
+}
+
+function appendTodoLines(
+  lines: string[],
+  plan: PlanDocument | undefined,
+  todos: readonly TodoItem[] | undefined,
+  viewMode: TodoViewMode,
+): void {
+  if (viewMode === "hidden") return;
+  const items = resolveTodoItems({ plan, todos });
+  const summary = todoSummary(items);
+  const planStatus = plan ? ` [${TODO_PLAN_STATUS_LABELS[plan.status]}]` : "";
+  lines.push(
+    `${ANSI.cyan}TODO${ANSI.reset}${planStatus} ${summary.completed}/${summary.total}` +
+      (summary.inProgress > 0 ? ` ${ANSI.yellow}${summary.inProgress} 执行中${ANSI.reset}` : "") +
+      (summary.failed > 0 ? ` ${ANSI.red}${summary.failed} 失败${ANSI.reset}` : ""),
+  );
+  if (viewMode === "compact") {
+    const current = items.find((item) => item.status === "in_progress");
+    lines.push(`${ANSI.dim}${current?.activeForm ?? "任务列表已折叠"}${ANSI.reset}`);
+    return;
+  }
+  if (items.length === 0) {
+    lines.push(`${ANSI.dim}暂无结构化步骤${ANSI.reset}`);
+    return;
+  }
+  const visibleItems = items.slice(0, TODO_PANEL_MAX_VISIBLE_ITEMS);
+  for (const [index, item] of visibleItems.entries()) {
+    const color = {
+      green: ANSI.green,
+      red: ANSI.red,
+      yellow: ANSI.yellow,
+      gray: ANSI.dim,
+    }[todoColor(item.status)];
+    const strike = item.status === "completed" ? ANSI.strike : "";
+    const number = item.source === "plan" ? `${index + 1}. ` : "";
+    lines.push(`${color}${strike}${todoIcon(item.status)}${ANSI.reset} ${strike}${number}${todoText(item.content)}${ANSI.reset}`);
+  }
+  if (items.length > visibleItems.length) {
+    lines.push(`${ANSI.dim}... 还有 ${items.length - visibleItems.length} 项${ANSI.reset}`);
+  }
+}
+
+function appendMemoryCards(lines: string[], events: MemoryUpdateEvent[] | undefined): void {
+  if (!events || events.length === 0) return;
+  for (const event of events.slice(-3)) {
+    const time = new Date(event.at).toLocaleTimeString("zh-CN", { hour12: false });
+    lines.push(`${ANSI.cyan}┌─ 🧠 记忆已更新 ${ANSI.dim}${time}${ANSI.reset}`);
+    const rows: string[] = [];
+    for (const key of event.added) {
+      const preview = event.previews?.[key] ? ` ${ANSI.dim}— ${short(event.previews[key]!, 60)}${ANSI.reset}` : "";
+      rows.push(`${ANSI.green}+${ANSI.reset} ${key}${preview}`);
+    }
+    for (const key of event.forgotten) {
+      rows.push(`${ANSI.red}−${ANSI.reset} ${key} ${ANSI.dim}(已遗忘)${ANSI.reset}`);
+    }
+    if (rows.length === 0) rows.push(`${ANSI.dim}(无需更新)${ANSI.reset}`);
+    lines.push(...rows);
+    lines.push(`${ANSI.cyan}└${ANSI.reset}${ANSI.dim} 下轮对话自动生效 · /memory 查看${ANSI.reset}`);
+  }
 }
 
 export function buildLegacyFrameLines(state: LegacyTuiState): string[] {
@@ -53,6 +148,20 @@ export function buildLegacyFrameLines(state: LegacyTuiState): string[] {
     if (message.role === "user") lines.push(`${ANSI.green}> ${ANSI.reset}${contentAsString(message.content)}`);
     if (message.role === "assistant" && message.content) lines.push(`${ANSI.cyan}assistant:${ANSI.reset} ${message.content}`);
     if (message.role === "tool") lines.push(`${ANSI.dim}[${message.name}] ${short(contentAsString(message.content))}${ANSI.reset}`);
+  }
+
+  if (state.todoPlan || state.todoItems) {
+    appendTodoLines(lines, state.todoPlan, state.todoItems, state.todoViewMode ?? "expanded");
+    lines.push("");
+  }
+
+  appendMemoryCards(lines, state.memoryEvents);
+
+  if (state.notice) {
+    if (state.notice.title) lines.push(`${ANSI.cyan}${state.notice.title}:${ANSI.reset}`);
+    const noticeLines = state.notice.text.split("\n");
+    lines.push(...noticeLines.slice(0, 8).map((line) => `${ANSI.dim}${line}${ANSI.reset}`));
+    if (noticeLines.length > 8) lines.push(`${ANSI.dim}...${ANSI.reset}`);
   }
 
   if (state.pendingUser) {

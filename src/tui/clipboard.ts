@@ -79,6 +79,26 @@ export async function writeClipboardText(
   const run = io.run ?? runClipboardCommand;
   const writeStdout = io.writeStdout ?? ((data: string) => process.stdout.write(data));
 
+  // ── 第一路径：OSC 52（首选，~0ms，终端原生支持）──────────────────────────
+  // 生成 OSC 52 序列并输出，让终端自行处理复制
+  try {
+    const osc52 = encodeOsc52(text);
+    writeStdout(osc52);
+    // OSC 52 成功后，fire-and-forget 原生工具作为安全网
+    // 这样即使终端不支持 OSC 52，原生工具仍能写入剪贴板
+    if (platform !== "win32") {
+      const candidates = nativeCandidates(platform, env);
+      for (const candidate of candidates) {
+        run(candidate.command, candidate.args, text).catch(() => {}); // fire-and-forget
+        break; // 只试第一个可用的
+      }
+    }
+    return { ok: true, method: "osc52" };
+  } catch (error) {
+    // OSC 52 失败，回退到原生工具
+  }
+
+  // ── 第二路径：原生工具（安全网）────────────────────────────────────────────
   for (const candidate of nativeCandidates(platform, env)) {
     try {
       await run(candidate.command, candidate.args, text);
@@ -88,16 +108,11 @@ export async function writeClipboardText(
     }
   }
 
-  try {
-    writeStdout(encodeOsc52(text));
-    return { ok: true, method: "osc52" };
-  } catch (error) {
-    return {
-      ok: false,
-      method: "none",
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
+  return {
+    ok: false,
+    method: "none",
+    error: "所有复制方式均失败",
+  };
 }
 
 export function osc52Payload(text: string): string {

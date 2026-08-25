@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import type { Tool, ToolResult } from "./types.ts";
-import type { SandboxConfig, SandboxResult, SandboxRunner } from "../sandbox/types.ts";
+import { DEFAULT_SANDBOX_CONFIG, type SandboxConfig, type SandboxResult, type SandboxRunner } from "../sandbox/types.ts";
 
 export type BashArgs = { command: string; timeout?: number };
 
@@ -8,8 +8,12 @@ const MAX_OUTPUT_BYTES = 100 * 1024;
 
 export function createBashTool(
   cwd: string,
-  sandbox?: { runner: SandboxRunner; config: SandboxConfig },
+  sandbox?: { runner: SandboxRunner; config?: Partial<SandboxConfig> },
 ): Tool<BashArgs> {
+  const sandboxConfig = sandbox
+    ? { ...DEFAULT_SANDBOX_CONFIG, ...sandbox.config }
+    : undefined;
+
   return {
     name: "bash",
     description: "Execute a bash command. Returns stdout/stderr. Optional timeout.",
@@ -28,10 +32,14 @@ export function createBashTool(
       }
       if (signal?.aborted) throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
 
-      const effectiveTimeoutMs = Math.min(
-        (args.timeout ?? sandbox?.config.timeout ?? 30) * 1000,
-        Number.MAX_SAFE_INTEGER,
-      );
+      const configuredTimeoutSeconds = sandboxConfig?.timeout === undefined
+        ? 30
+        : sandboxConfig.timeout / 1000;
+      const timeoutSeconds = args.timeout ?? configuredTimeoutSeconds;
+      if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
+        return { content: "Invalid timeout: must be greater than 0 seconds", isError: true };
+      }
+      const effectiveTimeoutMs = Math.min(timeoutSeconds * 1000, Number.MAX_SAFE_INTEGER);
 
       // Sandbox mode: use the runner directly (command-level exec only)
       if (sandbox && sandbox.runner.type !== "none") {
@@ -41,7 +49,7 @@ export function createBashTool(
             args: ["-lc", args.command],
             cwd,
             timeout: effectiveTimeoutMs,
-            allowNetwork: sandbox.config.allowNetwork ?? false,
+            allowNetwork: sandboxConfig?.allowNetwork ?? false,
             allowWrite: true,
           });
 

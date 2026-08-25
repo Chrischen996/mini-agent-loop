@@ -1,6 +1,7 @@
 import { AzureOpenAI } from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
+import { demoteUltra } from "../thinking-levels.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -153,7 +154,7 @@ export const streamSimple: StreamFunction<"azure-openai-responses", SimpleStream
 
 	const base = buildBaseOptions(model, context, options, apiKey);
 	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
-	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
+	const reasoningEffort = clampedReasoning === "off" ? undefined : demoteUltra(clampedReasoning);
 
 	return stream(model, context, {
 		...base,

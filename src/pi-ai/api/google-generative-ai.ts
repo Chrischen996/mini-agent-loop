@@ -34,6 +34,7 @@ import {
 	retainThoughtSignature,
 } from "./google-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
+import { toBaseEffortLevel, type BaseEffortLevel } from "../thinking-levels.ts";
 
 export interface GoogleOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "any";
@@ -297,7 +298,7 @@ export const streamSimple: StreamFunction<"google-generative-ai", SimpleStreamOp
 	}
 
 	const clampedReasoning = clampThinkingLevel(model, options.reasoning);
-	const effort = (clampedReasoning === "off" ? "high" : clampedReasoning) as ClampedThinkingLevel;
+	const effort = toBaseEffortLevel(clampedReasoning === "off" ? "high" : clampedReasoning)!;
 	const googleModel = model as Model<"google-generative-ai">;
 
 	if (isGemini3ProModel(googleModel) || isGemini3FlashModel(googleModel) || isGemma4Model(googleModel)) {
@@ -400,7 +401,7 @@ function buildParams(
 	return params;
 }
 
-type ClampedThinkingLevel = Exclude<ThinkingLevel, "xhigh" | "max">;
+type ClampedThinkingLevel = BaseEffortLevel;
 
 function isGemma4Model(model: Model<"google-generative-ai">): boolean {
 	return /gemma-?4/.test(model.id.toLowerCase());

@@ -13,7 +13,10 @@
  *       "model": "openai/gpt-4o-mini",
  *       "baseUrl": "https://api.openai.com/v1",
  *       "apiKey": "sk-...",
- *       "thinkingLevel": "medium"
+ *       "thinkingLevel": "medium",
+ *       "timeoutMs": 300000,
+ *       "firstResponseTimeoutMs": 300000,
+ *       "streamIdleTimeoutMs": 90000
  *     }
  *   }
  * }
@@ -28,6 +31,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
+import { ALL_THINKING_LEVELS, THINKING_EFFORT_LEVELS } from "./pi-ai/thinking-levels.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -37,6 +41,12 @@ export type ModelProfile = {
   apiKey: string;
   /** Optional for backwards compatibility with existing profiles. */
   thinkingLevel?: ModelThinkingLevel;
+  /** Optional per-model total request timeout (ms). */
+  timeoutMs?: number;
+  /** Optional per-model time-to-first-chunk timeout (ms). */
+  firstResponseTimeoutMs?: number;
+  /** Optional per-model stream-idle timeout (ms). */
+  streamIdleTimeoutMs?: number;
 };
 
 export type ModelProfileStore = {
@@ -81,14 +91,24 @@ function validateProfile(name: string, raw: unknown): ModelProfile {
   if (typeof p.apiKey !== "string") {
     throw new ProfileStoreValidationError(`Profile "${name}".apiKey must be a string`);
   }
-  const validThinkingLevels = new Set<ModelThinkingLevel>([
-    "off", "minimal", "low", "medium", "high", "xhigh", "max",
-  ]);
+  const validThinkingLevels = new Set(ALL_THINKING_LEVELS);
   if (p.thinkingLevel !== undefined && !validThinkingLevels.has(p.thinkingLevel as ModelThinkingLevel)) {
     throw new ProfileStoreValidationError(
-      `Profile "${name}".thinkingLevel must be one of off, minimal, low, medium, high, xhigh, or max`,
+      `Profile "${name}".thinkingLevel must be one of ${THINKING_EFFORT_LEVELS.join(",")}, or off`,
     );
   }
+  const validTimeout = (field: string): number | undefined => {
+    if (p[field] === undefined) return undefined;
+    if (typeof p[field] !== "number" || !Number.isFinite(p[field]) || p[field] < 1000) {
+      throw new ProfileStoreValidationError(
+        `Profile "${name}".${field} must be a number of milliseconds >= 1000`,
+      );
+    }
+    return Math.floor(p[field] as number);
+  };
+  const timeoutMs = validTimeout("timeoutMs");
+  const firstResponseTimeoutMs = validTimeout("firstResponseTimeoutMs");
+  const streamIdleTimeoutMs = validTimeout("streamIdleTimeoutMs");
   return {
     model: p.model.trim(),
     baseUrl: normalizeUrl(p.baseUrl),
@@ -96,6 +116,9 @@ function validateProfile(name: string, raw: unknown): ModelProfile {
     ...(p.thinkingLevel !== undefined
       ? { thinkingLevel: p.thinkingLevel as ModelThinkingLevel }
       : {}),
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(firstResponseTimeoutMs !== undefined ? { firstResponseTimeoutMs } : {}),
+    ...(streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs } : {}),
   };
 }
 

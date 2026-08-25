@@ -1,19 +1,7 @@
 import { createBashTool } from "./bash.ts";
 import { createReadTool } from "./read.ts";
 import { createWriteTool } from "./write.ts";
-import {
-  createCopyTool,
-  createDeleteTool,
-  createEditTool,
-  createFindTool,
-  createGrepTool,
-  createListTool,
-  createLsTool,
-  createMkdirTool,
-  createMoveTool,
-  createPatchTool,
-  createSearchTool,
-} from "./workspace-tools.ts";
+import { createEditTool, createFindTool, createGrepTool, createLsTool } from "./workspace-tools.ts";
 import type { Tool } from "./types.ts";
 import { createRepositoryStoreFromEnv, RepositoryStore } from "../codebase/repository-store.ts";
 import { createCodebaseTools } from "../codebase/tools.ts";
@@ -21,15 +9,16 @@ import type { CodebaseSemanticProvider } from "../codebase/deepwiki-provider.ts"
 import { createWebAccessTools } from "../web-access/index.ts";
 import { createGitTools } from "./git.ts";
 import { createValidationTool } from "./validation.ts";
-import { createSandboxRunner, type SandboxConfig, type SandboxRunner } from "../sandbox/index.ts";
+import { createTodoWriteTool } from "./todo-write.ts";
+import { createSandboxRunner, DEFAULT_SANDBOX_CONFIG, type SandboxConfig, type SandboxRunner } from "../sandbox/index.ts";
 
 export type { JsonSchema, Tool, ToolCapabilities, ToolResult } from "./types.ts";
 export type { ReadArgs } from "./read.ts";
 export type { WriteArgs } from "./write.ts";
 export type { SandboxConfig } from "../sandbox/index.ts";
 export type { BashArgs } from "./bash.ts";
-export { createTodoTool } from "./todo.ts";
-export type { TodoItem, TodoStatus, TodoWriteArgs } from "./todo.ts";
+export type { TodoWriteArgs } from "./todo-write.ts";
+export { createTodoWriteTool } from "./todo-write.ts";
 export { createBashTool } from "./bash.ts";
 export { createReadTool } from "./read.ts";
 export { createWriteTool } from "./write.ts";
@@ -54,7 +43,7 @@ export type ToolName =
   | "codebase_open" | "codebase_search" | "codebase_read" | "codebase_explain"
   | "web_search" | "fetch_content" | "get_search_content" | "source_check"
   | "subagent" | "git_status" | "git_diff" | "git_checkpoint" | "git_undo" | "git_branch_isolate"
-  | "validate_workspace" | "todo_write";
+  | "validate_workspace" | "TodoWrite";
 
 const WEB_ACCESS_TOOL_NAMES = new Set<ToolName>([
   "web_search",
@@ -68,31 +57,47 @@ export type ToolSelection = {
   excludeTools?: ToolName[];
 };
 
-/** Pi-compatible default: only the four primary tools are active. */
-export function createDefaultTools(cwd: string, selection: ToolSelection = {}): Tool[] {
-  const all = createAllTools(cwd);
-  const selected = selection.tools ?? ["read", "bash", "edit", "write"];
+const DEFAULT_TOOL_NAMES: ToolName[] = ["read", "bash", "edit", "write", "TodoWrite"];
+
+function selectTools(all: Tool[], selection: ToolSelection): Tool[] {
+  const selected = selection.tools ?? DEFAULT_TOOL_NAMES;
   const excluded = new Set(selection.excludeTools ?? []);
   return all.filter((tool) => selected.includes(tool.name as ToolName) && !excluded.has(tool.name as ToolName));
 }
 
-/** All seven Pi coding-agent tools, before active-tool filtering. */
-export function createAllTools(
-  cwd: string,
-  options: { sandboxRunner?: SandboxRunner; sandboxConfig?: SandboxConfig } = {},
-): Tool[] {
-  const bashTool = createBashTool(cwd, options.sandboxRunner ? { runner: options.sandboxRunner, config: options.sandboxConfig! } : undefined);
+/** Pi-compatible default: core coding tools plus the session-only TodoWrite tool. */
+export function createDefaultTools(cwd: string, selection: ToolSelection = {}): Tool[] {
+  return selectTools(createAllTools(cwd), selection);
+}
+
+type CoreToolOptions = { sandboxRunner?: SandboxRunner; sandboxConfig?: SandboxConfig };
+
+function createCoreTools(cwd: string, options: CoreToolOptions = {}): Tool[] {
+  const bashTool = createBashTool(cwd, options.sandboxRunner
+    ? { runner: options.sandboxRunner, config: { ...DEFAULT_SANDBOX_CONFIG, ...options.sandboxConfig } }
+    : undefined);
   return [
     createReadTool(cwd) as Tool,
     bashTool as Tool,
     createEditTool(cwd) as Tool,
     createWriteTool(cwd) as Tool,
+    createTodoWriteTool() as Tool,
     createGrepTool(cwd) as Tool,
     createFindTool(cwd) as Tool,
     createLsTool(cwd) as Tool,
-    ...createGitTools(cwd),
-    createValidationTool(cwd),
   ];
+}
+
+function createGitAndValidationTools(cwd: string): Tool[] {
+  return [...createGitTools(cwd), createValidationTool(cwd)];
+}
+
+/** All local coding-agent tools, before active-tool filtering. */
+export function createAllTools(
+  cwd: string,
+  options: CoreToolOptions = {},
+): Tool[] {
+  return [...createCoreTools(cwd, options), ...createGitAndValidationTools(cwd)];
 }
 
 export function createTools(
@@ -110,20 +115,18 @@ export function createTools(
     sandbox?: SandboxConfig;
   } = {},
 ): Tool[] {
-  const baseTools = createAllTools(cwd, {
+  const baseTools = createCoreTools(cwd, {
     sandboxRunner: options.sandboxRunner,
     sandboxConfig: options.sandboxConfig ?? options.sandbox,
   });
 
-  const selected = options.tools ?? ["read", "bash", "edit", "write"];
-  const excluded = new Set(options.excludeTools ?? []);
-  const tools = baseTools.filter((t) => selected.includes(t.name as ToolName) && !excluded.has(t.name as ToolName));
+  const tools = selectTools(baseTools, options);
 
   const selectedGit = options.tools
     ? options.tools.filter((name) => name.startsWith("git_") || name === "validate_workspace")
     : ["git_status", "git_diff", "git_checkpoint", "git_undo", "git_branch_isolate", "validate_workspace"] as ToolName[];
   const existingNames = new Set(tools.map((tool) => tool.name));
-  tools.push(...[...createGitTools(cwd), createValidationTool(cwd)].filter((tool) =>
+  tools.push(...createGitAndValidationTools(cwd).filter((tool) =>
     !existingNames.has(tool.name)
       && selectedGit.includes(tool.name as ToolName)
       && !options.excludeTools?.includes(tool.name as ToolName)));

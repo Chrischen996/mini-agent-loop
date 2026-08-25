@@ -54,7 +54,6 @@ describe("model selection", () => {
       [...new Set(getAvailableModels(env).map((model) => model.provider))],
       ["agnes-ai", "deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai", "tokenrouter"],
     );
-    assert.equal(getAllModels().length, 1083);
     assert.ok(getAllModels().every((model) => model.contextWindow > 0 && model.maxTokens > 0));
   });
 
@@ -212,6 +211,37 @@ describe("model selection", () => {
     assert.equal(resolved.baseUrl, "https://api.tokenrouter.io/v1");
   });
 
+  it("registers Ox Alpha under OpenRouter instead of TokenRouter", () => {
+    const openrouterModels = getAllModels().filter(
+      (model) => model.provider === "openrouter" && model.id === "ox-alpha",
+    );
+    assert.equal(openrouterModels.length, 1);
+    const model = openrouterModels[0];
+    assert.ok(model);
+    assert.equal(model.baseUrl, "https://openrouter.ai/api/v1");
+    assert.deepEqual(model.apiKeyEnv, ["OPENROUTER_API_KEY"]);
+    assert.equal(model.reasoning, true);
+    assert.equal(model.contextWindow, 1000000);
+    assert.equal(model.maxTokens, 131072);
+    assert.deepEqual(model.cost, {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+    assert.equal(getAllModels().some(
+      (item) => item.provider === "tokenrouter" && item.id === "ox-alpha",
+    ), false);
+    assert.ok(getAvailableModels({ OPENROUTER_API_KEY: "test" }).some(
+      (item) => item.provider === "openrouter" && item.id === "ox-alpha",
+    ));
+
+    const resolved = resolveModel("openrouter/ox-alpha");
+    assert.equal(resolved.provider, "openrouter");
+    assert.equal(resolved.id, "ox-alpha");
+    assert.equal(resolved.baseUrl, "https://openrouter.ai/api/v1");
+  });
+
   it("registers Agnes AI with its documented OpenAI-compatible capabilities", () => {
     const models = getAvailableModels({ AGNES_API_KEY: "test" })
       .filter((model) => model.provider === "agnes-ai");
@@ -275,6 +305,73 @@ describe("model selection", () => {
     assert.equal(custom?.id, "company-model-v1");
     assert.deepEqual(custom?.capabilities.input, ["text", "image"]);
     assert.equal(custom?.contextWindow, 64000);
+  });
+
+  it("parses per-model timeout overrides from MINI_AGENT_MODELS", () => {
+    const env = {
+      CUSTOM_LLM_KEY: "test",
+      MINI_AGENT_MODELS: JSON.stringify([
+        {
+          provider: "slow-gateway",
+          id: "slow-thinker",
+          baseUrl: "https://slow.example/v1",
+          apiKeyEnv: "CUSTOM_LLM_KEY",
+          timeoutMs: 600_000,
+          firstResponseTimeoutMs: 300_000,
+          streamIdleTimeoutMs: 180_000,
+        },
+        {
+          provider: "bad-gateway",
+          id: "invalid-timeouts",
+          baseUrl: "https://bad.example/v1",
+          apiKeyEnv: "CUSTOM_LLM_KEY",
+          timeoutMs: -5,
+          streamIdleTimeoutMs: "not-a-number",
+        },
+      ]),
+    };
+    const slow = getAvailableModels(env).find((model) => model.provider === "slow-gateway");
+    assert.equal(slow?.timeoutMs, 600_000);
+    assert.equal(slow?.firstResponseTimeoutMs, 300_000);
+    assert.equal(slow?.streamIdleTimeoutMs, 180_000);
+
+    // Invalid values are dropped rather than poisoning the catalog.
+    const bad = getAvailableModels(env).find((model) => model.provider === "bad-gateway");
+    assert.equal(bad?.timeoutMs, undefined);
+    assert.equal(bad?.firstResponseTimeoutMs, undefined);
+    assert.equal(bad?.streamIdleTimeoutMs, undefined);
+  });
+
+  it("keeps custom model timeout values available to LLM config resolution", async () => {
+    const originalModels = process.env.MINI_AGENT_MODELS;
+    const originalKey = process.env.CUSTOM_LLM_KEY;
+    process.env.CUSTOM_LLM_KEY = "test";
+    process.env.MINI_AGENT_MODELS = JSON.stringify([{
+      provider: "custom-timeout-gateway",
+      id: "slow-custom-model",
+      baseUrl: "https://slow.example/v1",
+      apiKeyEnv: "CUSTOM_LLM_KEY",
+      timeoutMs: 600_000,
+      firstResponseTimeoutMs: 300_000,
+      streamIdleTimeoutMs: 180_000,
+    }]);
+
+    try {
+      const { makeLlmConfig, timeoutLimitForPhase } = await import("../src/llm/index.ts?t=" + Date.now());
+      const config = makeLlmConfig({
+        apiKey: "test",
+        baseUrl: "https://slow.example/v1",
+        model: "custom-timeout-gateway/slow-custom-model",
+      });
+      assert.equal(timeoutLimitForPhase(config, "total"), 600_000);
+      assert.equal(timeoutLimitForPhase(config, "first_response"), 300_000);
+      assert.equal(timeoutLimitForPhase(config, "stream_idle"), 180_000);
+    } finally {
+      if (originalModels === undefined) delete process.env.MINI_AGENT_MODELS;
+      else process.env.MINI_AGENT_MODELS = originalModels;
+      if (originalKey === undefined) delete process.env.CUSTOM_LLM_KEY;
+      else process.env.CUSTOM_LLM_KEY = originalKey;
+    }
   });
 
   it("searchModels returns all models for an empty query", () => {

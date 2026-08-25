@@ -8,7 +8,9 @@ export async function getGitBranch(cwd: string): Promise<string | undefined> {
   try {
     const result = await execFileAsync("git", ["-C", cwd, "branch", "--show-current"], {
       cwd,
-      timeout: 1_000,
+      // Generous timeout: under parallel test load a cold git invocation can
+      // take several seconds; a killed process would silently hide the branch.
+      timeout: 5_000,
       maxBuffer: 4_096,
     });
     const branch = result.stdout.trim();

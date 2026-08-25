@@ -14,6 +14,7 @@ import { contentAsString } from "../src/content.ts";
 import { makeLlmConfig } from "../src/llm/index.ts";
 import { LlmTimeoutError } from "../src/llm/retry.ts";
 import { createDefaultTools, createReadTool } from "../src/tools/index.ts";
+import { createTodoWriteTool } from "../src/tools/todo-write.ts";
 import type { Tool } from "../src/tools/types.ts";
 import { PermissionManager } from "../src/permissions.ts";
 import {
@@ -39,6 +40,39 @@ const dummyLlm = makeLlmConfig({
 });
 
 describe("runAgentLoop", () => {
+  it("emits todo_updated without adding a visible TodoWrite result to the model contract", async () => {
+    let calls = 0;
+    const events: import("../src/loop.ts").LoopEvent[] = [];
+    const messages = await runAgentLoop("track this work", {
+      llm: dummyLlm,
+      tools: [createTodoWriteTool() as Tool],
+      onEvent: (event) => events.push(event),
+      chat: async () => {
+        calls += 1;
+        return calls === 1
+          ? {
+              role: "assistant",
+              content: "",
+              toolCalls: [{
+                id: "todo_1",
+                name: "TodoWrite",
+                arguments: {
+                  todos: [
+                    { content: "Track work", activeForm: "Tracking work", status: "in_progress" },
+                  ],
+                },
+              }],
+            }
+          : { role: "assistant", content: "done" };
+      },
+    });
+
+    const todoEvent = events.find((event) => event.type === "todo_updated");
+    assert.ok(todoEvent && todoEvent.type === "todo_updated");
+    assert.equal(todoEvent.todos[0]?.status, "in_progress");
+    assert.ok(messages.some((message) => message.role === "tool" && message.name === "TodoWrite"));
+  });
+
   it("enforces an exhausted global token budget before the parent model call", async () => {
     let chatCalled = false;
     await assert.rejects(
@@ -904,6 +938,42 @@ describe("runAgentTurn", () => {
     // The mode notice should only appear once.
     const noticeCount = content.match(/mode=plan/g)?.length ?? 0;
     assert.equal(noticeCount, 1);
+  });
+
+  it("preserves conversation history when permission mode changes before a follow-up turn", async () => {
+    const observed: AgentMessage[][] = [];
+    const chat = async (
+      _config: typeof dummyLlm,
+      messages: AgentMessage[],
+    ): Promise<import("../src/types.ts").AssistantMessage> => {
+      observed.push(messages.map((message) => ({ ...message })));
+      return { role: "assistant", content: "ack" };
+    };
+
+    const first = await runAgentTurn(createAgentHistory(undefined, "plan"), "first request", {
+      llm: dummyLlm,
+      tools: [],
+      chat,
+      permissionMode: "plan",
+    });
+    await runAgentTurn(first, "follow-up request", {
+      llm: dummyLlm,
+      tools: [],
+      chat,
+      permissionMode: "bypass",
+    });
+
+    const secondTurn = observed[1]!;
+    assert.deepEqual(
+      secondTurn
+        .filter((message) => message.role === "user")
+        .map((message) => contentAsString(message.content)),
+      ["first request", "follow-up request"],
+    );
+    const system = secondTurn.find((message) => message.role === "system");
+    assert.ok(system && typeof system.content === "string");
+    assert.match(system.content, /mode=bypass/);
+    assert.doesNotMatch(system.content, /mode=plan/);
   });
 
   it("buildSystemPrompt includes Permission Mode Awareness section", () => {

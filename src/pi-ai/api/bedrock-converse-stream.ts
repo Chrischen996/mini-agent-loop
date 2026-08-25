@@ -47,6 +47,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { requiresExplicitMapping, toBaseEffortLevel } from "../thinking-levels.ts";
 import { normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { providerHeadersToRecord } from "../utils/headers.ts";
@@ -1036,11 +1037,13 @@ function buildAdditionalModelRequestFields(
 						high: 16384,
 						xhigh: 16384, // Budget-based Claude clamps extended levels to high
 						max: 16384,
+						ultra: 16384,
 					};
 
-					// Custom budgets only cover token-based levels through high.
-					const level = options.reasoning === "xhigh" || options.reasoning === "max" ? "high" : options.reasoning;
-					const budget = options.thinkingBudgets?.[level] ?? defaultBudgets[options.reasoning];
+					// Custom budgets only cover token-based base effort levels;
+					// extended levels (xhigh/max/ultra) clamp to "high" for budget-based Claude.
+					const level = toBaseEffortLevel(options.reasoning) ?? "high";
+					const budget = options.thinkingBudgets?.[level] ?? defaultBudgets[level];
 
 					return {
 						thinking: {

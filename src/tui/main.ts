@@ -1,4 +1,6 @@
 import process from "node:process";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { contentAsString } from "../content.ts";
 import { loadLlmConfigFromEnv } from "../llm/index.ts";
 import {
@@ -25,7 +27,9 @@ import {
 import { createTools } from "../tools/index.ts";
 import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
+import { loadPlanDocument } from "../plan/index.ts";
 import { PERMISSION_MODES, PermissionManager, type PermissionMode } from "../permissions.ts";
+import { isTodoRevisionNewer, nextTodoRevision, TODO_WRITE_TOOL_NAME } from "../todo.ts";
 import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 import { createSubagentTool, createSubagentBatchTool, defaultProfiles } from "../subagent/index.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
@@ -45,6 +49,18 @@ import {
   LEGACY_ANSI,
   type LegacyTuiState,
 } from "./legacy-render.ts";
+import {
+  finalizeExecCapture,
+  finalizePlanCapture,
+  parsePlanTurnOverride,
+} from "./plan-commands.ts";
+import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
+import { SessionStore, getDataRoot, type PersistedSessionMeta } from "../session-store.ts";
+import type { AgentMessage } from "../types.ts";
+import { MemoryStore } from "../orchestration/memory-store.ts";
+import { createAutoMemoryHook, isAutoMemoryEnabled } from "../memory/auto-memory.ts";
+import type { TuiAction } from "./state.ts";
+import { isTuiFeatureEnabled } from "./execution-policy.ts";
 
 function short(value: string, max = 160): string {
   const oneLine = value.replace(/\s+/g, " ").trim();
@@ -70,6 +86,13 @@ function render(state: TuiState): void {
 
 function handleEvent(state: TuiState, event: LoopEvent): void {
   switch (event.type) {
+    case "todo_updated":
+      if (isTodoRevisionNewer(state.todoRevision, event.revision)) {
+        state.todoItems = event.todos;
+        state.todoRevision = event.revision;
+      }
+      state.status = "任务列表已更新";
+      break;
     case "assistant_delta":
       state.streamingText += event.text;
       state.status = "模型输出中...";
@@ -82,10 +105,18 @@ function handleEvent(state: TuiState, event: LoopEvent): void {
       state.status = `上下文已压缩 ${event.beforeTokens} → ${event.afterTokens} tokens`;
       break;
     case "tool_start":
+      if (event.call.name === TODO_WRITE_TOOL_NAME) {
+        state.status = "更新任务列表...";
+        break;
+      }
       state.tools.push({ id: event.call.id, name: event.call.name, status: "running" });
       state.status = `正在执行 ${event.call.name}...`;
       break;
     case "tool_end": {
+      if (event.call.name === TODO_WRITE_TOOL_NAME) {
+        state.status = event.result.isError ? "任务列表更新失败" : "任务列表已更新";
+        break;
+      }
       const current = state.tools.find((tool) => tool.id === event.call.id);
       if (current) {
         current.status = event.result.isError ? "error" : "done";
@@ -140,8 +171,48 @@ async function main(): Promise<void> {
   const autoSubagent = loadAutoSubagentOptionsFromEnv();
   await discoverWorkspaceSkills(cwd);
   let activeSkillNames = loadSkillNamesFromEnv();
+
+  // ── Session persistence + auto memory (Claude Code-style) ─────────────────
+  const sessionStore = new SessionStore(path.join(getDataRoot(), "sessions"));
+  const sessionId = randomUUID();
+  const memoryStore = new MemoryStore(path.join(getDataRoot(), "memory", "records.json"));
+  const buildTuiHistory = async (): Promise<AgentMessage[]> => {
+    const base = createAgentHistory(undefined, state.permissionMode);
+    if (!isAutoMemoryEnabled()) return base;
+    try {
+      const section = await memoryStore.buildSystemMemoryPrompt();
+      if (section && base[0]?.role === "system") {
+        base[0] = {
+          ...base[0],
+          content: `${base[0].content}\n\n# Persistent Memory\n${section}\n`,
+        };
+      }
+    } catch {
+      // Memory injection is best-effort.
+    }
+    return base;
+  };
+  const persistTurn = async (history: AgentMessage[]): Promise<void> => {
+    try {
+      const existing = await sessionStore.load(sessionId);
+      const persisted = {
+        id: sessionId,
+        createdAt: existing?.createdAt ?? Date.now(),
+        modelId: activeLlm.model,
+        thinkingLevel: activeLlm.thinkingLevel,
+        permissionMode: state.permissionMode,
+        skillNames: activeSkillNames,
+        messages: [...history],
+      };
+      if (existing) await sessionStore.save(persisted);
+      else await sessionStore.create(persisted);
+    } catch {
+      // Persistence is best-effort; never break the interactive loop.
+    }
+  };
+
   const state: TuiState = {
-    history: createAgentHistory(undefined, "plan"),
+    history: await buildTuiHistory(),
     streamingText: "",
     tools: [],
     busy: false,
@@ -150,8 +221,63 @@ async function main(): Promise<void> {
     status: "就绪",
     permissionMode: "plan" as PermissionMode,
     thinkingLevel: activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off"),
+    todoPlan: (await loadPlanDocument(cwd).catch(() => null)) ?? undefined,
+    todoItems: undefined,
+    todoRevision: 0,
+    todoViewMode: "expanded",
   };
+
+  // Resume the most recent session on startup (Claude Code `--continue`).
+  try {
+    const mostRecent = (await sessionStore.listSessions())[0];
+    if (mostRecent) {
+      const restored = await sessionStore.load(mostRecent.id);
+      if (restored && restored.messages.length > 0) {
+        const base = await buildTuiHistory();
+        state.history = [
+          ...base,
+          ...restored.messages.filter((message) => message.role !== "system"),
+        ];
+        state.status = `已恢复会话 ${mostRecent.id.slice(0, 8)} (${restored.messages.length} 条消息)，/clear 可重新开始`;
+      }
+    }
+  } catch {
+    // Resume is best-effort.
+  }
   const permissionManager = new PermissionManager(state.permissionMode);
+  const planCaptureRef = { current: null as { prompt: string } | null };
+  const execCaptureRef = { current: null as { mode: "run" | "retry" } | null };
+  const dispatchPlanAction = (action: TuiAction): void => {
+    switch (action.type) {
+      case "SET_TODO_PLAN":
+        state.todoPlan = action.plan;
+        state.todoItems = undefined;
+        state.todoRevision = nextTodoRevision();
+        break;
+      case "SET_TODO_ITEMS":
+        if (isTodoRevisionNewer(state.todoRevision, action.revision)) {
+          state.todoItems = action.todos;
+          state.todoRevision = action.revision;
+        }
+        break;
+      case "CLEAR_TODO_ITEMS":
+        state.todoItems = undefined;
+        state.todoRevision = nextTodoRevision();
+        break;
+      case "SET_TODO_VIEW_MODE":
+        state.todoViewMode = action.mode;
+        break;
+      case "SET_PERMISSION_MODE":
+        state.permissionMode = action.mode;
+        break;
+      case "ADD_NOTICE":
+        state.notice = { title: action.title, text: action.text };
+        state.status = action.title ?? action.text.split("\n")[0] ?? state.status;
+        break;
+      default:
+        break;
+    }
+  };
   let cursorCol = 0;   // column offset within current line of multi-line input
   let cursorRow = 0;   // which line (0-indexed) the cursor is on
   // Set up audit logging
@@ -264,9 +390,87 @@ async function main(): Promise<void> {
     if (!text || state.busy) return;
     if (text === "/exit" || text === "/quit") return quit();
     if (text === "/clear") {
-      state.history = createAgentHistory(undefined, state.permissionMode);
+      state.history = await buildTuiHistory();
       state.tools = [];
       state.status = "已清空会话";
+      state.todoItems = undefined;
+      state.todoRevision = nextTodoRevision();
+      render(state);
+      return;
+    }
+    if (text === "/sessions") {
+      const metas: PersistedSessionMeta[] = await sessionStore.listSessions().catch(() => []);
+      if (metas.length === 0) {
+        state.status = "没有可恢复的会话";
+      } else {
+        state.status = `会话列表: ${metas
+          .slice(0, 5)
+          .map((meta) => `${meta.id.slice(0, 8)}(${meta.messageCount}条)`)
+          .join(", ")} — /resume <id> 恢复`;
+      }
+      render(state);
+      return;
+    }
+    if (text.startsWith("/resume")) {
+      const arg = text.slice("/resume".length).trim();
+      const metas = await sessionStore.listSessions().catch(() => []);
+      const target =
+        (arg && metas.find((meta) => meta.id.startsWith(arg))) ??
+        (arg ? undefined : metas[0]);
+      if (!target) {
+        state.status = arg ? `未找到会话: ${arg}` : "没有可恢复的会话";
+        render(state);
+        return;
+      }
+      const restoredSession = await sessionStore.load(target.id).catch(() => undefined);
+      if (!restoredSession) {
+        state.status = `未找到会话: ${target.id}`;
+        render(state);
+        return;
+      }
+      const base = await buildTuiHistory();
+      state.history = [
+        ...base,
+        ...restoredSession.messages.filter((message) => message.role !== "system"),
+      ];
+      state.tools = [];
+      state.pendingUser = undefined;
+      state.status = `已恢复会话 ${target.id.slice(0, 8)} (${restoredSession.messages.length} 条消息)`;
+      render(state);
+      return;
+    }
+    if (text === "/memory" || text.startsWith("/memory ")) {
+      const arg = text.slice("/memory".length).trim();
+      const records = await memoryStore.list({ includeForgotten: arg === "--all" }).catch(() => []);
+      if (records.length === 0) {
+        state.status = "🧠 暂无记忆（对话积累后会自动提取）";
+        render(state);
+        return;
+      }
+      const lines = records
+        .slice(-8)
+        .map((record) => `${record.status === "forgotten" ? "−" : "+"} ${record.key}: ${short(record.content, 60)}`);
+      state.memoryEvents = [
+        ...(state.memoryEvents ?? []),
+        { added: [], forgotten: [], at: Date.now(), previews: Object.fromEntries(records.slice(-8).map((r) => [r.key, r.content])) },
+      ];
+      // Show the listing via notice for full-width readability.
+      state.notice = {
+        title: `🧠 记忆列表 (${records.length} 条${arg === "--all" ? "，含已遗忘" : ""})`,
+        text: lines.join("\n"),
+      };
+      render(state);
+      return;
+    }
+    const todoCommand = parseTodoCommand(text);
+    if (todoCommand) {
+      if (todoCommand === "clear") {
+        state.todoItems = undefined;
+        state.todoRevision = nextTodoRevision();
+      } else {
+        state.todoViewMode = todoViewModeForCommand(todoCommand, state.todoViewMode ?? "expanded");
+      }
+      state.input = "";
       render(state);
       return;
     }
@@ -281,10 +485,28 @@ async function main(): Promise<void> {
       return;
     }
 
+    const planTurnOverride = await parsePlanTurnOverride(text, {
+      cwd,
+      dispatch: dispatchPlanAction,
+      setInput: (value) => {
+        state.input = value;
+        cursorCol = 0;
+        cursorRow = 0;
+      },
+      planCaptureRef,
+      execCaptureRef,
+      permissionManager,
+    });
+    if (planTurnOverride === null) {
+      state.pendingUser = undefined;
+      render(state);
+      return;
+    }
+
     state.input = "";
     cursorCol = 0;
     cursorRow = 0;
-    state.pendingUser = text;
+    state.pendingUser = planTurnOverride?.displayText ?? text;
     state.streamingText = "";
     state.busy = true;
     state.status = "请求模型中...";
@@ -296,7 +518,9 @@ async function main(): Promise<void> {
       activeLlm = turnLlm;
       state.thinkingLevel = turnLlm.thinkingLevel ?? (turnLlm.reasoning ? "medium" : "off");
     }
-    const thinkingMode = parsedThinking.intensity
+    const thinkingMode = planTurnOverride
+      ? loadThinkingModeFromEnv()
+      : parsedThinking.intensity
       ? "fixed"
       : parseThinkingCommandMode(text) ?? loadThinkingModeFromEnv();
     render(state);
@@ -310,17 +534,19 @@ async function main(): Promise<void> {
       },
       abortController.signal,
     );
+    let turnSucceeded = false;
+    let turnErrorMessage: string | undefined;
     try {
-      state.history = await runAgentTurn(state.history, text, {
+      state.history = await runAgentTurn(state.history, planTurnOverride?.prompt ?? text, {
         llm: turnLlm,
         tools,
         autoSubagent,
         preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
         signal: abortController.signal,
         permissionTurn,
-        autoValidate: process.env.MINI_AGENT_AUTO_VALIDATE === "1",
+        autoValidate: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_VALIDATE),
         validationWorkspace: cwd,
-        autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
+        autoCheckpoint: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_CHECKPOINT),
         thinkingMode,
         runtimeRef: parentRuntime,
         runtimeContext,
@@ -335,6 +561,7 @@ async function main(): Promise<void> {
           render(state);
         },
       });
+      turnSucceeded = true;
       state.pendingUser = undefined;
       render(state);
     } catch (error) {
@@ -348,10 +575,60 @@ async function main(): Promise<void> {
       }
       state.pendingUser = undefined;
       state.busy = false;
-      state.status = `错误: ${error instanceof Error ? error.message : String(error)}`;
+      turnErrorMessage = error instanceof Error ? error.message : String(error);
+      state.status = `错误: ${turnErrorMessage}`;
       render(state);
     } finally {
       permissionTurn.close();
+      if (planTurnOverride?.restoreMode !== undefined && permissionManager.getMode() !== planTurnOverride.restoreMode) {
+        permissionManager.setMode(planTurnOverride.restoreMode);
+        dispatchPlanAction({ type: "SET_PERMISSION_MODE", mode: planTurnOverride.restoreMode });
+      }
+      if (turnSucceeded) {
+        // Persist the turn and extract memories — both best-effort.
+        await persistTurn(state.history);
+        if (isAutoMemoryEnabled()) {
+          // Reuse the module-scope memoryStore (same records.json path).
+          const extract = createAutoMemoryHook(activeLlm, memoryStore);
+          void extract(state.history)
+            .then(async (result) => {
+              if (!result.ran) return;
+              // Fetch previews for the updated keys so the card shows content.
+              const previews: Record<string, string> = {};
+              for (const key of [...result.added, ...result.forgotten]) {
+                const record = (await memoryStore.list({ includeForgotten: true }))
+                  .find((item) => item.key === key);
+                if (record) previews[key] = record.content;
+              }
+              state.memoryEvents = [
+                ...(state.memoryEvents ?? []),
+                { added: result.added, forgotten: result.forgotten, at: Date.now(), previews },
+              ];
+              const changed = result.added.length + result.forgotten.length;
+              state.status = changed > 0
+                ? `🧠 已自动更新记忆 (${changed} 条)`
+                : "🧠 记忆检查完成（无需更新）";
+              render(state);
+            })
+            .catch(() => {});
+        }
+      }
+      await finalizePlanCapture({
+        cwd,
+        planCaptureRef,
+        history: state.history,
+        succeeded: turnSucceeded,
+        dispatch: dispatchPlanAction,
+      });
+      await finalizeExecCapture({
+        cwd,
+        execCaptureRef,
+        history: state.history,
+        succeeded: turnSucceeded,
+        errorMessage: turnErrorMessage,
+        dispatch: dispatchPlanAction,
+      });
+      render(state);
     }
   };
 

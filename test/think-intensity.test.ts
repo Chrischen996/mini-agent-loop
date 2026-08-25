@@ -15,6 +15,7 @@ import {
   stripThinkingIntensityCommands,
   supportsThinkingOff,
   thinkingLevelToDisplay,
+  withThinkingLevel,
 } from "../src/think-intensity.ts";
 
 describe("thinking intensity parsing", () => {
@@ -23,6 +24,8 @@ describe("thinking intensity parsing", () => {
     assert.equal(parseThinkingIntensityCommand("  /THINK:MED do this"), "med");
     assert.equal(parseThinkingIntensityCommand("do this /think:high"), null);
     assert.equal(parseThinkingIntensityCommand("/think:xhigh"), "xhigh");
+    assert.equal(parseThinkingIntensityCommand("/think:ultra solve this"), "ultra");
+    assert.equal(parseThinkingIntensityCommand("  /THINK:ULTRA solve this"), "ultra");
     assert.equal(parseThinkingIntensityCommand("/think:off do this"), "off");
     assert.equal(parseThinkingIntensityCommand("/think:highest do this"), null);
     assert.equal(parseThinkingIntensityCommand("prefix/think:high do this"), null);
@@ -75,6 +78,16 @@ describe("thinking intensity model levels", () => {
     assert.equal(intensityToModelThinkingLevel("med"), "medium");
     assert.equal(intensityToModelThinkingLevel("high"), "high");
     assert.equal(intensityToModelThinkingLevel("xhigh"), "xhigh");
+    assert.equal(intensityToModelThinkingLevel("ultra"), "ultra");
+  });
+
+  it("keeps an explicit ultra selection visible while provider requests can clamp it", () => {
+    const base = {
+      reasoning: true,
+      piModel: { thinkingLevelMap: { xhigh: "xhigh", max: "max" } },
+    } as Parameters<typeof withThinkingLevel>[0];
+    assert.equal(withThinkingLevel(base, "ultra").thinkingLevel, "ultra");
+    assert.equal(clampThinkingLevelForModel(base, "ultra"), "max");
   });
 
   it("changes only thinkingLevel in the LLM config", () => {
@@ -105,20 +118,24 @@ describe("thinking intensity model levels", () => {
     assert.equal(getDefaultIntensity({ DEFAULT_THINKING_INTENSITY: "unsupported" }), "med");
   });
 
-  it("cycles supported levels directly without wrapping", () => {
+  it("cycles all user-facing levels directly without wrapping", () => {
     const config = { reasoning: true, piModel: undefined, thinkingLevel: "medium" as const };
-    assert.deepEqual(getThinkingLevelChoices(config), ["minimal", "low", "medium", "high"]);
+    assert.deepEqual(getThinkingLevelChoices(config), [
+      "minimal", "low", "medium", "high", "ultra",
+    ]);
     assert.equal(cycleThinkingLevel(config, "increase"), "high");
     assert.equal(cycleThinkingLevel(config, "decrease"), "low");
     assert.equal(cycleThinkingLevel({ ...config, thinkingLevel: "max" }, "increase"), "minimal");
+    assert.equal(cycleThinkingLevel({ ...config, thinkingLevel: "ultra" }, "increase"), "ultra");
     assert.equal(cycleThinkingLevel({ ...config, thinkingLevel: "minimal" }, "decrease"), "minimal");
     assert.equal(thinkingLevelToDisplay("xhigh"), "极高");
+    assert.equal(thinkingLevelToDisplay("ultra"), "超限");
   });
 
   it("supports a one-key wrapped cycle for quick switching", () => {
     const config = { reasoning: true, piModel: undefined, thinkingLevel: "high" as const };
-    assert.equal(cycleThinkingLevel(config, "increase", { wrap: true }), "minimal");
-    assert.equal(cycleThinkingLevel({ ...config, thinkingLevel: "minimal" }, "decrease", { wrap: true }), "high");
+    assert.equal(cycleThinkingLevel(config, "increase", { wrap: true }), "ultra");
+    assert.equal(cycleThinkingLevel({ ...config, thinkingLevel: "minimal" }, "decrease", { wrap: true }), "ultra");
   });
 
   it("keeps non-reasoning models disabled", () => {
@@ -155,14 +172,47 @@ describe("thinking intensity model levels", () => {
         },
       },
     } as Parameters<typeof getThinkingLevelChoices>[0];
-    assert.deepEqual(getThinkingLevelChoices(config), ["minimal", "low", "medium", "high"]);
+    assert.deepEqual(getThinkingLevelChoices(config), ["minimal", "low", "medium", "high", "ultra"]);
     assert.equal(clampThinkingLevelForModel(config, "xhigh"), "high");
 
     const explicitMax = {
       reasoning: true,
       piModel: { thinkingLevelMap: { xhigh: null, max: "max" } },
     } as Parameters<typeof getThinkingLevelChoices>[0];
-    assert.deepEqual(getThinkingLevelChoices(explicitMax), ["minimal", "low", "medium", "high", "max"]);
+    assert.deepEqual(getThinkingLevelChoices(explicitMax), ["minimal", "low", "medium", "high", "max", "ultra"]);
     assert.equal(clampThinkingLevelForModel(explicitMax, "xhigh"), "max");
+  });
+
+  it("keeps unsupported provider levels selectable while clamping requests", () => {
+    const withoutUltra = {
+      reasoning: true,
+      piModel: { thinkingLevelMap: { xhigh: "xhigh", max: "max" } },
+    } as Parameters<typeof getThinkingLevelChoices>[0];
+    assert.deepEqual(getThinkingLevelChoices(withoutUltra), [
+      "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    ]);
+    assert.equal(clampThinkingLevelForModel(withoutUltra, "ultra"), "max");
+    assert.equal(
+      cycleThinkingLevel({ ...withoutUltra, thinkingLevel: "max" }, "increase"),
+      "ultra",
+    );
+    assert.equal(
+      cycleThinkingLevel({ ...withoutUltra, thinkingLevel: "max" }, "increase", { wrap: true }),
+      "ultra",
+    );
+
+    const withUltra = {
+      reasoning: true,
+      piModel: { thinkingLevelMap: { xhigh: "xhigh", max: "max", ultra: "ultra" } },
+    } as Parameters<typeof getThinkingLevelChoices>[0];
+    assert.deepEqual(getThinkingLevelChoices(withUltra), [
+      "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    ]);
+    assert.equal(clampThinkingLevelForModel(withUltra, "ultra"), "ultra");
+    assert.equal(cycleThinkingLevel({ ...withUltra, thinkingLevel: "max" }, "increase"), "ultra");
+  });
+
+  it("labels ultra consistently for the status bar", () => {
+    assert.equal(thinkingLevelToDisplay("ultra"), "超限");
   });
 });

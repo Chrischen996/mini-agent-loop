@@ -82,6 +82,15 @@ export async function runValidation(options: ValidationOptions): Promise<Validat
 }
 
 export function formatValidationReport(report: ValidationReport): string {
-  if (report.steps.length === 0) return "No validation scripts configured (test/typecheck/build).";
-  return report.steps.map((step) => `# ${step.name}: ${step.ok ? "PASS" : "FAIL"}\n${step.output.slice(-1_000)}`).join("\n\n");
+  if (report.steps.length === 0) {
+    return `Validation: SKIPPED\nWorkspace: ${report.workspace}\nNo validation scripts configured (test/typecheck/build).`;
+  }
+
+  const status = report.ok ? "PASS" : "FAIL";
+  const steps = report.steps.map((step) => {
+    const command = [step.command, ...step.args].join(" ");
+    const exitCode = step.exitCode === undefined ? "" : `\nExit code: ${step.exitCode}`;
+    return `## ${step.name}: ${step.ok ? "PASS" : "FAIL"}\nCommand: ${command}${exitCode}\n${step.output.slice(-1_000)}`;
+  });
+  return [`Validation: ${status}`, `Workspace: ${report.workspace}`, ...steps].join("\n\n");
 }

@@ -10,6 +10,7 @@ import {
 } from "../hermes/format-adapter.ts";
 import type { Tool } from "../tools/types.ts";
 import type { AgentMessage, AssistantMessage } from "../types.ts";
+import type { ThinkingLevel } from "../pi-ai/types.ts";
 import {
   type LlmConfig,
   requestTimeout,
@@ -29,6 +30,7 @@ import {
   fromPiAssistant,
 } from "./wire.ts";
 import { prepareMessagesForModel } from "./vision.ts";
+import { clampThinkingLevelForModel } from "../think-intensity.ts";
 import {
   isAbortError,
   throwIfAborted,
@@ -42,10 +44,11 @@ import {
   OutputTruncatedError,
 } from "./retry.ts";
 
-function reasoningOption(config: LlmConfig): "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | undefined {
+function reasoningOption(config: LlmConfig): ThinkingLevel | undefined {
   const level = config.thinkingLevel ?? (config.reasoning ? "medium" : "off");
   if (!config.reasoning || level === "off") return undefined;
-  return level;
+  const clamped = clampThinkingLevelForModel(config, level);
+  return clamped === "off" ? undefined : clamped;
 }
 
 function addReasoningOption(body: Record<string, unknown>, config: LlmConfig): void {

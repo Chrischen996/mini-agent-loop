@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -192,6 +192,100 @@ describe("SessionStore", () => {
       const restored = await new SessionStore(root).loadAll();
       assert.deepEqual(restored.get(sessionId)?.todos, []);
       assert.equal(restored.get(sessionId)?.todoVersion, 0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("compacts events.jsonl to a single snapshot after the threshold", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-compact-"));
+    try {
+      const store = new SessionStore(root, { compactThreshold: 3 });
+      const session = {
+        id: "compact-session",
+        createdAt: Date.now(),
+        messages: [{ role: "user" as const, content: "v1" }],
+      };
+      await store.create(session);
+      for (const version of ["v2", "v3", "v4", "v5"]) {
+        session.messages = [{ role: "user" as const, content: version }];
+        await store.save(session);
+      }
+
+      const raw = await readFile(path.join(root, session.id, "events.jsonl"), "utf8");
+      const lines = raw.split("\n").filter((line) => line.trim().length > 0);
+      assert.ok(lines.length < 5, `expected compaction, got ${lines.length} lines`);
+      // The surviving snapshot must be the latest state.
+      const restored = await new SessionStore(root).loadAll();
+      assert.deepEqual(restored.get(session.id)?.messages, [
+        { role: "user", content: "v5" },
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("loads a single session by id via load()", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-load-"));
+    try {
+      const store = new SessionStore(root);
+      const session = {
+        id: "single-session",
+        createdAt: Date.now(),
+        messages: [{ role: "user" as const, content: "hello" }],
+      };
+      await store.create(session);
+
+      const loaded = await store.load("single-session");
+      assert.equal(loaded?.id, "single-session");
+      assert.deepEqual(loaded?.messages, session.messages);
+      assert.equal(await store.load("missing-session"), undefined);
+      // Path traversal attempts are rejected.
+      assert.equal(await store.load("../escape"), undefined);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("lists sessions most-recently-active first with previews", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-list-"));
+    try {
+      const store = new SessionStore(root);
+      const older = { id: "older", createdAt: Date.now() - 10_000, messages: [{ role: "user" as const, content: "first question" }] };
+      const newer = { id: "newer", createdAt: Date.now() - 20_000, messages: [{ role: "user" as const, content: "second question" }] };
+      await store.create(older);
+      // Ensure distinct lastActiveAt ordering despite coarse timestamps.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await store.create(newer);
+
+      const list = await store.listSessions();
+      assert.equal(list.length, 2);
+      assert.equal(list[0]!.id, "newer", "most recently active should be first");
+      assert.equal(list[0]!.preview, "second question");
+      assert.ok(list[0]!.lastActiveAt >= list[1]!.lastActiveAt);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("round-trips lastActiveAt and evicts by recency over maxSessions", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-recency-"));
+    try {
+      const store = new SessionStore(root);
+      const stale = { id: "stale", createdAt: Date.now() - 30_000, messages: [] };
+      const freshOld = { id: "fresh-old", createdAt: Date.now() - 20_000, messages: [] };
+      await store.create(stale);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await store.create(freshOld);
+      // Refresh the stale session so its lastActiveAt is now the newest even
+      // though createdAt is oldest — eviction must keep it.
+      await store.save(stale);
+
+      const loaded = await new SessionStore(root, { maxSessions: 1 }).loadAll();
+      assert.equal(loaded.size, 1);
+      assert.equal(loaded.has("stale"), true, "recently-active session should survive");
+      const restored = loaded.get("stale")!;
+      assert.ok(restored.lastActiveAt !== undefined, "lastActiveAt should round-trip");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

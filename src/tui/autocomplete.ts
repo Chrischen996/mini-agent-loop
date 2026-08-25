@@ -51,6 +51,11 @@ export function matchSlashCommands(
   return commands.filter((command) => command.name.startsWith(typed));
 }
 
+/** A fully typed slash command should submit instead of reopening its picker. */
+export function isExactSlashCommand(input: string, commandName: string): boolean {
+  return input.trim().toLowerCase() === `/${commandName.trim().toLowerCase()}`;
+}
+
 /**
  * Query for an inline `/model …` line.
  * Returns `null` when the input is not a model command (bare `/model` is

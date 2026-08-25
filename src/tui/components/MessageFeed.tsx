@@ -5,6 +5,7 @@ import type { ChatMessage, ThinkingDisplayMode } from "../state.ts";
 import { SubagentCard } from "./SubagentCard.tsx";
 import { TUI_COLORS as C } from "../theme.ts";
 import { selectMessageViewport } from "../message-viewport.ts";
+import { MarkdownText } from "./MarkdownText.tsx";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -14,22 +15,6 @@ const THINKING_MAX_FULL_LINES = 30;
 
 function str(v: unknown): string {
   return typeof v === "string" ? v : "";
-}
-
-/**
- * Format assistant message text for better readability in TUI.
- * Enhances markdown-style formatting with terminal-friendly alternatives.
- */
-function formatAssistantText(raw: string): string {
-  return raw
-    // ## Headers → with separator lines
-    .replace(/^## (.+)$/gm, "\n━━━ $1 ━━━")
-    // ### Subheaders → with arrow prefix
-    .replace(/^### (.+)$/gm, "\n▸ $1")
-    // **bold** → brackets (more visible in plain text)
-    .replace(/\*\*([^*]+)\*\*/g, "【$1】")
-    // Horizontal rule --- → full-width line
-    .replace(/^---+$/gm, "─".repeat(60));
 }
 
 function previewLines(text: string, max = 10): string[] {
@@ -533,13 +518,20 @@ export function MessageFeed({
         if (msg.kind === "user") {
           return (
             <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
-              <Box marginBottom={0} gap={1} flexDirection="column">
-                <Box gap={1}>
+              <Box
+                marginBottom={0}
+                flexDirection="column"
+                borderStyle="round"
+                borderColor={C.user}
+                paddingX={1}
+                marginTop={1}
+              >
+                <Box gap={1} marginTop={1}>
                   <Text color={C.user} bold>{">"}</Text>
                   <Text color={C.assistant}>{msg.displayText ?? msg.text}</Text>
                 </Box>
                 {msg.images?.length ? (
-                  <Box marginLeft={2} gap={1}>
+                  <Box marginLeft={2} marginTop={1} gap={1}>
                     {msg.images.map((image) => (
                       <Text key={image.path} color={C.info}>[image: {image.path.split("/").pop()}]</Text>
                     ))}
@@ -550,19 +542,23 @@ export function MessageFeed({
           );
         }
         if (msg.kind === "assistant") {
-          const formattedText = msg.text ? formatAssistantText(msg.text) : "";
           return (
             <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
-              <Box marginBottom={0} flexDirection="column">
-                {msg.reasoning && (
-                  <ThinkingBlock
-                    content={msg.reasoning}
-                    mode={effectiveMode}
-                    forceExpanded={expandedSet.has(absoluteIndex)}
-                    focused={focusedMessageIndex === absoluteIndex}
-                  />
-                )}
-                {formattedText && <Text color={C.assistant} wrap="wrap">{formattedText}</Text>}
+              <Box marginBottom={0} flexDirection="column" marginTop={1}>
+                <Box flexDirection="row">
+                  <Text color={C.gutter}>⎿ </Text>
+                  <Box flexDirection="column" flexGrow={1}>
+                    {msg.reasoning && (
+                      <ThinkingBlock
+                        content={msg.reasoning}
+                        mode={effectiveMode}
+                        forceExpanded={expandedSet.has(absoluteIndex)}
+                        focused={focusedMessageIndex === absoluteIndex}
+                      />
+                    )}
+                    {msg.text && <MarkdownText text={msg.text} />}
+                  </Box>
+                </Box>
               </Box>
             </ViewportSlice>
           );
@@ -573,8 +569,12 @@ export function MessageFeed({
         if (msg.kind === "notice") {
           return (
             <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
-              <Box flexDirection="column" borderStyle="single" borderColor={C.info} paddingX={1}>
-                {msg.title && <Text color={C.info} bold>{msg.title}</Text>}
+              <Box flexDirection="column" paddingX={1}>
+                {msg.title && (
+                  <Text color={C.info} dimColor>
+                    {"─".repeat(6)} {msg.title} {"─".repeat(6)}
+                  </Text>
+                )}
                 <Text color={C.assistant}>{msg.text}</Text>
               </Box>
             </ViewportSlice>

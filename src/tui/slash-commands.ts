@@ -1,4 +1,4 @@
-import { parseTodoCommand, type TodoCommand } from "./todo-commands.ts";
+import { parseLegacyTodoCommand, type LegacyTodoCommand } from "./todo-commands.ts";
 
 export type SlashCommand =
   | { cmd: "read"; path: string }
@@ -6,7 +6,7 @@ export type SlashCommand =
   | { cmd: "ls"; path: string }
   | { cmd: "find"; pattern: string; path: string }
   | { cmd: "grep"; pattern: string; path: string }
-  | { cmd: "todo"; todo: TodoCommand }
+  | { cmd: "todo"; todo: LegacyTodoCommand }
   | null;
 
 export function parseSlashCommand(input: string): SlashCommand {
@@ -16,7 +16,7 @@ export function parseSlashCommand(input: string): SlashCommand {
   const cmd = parts[0]?.toLowerCase();
   switch (cmd) {
     case "todo": {
-      const todo = parseTodoCommand(s);
+      const todo = parseLegacyTodoCommand(s);
       return todo ? { cmd: "todo", todo } : null;
     }
     case "read": { const path = parts.slice(1).join(" "); return path ? { cmd: "read", path } : null; }

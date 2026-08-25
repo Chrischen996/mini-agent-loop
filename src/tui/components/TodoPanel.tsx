@@ -1,63 +1,70 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { TodoItem } from "../../tools/todo.ts";
 import { TUI_COLORS as C } from "../theme.ts";
+import type { PlanDocument } from "../../plan/document.ts";
+import type { TodoItem, TodoViewMode } from "../../todo.ts";
+import { todoSummary } from "../../todo.ts";
+import {
+  resolveTodoItems,
+  todoColor,
+  todoIcon,
+  todoText,
+  TODO_PLAN_STATUS_LABELS,
+  TODO_PANEL_MAX_VISIBLE_ITEMS,
+} from "../todo-format.ts";
 
-export const MAX_VISIBLE_TODOS = 6;
+type TodoPanelProps = {
+  plan?: PlanDocument;
+  todos?: readonly TodoItem[];
+  viewMode?: TodoViewMode;
+  maxVisibleItems?: number;
+};
 
-function statusIcon(status: TodoItem["status"]): string {
-  if (status === "completed") return "✓";
-  if (status === "in_progress") return "▶";
-  return "○";
-}
-
-function displayContent(todo: TodoItem): string {
-  return todo.status === "in_progress" && todo.activeForm
-    ? todo.activeForm
-    : todo.content;
-}
-
-export function formatTodoPanel(todos: TodoItem[]): string[] {
-  if (todos.length === 0) return [];
-
-  const completed = todos.filter((todo) => todo.status === "completed").length;
-  const visible = todos.slice(0, MAX_VISIBLE_TODOS);
-  const lines = [
-    `TODO ${completed}/${todos.length}`,
-    ...visible.map((todo) => `  ${statusIcon(todo.status)} ${displayContent(todo)}`),
-  ];
-  const remaining = todos.length - visible.length;
-  if (remaining > 0) lines.push(`  … ${remaining} more`);
-  return lines;
-}
-
-export function getTodoPanelRows(todos: TodoItem[]): number {
-  return formatTodoPanel(todos).length;
-}
-
-function statusColor(status: TodoItem["status"]): string {
-  if (status === "completed") return C.success;
-  if (status === "in_progress") return C.running;
-  return C.muted;
-}
-
-export function TodoPanel({ todos, width }: { todos: TodoItem[]; width: number }): React.ReactElement | null {
-  const lines = formatTodoPanel(todos);
-  if (lines.length === 0) return null;
+export function TodoPanel({
+  plan,
+  todos,
+  viewMode = "expanded",
+  maxVisibleItems = TODO_PANEL_MAX_VISIBLE_ITEMS,
+}: TodoPanelProps): React.ReactElement | null {
+  if (viewMode === "hidden" || (!plan && !todos)) return null;
+  const items = resolveTodoItems({ plan, todos });
+  const summary = todoSummary(items);
+  const visibleItems = viewMode === "compact" ? [] : items.slice(0, maxVisibleItems);
+  const remaining = items.length - visibleItems.length;
+  const planStatus = plan ? ` [${TODO_PLAN_STATUS_LABELS[plan.status]}]` : "";
 
   return (
-    <Box flexDirection="column" width={width} paddingX={1}>
-      <Text color={C.primary} bold>{lines[0]}</Text>
-      {todos.slice(0, MAX_VISIBLE_TODOS).map((todo) => (
-        <Text key={todo.id} color={statusColor(todo.status)} wrap="truncate-end">
-          {`  ${statusIcon(todo.status)} ${displayContent(todo)}`}
+    <Box flexDirection="column" paddingX={1} flexShrink={0}>
+      <Box gap={1}>
+        <Text color={C.info} bold>TODO</Text>
+        <Text dimColor>{summary.completed}/{summary.total} 已完成</Text>
+        {summary.inProgress > 0 && <Text color={C.running}>{summary.inProgress} 执行中</Text>}
+        {summary.failed > 0 && <Text color={C.error}>{summary.failed} 失败</Text>}
+        {planStatus && <Text color={C.info}>{planStatus}</Text>}
+      </Box>
+      {viewMode === "compact" ? (
+        <Text dimColor>
+          {items.find((item) => item.status === "in_progress")?.activeForm ??
+            (items.length > 0 ? "任务列表已折叠" : "暂无结构化任务")}
         </Text>
-      ))}
-      {todos.length > MAX_VISIBLE_TODOS && (
-        <Text color={C.muted} wrap="truncate-end">
-          {`  … ${todos.length - MAX_VISIBLE_TODOS} more`}
-        </Text>
+      ) : visibleItems.length === 0 ? (
+        <Text dimColor>暂无结构化任务</Text>
+      ) : (
+        visibleItems.map((item) => (
+          <Box key={item.id} gap={1}>
+            <Text color={todoColor(item.status)}>{todoIcon(item.status)}</Text>
+            <Text
+              color={item.status === "completed" ? C.success : undefined}
+              dimColor={item.status === "skipped"}
+              strikethrough={item.status === "completed"}
+              wrap="truncate-end"
+            >
+              {todoText(item.content)}
+            </Text>
+          </Box>
+        ))
       )}
+      {viewMode === "expanded" && remaining > 0 && <Text dimColor>... 还有 {remaining} 项</Text>}
     </Box>
   );
 }

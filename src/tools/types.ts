@@ -1,4 +1,5 @@
 import type { MessageContent } from "../types.ts";
+import type { TodoItem } from "../todo.ts";
 
 export type JsonSchema = Record<string, unknown>;
 
@@ -7,6 +8,8 @@ export type ToolResult = {
   content: MessageContent;
   isError?: boolean;
   files?: FileArtifact[];
+  /** Structured session-state update consumed by the agent loop. */
+  todoUpdate?: TodoItem[];
 };
 
 export type FileArtifact = {

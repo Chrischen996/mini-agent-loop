@@ -17,4 +17,6 @@ export const TUI_COLORS = {
   success: "#9bc7a5",      // sage for completed work
   error: "#df8790",        // muted coral for errors and rejected actions
   badgeText: "#1c2126",    // readable text on status badges
+  userBg: "#1e2a36",       // dark blue for user message background (Claude Code style)
+  gutter: "#4b5563",       // dim gray for message gutter (⎿ marker)
 } as const;
