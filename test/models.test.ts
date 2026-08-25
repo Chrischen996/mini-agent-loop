@@ -307,6 +307,73 @@ describe("model selection", () => {
     assert.equal(custom?.contextWindow, 64000);
   });
 
+  it("parses per-model timeout overrides from MINI_AGENT_MODELS", () => {
+    const env = {
+      CUSTOM_LLM_KEY: "test",
+      MINI_AGENT_MODELS: JSON.stringify([
+        {
+          provider: "slow-gateway",
+          id: "slow-thinker",
+          baseUrl: "https://slow.example/v1",
+          apiKeyEnv: "CUSTOM_LLM_KEY",
+          timeoutMs: 600_000,
+          firstResponseTimeoutMs: 300_000,
+          streamIdleTimeoutMs: 180_000,
+        },
+        {
+          provider: "bad-gateway",
+          id: "invalid-timeouts",
+          baseUrl: "https://bad.example/v1",
+          apiKeyEnv: "CUSTOM_LLM_KEY",
+          timeoutMs: -5,
+          streamIdleTimeoutMs: "not-a-number",
+        },
+      ]),
+    };
+    const slow = getAvailableModels(env).find((model) => model.provider === "slow-gateway");
+    assert.equal(slow?.timeoutMs, 600_000);
+    assert.equal(slow?.firstResponseTimeoutMs, 300_000);
+    assert.equal(slow?.streamIdleTimeoutMs, 180_000);
+
+    // Invalid values are dropped rather than poisoning the catalog.
+    const bad = getAvailableModels(env).find((model) => model.provider === "bad-gateway");
+    assert.equal(bad?.timeoutMs, undefined);
+    assert.equal(bad?.firstResponseTimeoutMs, undefined);
+    assert.equal(bad?.streamIdleTimeoutMs, undefined);
+  });
+
+  it("keeps custom model timeout values available to LLM config resolution", async () => {
+    const originalModels = process.env.MINI_AGENT_MODELS;
+    const originalKey = process.env.CUSTOM_LLM_KEY;
+    process.env.CUSTOM_LLM_KEY = "test";
+    process.env.MINI_AGENT_MODELS = JSON.stringify([{
+      provider: "custom-timeout-gateway",
+      id: "slow-custom-model",
+      baseUrl: "https://slow.example/v1",
+      apiKeyEnv: "CUSTOM_LLM_KEY",
+      timeoutMs: 600_000,
+      firstResponseTimeoutMs: 300_000,
+      streamIdleTimeoutMs: 180_000,
+    }]);
+
+    try {
+      const { makeLlmConfig, timeoutLimitForPhase } = await import("../src/llm/index.ts?t=" + Date.now());
+      const config = makeLlmConfig({
+        apiKey: "test",
+        baseUrl: "https://slow.example/v1",
+        model: "custom-timeout-gateway/slow-custom-model",
+      });
+      assert.equal(timeoutLimitForPhase(config, "total"), 600_000);
+      assert.equal(timeoutLimitForPhase(config, "first_response"), 300_000);
+      assert.equal(timeoutLimitForPhase(config, "stream_idle"), 180_000);
+    } finally {
+      if (originalModels === undefined) delete process.env.MINI_AGENT_MODELS;
+      else process.env.MINI_AGENT_MODELS = originalModels;
+      if (originalKey === undefined) delete process.env.CUSTOM_LLM_KEY;
+      else process.env.CUSTOM_LLM_KEY = originalKey;
+    }
+  });
+
   it("searchModels returns all models for an empty query", () => {
       const all = getAllModels();
       assert.equal(searchModels("").length, all.length);

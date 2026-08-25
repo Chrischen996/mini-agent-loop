@@ -27,6 +27,18 @@ export type LegacyNotice = {
   text: string;
 };
 
+/** One auto-memory extraction outcome, rendered as an inline card. */
+export type MemoryUpdateEvent = {
+  /** Memory keys created or updated. */
+  added: string[];
+  /** Memory keys marked forgotten. */
+  forgotten: string[];
+  /** Wall-clock time of the update. */
+  at: number;
+  /** Optional key→content previews for richer display. */
+  previews?: Record<string, string>;
+};
+
 export type LegacyTuiState = {
   history: AgentMessage[];
   streamingText: string;
@@ -42,6 +54,8 @@ export type LegacyTuiState = {
   todoRevision?: number;
   todoViewMode?: TodoViewMode;
   notice?: LegacyNotice;
+  /** Auto-memory updates from completed turns, rendered as inline cards. */
+  memoryEvents?: MemoryUpdateEvent[];
 };
 
 const ANSI = {
@@ -105,6 +119,25 @@ function appendTodoLines(
   }
 }
 
+function appendMemoryCards(lines: string[], events: MemoryUpdateEvent[] | undefined): void {
+  if (!events || events.length === 0) return;
+  for (const event of events.slice(-3)) {
+    const time = new Date(event.at).toLocaleTimeString("zh-CN", { hour12: false });
+    lines.push(`${ANSI.cyan}┌─ 🧠 记忆已更新 ${ANSI.dim}${time}${ANSI.reset}`);
+    const rows: string[] = [];
+    for (const key of event.added) {
+      const preview = event.previews?.[key] ? ` ${ANSI.dim}— ${short(event.previews[key]!, 60)}${ANSI.reset}` : "";
+      rows.push(`${ANSI.green}+${ANSI.reset} ${key}${preview}`);
+    }
+    for (const key of event.forgotten) {
+      rows.push(`${ANSI.red}−${ANSI.reset} ${key} ${ANSI.dim}(已遗忘)${ANSI.reset}`);
+    }
+    if (rows.length === 0) rows.push(`${ANSI.dim}(无需更新)${ANSI.reset}`);
+    lines.push(...rows);
+    lines.push(`${ANSI.cyan}└${ANSI.reset}${ANSI.dim} 下轮对话自动生效 · /memory 查看${ANSI.reset}`);
+  }
+}
+
 export function buildLegacyFrameLines(state: LegacyTuiState): string[] {
   const lines: string[] = [
     `${ANSI.cyan}mini-agent TUI${ANSI.reset} ${ANSI.dim}(Ctrl+R 快切思考，Shift+↑↓ 精调，Shift+Tab 切换权限，输入 /clear 清空会话)${ANSI.reset}`,
@@ -121,6 +154,8 @@ export function buildLegacyFrameLines(state: LegacyTuiState): string[] {
     appendTodoLines(lines, state.todoPlan, state.todoItems, state.todoViewMode ?? "expanded");
     lines.push("");
   }
+
+  appendMemoryCards(lines, state.memoryEvents);
 
   if (state.notice) {
     if (state.notice.title) lines.push(`${ANSI.cyan}${state.notice.title}:${ANSI.reset}`);

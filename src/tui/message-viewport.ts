@@ -66,7 +66,8 @@ export function estimateMessageHeight(
           countTerminalRows(message.text, Math.max(10, width - 2)),
       );
     case "notice":
-      return 2 + (message.title ? 1 : 0) + Math.max(1, countTerminalRows(message.text, Math.max(10, width - 4)));
+      // Divider-style notice: optional title row + one text row (no border box).
+      return (message.title ? 1 : 0) + Math.max(1, countTerminalRows(message.text, Math.max(10, width - 2)));
     case "tool_call":
       return 1 + (message.result
         ? Math.min(TOOL_PREVIEW_LINES, countTerminalRows(message.result, Math.max(10, width - 4)))

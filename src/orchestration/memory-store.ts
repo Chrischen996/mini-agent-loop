@@ -2,6 +2,9 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
+/** Maximum retained records before LRU forgetting kicks in. */
+const MAX_RECORDS = 500;
+
 export type MemoryScope = "user" | "project" | "directory" | "task";
 export type MemoryStatus = "candidate" | "confirmed" | "forgotten";
 
@@ -77,6 +80,53 @@ export class MemoryStore {
     return record;
   }
 
+  /**
+   * Create or update a memory identified by (scope, key). Used by the
+   * turn-end auto-memory extractor so repeated observations of the same
+   * fact refresh a single record instead of accumulating duplicates.
+   */
+  async upsertByKey(
+    scope: MemoryScope,
+    key: string,
+    content: string,
+    source?: string,
+    status: MemoryStatus = "confirmed",
+  ): Promise<MemoryRecord> {
+    await this.load();
+    const normalizedKey = key.trim().toLowerCase();
+    const now = Date.now();
+    const existing = this.records.find(
+      (record) => record.scope === scope && record.key.toLowerCase() === normalizedKey && record.status !== "forgotten",
+    );
+    if (existing) {
+      existing.content = content;
+      existing.updatedAt = now;
+      if (source) existing.source = source;
+      await this.enforceCapacity();
+      await this.persist();
+      return existing;
+    }
+    const record = await this.add({ scope, key: normalizedKey, content, source, status });
+    await this.enforceCapacity();
+    return record;
+  }
+
+  /**
+   * Cap total records; when exceeded, forget the least-recently-used
+   * records until under the cap.
+   */
+  private async enforceCapacity(maxRecords = MAX_RECORDS): Promise<void> {
+    if (this.records.length <= maxRecords) return;
+    const excess = this.records.length - maxRecords;
+    const byLru = [...this.records]
+      .filter((record) => record.status !== "forgotten")
+      .sort((a, b) => (a.lastUsedAt ?? a.updatedAt) - (b.lastUsedAt ?? b.updatedAt));
+    for (const record of byLru.slice(0, excess)) {
+      record.status = "forgotten";
+      record.updatedAt = Date.now();
+    }
+  }
+
   async confirm(id: string): Promise<MemoryRecord | undefined> {
     return this.updateStatus(id, "confirmed");
   }
@@ -93,6 +143,20 @@ export class MemoryStore {
       "### Confirmed Project Memory",
       ...confirmed.map((record) => `- ${record.key}: ${record.content}`),
     ].join("\n");
+  }
+
+  /**
+   * Full memory digest for system-prompt injection (Claude Code-style
+   * MEMORY.md index). Includes all non-forgotten records regardless of
+   * confirmation status, capped by count.
+   */
+  async buildSystemMemoryPrompt(options: { limit?: number } = {}): Promise<string> {
+    const records = await this.list({ includeForgotten: false });
+    const selected = records
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, options.limit ?? 30);
+    if (selected.length === 0) return "";
+    return selected.map((record) => `- ${record.key}: ${record.content}`).join("\n");
   }
 
   private async updateStatus(id: string, status: MemoryStatus): Promise<MemoryRecord | undefined> {

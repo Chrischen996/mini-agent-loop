@@ -123,17 +123,39 @@ function configuredTimeout(raw: string | undefined, fallback: number): number {
   return Number.isFinite(value) && value >= 1_000 ? Math.floor(value) : fallback;
 }
 
+/**
+ * Resolve the total request timeout.
+ *
+ * Precedence: explicit config override → per-model catalog value →
+ * `MINI_AGENT_REQUEST_TIMEOUT_MS` env → built-in default (120s).
+ */
 export function requestTimeout(config: LlmConfig): number {
-  return config.timeoutMs ?? configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS);
+  return config.timeoutMs
+    ?? config.piModel?.timeoutMs
+    ?? configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS);
 }
 
+/**
+ * Resolve the first-response timeout.
+ *
+ * Precedence: explicit config override → per-model catalog value →
+ * `MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS` env → total request timeout.
+ */
 export function firstResponseTimeout(config: LlmConfig): number {
   return config.firstResponseTimeoutMs
+    ?? config.piModel?.firstResponseTimeoutMs
     ?? configuredTimeout(process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS, requestTimeout(config));
 }
 
+/**
+ * Resolve the stream-idle timeout.
+ *
+ * Precedence: explicit config override → per-model catalog value →
+ * `MINI_AGENT_STREAM_IDLE_TIMEOUT_MS` env → built-in default (60s).
+ */
 export function streamIdleTimeout(config: LlmConfig): number {
   return config.streamIdleTimeoutMs
+    ?? config.piModel?.streamIdleTimeoutMs
     ?? configuredTimeout(process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS, DEFAULT_STREAM_IDLE_TIMEOUT_MS);
 }
 
@@ -271,10 +293,6 @@ export function loadDotEnvFile(
 
 export function loadLlmConfigFromEnv(): LlmConfig {
   loadDotEnvFile();
-  const timeoutMs = configuredTimeout(process.env.MINI_AGENT_REQUEST_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS);
-  const firstResponseTimeoutMs = configuredTimeout(process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS, timeoutMs);
-  const streamIdleTimeoutMs = configuredTimeout(process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS, DEFAULT_STREAM_IDLE_TIMEOUT_MS);
-
   // ── 1. Active profile (highest precedence) ─────────────────────────────────
   const profileStore = loadProfileStoreSync();
   const activeProfile = profileStore ? getActiveProfile(profileStore) : null;
@@ -291,9 +309,9 @@ export function loadLlmConfigFromEnv(): LlmConfig {
       capabilities: resolved.capabilities,
       contextWindow: resolved.contextWindow,
       maxTokens: resolveOutputTokenLimit(resolved.maxTokens, resolved.contextWindow),
-      timeoutMs,
-      firstResponseTimeoutMs,
-      streamIdleTimeoutMs,
+      timeoutMs: activeProfile.timeoutMs ?? resolved.timeoutMs,
+      firstResponseTimeoutMs: activeProfile.firstResponseTimeoutMs ?? resolved.firstResponseTimeoutMs,
+      streamIdleTimeoutMs: activeProfile.streamIdleTimeoutMs ?? resolved.streamIdleTimeoutMs,
       piModel: resolved.piModel,
       reasoning: resolved.reasoning,
       compat: resolved.compat,
@@ -362,9 +380,9 @@ export function loadLlmConfigFromEnv(): LlmConfig {
     capabilities: resolved.capabilities,
     contextWindow: resolved.contextWindow,
     maxTokens: resolveOutputTokenLimit(resolved.maxTokens, resolved.contextWindow),
-    timeoutMs,
-    firstResponseTimeoutMs,
-    streamIdleTimeoutMs,
+    timeoutMs: resolved.timeoutMs,
+    firstResponseTimeoutMs: resolved.firstResponseTimeoutMs,
+    streamIdleTimeoutMs: resolved.streamIdleTimeoutMs,
     piModel: resolved.piModel,
     reasoning: resolved.reasoning,
     compat: resolved.compat,
@@ -417,9 +435,9 @@ export function makeLlmConfig(
       partial.contextWindow ?? resolved.contextWindow,
       partial.maxTokens,
     ),
-    timeoutMs: partial.timeoutMs,
-    firstResponseTimeoutMs: partial.firstResponseTimeoutMs,
-    streamIdleTimeoutMs: partial.streamIdleTimeoutMs,
+    timeoutMs: partial.timeoutMs ?? resolved.timeoutMs,
+    firstResponseTimeoutMs: partial.firstResponseTimeoutMs ?? resolved.firstResponseTimeoutMs,
+    streamIdleTimeoutMs: partial.streamIdleTimeoutMs ?? resolved.streamIdleTimeoutMs,
     piModel: resolved.piModel,
     reasoning: partial.reasoning ?? resolved.reasoning,
     compat: partial.compat ?? resolved.compat,
@@ -467,6 +485,9 @@ export function switchLlmModel(
       `Missing API key for model ${resolved.id}. Set one of: ${resolved.apiKeyEnv.join(", ")}.`,
     );
   }
+  // Adopt the target model's catalog timeout overrides. Explicitly clear any
+  // inherited values so switching away from a slow-thinking model back to a
+  // normal one does not keep its longer deadlines.
   const next: LlmConfig = {
     ...config,
     apiKey: effectiveApiKey ?? "",
@@ -491,6 +512,9 @@ export function switchLlmModel(
     // Inherit sessionId and cacheRetention from current config or env
     sessionId: config.sessionId ?? process.env.MINI_AGENT_SESSION_ID,
     cacheRetention: config.cacheRetention ?? (process.env.MINI_AGENT_CACHE_RETENTION as CacheRetention | undefined),
+    timeoutMs: resolved.timeoutMs,
+    firstResponseTimeoutMs: resolved.firstResponseTimeoutMs,
+    streamIdleTimeoutMs: resolved.streamIdleTimeoutMs,
   };
 
   // Apply relay for the new model if a registry is provided

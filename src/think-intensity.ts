@@ -124,7 +124,11 @@ export function getThinkingLevelChoices(
 ): ModelThinkingLevel[] {
   if (!config.reasoning) return ["off"];
   const mapped = THINKING_LEVEL_ORDER.filter((level) => modelSupportsLevel(config, level));
-  return mapped.length > 0 ? [...mapped] : ["medium"];
+  if (mapped.length === 0) return ["medium", "ultra"];
+  if (mapped.includes("ultra")) return [...mapped];
+  // Keep ultra available to the user-facing control; request construction still
+  // clamps it to the nearest mapped provider level when unsupported.
+  return [...mapped, "ultra"];
 }
 
 /** Move one effort step without changing provider or model. */
@@ -153,7 +157,7 @@ export function clampThinkingLevelForModel(
   requested: ModelThinkingLevel,
 ): ModelThinkingLevel {
   if (!config.reasoning || requested === "off") return "off";
-  const choices = new Set(getThinkingLevelChoices(config));
+  const choices = new Set(THINKING_LEVEL_ORDER.filter((level) => modelSupportsLevel(config, level)));
   return clampToAvailableLevels(requested, (candidate) => choices.has(candidate));
 }
 
@@ -173,7 +177,9 @@ export function buildIntenseLlm(base: LlmConfig, intensity: ThinkingIntensity): 
 export function withThinkingLevel(base: LlmConfig, level: ModelThinkingLevel): ThinkingLlmConfig {
   return {
     ...base,
-    thinkingLevel: clampThinkingLevelForModel(base, level),
+    // Keep the user-selected level for the TUI/status bar. Provider-specific
+    // capability clamping happens immediately before request construction.
+    thinkingLevel: normalizeThinkingLevelForModel(base.reasoning, level),
   };
 }
 

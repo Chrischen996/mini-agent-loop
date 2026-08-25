@@ -94,6 +94,7 @@ import {
 } from "./orchestration/index.ts";
 import type { PauseGate } from "./orchestration/pause-gate.ts";
 import type { SessionExecutionLease } from "./orchestration/session-gate.ts";
+import { createAutoMemoryHook, isAutoMemoryEnabled } from "./memory/auto-memory.ts";
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 5;
@@ -839,6 +840,13 @@ export function createAgentServer(options: AgentServerOptions): Express {
   const sessionStore = new SessionStore(path.join(dataRoot, "sessions"));
   const jobManager = new JobManager(new JobStore(path.join(dataRoot, "jobs")));
   const memoryStore = new MemoryStore(path.join(dataRoot, "memory", "records.json"));
+  // Persistent memory digest for system-prompt injection (Claude Code-style).
+  let memorySectionContent = "";
+  const memoryDiscovery = isAutoMemoryEnabled()
+    ? memoryStore.buildSystemMemoryPrompt().then((section) => {
+        memorySectionContent = section;
+      })
+    : Promise.resolve();
   const gitWorkflow = new GitWorkflow(workspace);
   const persistedSession = (session: Session): PersistedSession => ({
     id: session.id,
@@ -916,6 +924,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     jobManager.restore(),
     memoryStore.load(),
     instructionDiscovery,
+    memoryDiscovery,
   ]).then(() => undefined);
   const upload = multer({
     storage: multer.memoryStorage(),
@@ -1040,6 +1049,19 @@ export function createAgentServer(options: AgentServerOptions): Express {
           messageCount: session.messages.length,
         });
         await saveSession(session);
+        // Turn-end memory extraction — fire-and-forget, never blocks the job.
+        if (isAutoMemoryEnabled()) {
+          const extract = createAutoMemoryHook(sessionLlm, memoryStore);
+          void extract(session.messages)
+            .then((result) => {
+              if (!result.ran) return;
+              const summary = result.added.length + result.forgotten.length > 0
+                ? `added=${result.added.length}, forgotten=${result.forgotten.length}`
+                : "nothing new";
+              void context.emit("memory_updated", `auto memory: ${summary}`, { result });
+            })
+            .catch(() => {});
+        }
         const lastAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
         return lastAssistant && lastAssistant.role === "assistant"
           ? contentAsString(lastAssistant.content).slice(0, 2000)
@@ -1461,7 +1483,11 @@ export function createAgentServer(options: AgentServerOptions): Express {
     const session: Session = {
       id,
       messages: createAgentHistory(
-        buildSystemPrompt(defaultPermissionMode, instructionContent || undefined),
+        buildSystemPrompt(
+          defaultPermissionMode,
+          instructionContent || undefined,
+          memorySectionContent || undefined,
+        ),
         defaultPermissionMode,
       ),
       createdAt: Date.now(),

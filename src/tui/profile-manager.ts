@@ -87,6 +87,13 @@ export async function commitModelSetup(
         baseUrl: setup.baseUrl,
         apiKey,
         thinkingLevel: newLlmConfig.thinkingLevel,
+        ...(newLlmConfig.timeoutMs !== undefined ? { timeoutMs: newLlmConfig.timeoutMs } : {}),
+        ...(newLlmConfig.firstResponseTimeoutMs !== undefined
+          ? { firstResponseTimeoutMs: newLlmConfig.firstResponseTimeoutMs }
+          : {}),
+        ...(newLlmConfig.streamIdleTimeoutMs !== undefined
+          ? { streamIdleTimeoutMs: newLlmConfig.streamIdleTimeoutMs }
+          : {}),
       });
     } catch {
       // non-fatal: model is already switched in memory

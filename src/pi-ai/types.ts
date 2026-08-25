@@ -716,6 +716,14 @@ export interface Model<TApi extends Api> {
 	cost: ModelCost;
 	contextWindow: number;
 	maxTokens: number;
+	/**
+	 * Per-model request timeout overrides (milliseconds). Surfaced on
+	 * `LlmConfig.piModel` so the agent's layered timeouts can prefer catalog
+	 * values over global env defaults.
+	 */
+	timeoutMs?: number;
+	firstResponseTimeoutMs?: number;
+	streamIdleTimeoutMs?: number;
 	headers?: Record<string, string>;
 	/** Compatibility overrides for OpenAI-compatible APIs. If not set, auto-detected from baseUrl. */
 	compat?: TApi extends "openai-completions"

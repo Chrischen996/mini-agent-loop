@@ -6,8 +6,10 @@ import {
   createRequestSignal,
   makeLlmConfig,
   resolveOutputTokenLimit,
+  switchLlmModel,
   timeoutLimitForPhase,
 } from "../src/llm/index.ts";
+import { resolveModel } from "../src/models.ts";
 import type { AgentMessage } from "../src/types.ts";
 
 function wait(ms: number): Promise<void> {
@@ -330,6 +332,79 @@ describe("layered LLM request timeouts", () => {
     } finally {
       request.cleanup();
     }
+  });
+});
+
+describe("per-model timeout configuration", () => {
+  it("prefers explicit config overrides over model catalog values", () => {
+    const config = makeLlmConfig({
+      apiKey: "test",
+      baseUrl: "https://llm.example/v1",
+      model: "gpt-4o-mini",
+      timeoutMs: 300_000,
+      firstResponseTimeoutMs: 240_000,
+      streamIdleTimeoutMs: 90_000,
+    });
+
+    assert.equal(timeoutLimitForPhase(config, "total"), 300_000);
+    assert.equal(timeoutLimitForPhase(config, "first_response"), 240_000);
+    assert.equal(timeoutLimitForPhase(config, "stream_idle"), 90_000);
+  });
+
+  it("falls back to env defaults when no per-model value is set", () => {
+    const originalTotal = process.env.MINI_AGENT_REQUEST_TIMEOUT_MS;
+    const originalFirst = process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS;
+    const originalIdle = process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS;
+    delete process.env.MINI_AGENT_REQUEST_TIMEOUT_MS;
+    delete process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS;
+    delete process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS;
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test",
+        baseUrl: "https://llm.example/v1",
+        model: "gpt-4o-mini",
+      });
+
+      assert.equal(timeoutLimitForPhase(config, "total"), 120_000);
+      assert.equal(timeoutLimitForPhase(config, "first_response"), 120_000);
+      assert.equal(timeoutLimitForPhase(config, "stream_idle"), 60_000);
+    } finally {
+      if (originalTotal !== undefined) process.env.MINI_AGENT_REQUEST_TIMEOUT_MS = originalTotal;
+      else delete process.env.MINI_AGENT_REQUEST_TIMEOUT_MS;
+      if (originalFirst !== undefined) process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS = originalFirst;
+      else delete process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS;
+      if (originalIdle !== undefined) process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS = originalIdle;
+      else delete process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS;
+    }
+  });
+
+  it("switchLlmModel adopts the target model's catalog timeouts and drops stale ones", () => {
+    const slowModel = resolveModel("deepseek/deepseek-v4-pro");
+    (slowModel as { timeoutMs?: number }).timeoutMs = 600_000;
+    (slowModel as { streamIdleTimeoutMs?: number }).streamIdleTimeoutMs = 180_000;
+
+    const fastConfig = makeLlmConfig({
+      apiKey: "test",
+      baseUrl: "https://llm.example/v1",
+      model: "gpt-4o-mini",
+      timeoutMs: 60_000,
+      streamIdleTimeoutMs: 15_000,
+    });
+
+    // Switching to the slow-thinking model adopts its catalog timeouts.
+    const switched = switchLlmModel(fastConfig, slowModel);
+    assert.equal(switched.timeoutMs, 600_000);
+    assert.equal(switched.streamIdleTimeoutMs, 180_000);
+    assert.equal(timeoutLimitForPhase(switched, "total"), 600_000);
+    assert.equal(timeoutLimitForPhase(switched, "stream_idle"), 180_000);
+
+    // Switching back to a model without catalog timeouts clears them so the
+    // previous long deadlines do not leak into the new model.
+    const switchedBack = switchLlmModel(switched, "openai/gpt-4o-mini");
+    assert.equal(switchedBack.timeoutMs, undefined);
+    assert.equal(switchedBack.firstResponseTimeoutMs, undefined);
+    assert.equal(switchedBack.streamIdleTimeoutMs, undefined);
   });
 });
 

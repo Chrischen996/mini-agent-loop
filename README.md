@@ -63,6 +63,11 @@ npm install
 | `MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS` | no | same as request timeout |
 | `MINI_AGENT_STREAM_IDLE_TIMEOUT_MS` | no | `60000` after stream starts |
 | `MINI_AGENT_MODELS` | no | — |
+
+Timeouts can also be configured **per model** via the model catalog
+(`MINI_AGENT_MODELS` entries or built-in catalog entries), persisted profiles,
+or `switchLlmModel`. Resolution order: explicit config override → model
+catalog value → env var → default. See [Per-model timeouts](#per-model-timeouts).
 | `VISION_API_KEY` | no\* | — |
 | `VISION_BASE_URL` | no\* | — |
 | `VISION_MODEL` | no\* | — |
@@ -277,6 +282,27 @@ MINI_AGENT_MODELS='[{"provider":"company","id":"company-model-v1","baseUrl":"htt
 `MINI_AGENT_MODELS` is a JSON array. Each entry requires `provider`, `id`,
 `baseUrl`, and `apiKeyEnv`; optional fields are `input`, `tools`, and
 `contextWindow`.
+
+#### Per-model timeouts
+
+Slow deep-thinking models often need longer deadlines than fast chat models.
+Instead of raising the global timeout for everyone, a model entry can carry its
+own layered timeouts:
+
+```bash
+CUSTOM_LLM_KEY=sk-...
+MINI_AGENT_MODELS='[{"provider":"company","id":"deep-thinker-v1","baseUrl":"https://llm.example/v1","apiKeyEnv":"CUSTOM_LLM_KEY","contextWindow":128000,"timeoutMs":600000,"firstResponseTimeoutMs":300000,"streamIdleTimeoutMs":180000}]'
+```
+
+- `timeoutMs` — total request deadline (default 120s)
+- `firstResponseTimeoutMs` — time-to-first-chunk deadline (defaults to `timeoutMs`)
+- `streamIdleTimeoutMs` — max gap between stream chunks (default 60s)
+
+Resolution order: explicit config override → model catalog value →
+`MINI_AGENT_*_TIMEOUT_MS` env var → default. Switching models with `/model`
+automatically adopts the target model's catalog timeouts and drops stale ones.
+The same fields may be persisted on a profile in `~/.mini-agent/models.json`
+(see below).
 
 #### Vision preprocessing for DeepSeek
 
@@ -560,7 +586,9 @@ current session configuration and never rewrite the user prompt. The setting
 is provider-neutral: it does not automatically switch providers or models.
 The default is `medium` for reasoning-capable models and `off` otherwise;
 `DEFAULT_THINKING_INTENSITY=low|med|high|xhigh|ultra` overrides the startup default.
-Profiles may persist an optional `thinkingLevel`.
+Profiles may persist an optional `thinkingLevel` plus optional per-model
+timeout overrides (`timeoutMs`, `firstResponseTimeoutMs`,
+`streamIdleTimeoutMs`) applied when that profile is active.
 
 ## Test (offline)
 

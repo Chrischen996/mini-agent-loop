@@ -33,6 +33,16 @@ export type ModelRef = {
   cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
   compat?: Record<string, unknown>;
   piModel?: PiModel<Api>;
+  /**
+   * Per-model timeout overrides (milliseconds). When present on a catalog
+   * entry these take precedence over the global env-based defaults.
+   * - `timeoutMs` — total request deadline (default 120s)
+   * - `firstResponseTimeoutMs` — time-to-first-chunk deadline (defaults to `timeoutMs`)
+   * - `streamIdleTimeoutMs` — gap allowed between stream chunks (default 60s)
+   */
+  timeoutMs?: number;
+  firstResponseTimeoutMs?: number;
+  streamIdleTimeoutMs?: number;
 };
 
 export type ModelReferenceMatch = {
@@ -113,6 +123,9 @@ function toModelRef(model: PiModel<Api>): ModelRef {
     cost: model.cost,
     compat: model.compat as Record<string, unknown> | undefined,
     piModel: model,
+    timeoutMs: model.timeoutMs,
+    firstResponseTimeoutMs: model.firstResponseTimeoutMs,
+    streamIdleTimeoutMs: model.streamIdleTimeoutMs,
   };
 }
 
@@ -146,6 +159,12 @@ function positiveInteger(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? Math.floor(value)
     : fallback;
+}
+
+function positiveTimeout(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 1_000
+    ? Math.floor(value)
+    : undefined;
 }
 
 function parseCustomModels(raw: string | undefined): ModelRef[] {
@@ -182,6 +201,13 @@ function parseCustomModels(raw: string | undefined): ModelRef[] {
       contextWindow,
       maxTokens: Math.min(positiveInteger(item.maxTokens, 16384), Math.max(1, contextWindow - 1)),
       reasoning: item.reasoning === true,
+      ...(item.timeoutMs !== undefined ? { timeoutMs: positiveTimeout(item.timeoutMs) } : {}),
+      ...(item.firstResponseTimeoutMs !== undefined
+        ? { firstResponseTimeoutMs: positiveTimeout(item.firstResponseTimeoutMs) }
+        : {}),
+      ...(item.streamIdleTimeoutMs !== undefined
+        ? { streamIdleTimeoutMs: positiveTimeout(item.streamIdleTimeoutMs) }
+        : {}),
     });
   }
   return models;

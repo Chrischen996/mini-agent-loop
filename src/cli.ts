@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,6 +9,10 @@ import { imagePart, textPart } from "./content.ts";
 import { loadLlmConfigFromEnv } from "./llm/index.ts";
 import { MaxTurnsExceededError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
 import { loadInstructionBundle } from "./agents-md.ts";
+import { SessionStore, getDataRoot } from "./session-store.ts";
+import type { AgentMessage } from "./types.ts";
+import { MemoryStore } from "./orchestration/memory-store.ts";
+import { createAutoMemoryHook, isAutoMemoryEnabled } from "./memory/auto-memory.ts";
 import {
   defaultSkillRegistry,
   discoverWorkspaceSkills,
@@ -171,6 +176,12 @@ export function parseCliArgs(argv: string[]): {
   planHistory: boolean;
   planArchive: boolean;
   sandboxEnabled: boolean;
+  /** Resume the most recent session (Claude Code `--continue`). */
+  continueSession: boolean;
+  /** Resume a specific session id, or list sessions when no id is given. */
+  resumeSessionId?: string;
+  /** With --resume/--continue: start a new session seeded with old messages. */
+  forkSession: boolean;
 } {
   const imagePaths: string[] = [];
   const rest: string[] = [];
@@ -190,6 +201,9 @@ export function parseCliArgs(argv: string[]): {
   let planSetFile: string | undefined;
   let planHistory = false;
   let planArchive = false;
+  let continueSession = false;
+  let resumeSessionId: string | undefined;
+  let forkSession = false;
   let sandboxEnabled = process.env.MINI_AGENT_SANDBOX !== "0";
   const validTools = new Set<ToolName>([
     "read", "bash", "edit", "write", "grep", "find", "ls",
@@ -280,6 +294,29 @@ export function parseCliArgs(argv: string[]): {
       planYes = true;
       continue;
     }
+    if (arg === "--continue") {
+      continueSession = true;
+      continue;
+    }
+    if (arg === "--resume") {
+      const next = argv[i + 1];
+      if (!next || next.startsWith("--")) {
+        // No id: list resumable sessions.
+        resumeSessionId = "";
+      } else {
+        resumeSessionId = next;
+        i += 1;
+      }
+      continue;
+    }
+    if (arg.startsWith("--resume=")) {
+      resumeSessionId = arg.slice("--resume=".length);
+      continue;
+    }
+    if (arg === "--fork-session") {
+      forkSession = true;
+      continue;
+    }
     if (arg === "--mode") {
       const next = argv[i + 1];
       if (!next || next.startsWith("--")) {
@@ -346,6 +383,9 @@ export function parseCliArgs(argv: string[]): {
     planHistory,
     planArchive,
     sandboxEnabled,
+    continueSession,
+    resumeSessionId,
+    forkSession,
   };
 }
 
@@ -408,6 +448,9 @@ async function main(): Promise<void> {
     planHistory,
     planArchive,
     sandboxEnabled,
+    continueSession,
+    resumeSessionId,
+    forkSession,
   } = parsed;
   const sandboxConfig: SandboxConfig | undefined = sandboxEnabled && process.env.MINI_AGENT_SANDBOX !== "false"
     ? {
@@ -547,12 +590,64 @@ async function main(): Promise<void> {
 
   if (!prompt && imagePaths.length === 0 && !planExecute && !planRetry) {
     console.error(
-      'Usage: npx tsx src/cli.ts "<prompt>" [--image path.png]...',
+      'Usage: npx tsx src/cli.ts "<prompt>" [--image path.png]... [--continue] [--resume <id>] [--fork-session]',
     );
     process.exit(1);
   }
 
+  // ── Session resume (Claude Code-style --continue / --resume) ───────────────
+  const sessionStore = new SessionStore(path.join(getDataRoot(), "sessions"));
+  let resumedSessionId: string | undefined;
+  let resumedMessages: AgentMessage[] | undefined;
+  if (continueSession || resumeSessionId !== undefined) {
+    if (resumeSessionId === "") {
+      // `--resume` without an id lists resumable sessions.
+      const metas = await sessionStore.listSessions();
+      if (metas.length === 0) {
+        console.error("No resumable sessions found.");
+        return;
+      }
+      console.error("Resumable sessions (most recent first):");
+      for (const meta of metas) {
+        const when = new Date(meta.lastActiveAt).toISOString();
+        console.error(`  ${meta.id}  ${when}  msgs=${meta.messageCount}  ${meta.preview}`);
+      }
+      return;
+    }
+    const targetId = continueSession && !resumeSessionId
+      ? (await sessionStore.listSessions())[0]?.id
+      : resumeSessionId;
+    if (!targetId) {
+      console.error(continueSession ? "No previous session to continue." : `Session not found: ${resumeSessionId}`);
+      process.exit(1);
+    }
+    const restored = await sessionStore.load(targetId);
+    if (!restored) {
+      console.error(`Session not found: ${targetId}`);
+      process.exit(1);
+    }
+    if (forkSession) {
+      // Fork: keep old messages under a fresh session id.
+      resumedSessionId = randomUUID();
+      restored.parentSessionId = restored.id;
+      restored.forkedFromMessage = restored.messages.length;
+      restored.id = resumedSessionId;
+      await sessionStore.create(restored);
+      console.error(`[session] forked from ${targetId} as ${resumedSessionId}`);
+    } else {
+      resumedSessionId = restored.id;
+    }
+    resumedMessages = restored.messages;
+    console.error(`[session] resumed ${resumedSessionId} (${restored.messages.length} messages)`);
+  }
+
   const agentsMd = (await loadInstructionBundle(cwd)).content || undefined;
+
+  // Persistent memory digest for system-prompt injection (Claude Code-style).
+  const memoryStoreForPrompt = new MemoryStore(path.join(getDataRoot(), "memory", "records.json"));
+  const memorySection = isAutoMemoryEnabled()
+    ? await memoryStoreForPrompt.buildSystemMemoryPrompt().catch(() => undefined)
+    : undefined;
 
   // --plan flag: force plan mode and append plan-only instruction
   const wantExecute = planExecute || planRetry;
@@ -704,8 +799,10 @@ async function main(): Promise<void> {
       globalTokenBudget,
       onEvent: logEvent,
       agentsMd,
+      memorySection,
       skillNames,
       skillRegistry: defaultSkillRegistry,
+      initialMessages: resumedMessages,
     });
     if (trackingExecution) {
       const last = [...messages].reverse().find((m) => m.role === "assistant");
@@ -746,6 +843,49 @@ async function main(): Promise<void> {
   } finally {
     activePermissionTurn.close();
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close(), sandboxCleanup?.() ?? Promise.resolve()]);
+  }
+
+  // ── Persist the session and extract memories (Claude Code-style) ──────────
+  if (messages.length > 0) {
+    try {
+      const sessionId = resumedSessionId ?? "cli_session";
+      const existing = await sessionStore.load(sessionId);
+      const persisted = {
+        id: sessionId,
+        createdAt: existing?.createdAt ?? Date.now(),
+        modelId: requestLlm.model,
+        thinkingLevel: requestLlm.thinkingLevel,
+        thinkingMode,
+        permissionMode: effectiveMode,
+        skillNames,
+        messages: [...messages],
+        parentSessionId: forkSession ? existing?.parentSessionId : undefined,
+        forkedFromMessage: forkSession ? existing?.forkedFromMessage : undefined,
+      };
+      if (existing) await sessionStore.save(persisted);
+      else await sessionStore.create(persisted);
+      console.error(`[session] saved ${sessionId} (${persisted.messages.length} messages)`);
+    } catch (error) {
+      console.error(`[session] save failed: ${error instanceof Error ? error.message : error}`);
+    }
+    // Turn-end memory extraction — fire-and-forget, never blocks the answer.
+    // Reuses memoryStoreForPrompt (same records.json path) created above.
+    if (isAutoMemoryEnabled()) {
+      const extract = createAutoMemoryHook(requestLlm, memoryStoreForPrompt);
+      void extract(messages)
+        .then((result) => {
+          if (!result.ran) return;
+          const parts: string[] = [];
+          if (result.added.length > 0) parts.push(`added/updated=${result.added.join(",")}`);
+          if (result.forgotten.length > 0) parts.push(`forgotten=${result.forgotten.join(",")}`);
+          console.error(
+            parts.length > 0
+              ? `[memory] auto-updated (${parts.join(", ")})`
+              : "[memory] checked, nothing new to remember",
+          );
+        })
+        .catch(() => {});
+    }
   }
 
   const lastAssistant = [...messages]

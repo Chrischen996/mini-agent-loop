@@ -1,5 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
+import { TUI_COLORS as C } from "../theme.ts";
 import type { PlanDocument } from "../../plan/document.ts";
 import type { TodoItem, TodoViewMode } from "../../todo.ts";
 import { todoSummary } from "../../todo.ts";
@@ -35,11 +36,11 @@ export function TodoPanel({
   return (
     <Box flexDirection="column" paddingX={1} flexShrink={0}>
       <Box gap={1}>
-        <Text color="cyan" bold>TODO</Text>
+        <Text color={C.info} bold>TODO</Text>
         <Text dimColor>{summary.completed}/{summary.total} 已完成</Text>
-        {summary.inProgress > 0 && <Text color="yellow">{summary.inProgress} 执行中</Text>}
-        {summary.failed > 0 && <Text color="red">{summary.failed} 失败</Text>}
-        {planStatus && <Text color="cyan">{planStatus}</Text>}
+        {summary.inProgress > 0 && <Text color={C.running}>{summary.inProgress} 执行中</Text>}
+        {summary.failed > 0 && <Text color={C.error}>{summary.failed} 失败</Text>}
+        {planStatus && <Text color={C.info}>{planStatus}</Text>}
       </Box>
       {viewMode === "compact" ? (
         <Text dimColor>
@@ -53,7 +54,7 @@ export function TodoPanel({
           <Box key={item.id} gap={1}>
             <Text color={todoColor(item.status)}>{todoIcon(item.status)}</Text>
             <Text
-              color={item.status === "completed" ? "green" : undefined}
+              color={item.status === "completed" ? C.success : undefined}
               dimColor={item.status === "skipped"}
               strikethrough={item.status === "completed"}
               wrap="truncate-end"

@@ -361,7 +361,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   // ── keyboard handler ─────────────────────────────────────────────────────
 
   useKeyboardHandler({
-    exit, abortRef, copyResolvedText, getPermissionManager,
+    exit, abortRef, copyResolvedText, pasteImage: handlePasteImageRef, getPermissionManager,
     adjustThinkingLevel, resolvePendingPermission, dispatch,
     acMode, state, feedHeight, handleAutocompleteKey, historyRef,
     suppressInputEchoRef, pendingPermissionRef,

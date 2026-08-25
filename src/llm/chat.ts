@@ -30,6 +30,7 @@ import {
   fromPiAssistant,
 } from "./wire.ts";
 import { prepareMessagesForModel } from "./vision.ts";
+import { clampThinkingLevelForModel } from "../think-intensity.ts";
 import {
   isAbortError,
   throwIfAborted,
@@ -46,7 +47,8 @@ import {
 function reasoningOption(config: LlmConfig): ThinkingLevel | undefined {
   const level = config.thinkingLevel ?? (config.reasoning ? "medium" : "off");
   if (!config.reasoning || level === "off") return undefined;
-  return level;
+  const clamped = clampThinkingLevelForModel(config, level);
+  return clamped === "off" ? undefined : clamped;
 }
 
 function addReasoningOption(body: Record<string, unknown>, config: LlmConfig): void {

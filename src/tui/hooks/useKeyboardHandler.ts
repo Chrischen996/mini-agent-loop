@@ -1,22 +1,22 @@
 import { useInput, type Key } from "ink";
-import { useCallback } from "react";
 import { resolvePendingPermissionDecision } from "../pending-permission.ts";
 import { nextPermissionMode, switchPermissionMode } from "../permission-utils.ts";
+import { buildSystemPrompt, createAgentHistory } from "../../loop.ts";
 import type { Dispatch } from "react";
 import type { TuiAction } from "../state.ts";
 import type { PermissionDecision, PermissionManager, PermissionTurnContext } from "../../permissions.ts";
-import type { AcMode } from "../input-utils.ts";
 
 export type UseKeyboardHandlerDeps = {
   exit: () => void;
   abortRef: React.MutableRefObject<AbortController>;
   copyResolvedText: (target?: import("../copy-text.ts").CopyTarget) => Promise<void>;
+  pasteImage: () => Promise<boolean>;
   getPermissionManager: () => PermissionManager;
+  historyRef: React.MutableRefObject<import("../../types.ts").AgentMessage[]>;
   adjustThinkingLevel: (direction: "increase" | "decrease", wrap?: boolean) => void;
   resolvePendingPermission: (decision: PermissionDecision) => boolean;
   dispatch: Dispatch<TuiAction>;
-  acMode: AcMode;
-  setAcMode: (mode: AcMode) => void;
+  acMode: string | null;
   state: { busy: boolean; pendingPermission?: unknown; phase: string; currentPlan?: { id: string } };
   feedHeight: number;
   handleAutocompleteKey: (key: Key) => boolean;
@@ -26,9 +26,9 @@ export type UseKeyboardHandlerDeps = {
 
 export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
   const {
-    exit, abortRef, copyResolvedText, getPermissionManager,
+    exit, abortRef, copyResolvedText, pasteImage, getPermissionManager, historyRef,
     adjustThinkingLevel, resolvePendingPermission, dispatch,
-    acMode, setAcMode, state, feedHeight, handleAutocompleteKey,
+    acMode, state, feedHeight, handleAutocompleteKey,
     suppressInputEchoRef, pendingPermissionRef,
   } = deps;
 
@@ -55,15 +55,32 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
       return;
     }
 
-    // Shift+Tab: cycle permission mode (works even during autocomplete)
+    // Ctrl+Shift+C: copy focused message to clipboard (iTerm2-compatible)
+    if (!acMode && key.ctrl && key.shift && (_ch === "c" || _ch === "C" || _ch === "\u0003")) {
+      suppressInputEchoRef.current = true;
+      void copyResolvedText("auto");
+      return;
+    }
+
+    // Ctrl+V: paste image from clipboard
+    if (!acMode && key.ctrl && (_ch === "v" || _ch === "V" || _ch === "\u0016")) {
+      suppressInputEchoRef.current = true;
+      void pasteImage();
+      return;
+    }
+
+    // Shift+Tab: cycle permission mode
     if (key.shift && key.tab) {
       suppressInputEchoRef.current = true;
       const permissionManager = getPermissionManager();
       const next = nextPermissionMode(permissionManager.getMode());
-      if (switchPermissionMode(permissionManager, next)) {
-        dispatch({ type: "SET_PERMISSION_MODE", mode: next });
+      switchPermissionMode(permissionManager, next);
+      // Always sync React state so the StatusBar reflects the new mode.
+      dispatch({ type: "SET_PERMISSION_MODE", mode: next });
+      if (historyRef?.current && historyRef.current.length > 0) {
+        const newPrompt = buildSystemPrompt(next);
+        historyRef.current = createAgentHistory(newPrompt, next);
       }
-      setAcMode(null);
       return;
     }
 

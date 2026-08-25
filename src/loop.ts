@@ -198,6 +198,14 @@ export type AgentLoopOptions = {
    * in the public tool args schema.
    */
   _parentHistory?: AgentMessage[];
+  /**
+   * Seed history for resumed sessions (Claude Code-style resume). When set,
+   * the loop starts from these messages instead of an empty history; the
+   * system prompt is (re)built and placed at position 0.
+   */
+  initialMessages?: AgentMessage[];
+  /** Persistent memory section to inject into the system prompt. */
+  memorySection?: string;
   /** Optional agents.md content to inject into system prompt. */
   agentsMd?: string;
   /** Current Plan-Act workflow phase. */
@@ -376,10 +384,20 @@ function mergeLoopSignals(...signals: (AbortSignal | undefined)[]): {
   return { signal: controller.signal, cleanup: () => cleanups.forEach((remove) => remove()) };
 }
 
-export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string): string {
+/** Maximum characters of the injected memory section (Claude Code caps its MEMORY.md index similarly). */
+const MAX_MEMORY_SECTION_CHARS = 2_000;
+
+export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string, memorySection?: string): string {
   const parts: string[] = [];
   if (agentsMd) {
     parts.push(`# Repository Agent Instructions (from AGENTS.md)\n${agentsMd}\n`);
+  }
+  if (memorySection && memorySection.trim()) {
+    let section = memorySection.trim();
+    if (section.length > MAX_MEMORY_SECTION_CHARS) {
+      section = `${section.slice(0, MAX_MEMORY_SECTION_CHARS)}\n[... memory truncated ...]`;
+    }
+    parts.push(`# Persistent Memory\n${section}\n`);
   }
   const base: string[] = [
     "You are a local file assistant that can read and write workspace files.",
@@ -436,8 +454,8 @@ export function createAgentHistory(
 }
 
 /** Get the default system prompt for a given permission mode. */
-export function getDefaultSystemPrompt(mode?: PermissionMode, agentsMd?: string): string {
-  return buildSystemPrompt(mode, agentsMd);
+export function getDefaultSystemPrompt(mode?: PermissionMode, agentsMd?: string, memorySection?: string): string {
+  return buildSystemPrompt(mode, agentsMd, memorySection);
 }
 
 async function applyPreprocessors(
@@ -528,12 +546,24 @@ export async function runAgentLoop(
   userText: string,
   options: AgentLoopOptions,
 ): Promise<AgentMessage[]> {
-  const { systemPrompt, permissionMode, permissionTurn, ...turnOptions } = options;
+  const { systemPrompt, permissionMode, permissionTurn, initialMessages, memorySection, ...turnOptions } = options;
   const activePermissionMode = permissionTurn?.mode ?? permissionMode;
-  const prompt = systemPrompt ?? buildSystemPrompt(activePermissionMode);
-  const history = turnOptions._parentHistory
-    ? inheritHistoryWithPrompt(turnOptions._parentHistory, prompt)
-    : createAgentHistory(prompt, activePermissionMode);
+  const prompt =
+    systemPrompt ??
+    buildSystemPrompt(activePermissionMode, turnOptions.agentsMd, memorySection);
+  let history: AgentMessage[];
+  if (turnOptions._parentHistory) {
+    history = inheritHistoryWithPrompt(turnOptions._parentHistory, prompt);
+  } else if (initialMessages && initialMessages.length > 0) {
+    // Resumed session: rebuild the system prompt (it may have changed between
+    // runs) and keep the restored conversation after it.
+    const [first, ...rest] = initialMessages;
+    history = first?.role === "system"
+      ? [{ ...first, content: prompt }, ...rest]
+      : [{ role: "system", content: prompt }, ...initialMessages];
+  } else {
+    history = createAgentHistory(prompt, activePermissionMode);
+  }
   return runAgentTurn(
     history,
     userText,
