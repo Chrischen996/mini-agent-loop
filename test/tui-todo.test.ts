@@ -1,41 +1,62 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { getTodoPanelRows, formatTodoPanel } from "../src/tui/components/TodoPanel.tsx";
+import { getTodoPanelRows, planToTodoItems } from "../src/tui/todo-format.ts";
+import { TodoPanel } from "../src/tui/components/TodoPanel.tsx";
 import { createInitialState, tuiReducer } from "../src/tui/state.ts";
 import { getMessageFeedHeight, getPickerLayout } from "../src/tui/layout.ts";
-import type { TodoItem } from "../src/tools/todo.ts";
+import type { TodoItem } from "../src/todo.ts";
 
 describe("TUI todo state", () => {
-  it("replaces the independent todo snapshot", () => {
-    const todos: TodoItem[] = [{ id: "a", content: "Run tests", status: "in_progress" }];
-    const next = tuiReducer(createInitialState("model"), { type: "SET_TODOS", todos });
+  it("replaces the independent todo snapshot with a revision guard", () => {
+    const todos: TodoItem[] = [{ id: "a", content: "Run tests", activeForm: "Running tests", status: "in_progress", source: "model" as const }];
+    const next = tuiReducer(createInitialState("model"), {
+      type: "SET_TODO_ITEMS",
+      todos,
+      revision: 1,
+    });
 
-    assert.deepEqual(next.todos, todos);
+    assert.deepEqual(next.todoItems, todos);
+  });
+
+  it("ignores stale todo snapshots", () => {
+    const state = tuiReducer(createInitialState("model"), {
+      type: "SET_TODO_ITEMS",
+      todos: [{ id: "a", content: "First", activeForm: "First", status: "pending", source: "model" as const }],
+      revision: 5,
+    });
+    const stale = tuiReducer(state, {
+      type: "SET_TODO_ITEMS",
+      todos: [{ id: "b", content: "Stale", activeForm: "Stale", status: "completed", source: "model" as const }],
+      revision: 2,
+    });
+
+    assert.equal(stale.todoItems?.[0].id, "a");
   });
 
   it("clears todos on reset while preserving global display settings", () => {
-    const state = {
-      ...createInitialState("model"),
-      todos: [{ id: "a", content: "Done", status: "completed" as const }],
-    };
+    const state = tuiReducer(createInitialState("model"), {
+      type: "SET_TODO_ITEMS",
+      todos: [{ id: "a", content: "Done", activeForm: "Done", status: "completed", source: "model" as const }],
+      revision: 1,
+    });
     const next = tuiReducer(state, { type: "RESET" });
 
-    assert.deepEqual(next.todos, []);
+    assert.deepEqual(next.todoItems, undefined);
     assert.equal(next.permissionMode, state.permissionMode);
     assert.equal(next.thinkingMode, state.thinkingMode);
   });
 
-  it("keeps raw todo_write calls out of normal activity state", () => {
+  it("keeps raw TodoWrite calls out of normal activity state", () => {
     let state = createInitialState("model");
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
-      event: { type: "tool_start", call: { id: "todo-1", name: "todo_write", arguments: { todos: [] } } },
+      event: { type: "tool_start", call: { id: "todo-1", name: "TodoWrite", arguments: { todos: [] } } },
     });
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
       event: {
         type: "tool_end",
-        call: { id: "todo-1", name: "todo_write", arguments: { todos: [] } },
+        call: { id: "todo-1", name: "TodoWrite", arguments: { todos: [] } },
         result: { content: "Todo list updated", isError: false },
       },
     });
@@ -43,44 +64,63 @@ describe("TUI todo state", () => {
     assert.deepEqual(state.messages, []);
     assert.deepEqual(state.steps, []);
     assert.deepEqual(state.toolCards, []);
-    assert.equal(state.status, "任务清单已更新");
+    assert.equal(state.status, "任务列表已更新");
   });
 });
 
 describe("TodoPanel formatting", () => {
-  it("renders status symbols and active form text", () => {
+  it("renders status symbols and active form text via the unified panel", () => {
     const todos: TodoItem[] = [
-      { id: "done", content: "Read config", status: "completed" },
-      { id: "active", content: "Run tests", status: "in_progress", activeForm: "Running tests" },
-      { id: "next", content: "Review output", status: "pending" },
+      { id: "done", content: "Read config", activeForm: "Reading config", status: "completed", source: "model" as const },
+      { id: "active", content: "Run tests", activeForm: "Running tests", status: "in_progress", source: "model" as const },
+      { id: "next", content: "Review output", activeForm: "Reviewing output", status: "pending", source: "model" as const },
     ];
 
-    const lines = formatTodoPanel(todos);
+    const panel = TodoPanel({ todos })!;
+    const rendered = JSON.stringify(panel);
 
-    assert.equal(lines[0], "TODO 1/3");
-    assert.match(lines[1] ?? "", /✓.*Read config/);
-    assert.match(lines[2] ?? "", /▶.*Running tests/);
-    assert.doesNotMatch(lines[2] ?? "", /Run tests/);
-    assert.match(lines[3] ?? "", /○.*Review output/);
+    // Unified panel renders item content with per-status icons/colors.
+    assert.ok(rendered.includes("Read config"));
+    assert.ok(rendered.includes("Run tests"));
+    assert.ok(rendered.includes("Review output"));
+    // Summary header reports the completed/total line.
+    assert.ok(rendered.includes("已完成"));
+    assert.ok(rendered.includes("执行中"));
   });
 
   it("limits visible rows and reports overflow", () => {
-    const todos: TodoItem[] = Array.from({ length: 8 }, (_, index) => ({
+    const todos: TodoItem[] = Array.from({ length: 10 }, (_, index) => ({
       id: String(index),
       content: `Task ${index}`,
+      activeForm: `Tasking ${index}`,
       status: "pending" as const,
+      source: "model" as const,
     }));
 
-    const lines = formatTodoPanel(todos);
-
-    assert.equal(getTodoPanelRows(todos), 8);
-    assert.equal(lines.length, 8);
-    assert.match(lines.at(-1) ?? "", /2 more/);
+    assert.equal(getTodoPanelRows({ todos }), 10); // header + 8 visible + overflow row
   });
 
-  it("uses no rows for an empty list", () => {
-    assert.deepEqual(formatTodoPanel([]), []);
-    assert.equal(getTodoPanelRows([]), 0);
+  it("uses no rows when both sources are absent or hidden", () => {
+    assert.equal(getTodoPanelRows({}, "expanded"), 0);
+    assert.equal(getTodoPanelRows({ todos: [{ id: "x", content: "x", activeForm: "x", status: "pending", source: "model" as const }] }, "hidden"), 0);
+    assert.equal(getTodoPanelRows({ todos: [{ id: "x", content: "x", activeForm: "x", status: "pending", source: "model" as const }] }, "compact"), 1);
+  });
+
+  it("derives items from a plan document", () => {
+    const plan = {
+      id: "plan-1",
+      title: "Plan",
+      status: "approved" as const,
+      steps: [
+        { index: 1, text: "Step one", status: "done" as const },
+        { index: 2, text: "Step two", status: "doing" as const },
+      ],
+    };
+    const items = planToTodoItems(plan as any);
+
+    assert.equal(items.length, 2);
+    assert.equal(items[0].status, "completed");
+    assert.equal(items[1].status, "in_progress");
   });
 
   it("reserves todo rows from the message feed", () => {

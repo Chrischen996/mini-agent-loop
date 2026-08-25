@@ -4,7 +4,6 @@ import type { LoopEvent } from "../loop.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
 import { PERMISSION_MODES, type PermissionMode } from "../permissions.ts";
 import type { SessionPhase, ExecutionPlan, PlanActEvent } from "../plan-act/types.ts";
-import type { TodoItem } from "../tools/todo.ts";
 import type { PlanDocument } from "../plan/document.ts";
 import { isTodoRevisionNewer, nextTodoRevision, TODO_WRITE_TOOL_NAME, type TodoItem, type TodoViewMode } from "../todo.ts";
 import { executionPlanToTodoItems } from "./todo-format.ts";

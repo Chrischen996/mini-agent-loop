@@ -16,7 +16,6 @@ export function getMessageFeedHeight(options: {
   hasPendingImages?: boolean;
   todoRows?: number;
   pickerRows?: number;
-  todoRows?: number;
 }): number {
   const viewport = getTuiViewportHeight(options.termRows);
   const chrome =

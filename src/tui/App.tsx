@@ -9,6 +9,22 @@ import { getTodoPanelRows } from "./todo-format.ts";
 import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
 import { parseSlashCommand } from "./slash-commands.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
+
+/** Human-readable message for an LlmTimeoutError, with partial-response preview. */
+function formatLlmTimeoutMessage(err: InstanceType<typeof LlmTimeoutError>): string {
+  const phaseLabel = err.phase === "first_response"
+    ? "first response"
+    : err.phase === "stream_idle"
+      ? "stream idle"
+      : err.phase === "total"
+        ? "total request"
+        : "request";
+  const duration = err.timeoutMs !== undefined ? `, ${Math.ceil(err.timeoutMs / 1000)}s` : "";
+  const preview = err.partialContent?.replace(/\s+/g, " ").trim().slice(0, 80);
+  return preview
+    ? `LLM timeout (${phaseLabel}${duration}) - partial response saved: ${preview}`
+    : `LLM timeout (${phaseLabel}${duration}) - no partial response received`;
+}
 import { useAutocomplete } from "./hooks/useAutocomplete.ts";
 import { tuiReducer, createInitialState } from "./state.ts";
 import {
@@ -19,7 +35,6 @@ import {
   type LoopEvent,
 } from "../loop.ts";
 import { LlmTimeoutError } from "../llm/retry.ts";
-import { formatLlmTimeoutMessage } from "./turn-helpers.ts";
 import { loadLlmConfigFromEnv, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
 import {
   buildIntenseLlm,
@@ -300,13 +315,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     termRows: stdout?.rows,
     requestedItems: requestedPickerItems,
     hasPendingImages: state.pendingImages.length > 0,
-    todoRows: Math.max(todoRows, todoItemRows),
+    todoRows,
     extraRows: acMode === "model" || acMode === "model-picker" || acMode === "file" ? 3 : 2,
   });
   const feedHeight = getMessageFeedHeight({
     termRows: stdout?.rows,
     hasPendingImages: state.pendingImages.length > 0,
-    todoRows: Math.max(todoRows, todoItemRows),
+    todoRows,
     pickerRows: pickerLayout.totalRows,
   });
 
