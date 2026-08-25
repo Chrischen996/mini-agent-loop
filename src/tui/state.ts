@@ -620,6 +620,13 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               status: event.result.isError ? "任务列表更新失败" : "任务列表已更新",
             };
           }
+          if (event.call.name === "validate_workspace") {
+            return {
+              ...state,
+              status: event.result.isError ? "修改后验证失败，准备修复" : "修改后验证通过",
+              spinnerMessage: undefined,
+            };
+          }
           const now = Date.now();
           const result = resultPreview(event.result.content);
           const updatedMessages = state.messages.map((m) => {

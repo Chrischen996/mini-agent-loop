@@ -60,6 +60,7 @@ import type { AgentMessage } from "../types.ts";
 import { MemoryStore } from "../orchestration/memory-store.ts";
 import { createAutoMemoryHook, isAutoMemoryEnabled } from "../memory/auto-memory.ts";
 import type { TuiAction } from "./state.ts";
+import { isTuiFeatureEnabled } from "./execution-policy.ts";
 
 function short(value: string, max = 160): string {
   const oneLine = value.replace(/\s+/g, " ").trim();
@@ -543,9 +544,9 @@ async function main(): Promise<void> {
         preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
         signal: abortController.signal,
         permissionTurn,
-        autoValidate: process.env.MINI_AGENT_AUTO_VALIDATE === "1",
+        autoValidate: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_VALIDATE),
         validationWorkspace: cwd,
-        autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
+        autoCheckpoint: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_CHECKPOINT),
         thinkingMode,
         runtimeRef: parentRuntime,
         runtimeContext,

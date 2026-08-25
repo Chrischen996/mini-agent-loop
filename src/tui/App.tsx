@@ -114,6 +114,7 @@ import { PermissionPanel } from "./components/PermissionPanel.tsx";
 import { PlanApprovalBar } from "./components/PlanApprovalBar.tsx";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
+import { isTuiFeatureEnabled } from "./execution-policy.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
@@ -734,9 +735,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               workspaceId: cwd,
             } satisfies RuntimeExecutionContext,
             globalTokenBudget,
-            autoValidate: process.env.MINI_AGENT_AUTO_VALIDATE === "1",
+            autoValidate: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_VALIDATE),
             validationWorkspace: cwd,
-            autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
+            autoCheckpoint: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_CHECKPOINT),
             thinkingMode,
             runtimeRef: subagentRuntimeRef.current,
             skillNames: skillNamesRef.current,
