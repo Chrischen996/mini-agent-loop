@@ -518,13 +518,20 @@ export function MessageFeed({
         if (msg.kind === "user") {
           return (
             <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
-              <Box marginBottom={0} gap={1} flexDirection="column">
-                <Box gap={1}>
+              <Box
+                marginBottom={0}
+                flexDirection="column"
+                borderStyle="round"
+                borderColor={C.user}
+                paddingX={1}
+                marginTop={1}
+              >
+                <Box gap={1} marginTop={1}>
                   <Text color={C.user} bold>{">"}</Text>
                   <Text color={C.assistant}>{msg.displayText ?? msg.text}</Text>
                 </Box>
                 {msg.images?.length ? (
-                  <Box marginLeft={2} gap={1}>
+                  <Box marginLeft={2} marginTop={1} gap={1}>
                     {msg.images.map((image) => (
                       <Text key={image.path} color={C.info}>[image: {image.path.split("/").pop()}]</Text>
                     ))}
@@ -537,16 +544,21 @@ export function MessageFeed({
         if (msg.kind === "assistant") {
           return (
             <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
-              <Box marginBottom={0} flexDirection="column">
-                {msg.reasoning && (
-                  <ThinkingBlock
-                    content={msg.reasoning}
-                    mode={effectiveMode}
-                    forceExpanded={expandedSet.has(absoluteIndex)}
-                    focused={focusedMessageIndex === absoluteIndex}
-                  />
-                )}
-                {msg.text && <MarkdownText text={msg.text} />}
+              <Box marginBottom={0} flexDirection="column" marginTop={1}>
+                <Box flexDirection="row">
+                  <Text color={C.gutter}>⎿ </Text>
+                  <Box flexDirection="column" flexGrow={1}>
+                    {msg.reasoning && (
+                      <ThinkingBlock
+                        content={msg.reasoning}
+                        mode={effectiveMode}
+                        forceExpanded={expandedSet.has(absoluteIndex)}
+                        focused={focusedMessageIndex === absoluteIndex}
+                      />
+                    )}
+                    {msg.text && <MarkdownText text={msg.text} />}
+                  </Box>
+                </Box>
               </Box>
             </ViewportSlice>
           );
