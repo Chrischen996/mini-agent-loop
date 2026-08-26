@@ -32,12 +32,25 @@
     "dev": "tsx watch src/server.ts",
     "dev:server": "tsx watch src/server.ts",
     "serve": "tsx src/server.ts",
-    "build": "npm run typecheck",
-    "build:package": "tsc -p tsconfig.publish.json && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "build": "tsx build.ts",
+    "build:package": "tsx build.ts && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
     "prepack": "npm run build:package",
+    "dev:inspect": "node --inspect=0.0.0.0:8888 --import tsx src/tui/ink-main.tsx",
     "test": "tsx --test test/*.test.ts",
     "test:coverage": "c8 tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/multer": "^2.2.0",
+    "@types/node": "^22.13.10",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "@types/supertest": "^7.2.1",
+    "c8": "^12.0.0",
+    "supertest": "^7.2.2",
+    "vite": "^6.3.5",
+    "@vitejs/plugin-node": "^5.1.0"
   },
   "engines": {
     "node": ">=22.19.0"
