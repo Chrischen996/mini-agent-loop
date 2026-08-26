@@ -8,7 +8,24 @@ import {
   isAbortError,
   throwIfAborted,
   LlmTimeoutError,
+  StreamTruncatedError,
 } from "../src/llm/retry.ts";
+
+describe("StreamTruncatedError", () => {
+  it("carries partial content and classifies as network-retryable", () => {
+    const error = new StreamTruncatedError("partial ans");
+    assert.equal(error.name, "StreamTruncatedError");
+    assert.equal(error.partialContent, "partial ans");
+    assert.equal(classifyError(error), "network");
+  });
+
+  it("classifies the legacy untyped truncation message as network too", () => {
+    assert.equal(
+      classifyError(new Error("LLM stream ended before completion (missing finish_reason)")),
+      "network",
+    );
+  });
+});
 
 describe("LlmTimeoutError", () => {
   it("preserves timeout phase and timing metadata", () => {

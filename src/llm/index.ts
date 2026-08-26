@@ -48,6 +48,7 @@ export {
   OutputTruncatedError,
   ProtocolError,
   LlmTimeoutError,
+  StreamTruncatedError,
 } from "./retry.ts";
 export { LlmRetryCoordinator, waitForRetry, type RetryDecision } from "./recovery.ts";
 

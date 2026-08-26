@@ -25,6 +25,7 @@ import {
   type RetryableErrorType,
   type StreamChatUsage,
   LlmTimeoutError,
+  StreamTruncatedError,
   ThinkingCapabilityError,
 } from "./llm/index.ts";
 import { resolveModel } from "./models.ts";
@@ -276,7 +277,7 @@ export type LoopEvent =
   | { type: "permission_required"; request: PermissionRequest }
   | { type: "plan_act_event"; event: PlanActEvent }
   | { type: "done"; messages: AgentMessage[] }
-  | { type: "attempt_reset"; reason: "reasoning_only"; attempt: number }
+  | { type: "attempt_reset"; reason: "reasoning_only" | "stream_truncated"; attempt: number }
   | {
       type: "model_switched";
       previousModel: string;
@@ -882,6 +883,11 @@ async function runAgentTurnInternal(
   let reasoningOnlyRetries = 0;
   const retryCoordinator = new LlmRetryCoordinator();
   let timeoutRetries = 0;
+  let truncatedStreamRetries = 0;
+  // Consecutive-truncation budget. Reset on any successful turn so a flaky
+  // provider can be retried indefinitely across the session, but a hard
+  // outage fails fast instead of spinning.
+  const MAX_TRUNCATED_STREAM_RETRIES = 2;
 
   if (initialDecision) {
     onEvent?.({
@@ -1482,6 +1488,25 @@ async function runAgentTurnInternal(
           continue;
         }
         throw err;
+      }
+      // Stream cut off mid-generation (no [DONE]/finish_reason). Tool calls
+      // have not been executed yet, so replaying the request is side-effect
+      // free. Reset the UI's streamed text first so the retry doesn't
+      // duplicate the partial answer, then re-run the same turn.
+      if (err instanceof StreamTruncatedError && truncatedStreamRetries < MAX_TRUNCATED_STREAM_RETRIES) {
+        truncatedStreamRetries += 1;
+        onEvent?.({ type: "attempt_reset", reason: "stream_truncated", attempt: truncatedStreamRetries });
+        turn -= 1;
+        continue;
+      }
+      if (err instanceof StreamTruncatedError) {
+        throw new Error(
+          `LLM stream truncated ${MAX_TRUNCATED_STREAM_RETRIES + 1} times in a row; ` +
+          "provider connection is unstable. " +
+          (err.partialContent.trim()
+            ? `Partial answer before disconnect: "${err.partialContent.slice(0, 200)}"`
+            : "No content was received."),
+        );
       }
       const maxRetries = currentContext?.maxCompactionRetries ?? 1;
       if (isContextOverflowError(err) && overflowRetries < maxRetries) {

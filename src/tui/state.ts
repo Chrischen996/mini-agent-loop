@@ -515,7 +515,9 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             streamingText: "",
             streamingReasoning: "",
-            status: `思考结果不完整，正在重试 (${event.attempt})...`,
+            status: event.reason === "stream_truncated"
+              ? `连接中断，正在重试 (${event.attempt})...`
+              : `思考结果不完整，正在重试 (${event.attempt})...`,
           };
 
         case "retry_attempt":

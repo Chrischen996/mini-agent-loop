@@ -143,7 +143,9 @@ function handleEvent(state: TuiState, event: LoopEvent): void {
       break;
     case "attempt_reset":
       state.streamingText = "";
-      state.status = `思考结果不完整，正在重试 (${event.attempt})...`;
+      state.status = event.reason === "stream_truncated"
+        ? `连接中断，正在重试 (${event.attempt})...`
+        : `思考结果不完整，正在重试 (${event.attempt})...`;
       break;
     case "permission_required":
       state.status = `等待权限确认: ${event.request.tool} (${event.request.risk})`;

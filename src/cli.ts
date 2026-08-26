@@ -87,7 +87,11 @@ function logEvent(event: LoopEvent): void {
       break;
     }
     case "attempt_reset":
-      process.stderr.write(`\n[llm] reasoning-only response; retrying attempt ${event.attempt}\n`);
+      process.stderr.write(
+        event.reason === "stream_truncated"
+          ? `\n[llm] stream truncated; retrying attempt ${event.attempt}\n`
+          : `\n[llm] reasoning-only response; retrying attempt ${event.attempt}\n`,
+      );
       break;
     case "tool_start":
       console.error(`[tool_start] ${event.call.name} id=${event.call.id}`);

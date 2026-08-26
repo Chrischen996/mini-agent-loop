@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { makeLlmConfig, streamChat, OutputTruncatedError, LlmTimeoutError, IncompleteLlmResponseError } from "../src/llm/index.ts";
+import { makeLlmConfig, streamChat, OutputTruncatedError, LlmTimeoutError, IncompleteLlmResponseError, StreamTruncatedError } from "../src/llm/index.ts";
 import type { AgentMessage, AssistantMessage } from "../src/types.ts";
 
 function sseResponse(chunks: string[]): Response {
@@ -184,7 +184,12 @@ describe("streamChat", () => {
             // Consume the stream to exercise the terminal check.
           }
         },
-        /LLM stream ended before completion/,
+        (err: unknown) => {
+          assert.ok(err instanceof StreamTruncatedError);
+          assert.equal(err.partialContent, "truncated");
+          assert.match(err.message, /LLM stream ended before completion/);
+          return true;
+        },
       );
     } finally {
       globalThis.fetch = originalFetch;

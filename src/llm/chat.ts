@@ -42,6 +42,7 @@ import {
   LlmTimeoutError,
   ProtocolError,
   OutputTruncatedError,
+  StreamTruncatedError,
 } from "./retry.ts";
 
 function reasoningOption(config: LlmConfig): ThinkingLevel | undefined {
@@ -613,7 +614,10 @@ export async function* streamChat(
       yield { type: "error", error: new ProtocolError(`stream stopped with finish_reason=${finishReason}`) }; return;
     }
     if (!sawDoneMarker && !sawFinishReason && !sawTerminalMessage) {
-      throw new Error("LLM stream ended before completion (missing finish_reason, terminal message, or [DONE])");
+      // Stream was cut off mid-generation. Throw a typed error carrying the
+      // partial answer so the loop can replay the request (tool calls have
+      // not been executed yet, so replaying is side-effect free).
+      throw new StreamTruncatedError(content);
     }
   } catch (err) {
     if (request.didTimeout()) {
