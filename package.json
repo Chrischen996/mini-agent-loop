@@ -36,6 +36,8 @@
     "build:package": "tsx build.ts && node -e \"require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
     "prepack": "npm run build:package",
     "dev:inspect": "node --inspect=0.0.0.0:8888 --import tsx src/tui/ink-main.tsx",
+    "tui:inspect": "tsx src/tui/ink-main.tsx --inspect=9229",
+    "tui:inspect-brk": "tsx src/tui/ink-main.tsx --inspect-brk=9229",
     "test": "tsx --test test/*.test.ts",
     "test:coverage": "c8 tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"

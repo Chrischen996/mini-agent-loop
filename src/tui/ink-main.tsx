@@ -8,12 +8,24 @@ import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
 
 const cwd = process.cwd();
 
+// Parse command line arguments for debugging/inspection
+const args = process.argv.slice(2);
+const inspectArg = args.find(arg => arg.startsWith("--inspect"));
+const inspectPort = inspectArg?.includes("=") ? inspectArg.split("=")[1] : "9222";
+
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
   process.stderr.write("Hermes TUI requires an interactive terminal\n");
   process.exit(1);
 }
 
 async function main(): Promise<void> {
+  // Start Node.js inspector if requested
+  if (inspectArg) {
+    const inspector = await import("node:inspector");
+    inspector.open(Number(inspectPort), "127.0.0.1", false);
+    console.error(`[inspector] started on port ${inspectPort}`);
+  }
+
   const codebaseRuntime = createCodebaseRuntimeFromEnv();
   const mcpRuntime = await createMcpRuntimeFromEnv(cwd).catch(async (error) => {
     await codebaseRuntime.close();
