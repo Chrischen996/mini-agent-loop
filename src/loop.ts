@@ -325,7 +325,12 @@ const PHASE_SUFFIX: Record<SessionPhase, string> = {
   failed: "\n[PHASE:failed] Execution failed.",
 };
 
-function applyPermissionModePrompt(messages: AgentMessage[], mode: PermissionMode): void {
+/**
+ * In-place update of the permission-mode suffix on the system prompt.
+ * Used by Shift+Tab mode cycling so the conversation history (user/assistant/
+ * tool messages) is preserved — only the `[MODE]` marker line is rewritten.
+ */
+export function applyPermissionModePrompt(messages: AgentMessage[], mode: PermissionMode): void {
   const system = messages[0];
   if (!system || system.role !== "system" || typeof system.content !== "string") return;
   const base = system.content.split(PERMISSION_MODE_MARKER, 1)[0]!.trimEnd();

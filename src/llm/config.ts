@@ -120,6 +120,7 @@ const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 60_000;
 
 function configuredTimeout(raw: string | undefined, fallback: number): number {
   const value = Number(raw);
+  if (value === 0) return 0;
   return Number.isFinite(value) && value >= 1_000 ? Math.floor(value) : fallback;
 }
 
@@ -220,15 +221,15 @@ export function createRequestSignal(
     phase = nextPhase;
     controller.abort();
   };
-  const totalTimer = setTimeout(() => abortFor("total"), timeoutMs);
-  if (options.firstResponseTimeoutMs !== undefined) {
+  const totalTimer = timeoutMs > 0 ? setTimeout(() => abortFor("total"), timeoutMs) : undefined;
+  if (options.firstResponseTimeoutMs !== undefined && options.firstResponseTimeoutMs > 0) {
     firstResponseTimer = setTimeout(
       () => abortFor("first_response"),
       options.firstResponseTimeoutMs,
     );
   }
   const refreshIdleTimer = () => {
-    if (options.idleTimeoutMs === undefined || !responseStarted || phase) return;
+    if (options.idleTimeoutMs === undefined || options.idleTimeoutMs <= 0 || !responseStarted || phase) return;
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => abortFor("stream_idle"), options.idleTimeoutMs);
   };
@@ -247,7 +248,7 @@ export function createRequestSignal(
     },
     markActivity: refreshIdleTimer,
     cleanup: () => {
-      clearTimeout(totalTimer);
+      if (totalTimer !== undefined) clearTimeout(totalTimer);
       if (firstResponseTimer !== undefined) clearTimeout(firstResponseTimer);
       if (idleTimer !== undefined) clearTimeout(idleTimer);
       parent?.removeEventListener("abort", onAbort);

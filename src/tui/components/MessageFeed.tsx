@@ -6,6 +6,8 @@ import { SubagentCard } from "./SubagentCard.tsx";
 import { TUI_COLORS as C } from "../theme.ts";
 import { selectMessageViewport } from "../message-viewport.ts";
 import { MarkdownText } from "./MarkdownText.tsx";
+import { toMessageRenderModel } from "../render-model.ts";
+import { toolDisplayName, toolStatusIcon } from "../tool-lines.ts";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -205,7 +207,7 @@ function ReadView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> })
     <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
         {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
-          : <Text color={isError ? C.error : C.success}>{isError ? "✗" : "✓"}</Text>}
+          : <Text color={isError ? C.error : C.success}>{toolStatusIcon(msg.status)}</Text>}
         <Text dimColor>read</Text>
         <Text color={C.info}>{path}</Text>
         {msg.durationMs !== undefined && <Text dimColor>({msg.durationMs}ms)</Text>}
@@ -232,7 +234,7 @@ function BashView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> })
     <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
         {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
-          : <Text color={isError ? C.error : C.success}>{isError ? "✗" : "✓"}</Text>}
+          : <Text color={isError ? C.error : C.success}>{toolStatusIcon(msg.status)}</Text>}
         <Text dimColor>$</Text>
         <Text color={C.assistant} bold>{cmd}</Text>
         {msg.durationMs !== undefined && <Text dimColor>({msg.durationMs}ms)</Text>}
@@ -263,7 +265,7 @@ function FileWriteView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" 
     <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
         {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
-          : <Text color={isError ? C.error : C.success}>{isError ? "✗" : "✓"}</Text>}
+          : <Text color={isError ? C.error : C.success}>{toolStatusIcon(msg.status)}</Text>}
         <Text dimColor>{isEdit ? "edit" : "write"}</Text>
         <Text color={C.info}>{path}</Text>
         {msg.durationMs !== undefined && <Text dimColor>({msg.durationMs}ms)</Text>}
@@ -331,7 +333,7 @@ function FileListView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }
       <Box gap={1}>
         {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
           : <Text color={isError ? C.error : C.success}>{isError ? "✗" : "✓"}</Text>}
-        <Text dimColor>{msg.name}</Text>
+        <Text dimColor>{toolDisplayName(msg.name)}</Text>
         <Text color={C.info}>{path}/</Text>
         {msg.durationMs !== undefined && <Text dimColor>({msg.durationMs}ms)</Text>}
       </Box>
@@ -379,24 +381,36 @@ function GenericView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }>
 // ─── dispatcher ──────────────────────────────────────────────────────────────
 
 function ToolCallRow({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> }): React.ReactElement {
+  let content: React.ReactElement;
   switch (msg.name) {
     case "read":
-      return <ReadView msg={msg} />;
+      content = <ReadView msg={msg} />;
+      break;
     case "bash":
-      return <BashView msg={msg} />;
+      content = <BashView msg={msg} />;
+      break;
     case "write":
     case "edit":
-      return <FileWriteView msg={msg} />;
+      content = <FileWriteView msg={msg} />;
+      break;
     case "grep":
     case "search":
-      return <GrepView msg={msg} />;
+      content = <GrepView msg={msg} />;
+      break;
     case "find":
     case "ls":
     case "list":
-      return <FileListView msg={msg} />;
+      content = <FileListView msg={msg} />;
+      break;
     default:
-      return <GenericView msg={msg} />;
+      content = <GenericView msg={msg} />;
   }
+  return (
+    <Box flexDirection="row" marginTop={0} marginBottom={0}>
+      <Text color={C.gutter}>⎿ </Text>
+      <Box flexDirection="column" flexGrow={1}>{content}</Box>
+    </Box>
+  );
 }
 
 // ─── main feed ───────────────────────────────────────────────────────────────
@@ -498,7 +512,10 @@ export function MessageFeed({
         if (item.kind === "streaming_text") {
           return (
             <ViewportSlice key="streaming-text" clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
-              <Text color={C.assistant} wrap="wrap">{streamingText}</Text>
+              <Box flexDirection="row">
+                <Text color={C.primary} bold>⏺ </Text>
+                <Text color={C.assistant} wrap="wrap">{streamingText}</Text>
+              </Box>
             </ViewportSlice>
           );
         }
@@ -515,23 +532,22 @@ export function MessageFeed({
 
         const msg = item.message;
         const absoluteIndex = item.index;
+        const visual = toMessageRenderModel(msg);
         if (msg.kind === "user") {
           return (
             <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
               <Box
                 marginBottom={0}
                 flexDirection="column"
-                borderStyle="round"
-                borderColor={C.user}
                 paddingX={1}
                 marginTop={1}
               >
-                <Box gap={1} marginTop={1}>
-                  <Text color={C.user} bold>{">"}</Text>
+                <Box gap={1}>
+                  <Text color={C.user} bold>{visual.marker}</Text>
                   <Text color={C.assistant}>{msg.displayText ?? msg.text}</Text>
                 </Box>
                 {msg.images?.length ? (
-                  <Box marginLeft={2} marginTop={1} gap={1}>
+                  <Box marginLeft={2} marginTop={0} gap={1}>
                     {msg.images.map((image) => (
                       <Text key={image.path} color={C.info}>[image: {image.path.split("/").pop()}]</Text>
                     ))}
@@ -546,7 +562,7 @@ export function MessageFeed({
             <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
               <Box marginBottom={0} flexDirection="column" marginTop={1}>
                 <Box flexDirection="row">
-                  <Text color={C.gutter}>⎿ </Text>
+                  <Text color={C.primary} bold>{visual.marker} </Text>
                   <Box flexDirection="column" flexGrow={1}>
                     {msg.reasoning && (
                       <ThinkingBlock

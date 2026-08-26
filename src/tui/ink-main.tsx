@@ -5,8 +5,15 @@ import { createAllTools, createTools, createToolsWithSandbox } from "../tools/in
 import { createSandboxRunner } from "../sandbox/index.ts";
 import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
+import { createIncrementalStdout } from "./incremental-renderer.ts";
 
 const cwd = process.cwd();
+
+// Keep Ink's frequent redraws isolated from the shell's main screen. This is
+// also what prevents a completed TUI session from leaving its frame in the
+// user's scrollback buffer.
+const ALTERNATE_SCREEN = "\x1b[?1049h";
+const MAIN_SCREEN = "\x1b[?1049l";
 
 // Parse command line arguments for debugging/inspection
 const args = process.argv.slice(2);
@@ -59,15 +66,19 @@ async function main(): Promise<void> {
       codebaseProvider: codebaseRuntime.semanticProvider,
       sandboxRunner,
     });
+    process.stdout.write(ALTERNATE_SCREEN);
+    const incrementalStdout = createIncrementalStdout(process.stdout);
     const app = render(
       <App
         cwd={cwd}
         agentTools={mcpRuntime.toolProvider(agentTools)}
         allTools={mcpRuntime.toolProvider(createAllTools(cwd, { sandboxRunner }))}
       />,
+      { stdout: incrementalStdout },
     );
     await app.waitUntilExit();
   } finally {
+    process.stdout.write(MAIN_SCREEN);
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close(), sandboxRunner?.cleanup() ?? Promise.resolve()]);
   }
 }

@@ -59,7 +59,7 @@ npm install
 | `SILICONFLOW_API_KEY` | no | — |
 | `OPENAI_BASE_URL` | no | OpenAI or DeepSeek auto |
 | `OPENAI_MODEL` | no | `gpt-4o-mini` / `deepseek-chat` |
-| `MINI_AGENT_REQUEST_TIMEOUT_MS` | no | `120000` (total request) |
+| `MINI_AGENT_REQUEST_TIMEOUT_MS` | no | `120000` (total request; `0` disables) |
 | `MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS` | no | same as request timeout |
 | `MINI_AGENT_STREAM_IDLE_TIMEOUT_MS` | no | `60000` after stream starts |
 | `MINI_AGENT_MODELS` | no | — |
@@ -294,9 +294,9 @@ CUSTOM_LLM_KEY=sk-...
 MINI_AGENT_MODELS='[{"provider":"company","id":"deep-thinker-v1","baseUrl":"https://llm.example/v1","apiKeyEnv":"CUSTOM_LLM_KEY","contextWindow":128000,"timeoutMs":600000,"firstResponseTimeoutMs":300000,"streamIdleTimeoutMs":180000}]'
 ```
 
-- `timeoutMs` — total request deadline (default 120s)
-- `firstResponseTimeoutMs` — time-to-first-chunk deadline (defaults to `timeoutMs`)
-- `streamIdleTimeoutMs` — max gap between stream chunks (default 60s)
+- `timeoutMs` — total request deadline (default 120s; `0` disables)
+- `firstResponseTimeoutMs` — time-to-first-chunk deadline (defaults to `timeoutMs`; `0` disables)
+- `streamIdleTimeoutMs` — max gap between stream chunks (default 60s; `0` disables)
 
 Resolution order: explicit config override → model catalog value →
 `MINI_AGENT_*_TIMEOUT_MS` env var → default. Switching models with `/model`

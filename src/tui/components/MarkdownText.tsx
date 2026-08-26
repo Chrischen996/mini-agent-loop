@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { TUI_COLORS as C } from "../theme.ts";
+import { parseMarkdownLines } from "../markdown-lines.ts";
 
 /**
  * Lightweight terminal markdown renderer (pure Ink, no dependencies).
@@ -43,57 +44,31 @@ function renderInline(text: string, keyPrefix: string, baseColor?: string): Reac
 const RULE_WIDTH = 48;
 
 export function MarkdownText({ text }: { text: string }): React.ReactElement {
-  const lines = text.split("\n");
-  let inCodeBlock = false;
+  const lines = parseMarkdownLines(text);
 
   return (
     <Box flexDirection="column">
       {lines.map((line, i) => {
-        if (line.trimStart().startsWith("```")) {
-          inCodeBlock = !inCodeBlock;
-          return <Text key={i} color={C.muted}>{line}</Text>;
-        }
-        if (inCodeBlock) {
-          return <Text key={i} color={C.info}>{line}</Text>;
-        }
-
-        const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-        if (heading) {
-          const level = heading[1]!.length;
+        if (line.kind === "code-fence") return <Text key={i} color={C.muted}>{line.text}</Text>;
+        if (line.kind === "code") return <Text key={i} color={C.info}>{line.text}</Text>;
+        if (line.kind === "heading") {
+          const level = line.level;
           if (level <= 2) {
-            return (
-              <Text key={i} color={C.primary} bold>▸ {heading[2]}</Text>
-            );
+            return <Text key={i} color={C.primary} bold>▸ {line.text}</Text>;
           }
-          return (
-            <Text key={i} color={C.selection} bold>· {heading[2]}</Text>
-          );
+          return <Text key={i} color={C.selection} bold>· {line.text}</Text>;
         }
-
-        if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
-          return <Text key={i} color={C.border}>{"─".repeat(RULE_WIDTH)}</Text>;
-        }
-
-        const listItem = /^(\s*)([-*+]|\d+\.)\s+(.*)$/.exec(line);
-        if (listItem) {
-          const indent = Math.floor(listItem[1]!.length / 2);
-          const ordered = /\d/.test(listItem[2]!);
+        if (line.kind === "rule") return <Text key={i} color={C.border}>{"─".repeat(RULE_WIDTH)}</Text>;
+        if (line.kind === "list") {
           return (
-            <Box key={i} paddingLeft={indent * 2} gap={1}>
-              <Text color={C.running}>{ordered ? listItem[2] : "•"}</Text>
-              <Text color={C.assistant}>{renderInline(listItem[3]!, `li${i}`, C.assistant)}</Text>
+            <Box key={i} paddingLeft={line.indent * 2} gap={1}>
+              <Text color={C.running}>{line.ordered ? line.marker : "•"}</Text>
+              <Text color={C.assistant}>{renderInline(line.text, `li${i}`, C.assistant)}</Text>
             </Box>
           );
         }
-
-        const quote = /^>\s?(.*)$/.exec(line);
-        if (quote) {
-          return <Text key={i} color={C.muted}>│ {quote[1]}</Text>;
-        }
-
-        return (
-          <Text key={i} color={C.assistant}>{renderInline(line, `ln${i}`, C.assistant)}</Text>
-        );
+        if (line.kind === "quote") return <Text key={i} color={C.muted}>│ {line.text}</Text>;
+        return <Text key={i} color={C.assistant}>{renderInline(line.text, `ln${i}`, C.assistant)}</Text>;
       })}
     </Box>
   );

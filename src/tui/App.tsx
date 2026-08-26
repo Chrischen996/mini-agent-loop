@@ -123,9 +123,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const { exit } = useApp();
   const { stdout } = useStdout();
   const termWidth = stdout?.columns ?? 80;
-  // Leave one terminal row unused so Ink never enters its full-screen clear
-  // path (`outputHeight >= rows`) while streamed reasoning is growing.
-  const termHeight = getTuiViewportHeight(stdout?.rows);
+  // Leave two terminal rows unused. Ink's renderer adds a trailing newline and
+  // can gain a row from borders/wrapping; staying below the terminal height
+  // prevents its visible `clearTerminal` fallback during streamed updates.
+  const termHeight = Math.max(1, (stdout?.rows ?? 24) - 2);
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const llmRef = useRef(llm);
   llmRef.current = llm;
@@ -938,8 +939,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             <Text dimColor>{state.spinnerMessage}</Text>
           </Box>
         )}
-        <Box paddingX={1} gap={1} flexShrink={0}>
-          <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : ">"}</Text>
+        <Box
+          paddingX={1}
+          gap={1}
+          flexShrink={0}
+        >
+          <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : "❯"}</Text>
           <Box flexGrow={1} minWidth={0}>
             <PromptInput
               key={inputEpoch}

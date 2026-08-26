@@ -1,7 +1,7 @@
 import { useInput, type Key } from "ink";
 import { resolvePendingPermissionDecision } from "../pending-permission.ts";
 import { nextPermissionMode, switchPermissionMode } from "../permission-utils.ts";
-import { buildSystemPrompt, createAgentHistory } from "../../loop.ts";
+import { applyPermissionModePrompt } from "../../loop.ts";
 import type { Dispatch } from "react";
 import type { TuiAction } from "../state.ts";
 import type { PermissionDecision, PermissionManager, PermissionTurnContext } from "../../permissions.ts";
@@ -77,9 +77,10 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
       switchPermissionMode(permissionManager, next);
       // Always sync React state so the StatusBar reflects the new mode.
       dispatch({ type: "SET_PERMISSION_MODE", mode: next });
+      // Rewrite only the [MODE] suffix on the existing system prompt so the
+      // conversation history (user/assistant/tool messages) is preserved.
       if (historyRef?.current && historyRef.current.length > 0) {
-        const newPrompt = buildSystemPrompt(next);
-        historyRef.current = createAgentHistory(newPrompt, next);
+        applyPermissionModePrompt(historyRef.current, next);
       }
       return;
     }

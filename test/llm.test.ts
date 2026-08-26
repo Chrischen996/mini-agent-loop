@@ -379,6 +379,45 @@ describe("per-model timeout configuration", () => {
     }
   });
 
+  it("allows zero environment timeouts to disable each deadline", async () => {
+    const originalTotal = process.env.MINI_AGENT_REQUEST_TIMEOUT_MS;
+    const originalFirst = process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS;
+    const originalIdle = process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS;
+    process.env.MINI_AGENT_REQUEST_TIMEOUT_MS = "0";
+    process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS = "0";
+    process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS = "0";
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test",
+        baseUrl: "https://llm.example/v1",
+        model: "gpt-4o-mini",
+      });
+
+      assert.equal(timeoutLimitForPhase(config, "total"), 0);
+      assert.equal(timeoutLimitForPhase(config, "first_response"), 0);
+      assert.equal(timeoutLimitForPhase(config, "stream_idle"), 0);
+
+      const request = createRequestSignal(undefined, 0, {
+        firstResponseTimeoutMs: 0,
+        idleTimeoutMs: 0,
+      });
+      try {
+        await wait(25);
+        assert.equal(request.didTimeout(), false);
+      } finally {
+        request.cleanup();
+      }
+    } finally {
+      if (originalTotal !== undefined) process.env.MINI_AGENT_REQUEST_TIMEOUT_MS = originalTotal;
+      else delete process.env.MINI_AGENT_REQUEST_TIMEOUT_MS;
+      if (originalFirst !== undefined) process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS = originalFirst;
+      else delete process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS;
+      if (originalIdle !== undefined) process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS = originalIdle;
+      else delete process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS;
+    }
+  });
+
   it("switchLlmModel adopts the target model's catalog timeouts and drops stale ones", () => {
     const slowModel = resolveModel("deepseek/deepseek-v4-pro");
     (slowModel as { timeoutMs?: number }).timeoutMs = 600_000;
