@@ -103,7 +103,7 @@ describe("TodoPanel formatting", () => {
   it("uses no rows when both sources are absent or hidden", () => {
     assert.equal(getTodoPanelRows({}, "expanded"), 0);
     assert.equal(getTodoPanelRows({ todos: [{ id: "x", content: "x", activeForm: "x", status: "pending", source: "model" as const }] }, "hidden"), 0);
-    assert.equal(getTodoPanelRows({ todos: [{ id: "x", content: "x", activeForm: "x", status: "pending", source: "model" as const }] }, "compact"), 1);
+    assert.equal(getTodoPanelRows({ todos: [{ id: "x", content: "x", activeForm: "x", status: "pending", source: "model" as const }] }, "compact"), 2);
   });
 
   it("derives items from a plan document", () => {

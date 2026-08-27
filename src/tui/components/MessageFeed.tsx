@@ -8,12 +8,9 @@ import { selectMessageViewport } from "../message-viewport.ts";
 import { MarkdownText } from "./MarkdownText.tsx";
 import { toMessageRenderModel } from "../render-model.ts";
 import { toolDisplayName, toolStatusIcon } from "../tool-lines.ts";
+import { thinkingRenderLines, thinkingVisibleLines } from "../thinking-lines.ts";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
-
-const THINKING_SUMMARY_LINES = 3;
-const THINKING_AUTO_COLLAPSE_LINES = 15;
-const THINKING_MAX_FULL_LINES = 30;
 
 function str(v: unknown): string {
   return typeof v === "string" ? v : "";
@@ -38,21 +35,6 @@ function formatTokenCount(tokens: number): string {
 function formatCharCount(chars: number): string {
   if (chars >= 1000) return `${(chars / 1000).toFixed(1)}k chars`;
   return `${chars} chars`;
-}
-
-/**
- * Format thinking content with basic code-block highlighting.
- * Lines inside ``` fences get a different color to stand out.
- */
-function formatThinkingLines(text: string, maxLines: number): { lines: string[]; truncated: number } {
-  const allLines = text.split("\n");
-  const visible = allLines.slice(0, maxLines);
-  const truncated = Math.max(0, allLines.length - maxLines);
-  return { lines: visible, truncated };
-}
-
-function isCodeFenceLine(line: string): boolean {
-  return line.trimStart().startsWith("```");
 }
 
 // ─── ThinkingBlock ───────────────────────────────────────────────────────────
@@ -87,18 +69,9 @@ export function ThinkingBlock({
   if (mode === "hidden" && !forceExpanded) return null;
   if (!content) return null;
 
-  const lines = content.split("\n");
   const tokenCount = estimateTokens(content);
-  const streamingShouldCollapse =
-    isStreaming &&
-    !forceExpanded &&
-    mode !== "full" &&
-    lines.length > THINKING_AUTO_COLLAPSE_LINES;
-  const showFull =
-    forceExpanded ||
-    mode === "full" ||
-    (mode === "summary" && !isStreaming && lines.length <= THINKING_SUMMARY_LINES) ||
-    (isStreaming && !streamingShouldCollapse && mode !== "summary");
+  const visibleModel = thinkingVisibleLines(content, { mode, isStreaming, forceExpanded });
+  const showFull = visibleModel.expanded;
 
   // Distinctive panel: magenta frame + status badge.
   // Streaming = yellow energy; focused = cyan highlight; idle = magenta signature.
@@ -114,49 +87,16 @@ export function ThinkingBlock({
       : (focused ? "Alt+T expand" : "Alt+T"))
     : `${formatCharCount(charCount)}`;
 
-  // Render body content based on mode
-  const renderThinkingLines = (textContent: string, maxLines: number) => {
-    const { lines: visibleLines, truncated } = formatThinkingLines(textContent, maxLines);
-    let inCodeBlock = false;
-    return (
-      <>
-        {visibleLines.map((line, i) => {
-          if (isCodeFenceLine(line)) {
-            inCodeBlock = !inCodeBlock;
-            return <Text key={i} color={C.thinking} dimColor>{line}</Text>;
-          }
-          if (inCodeBlock) {
-            return <Text key={i} color={C.muted}>{line}</Text>;
-          }
-          return <Text key={i} color={C.assistant} dimColor wrap="wrap">{line}</Text>;
-        })}
-        {truncated > 0 && (
-          <Text color={C.thinking} dimColor>
-            ··· {truncated} more lines{streamInfo}
-          </Text>
-        )}
-      </>
-    );
-  };
-
-  const body = !showFull
-    ? (() => {
-        const preview = lines.slice(0, THINKING_SUMMARY_LINES);
-        const remaining = Math.max(0, lines.length - THINKING_SUMMARY_LINES);
-        return (
-          <>
-            {preview.map((line, i) => (
-              <Text key={i} color={C.assistant} dimColor wrap="wrap">{line}</Text>
-            ))}
-            {remaining > 0 && (
-              <Text color={C.thinking} dimColor>
-                ··· {remaining} more lines{streamInfo}
-              </Text>
-            )}
-          </>
-        );
-      })()
-    : renderThinkingLines(content, THINKING_MAX_FULL_LINES);
+  const body = thinkingRenderLines(content, { mode, isStreaming, forceExpanded, streamInfo }).map((line) => (
+    <Text
+      key={line.key}
+      color={line.style === "thinking" ? C.thinking : line.style === "muted" ? C.muted : C.assistant}
+      dimColor={line.dim}
+      wrap="wrap"
+    >
+      {line.text}
+    </Text>
+  ));
 
   return (
     <Box

@@ -1,4 +1,5 @@
 import type { WriteStream } from "node:tty";
+import type { RenderLine } from "./render-lines.ts";
 
 const ANSI_ERASE_LINE = "\x1b[2K";
 const ANSI_CLEAR_TERMINAL = "\x1b[2J";
@@ -22,6 +23,16 @@ export class IncrementalTerminalRenderer {
 
     const nextLines = frame.split("\n");
     if (nextLines.at(-1) === "") nextLines.pop();
+    this.renderLines(nextLines.map((text, index) => ({ key: `ink-${index}`, text, style: "assistant" as const })));
+    return true;
+  }
+
+  /** Direct entrypoint for presentation models that no longer need Ink. */
+  renderLines(lines: readonly RenderLine[]): void {
+    this.renderRows(lines.map(formatRenderLine));
+  }
+
+  private renderRows(nextLines: string[]): void {
     const previous = this.previousLines ?? [];
     let output = "";
 
@@ -39,12 +50,22 @@ export class IncrementalTerminalRenderer {
       this.target.write(output);
     }
     this.previousLines = nextLines;
-    return true;
   }
 
   reset(): void {
     this.previousLines = undefined;
   }
+}
+
+function formatRenderLine(line: RenderLine): string {
+  const indent = " ".repeat(Math.max(0, line.indent ?? 0));
+  const codes: number[] = [];
+  if (line.bold) codes.push(1);
+  if (line.dim) codes.push(2);
+  if (line.strikethrough) codes.push(9);
+  const color = line.tone === "success" ? 32 : line.tone === "running" ? 33 : line.tone === "error" || line.style === "error" ? 31 : line.style === "thinking" ? 35 : line.style === "tool" ? 36 : line.style === "todo" ? 33 : line.style === "muted" ? 90 : 37;
+  codes.push(color);
+  return `${indent}\x1b[${codes.join(";")}m${line.prefix ?? ""}${line.text}\x1b[0m`;
 }
 
 /** Create a stdout-compatible facade without mutating process.stdout. */

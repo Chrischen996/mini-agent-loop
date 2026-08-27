@@ -38,5 +38,15 @@ describe("incremental terminal renderer", () => {
     assert.match(output.writes[0]!, /3;1H/);
     assert.match(output.writes[0]!, /\x1b\[2K/);
   });
-});
 
+  it("consumes shared RenderLine models directly", () => {
+    const output = sink();
+    const renderer = new IncrementalTerminalRenderer(output.target as never);
+    renderer.renderLines([{ key: "todo", text: "TODO 1/2", style: "todo", bold: true }]);
+    assert.equal(output.writes.length, 1);
+    assert.match(output.writes[0]!, /TODO 1\/2/);
+    output.writes.length = 0;
+    renderer.renderLines([{ key: "todo", text: "TODO 1/2", style: "todo", bold: true }]);
+    assert.deepEqual(output.writes, []);
+  });
+});

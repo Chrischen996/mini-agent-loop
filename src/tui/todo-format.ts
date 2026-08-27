@@ -99,7 +99,7 @@ export function getTodoPanelRows(
 ): number {
   const items = resolveTodoItems(source);
   if (viewMode === "hidden" || (!source.plan && !source.todos)) return 0;
-  if (viewMode === "compact") return 1;
+  if (viewMode === "compact") return 2;
   const visible = Math.min(items.length, maxVisibleItems);
   return 1 + Math.max(1, visible) + (items.length > visible ? 1 : 0);
 }

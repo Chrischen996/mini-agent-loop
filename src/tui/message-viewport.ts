@@ -1,8 +1,7 @@
 import type { ChatMessage, ThinkingDisplayMode } from "./state.ts";
 import { countTerminalRows } from "./terminal-width.ts";
+import { estimateThinkingRows } from "./thinking-lines.ts";
 
-const THINKING_SUMMARY_LINES = 3;
-const THINKING_MAX_FULL_LINES = 30;
 const TOOL_PREVIEW_LINES = 10;
 const SUBAGENT_COLLAPSED_LINES = 3;
 const SUBAGENT_EXPANDED_INNER = 8;
@@ -36,14 +35,7 @@ function thinkingRows(
   forceExpanded: boolean,
   width: number,
 ): number {
-  if (!content || (mode === "hidden" && !forceExpanded)) return 0;
-  const sourceLines = content.split("\n").length;
-  const showFull = forceExpanded || mode === "full" || (mode === "summary" && sourceLines <= THINKING_SUMMARY_LINES);
-  const maxLines = showFull ? THINKING_MAX_FULL_LINES : THINKING_SUMMARY_LINES;
-  const visible = content.split("\n").slice(0, maxLines).join("\n");
-  const bodyRows = countTerminalRows(visible, Math.max(10, width - 4));
-  const truncationRow = sourceLines > maxLines ? 1 : 0;
-  return 3 + bodyRows + truncationRow;
+  return estimateThinkingRows(content, { mode, forceExpanded, width });
 }
 
 export function estimateMessageHeight(

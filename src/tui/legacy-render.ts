@@ -4,16 +4,10 @@ import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import type { AgentMessage } from "../types.ts";
 import type { PermissionMode } from "../permissions.ts";
 import type { PlanDocument } from "../plan/document.ts";
-import { todoSummary, type TodoItem, type TodoViewMode } from "../todo.ts";
-import {
-  resolveTodoItems,
-  todoColor,
-  todoIcon,
-  todoText,
-  TODO_PANEL_MAX_VISIBLE_ITEMS,
-  TODO_PLAN_STATUS_LABELS,
-} from "./todo-format.ts";
+import type { TodoItem, TodoViewMode } from "../todo.ts";
+import { TODO_PANEL_MAX_VISIBLE_ITEMS } from "./todo-format.ts";
 import { countTerminalRows, terminalStringWidth } from "./terminal-width.ts";
+import { todoPanelRenderLines } from "./todo-lines.ts";
 
 export type LegacyToolView = {
   id: string;
@@ -84,38 +78,11 @@ function appendTodoLines(
   todos: readonly TodoItem[] | undefined,
   viewMode: TodoViewMode,
 ): void {
-  if (viewMode === "hidden") return;
-  const items = resolveTodoItems({ plan, todos });
-  const summary = todoSummary(items);
-  const planStatus = plan ? ` [${TODO_PLAN_STATUS_LABELS[plan.status]}]` : "";
-  lines.push(
-    `${ANSI.cyan}TODO${ANSI.reset}${planStatus} ${summary.completed}/${summary.total}` +
-      (summary.inProgress > 0 ? ` ${ANSI.yellow}${summary.inProgress} 执行中${ANSI.reset}` : "") +
-      (summary.failed > 0 ? ` ${ANSI.red}${summary.failed} 失败${ANSI.reset}` : ""),
-  );
-  if (viewMode === "compact") {
-    const current = items.find((item) => item.status === "in_progress");
-    lines.push(`${ANSI.dim}${current?.activeForm ?? "任务列表已折叠"}${ANSI.reset}`);
-    return;
-  }
-  if (items.length === 0) {
-    lines.push(`${ANSI.dim}暂无结构化步骤${ANSI.reset}`);
-    return;
-  }
-  const visibleItems = items.slice(0, TODO_PANEL_MAX_VISIBLE_ITEMS);
-  for (const [index, item] of visibleItems.entries()) {
-    const color = {
-      green: ANSI.green,
-      red: ANSI.red,
-      yellow: ANSI.yellow,
-      gray: ANSI.dim,
-    }[todoColor(item.status)];
-    const strike = item.status === "completed" ? ANSI.strike : "";
-    const number = item.source === "plan" ? `${index + 1}. ` : "";
-    lines.push(`${color}${strike}${todoIcon(item.status)}${ANSI.reset} ${strike}${number}${todoText(item.content)}${ANSI.reset}`);
-  }
-  if (items.length > visibleItems.length) {
-    lines.push(`${ANSI.dim}... 还有 ${items.length - visibleItems.length} 项${ANSI.reset}`);
+  const renderLines = todoPanelRenderLines({ plan, todos, viewMode, maxVisibleItems: TODO_PANEL_MAX_VISIBLE_ITEMS });
+  for (const line of renderLines) {
+    const color = line.tone === "success" ? ANSI.green : line.tone === "running" ? ANSI.yellow : line.tone === "error" ? ANSI.red : line.style === "muted" ? ANSI.dim : ANSI.cyan;
+    const attributes = `${line.strikethrough ? ANSI.strike : ""}${line.dim ? ANSI.dim : ""}`;
+    lines.push(`${color}${attributes}${line.prefix ?? ""}${line.text}${ANSI.reset}`);
   }
 }
 
