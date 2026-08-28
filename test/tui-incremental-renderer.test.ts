@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { createIncrementalStdout, IncrementalTerminalRenderer } from "../src/tui/incremental-renderer.ts";
+import {
+  createIncrementalStdout,
+  IncrementalTerminalRenderer,
+  resolveTerminalDisplayMode,
+  ScrollbackTerminalRenderer,
+} from "../src/tui/incremental-renderer.ts";
 
 function sink(): { writes: string[]; target: { write(value: string): boolean } } {
   const writes: string[] = [];
@@ -8,6 +13,138 @@ function sink(): { writes: string[]; target: { write(value: string): boolean } }
 }
 
 describe("incremental terminal renderer", () => {
+  it("defaults to main-screen scrollback with fullscreen as an explicit opt-in", () => {
+    assert.equal(resolveTerminalDisplayMode({}), "scrollback");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "fullscreen" }), "fullscreen");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "main-screen" }), "scrollback");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_FULLSCREEN: "1" }), "fullscreen");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_SCROLLBACK: "0" }), "fullscreen");
+  });
+
+  it("appends committed transcript rows and redraws only the live tail", () => {
+    const output = sink();
+    const renderer = new ScrollbackTerminalRenderer(output.target);
+
+    renderer.renderLines([
+      { key: "history-1", text: "first message", style: "assistant" },
+      { key: "status", text: "Working…", style: "muted", ephemeral: true },
+      { key: "input", text: "▌", style: "assistant", ephemeral: true },
+    ]);
+    assert.match(output.writes[0]!, /first message/);
+    output.writes.length = 0;
+
+    renderer.renderLines([
+      { key: "history-1", text: "first message", style: "assistant" },
+      { key: "history-2", text: "second message", style: "assistant" },
+      { key: "status", text: "Ready", style: "muted", ephemeral: true },
+      { key: "input", text: "next▌", style: "assistant", ephemeral: true },
+    ]);
+
+    const update = output.writes[0]!;
+    assert.match(update, /second message/);
+    assert.match(update, /Ready/);
+    assert.match(update, /next▌/);
+    assert.doesNotMatch(update, /first message/);
+    assert.match(update, /\x1b\[2A/);
+    assert.doesNotMatch(update, /\x1b\[2J/);
+  });
+
+  it("keeps scrollback rows untouched when only the prompt changes", () => {
+    const output = sink();
+    const renderer = new ScrollbackTerminalRenderer(output.target);
+
+    renderer.renderLines([
+      { key: "history", text: "committed", style: "assistant" },
+      { key: "input", text: "a▌", style: "assistant", ephemeral: true },
+    ]);
+    output.writes.length = 0;
+    renderer.renderLines([
+      { key: "history", text: "committed", style: "assistant" },
+      { key: "input", text: "ab▌", style: "assistant", ephemeral: true },
+    ]);
+
+    assert.match(output.writes[0]!, /ab▌/);
+    assert.doesNotMatch(output.writes[0]!, /committed/);
+  });
+
+  it("skips a scrollback frame when both history and live tail are unchanged", () => {
+    const output = sink();
+    const renderer = new ScrollbackTerminalRenderer(output.target);
+    const frame = [
+      { key: "history", text: "committed", style: "assistant" as const },
+      { key: "input", text: "▌", style: "assistant" as const, ephemeral: true },
+    ];
+
+    renderer.renderLines(frame);
+    output.writes.length = 0;
+    renderer.renderLines(frame);
+
+    assert.deepEqual(output.writes, []);
+  });
+
+  it("returns control to the shell without leaving an alternate-screen escape", () => {
+    const output = sink();
+    const renderer = new ScrollbackTerminalRenderer(output.target);
+    renderer.renderLines([
+      { key: "status", text: "Working", style: "muted", ephemeral: true },
+      { key: "input", text: "ready", style: "assistant", ephemeral: true },
+    ]);
+    output.writes.length = 0;
+
+    renderer.finish();
+
+    assert.match(output.writes[0]!, /\x1b\[2A/);
+    assert.match(output.writes[0]!, /\x1b\[2K/);
+    assert.doesNotMatch(output.writes[0]!, /Working|ready/);
+    assert.match(output.writes[0]!, /\x1b\[\?25h/);
+    assert.doesNotMatch(output.writes[0]!, /\x1b\[\?1049[hl]/);
+  });
+
+  it("keeps the cursor at the live-tail origin when ephemeral rows shrink", () => {
+    const output = sink();
+    const renderer = new ScrollbackTerminalRenderer(output.target);
+
+    renderer.renderLines([
+      { key: "history", text: "committed", style: "assistant" },
+      { key: "status", text: "Working", style: "muted", ephemeral: true },
+      { key: "completion", text: "50%", style: "muted", ephemeral: true },
+      { key: "input", text: "a", style: "assistant", ephemeral: true },
+    ]);
+    output.writes.length = 0;
+
+    renderer.renderLines([
+      { key: "history", text: "committed", style: "assistant" },
+      { key: "status", text: "Ready", style: "muted", ephemeral: true },
+    ]);
+
+    const update = output.writes[0]!;
+    assert.match(update, /\x1b\[3A/);
+    assert.match(update, /\x1b\[2A/);
+    assert.match(update, /Ready/);
+    assert.doesNotMatch(update, /committed/);
+  });
+
+  it("starts a new append-only segment when committed history is reset", () => {
+    const output = sink();
+    const renderer = new ScrollbackTerminalRenderer(output.target);
+
+    renderer.renderLines([
+      { key: "history-1", text: "old conversation", style: "assistant" },
+      { key: "input", text: "", style: "assistant", ephemeral: true },
+    ]);
+    output.writes.length = 0;
+
+    renderer.renderLines([
+      { key: "history-2", text: "new conversation", style: "assistant" },
+      { key: "input", text: "", style: "assistant", ephemeral: true },
+    ]);
+
+    const update = output.writes[0]!;
+    assert.match(update, /new conversation/);
+    assert.match(update, /\n\n/);
+    assert.doesNotMatch(update, /old conversation/);
+  });
+
   it("updates only changed rows and skips identical frames", () => {
     const output = sink();
     const renderer = new IncrementalTerminalRenderer(output.target as never);

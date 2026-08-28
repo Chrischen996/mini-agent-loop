@@ -21,7 +21,7 @@ import { parseSlashCommand } from "./slash-commands.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
 import { createInitialState, createTuiStore } from "./state.ts";
 import { buildTerminalRenderLines } from "./terminal-render-model.ts";
-import { IncrementalTerminalRenderer } from "./incremental-renderer.ts";
+import { IncrementalTerminalRenderer, resolveTerminalDisplayMode, ScrollbackTerminalRenderer } from "./incremental-renderer.ts";
 import { TerminalInputController, type TerminalInputAction } from "./terminal-input-controller.ts";
 import { TerminalAgentService } from "./terminal-agent-service.ts";
 import { TerminalAutocompleteController } from "./terminal-autocomplete-controller.ts";
@@ -246,7 +246,14 @@ export async function runTerminalMain(): Promise<void> {
       store.dispatch({ type: "ADD_NOTICE", title: "会话已恢复", text: `${activeSessionId.slice(0, 8)} · ${restoredSession.messages.length} 条消息` });
     }
 
-    const renderer = new IncrementalTerminalRenderer(process.stdout);
+    const displayMode = resolveTerminalDisplayMode();
+    const fullscreen = displayMode === "fullscreen";
+    const fullscreenRenderer = new IncrementalTerminalRenderer(process.stdout);
+    const scrollbackRenderer = new ScrollbackTerminalRenderer(process.stdout);
+    const renderer = fullscreen ? fullscreenRenderer : scrollbackRenderer;
+    // Existing scrollback rows cannot be reflowed after they have been handed
+    // to the terminal, so keep the initial width for the append-only path.
+    const scrollbackWidth = process.stdout.columns || 80;
     let autocomplete: TerminalAutocompleteController;
     let render: () => void = () => undefined;
     const directAbortRef: { current?: AbortController } = {};
@@ -268,9 +275,13 @@ export async function runTerminalMain(): Promise<void> {
     render = () => {
       const state = store.getState();
       renderer.renderLines(buildTerminalRenderLines(state, {
-        width: process.stdout.columns || 80,
-        height: Math.max(1, (process.stdout.rows || 24) - 1),
-        scrollOffset: state.scrollOffset,
+        width: fullscreen ? process.stdout.columns || 80 : scrollbackWidth,
+        ...(fullscreen ? {
+          height: Math.max(1, (process.stdout.rows || 24) - 1),
+          scrollOffset: state.scrollOffset,
+        } : {
+          scrollback: true,
+        }),
         // Keep only Claude Code's product title above the transcript. Model,
         // permission mode, and cwd belong in the bottom status chrome.
         header: { title: "Claude Code", cwd },
@@ -292,7 +303,13 @@ export async function runTerminalMain(): Promise<void> {
       process.stdout.removeListener("resize", render);
       if (process.stdin.isRaw) process.stdin.setRawMode(false);
       process.stdin.pause();
-      process.stdout.write(`\x1b[?25h${MAIN_SCREEN}`);
+      if (fullscreen) {
+        process.stdout.write(`\x1b[?25h${MAIN_SCREEN}`);
+      } else {
+        // Scrollback mode never entered the alternate buffer. The renderer
+        // already left the cursor after the live tail; just restore it.
+        scrollbackRenderer.finish();
+      }
       unsubscribe();
       finishLoop();
     };
@@ -303,7 +320,13 @@ export async function runTerminalMain(): Promise<void> {
       cleanup();
     };
 
-    process.stdout.write(`${ALTERNATE_SCREEN}\x1b[?25l\x1b[H`);
+    if (fullscreen) {
+      process.stdout.write(`${ALTERNATE_SCREEN}\x1b[?25l\x1b[H`);
+    } else {
+      // Start a clean transcript row in the user's main screen. Do not clear
+      // the terminal: previous shell output must remain in scrollback.
+      process.stdout.write("\x1b[2K\r\x1b[?25l");
+    }
     screenActive = true;
     process.stdin.setRawMode(true);
     process.stdin.setEncoding("utf8");
@@ -312,7 +335,10 @@ export async function runTerminalMain(): Promise<void> {
     process.once("exit", cleanup);
     process.stdin.on("data", (chunk: string) => {
       input.handle(chunk);
-      render();
+      // An action such as /exit can synchronously tear down the screen while
+      // handling the same input chunk. Do not render a fresh scrollback
+      // segment after cleanup has already returned control to the shell.
+      if (screenActive && !quitting) render();
     });
     process.stdout.on("resize", render);
     render();

@@ -25,6 +25,12 @@ export type TerminalRenderOptions = {
   width?: number;
   /** Optional total frame height; the prompt footer is pinned to the bottom. */
   height?: number;
+  /**
+   * Main-screen mode: completed transcript rows are append-only and all
+   * transient rows are marked for the renderer's live tail. This intentionally
+   * leaves `height` unset so messages flow into terminal scrollback.
+   */
+  scrollback?: boolean;
   /** Rows below the viewport, matching TuiState.scrollOffset semantics. */
   scrollOffset?: number;
   /** Input value and grapheme cursor rendered as the final frame rows. */
@@ -46,15 +52,19 @@ export function buildTerminalRenderLines(
   const messageStart = Math.max(0, state.messages.length - (options.maxMessages ?? 200));
 
   const width = options.width === undefined ? undefined : Math.max(10, options.width);
+  const scrollback = options.scrollback === true;
   const header = options.header?.show === false ? [] : options.header ? headerRenderLines(state, options.header) : [];
 
-  // Match the existing App layout: the task panel is above the scrollable
-  // message feed and is not part of conversation history.
+  // Fullscreen keeps the task panel above the message feed. In main-screen
+  // mode it belongs to the live tail so Todo updates never require rewriting
+  // already committed transcript rows in terminal scrollback.
   const panelLines = todoPanelRenderLines({
     plan: state.todoPlan,
     todos: state.todoItems,
     viewMode: state.todoViewMode,
   }).map((line) => ({ ...line, key: `panel-${line.key}` }));
+  const panelLinesAboveBody = scrollback ? [] : panelLines;
+  const panelLinesInLiveTail = scrollback ? panelLines.map(markEphemeral) : [];
 
   for (let index = messageStart; index < state.messages.length; index++) {
     const message = state.messages[index]!;
@@ -74,7 +84,9 @@ export function buildTerminalRenderLines(
       continue;
     }
     if (message.kind === "assistant") {
-      const focused = state.focusedMessageIndex === index;
+      // Focus highlighting is a fullscreen interaction. Main-screen history
+      // is append-only, so toggling focus must not rewrite old scrollback.
+      const focused = !scrollback && state.focusedMessageIndex === index;
       const reasoning = message.reasoning;
       const showReasoning = Boolean(reasoning && (state.thinkingMode !== "hidden" || state.expandedThinking.includes(index)));
       if (showReasoning) {
@@ -109,7 +121,9 @@ export function buildTerminalRenderLines(
       continue;
     }
     if (message.kind === "tool_call") {
-      lines.push(...toolCardRenderLines(message, index, width));
+      // Claude Code's main-screen transcript uses compact activity rows; the
+      // bordered tool card remains available in fullscreen mode.
+      lines.push(...toolCardRenderLines(message, index, scrollback ? undefined : width));
       continue;
     }
     if (message.kind === "notice") {
@@ -127,21 +141,26 @@ export function buildTerminalRenderLines(
 
   if (state.streamingReasoning) {
     addMessageGap(lines, state.messages.length);
-    lines.push(...thinkingHeaderLines(state.streamingReasoning, state.thinkingMode, state.busy, "streaming", false));
+    lines.push(...thinkingHeaderLines(state.streamingReasoning, state.thinkingMode, state.busy, "streaming", false).map((line) => scrollback ? markEphemeral(line) : line));
     lines.push(...thinkingRenderLines(state.streamingReasoning, {
       mode: state.thinkingMode,
       isStreaming: state.busy,
       streamInfo: state.busy ? " streaming" : undefined,
-    }).map((line) => ({ ...line, key: `streaming-${line.key}`, prefix: "  " })));
+    }).map((line) => {
+      const next = { ...line, key: `streaming-${line.key}`, prefix: "  " };
+      return scrollback ? markEphemeral(next) : next;
+    }));
   }
   if (state.streamingText) {
     addMessageGap(lines, state.messages.length + 1);
-    lines.push({ key: "streaming-text", text: state.streamingText, prefix: "⏺ ", style: "assistant" });
+    lines.push({ key: "streaming-text", text: state.streamingText, prefix: "⏺ ", style: "assistant", ...(scrollback ? { ephemeral: true } : {}) });
   }
-  const wrappedPanel = width === undefined ? panelLines : panelLines.flatMap((line) => wrapRenderLine(line, width));
-  const wrappedBody = width === undefined ? lines : lines.flatMap((line) => wrapRenderLine(line, width));
+  const wrappedPanel = width === undefined ? panelLinesAboveBody : panelLinesAboveBody.flatMap((line) => wrapRenderLine(line, width));
+  const bodyLines = scrollback ? lines.map((line) => line.tone === "running" ? markEphemeral(line) : line) : lines;
+  const wrappedBody = width === undefined ? bodyLines : bodyLines.flatMap((line) => wrapRenderLine(line, width));
   const wrappedHeader = width === undefined ? header : header.flatMap((line) => wrapRenderLine(line, width));
   const footer: RenderLine[] = [];
+  footer.push(...panelLinesInLiveTail);
   footer.push(...autocompleteRenderLines(options.autocomplete));
   footer.push(...permissionPanelRenderLines(state.pendingPermission, width));
   footer.push(...planApprovalRenderLines(state.phase === "review" ? state.currentPlan : undefined, width));
@@ -178,14 +197,15 @@ export function buildTerminalRenderLines(
     const inputLines = inputRenderLines(options.input, options.cursor, options.maskInput);
     footer.push(...(width === undefined ? inputLines : inputLines.flatMap((line) => wrapRenderLine(line, width))));
   }
+  const visibleFooter = scrollback ? footer.map(markEphemeral) : footer;
 
-  if (options.height === undefined) return [...wrappedHeader, ...wrappedPanel, ...wrappedBody, ...footer];
+  if (options.height === undefined) return [...wrappedHeader, ...wrappedPanel, ...wrappedBody, ...visibleFooter];
   const height = Math.max(1, options.height);
   // Reserve the footer first so the prompt remains anchored at the bottom of
   // the frame. On very short terminals this intentionally drops header/body
   // rows before it drops the latest input and status rows.
-  const visibleFooter = footer.slice(-Math.min(footer.length, height));
-  let remaining = Math.max(0, height - visibleFooter.length);
+  const clippedFooter = visibleFooter.slice(-Math.min(visibleFooter.length, height));
+  let remaining = Math.max(0, height - clippedFooter.length);
   const visibleHeader = wrappedHeader.slice(0, remaining);
   remaining = Math.max(0, remaining - visibleHeader.length);
   const visiblePanel = wrappedPanel.slice(0, remaining);
@@ -202,7 +222,7 @@ export function buildTerminalRenderLines(
   while (clipped.length < bodyHeight) {
     clipped.push({ key: `frame-spacer-${clipped.length}`, text: "", style: "muted" });
   }
-  return [...visibleHeader, ...visiblePanel, ...clipped, ...visibleFooter];
+  return [...visibleHeader, ...visiblePanel, ...clipped, ...clippedFooter];
 }
 
 function truncateTail(value: string, maxWidth: number): string {
@@ -222,6 +242,10 @@ function truncateTail(value: string, maxWidth: number): string {
 function addMessageGap(lines: RenderLine[], messageIndex: number | string): void {
   if (lines.length === 0 || lines.at(-1)?.text === "") return;
   lines.push({ key: `message-gap-${messageIndex}`, text: "", style: "muted" });
+}
+
+function markEphemeral(line: RenderLine): RenderLine {
+  return line.ephemeral ? line : { ...line, ephemeral: true };
 }
 
 function toolCardRenderLines(

@@ -169,6 +169,41 @@ describe("standalone terminal render model", () => {
     assert.equal(card.at(-1)?.text.at(-1), "╯");
   });
 
+  it("uses append-only transcript rows and a live tail in scrollback mode", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "inspect" });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "tool_start", call: { id: "tool-1", name: "read", arguments: { path: "src/app.tsx" } } } });
+
+    const lines = buildTerminalRenderLines(state, {
+      width: 40,
+      scrollback: true,
+      header: { title: "Claude Code", cwd: "/workspace" },
+      input: "",
+    });
+
+    const firstLive = lines.findIndex((line) => line.ephemeral);
+    assert.ok(firstLive > 0);
+    assert.equal(lines.slice(0, firstLive).some((line) => line.text.at(0) === "╭"), false);
+    assert.equal(lines.find((line) => line.key === "message-1-tool")?.prefix, "⎿ ");
+    assert.ok(lines.slice(firstLive).every((line) => line.ephemeral));
+  });
+
+  it("moves Todo updates into the live tail without blocking transcript history", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, {
+      type: "SET_TODO_ITEMS",
+      revision: 1,
+      todos: [{ id: "task-1", content: "inspect", activeForm: "inspecting", status: "in_progress", source: "model" }],
+    });
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "history" });
+
+    const lines = buildTerminalRenderLines(state, { width: 40, scrollback: true, input: "" });
+    const firstLive = lines.findIndex((line) => line.ephemeral);
+    assert.ok(firstLive > 0);
+    assert.ok(lines.slice(firstLive).some((line) => line.key.startsWith("panel-")));
+    assert.ok(lines.slice(0, firstLive).some((line) => line.text.includes("history")));
+  });
+
   it("renders permission and plan overlays as English bordered cards", () => {
     const permission = permissionPanelRenderLines({ requestId: "p", sessionId: "s", tool: "bash", arguments: { command: "npm test" }, risk: "high" });
     assert.equal(permission[0]?.prefix, "╭─ ");

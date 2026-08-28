@@ -17,4 +17,10 @@ export type RenderLine = {
   background?: RenderLineBackground;
   /** Optional terminal width to paint a background across the whole row. */
   fillWidth?: number;
+  /**
+   * Main-screen mode keeps these rows in a small live region at the bottom.
+   * They are redrawn while the current turn, prompt, or overlay changes;
+   * completed transcript rows are appended to terminal scrollback instead.
+   */
+  ephemeral?: boolean;
 };

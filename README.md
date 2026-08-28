@@ -545,8 +545,10 @@ npm run tui
 ```
 
 The default `npm run tui` entry uses the standalone ANSI renderer and the Claude
-Code-style conversation layout. Completed rows are diffed in place, so streamed
-responses do not issue full-screen `ESC[2J` clears. The same renderer is also
+Code-style conversation layout. It uses main-screen scrollback: completed
+messages are appended to the terminal's normal history, while only the active
+stream, status, overlays, and prompt are redrawn as a live tail. Streamed
+responses never issue full-screen `ESC[2J` clears. The same renderer is also
 available under the explicit `tui:terminal` alias:
 
 ```bash
@@ -567,10 +569,11 @@ compatibility client remains available as `npm run tui:legacy`.
 The standalone frame follows the Claude Code conversation layout: a compact
 session header, `❯` user prompts, `⏺` assistant responses, `⎿` tool output, and
 a dim `∴ Thinking` block. Todo, permission, plan, attachment, spinner, and
-status rows carry their own visual icons. The prompt footer is pinned to the
-bottom of the available terminal height, while user rows and the prompt
-separator are emitted as incremental terminal rows, so streaming updates do
-not clear the screen.
+status rows carry their own visual icons. In the default scrollback mode, the
+prompt follows the live tail instead of constraining the conversation to a
+fixed-height window. To keep the previous fixed viewport, set
+`MINI_AGENT_TUI_MODE=fullscreen` (or `MINI_AGENT_TUI_FULLSCREEN=1`).
+`MINI_AGENT_TUI_MODE=scrollback` explicitly selects the default behavior.
 TUI supports plan workflow slash commands: `/plan`, `/plan-show`, `/plan-approve`,
 `/plan-reject`, `/plan-run`, `/plan-retry`, `/plan-history`, `/plan-archive`.
 Terminal input follows the Claude Code-style priority order: `Tab`/`↑↓` first
