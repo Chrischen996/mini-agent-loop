@@ -49,10 +49,16 @@ export function buildTerminalRenderLines(
   options: TerminalRenderOptions = {},
 ): RenderLine[] {
   const lines: RenderLine[] = [];
-  const messageStart = Math.max(0, state.messages.length - (options.maxMessages ?? 200));
 
   const width = options.width === undefined ? undefined : Math.max(10, options.width);
   const scrollback = options.scrollback === true;
+  // Main-screen transcript mode must keep every completed message in order.
+  // Applying the fullscreen 200-message viewport cap here would shift the
+  // first committed row after message 200 and make the append-only renderer
+  // emit the preceding history again as a new segment.
+  const messageStart = scrollback
+    ? 0
+    : Math.max(0, state.messages.length - (options.maxMessages ?? 200));
   const header = options.header?.show === false ? [] : options.header ? headerRenderLines(state, options.header) : [];
 
   // Fullscreen keeps the task panel above the message feed. In main-screen
@@ -71,7 +77,7 @@ export function buildTerminalRenderLines(
     const visual = toMessageRenderModel(message);
     addMessageGap(lines, index);
     if (message.kind === "user") {
-      lines.push({ key: `message-${index}`, text: visual.text, prefix: "❯ ", style: "user", background: "user", fillWidth: width });
+      lines.push({ key: `message-${index}`, text: truncateUserText(visual.text), prefix: "❯ ", style: "user", background: "user", fillWidth: width });
       for (const [imageIndex, image] of (message.images ?? []).entries()) {
         lines.push({
           key: `message-${index}-image-${imageIndex}`,
@@ -133,7 +139,21 @@ export function buildTerminalRenderLines(
       continue;
     }
     if (message.kind === "subagent_call") {
-      lines.push({ key: `message-${index}-subagent`, text: `${toolVisualStatusIcon(message.status)} ${message.profile ?? "Agent"} (${message.task})`, prefix: "⎿ ", style: "tool", tone: message.status === "error" ? "error" : message.status === "running" ? "running" : "success", bold: true });
+      const tone = message.status === "error" ? "error" : message.status === "running" ? "running" : "success";
+      lines.push({
+        key: `message-${index}-subagent`,
+        text: `${message.profile ?? "Agent"} (${message.task})`,
+        prefix: message.status === "error" ? "✗ " : "⏺ ",
+        style: "tool",
+        tone,
+        bold: true,
+      });
+      if (message.result) {
+        lines.push(...plainPreviewLines(message.result, `message-${index}-subagent-result`).map((line, lineIndex) => ({
+          ...line,
+          prefix: lineIndex === 0 ? "  ⎿ " : "     ",
+        })));
+      }
       continue;
     }
     lines.push({ key: `message-${index}-error`, text: message.text, prefix: "✗ ", style: "error", tone: "error" });
@@ -253,13 +273,33 @@ function toolCardRenderLines(
   index: number,
   width?: number,
 ): RenderLine[] {
-  const summary = toolArgumentSummary(message.name, message.rawArgs, message.args);
+  // Claude Code renders the shell command itself inside the tool title rather
+  // than adding a second `$` prompt inside the parentheses.
+  const summary = toolArgumentSummary(message.name, message.rawArgs, message.args).replace(/^\$\s*/, "");
   const duration = message.durationMs === undefined ? "" : ` · ${message.durationMs}ms`;
   const tone = message.status === "error" ? "error" : message.status === "running" ? "running" : "success";
-  const title = `${toolVisualStatusIcon(message.status)} ${toolVisualName(message.name)}${summary ? ` (${summary})` : ""}${duration}`;
+  const label = `${toolVisualName(message.name)}${summary ? `(${summary})` : ""}${duration}`;
+  const title = `${toolVisualStatusIcon(message.status)} ${label}`;
   if (width === undefined) {
-    const rows: RenderLine[] = [{ key: `message-${index}-tool`, text: title, prefix: "⎿ ", style: "tool", tone, bold: true }];
-    if (message.result) rows.push(...plainPreviewLines(message.result, `message-${index}-result`).map((line) => ({ ...line, prefix: "│  " })));
+    const marker = message.status === "error" ? "✗ " : "⏺ ";
+    const rows: RenderLine[] = [{
+      key: `message-${index}-tool`,
+      text: label,
+      prefix: marker,
+      style: "tool",
+      tone,
+      bold: true,
+    }];
+    if (message.result) {
+      rows.push(...plainPreviewLines(message.result, `message-${index}-result`).map((line, lineIndex) => ({
+        ...line,
+        // Claude Code's MessageResponse uses one nested result marker and
+        // plain continuation indentation instead of a box-drawing column.
+        prefix: lineIndex === 0 ? "  ⎿ " : "     ",
+      })));
+    } else if (message.status === "running") {
+      rows.push({ key: `message-${index}-result-running`, text: "Working…", prefix: "  ⎿ ", style: "muted", tone: "running", dim: true });
+    }
     return rows;
   }
   const rows: RenderLine[] = [panelTopLine(`message-${index}-tool`, title, width, tone)];
@@ -362,4 +402,19 @@ function plainPreviewLines(text: string, prefix: string): RenderLine[] {
   const visible = source.slice(0, 15).map((line, index) => ({ key: `${prefix}-${index}`, text: line, style: "muted" as const, dim: true }));
   if (source.length > visible.length) visible.push({ key: `${prefix}-more`, text: `… ${source.length - visible.length} more lines`, style: "muted" as const, dim: true });
   return visible;
+}
+
+const MAX_USER_DISPLAY_CHARS = 10_000;
+const USER_DISPLAY_HEAD_CHARS = 2_500;
+const USER_DISPLAY_TAIL_CHARS = 2_500;
+
+/** Keep pasted files from turning one prompt into an unbounded transcript row. */
+function truncateUserText(text: string): string {
+  if (text.length <= MAX_USER_DISPLAY_CHARS) return text;
+  const head = text.slice(0, USER_DISPLAY_HEAD_CHARS);
+  const tail = text.slice(-USER_DISPLAY_TAIL_CHARS);
+  const headLines = (head.match(/\n/g) ?? []).length;
+  const tailLines = (tail.match(/\n/g) ?? []).length;
+  const hiddenLines = Math.max(0, (text.match(/\n/g) ?? []).length - headLines - tailLines);
+  return `${head}\n… +${hiddenLines} lines …\n${tail}`;
 }

@@ -152,8 +152,9 @@ describe("standalone terminal render model", () => {
     state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "tool_end", call: { id: "tool-1", name: "read", arguments: { path: "src/app.tsx" } }, result: { content: "line one\nline two", isError: false } } });
     const lines = buildTerminalRenderLines(state);
     const tool = lines.find((line) => line.key.endsWith("-tool"));
-    assert.match(tool?.text ?? "", /Read \(src\/app\.tsx\)/);
-    assert.equal(lines.find((line) => line.key.endsWith("-result-0"))?.prefix, "│  ");
+    assert.match(tool?.text ?? "", /Read\(src\/app\.tsx\)/);
+    assert.equal(tool?.prefix, "⏺ ");
+    assert.equal(lines.find((line) => line.key.endsWith("-result-0"))?.prefix, "  ⎿ ");
   });
 
   it("renders completed tools as full-width cards when terminal width is known", () => {
@@ -184,8 +185,33 @@ describe("standalone terminal render model", () => {
     const firstLive = lines.findIndex((line) => line.ephemeral);
     assert.ok(firstLive > 0);
     assert.equal(lines.slice(0, firstLive).some((line) => line.text.at(0) === "╭"), false);
-    assert.equal(lines.find((line) => line.key === "message-1-tool")?.prefix, "⎿ ");
+    assert.equal(lines.find((line) => line.key === "message-1-tool")?.prefix, "⏺ ");
     assert.ok(lines.slice(firstLive).every((line) => line.ephemeral));
+  });
+
+  it("keeps the complete transcript in scrollback mode beyond the fullscreen cap", () => {
+    let state = createInitialState("test-model");
+    for (let index = 0; index < 205; index++) {
+      state = tuiReducer(state, { type: "USER_MESSAGE", text: `message-${index}` });
+    }
+
+    const lines = buildTerminalRenderLines(state, { scrollback: true, input: "" });
+    assert.ok(lines.some((line) => line.text.includes("message-0")));
+    assert.ok(lines.some((line) => line.text.includes("message-204")));
+    assert.equal(lines.filter((line) => line.text.includes("message-0")).length, 1);
+  });
+
+  it("truncates oversized user prompts with head and tail context", () => {
+    const prompt = `${"head\n".repeat(900)}${"middle\n".repeat(900)}${"tail\n".repeat(900)}`;
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: prompt });
+
+    const user = buildTerminalRenderLines(state, { scrollback: true }).find((line) => line.key === "message-0");
+    assert.ok(user);
+    assert.match(user.text, /head/);
+    assert.match(user.text, /tail/);
+    assert.match(user.text, /\+\d+ lines/);
+    assert.ok(user.text.length < prompt.length);
   });
 
   it("moves Todo updates into the live tail without blocking transcript history", () => {
