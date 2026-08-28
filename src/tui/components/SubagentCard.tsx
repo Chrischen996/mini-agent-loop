@@ -1,138 +1,47 @@
 import React from "react";
 import { Box, Text } from "ink";
-import Spinner from "ink-spinner";
-import type { ChatMessage, SubagentInnerEvent } from "../state.ts";
+import type { ChatMessage } from "../state.ts";
+import type { RenderLine } from "../render-lines.ts";
+import { subagentRenderLines } from "../subagent-lines.ts";
 import { TUI_COLORS as C } from "../theme.ts";
 
 type SubagentCallMessage = Extract<ChatMessage, { kind: "subagent_call" }>;
 
-type SubagentCardProps = {
-  msg: SubagentCallMessage;
-};
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-function InnerEventRow({ event }: { event: SubagentInnerEvent }): React.ReactElement {
-  return (
-    <Box gap={1}>
-      <Text dimColor wrap="truncate-end">
-        {event.label}
-        {event.detail ? ` — ${event.detail}` : ""}
-      </Text>
-    </Box>
-  );
+function lineColor(line: RenderLine): string {
+  if (line.tone === "error") return C.error;
+  if (line.tone === "running") return C.running;
+  if (line.tone === "success") return C.success;
+  if (line.style === "tool") return C.info;
+  if (line.style === "thinking") return C.thinking;
+  if (line.style === "user") return C.user;
+  if (line.style === "error") return C.error;
+  return C.assistant;
 }
 
 /**
  * SubagentCard renders a subagent invocation in the TUI message feed.
  *
- * Inspired by Cline's subagent orchestration UI:
- * - Rounded border with status-dependent color
- * - Task description in quotes
- * - Statistics line (tool calls · cost/tokens · duration)
- * - Expandable inner event log ("> Show output")
+ * Render the same Claude Code-style subagent rows used by the ANSI terminal.
+ * This component intentionally has no border or independent layout model;
+ * conversation semantics remain owned by the reducer and agent service.
  */
-export function SubagentCard({ msg }: SubagentCardProps): React.ReactElement {
-  const isRunning = msg.status === "running";
-  const isError = msg.status === "error";
-  const borderColor = isError ? C.error : isRunning ? C.running : C.success;
-
-  const depthLabel = msg.depth > 1 ? ` (depth ${msg.depth})` : "";
-  const profileLabel = msg.profile ? ` [${msg.profile}]` : "";
-
+export function SubagentCard({ msg, width }: { msg: SubagentCallMessage; width?: number }): React.ReactElement {
+  const rows = subagentRenderLines(msg, msg.id, { width });
   return (
-    <Box
-      flexDirection="column"
-      borderStyle="round"
-      borderColor={borderColor}
-      paddingX={1}
-      marginBottom={0}
-    >
-      {/* Header: icon + label + profile + duration */}
-      <Box gap={1} justifyContent="space-between">
-        <Box gap={1}>
-          {isRunning ? (
-            <Text color={C.running}>
-              <Spinner type="dots" />
-            </Text>
-          ) : (
-            <Text color={isError ? C.error : C.success}>
-              {isError ? "✗" : "✓"}
-            </Text>
-          )}
-          <Text bold color={isRunning ? C.running : isError ? C.error : C.success}>
-            Sub-Agent{depthLabel}{profileLabel}
-          </Text>
-        </Box>
-        <Box gap={1}>
-          {msg.toolCallCount > 0 && (
-            <Text dimColor>{msg.toolCallCount} tool{msg.toolCallCount > 1 ? "s" : ""}</Text>
-          )}
-          {msg.turns !== undefined && msg.turns > 0 && (
-            <Text dimColor>· {msg.turns} turn{msg.turns > 1 ? "s" : ""}</Text>
-          )}
-          {msg.totalTokens !== undefined && msg.totalTokens > 0 && (
-            <Text dimColor>· {msg.totalTokens} tokens</Text>
-          )}
-          {msg.durationMs !== undefined && (
-            <Text dimColor>· {formatDuration(msg.durationMs)}</Text>
-          )}
-        </Box>
-      </Box>
-
-      {/* Task description */}
-      <Box marginLeft={2}>
-        <Text color={C.assistant} wrap="wrap">
-          &quot;{msg.task}&quot;
+    <Box flexDirection="column" marginTop={1} marginBottom={0}>
+      {rows.map((line) => (
+        <Text
+          key={line.key}
+          color={lineColor(line)}
+          dimColor={line.dim}
+          bold={line.bold}
+          italic={line.italic}
+          strikethrough={line.strikethrough}
+          wrap="wrap"
+        >
+          {`${" ".repeat(Math.max(0, line.indent ?? 0))}${line.prefix ?? ""}${line.text}`}
         </Text>
-      </Box>
-
-      {/* Live status: show latest inner event during running */}
-      {isRunning && msg.innerEvents.length > 0 && !msg.expanded && (
-        <Box marginLeft={2} marginTop={0} gap={1}>
-          <Text color={C.running} dimColor>
-            ↳ {msg.innerEvents[msg.innerEvents.length - 1]!.label}
-          </Text>
-        </Box>
-      )}
-
-      {/* Result preview (when done) */}
-      {!isRunning && msg.result && !msg.expanded && (
-        <Box marginLeft={2} marginTop={0}>
-          <Text dimColor wrap="truncate-end">
-            {msg.result.replace(/\s+/g, " ").trim().slice(0, 200)}
-            {msg.result.length > 200 ? "…" : ""}
-          </Text>
-        </Box>
-      )}
-
-      {/* Expanded inner events (available both during running and after) */}
-      {msg.expanded && msg.innerEvents.length > 0 && (
-        <Box flexDirection="column" marginLeft={2} marginTop={0}>
-          <Text dimColor>── inner events ──</Text>
-          {msg.innerEvents.map((evt, i) => (
-            <InnerEventRow key={i} event={evt} />
-          ))}
-          {isRunning && (
-            <Box gap={1}>
-              <Text color={C.running}><Spinner type="dots" /></Text>
-              <Text dimColor>waiting for next event...</Text>
-            </Box>
-          )}
-        </Box>
-      )}
-
-      {/* Expand/collapse hint (available during running too) */}
-      {msg.innerEvents.length > 0 && (
-        <Box marginLeft={2}>
-          <Text color={borderColor} dimColor>
-            {msg.expanded ? "▾ Hide output" : `▸ Show output (${msg.innerEvents.length} events)`}
-          </Text>
-        </Box>
-      )}
+      ))}
     </Box>
   );
 }

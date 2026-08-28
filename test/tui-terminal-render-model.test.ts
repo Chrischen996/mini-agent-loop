@@ -3,9 +3,16 @@ import { describe, it } from "node:test";
 import { buildTerminalRenderLines } from "../src/tui/terminal-render-model.ts";
 import { permissionPanelRenderLines, planApprovalRenderLines } from "../src/tui/terminal-overlay-lines.ts";
 import { createInitialState, tuiReducer } from "../src/tui/state.ts";
-import { terminalStringWidth } from "../src/tui/terminal-width.ts";
+import { terminalStringWidth, truncateTerminalPath } from "../src/tui/terminal-width.ts";
+import { displaySubagentTask, isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from "../src/tui/subagent-lines.ts";
 
 describe("standalone terminal render model", () => {
+  it("keeps the final path segments visible when compacting cwd", () => {
+    const compact = truncateTerminalPath("/Users/chenjiaxu/Project/agent loop/mini-agent", 24);
+    assert.equal(compact, "…/agent loop/mini-agent");
+    assert.ok(terminalStringWidth(compact) <= 24);
+  });
+
   it("projects chat state without mutating the reducer state", () => {
     let state = createInitialState("test-model");
     state = tuiReducer(state, { type: "USER_MESSAGE", text: "hello" });
@@ -289,6 +296,7 @@ describe("standalone terminal render model", () => {
     const status = lines.find((line) => line.key === "status");
     assert.ok(status);
     assert.ok(terminalStringWidth(`${status.prefix ?? ""}${status.text}`) <= 20);
+    assert.match(status.text, /mini-agent|…/);
     assert.equal(lines.at(-1)?.key, "input-0");
   });
 
@@ -305,5 +313,179 @@ describe("standalone terminal render model", () => {
     });
     assert.ok(!lines.some((line) => line.text.includes("还有")));
     assert.equal(lines.at(-1)?.key, "input-0");
+  });
+
+  it("renders subagents as Claude Code progress rows instead of a card", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_start",
+        id: "agent-1",
+        task: "Inspect the workspace",
+        profile: "researcher",
+        depth: 1,
+        runtime: {
+          model: "test-model",
+          provider: "faux",
+          baseUrl: "http://localhost",
+          thinkingMode: "fixed",
+          modelSwitchSucceeded: true,
+        },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_event",
+        id: "agent-1",
+        depth: 1,
+        inner: {
+          type: "tool_start",
+          call: { id: "read-1", name: "read", arguments: { path: "src/app.tsx" } },
+        },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_event",
+        id: "agent-1",
+        depth: 1,
+        inner: {
+          type: "tool_end",
+          call: { id: "read-1", name: "read", arguments: { path: "src/app.tsx" } },
+          result: { content: "ok", isError: false },
+        },
+      },
+    });
+
+    const message = state.messages[0];
+    assert.equal(message?.kind, "subagent_call");
+    if (!message || message.kind !== "subagent_call") return;
+    const rows = subagentRenderLines(message, 0);
+    assert.match(rows[0]?.text ?? "", /researcher \(Inspect the workspace\) · 1 tool use/);
+    assert.equal(rows[0]?.prefix, "⏺ ");
+    assert.equal(rows[0]?.ephemeral, true);
+    assert.match(rows.at(-1)?.text ?? "", /Read\(src\/app\.tsx\)/);
+    assert.ok(!rows.some((row) => row.text.includes("╭") || row.text.includes("╰")));
+  });
+
+  it("hides the subagent scaffold and keeps long task titles single-line", () => {
+    const task = `You are the researcher subagent for a parent orchestrator.\nGather only the key facts.\n\nUser request:\n${"inspect the workspace ".repeat(30)}`;
+    const visible = displaySubagentTask(task);
+    assert.doesNotMatch(visible, /You are|parent orchestrator|Gather only/);
+    assert.doesNotMatch(visible, /\n/);
+    assert.ok(visible.length <= 180);
+  });
+
+  it("cleans provider-normalized subagent scaffolds and namespaced tools", () => {
+    const task = "You are the researcher subagent for a parent orchestrator.\r\nGather only the key facts needed for the parent to continue.\r\nDo not implement code changes.\r\n\r\nUser request：\r\nInspect the terminal layout";
+    assert.equal(displaySubagentTask(task), "Inspect the terminal layout");
+    assert.equal(displaySubagentTask("You are the researcher subagent.\\nUser request:\\nInspect the terminal layout"), "Inspect the terminal layout");
+    assert.equal(displaySubagentTask("You are a researcher subagent\nGather only the key facts\nInspect the terminal layout"), "Inspect the terminal layout");
+    assert.equal(displaySubagentTask("task=Inspect the terminal layout"), "Inspect the terminal layout");
+    assert.equal(isSubagentToolName("functions.subagent"), true);
+    assert.equal(isSubagentToolName("mcp.subagent_batch"), true);
+    assert.equal(isSubagentToolName("assistant"), false);
+  });
+
+  it("does not truncate a normal task that mentions request syntax", () => {
+    assert.equal(displaySubagentTask("Explain the request: marker in this task"), "Explain the request: marker in this task");
+  });
+
+  it("recognizes only serialized subagent calls as assistant protocol noise", () => {
+    assert.equal(isSubagentProtocolText("subagent(task=Inspect files, profile=researcher)"), true);
+    assert.equal(isSubagentProtocolText("functions.subagent(task=Inspect files, profile=researcher)"), true);
+    assert.equal(isSubagentProtocolText("Please explain subagent(task=Inspect files)"), false);
+    assert.equal(isSubagentProtocolText("The task is complete."), false);
+  });
+
+  it("uses tree connectors and compact token counts for expanded subagents", () => {
+    const message = {
+      kind: "subagent_call" as const,
+      id: "agent-2",
+      task: "Review changes",
+      profile: "reviewer",
+      depth: 1,
+      status: "done" as const,
+      totalTokens: 3200,
+      durationMs: 1250,
+      innerEvents: [
+        { type: "tool_start", label: "▶ read", detail: '{"path":"a.ts"}' },
+        { type: "tool_end", label: "✓ read", detail: "ok" },
+      ],
+      toolCallCount: 1,
+      startedAt: 0,
+      expanded: true,
+    };
+    const rows = subagentRenderLines(message, "x");
+    assert.match(rows[0]?.text ?? "", /3\.2k tokens/);
+    assert.equal(rows[1]?.prefix, "  ├─ ⎿ ");
+    assert.equal(rows[2]?.prefix, "  └─ ⎿ ");
+
+    const completedRows = subagentRenderLines({ ...message, expanded: false, result: "review complete" }, "done");
+    assert.match(completedRows[1]?.text ?? "", /Done \(1 tool use · 3\.2k tokens · 1\.3s\)/);
+    assert.equal(completedRows[2]?.prefix, "     ");
+  });
+
+  it("counts active tools and omits assistant bookkeeping rows", () => {
+    const message = {
+      kind: "subagent_call" as const,
+      id: "agent-active",
+      task: "Inspect files",
+      profile: "researcher",
+      depth: 1,
+      status: "running" as const,
+      innerEvents: [
+        { type: "assistant" as const, label: "💬 assistant" },
+        { type: "tool_start" as const, label: "▶ read", detail: '{"path":"a.ts"}' },
+      ],
+      toolCallCount: 0,
+      startedAt: 0,
+      expanded: true,
+    };
+    const rows = subagentRenderLines(message, "active");
+    assert.match(rows[0]?.text ?? "", /1 tool use/);
+    assert.ok(!rows.some((row) => row.text.includes("assistant")));
+    assert.match(rows.at(-1)?.text ?? "", /Read\(a\.ts\)/);
+  });
+
+  it("does not duplicate the protocol subagent tool row", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "tool_start",
+        call: { id: "parent-call", name: "subagent", arguments: { task: "internal scaffold", profile: "researcher" } },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_start",
+        id: "child-call",
+        task: "You are the researcher subagent.\n\nUser request:\nCheck the upgrade list",
+        profile: "researcher",
+        depth: 1,
+        runtime: {
+          model: "test-model",
+          provider: "faux",
+          baseUrl: "http://localhost",
+          thinkingMode: "fixed",
+          modelSwitchSucceeded: true,
+        },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant", message: { role: "assistant", content: "subagent(task=internal scaffold, profile=researcher)" } },
+    });
+    const lines = buildTerminalRenderLines(state);
+    assert.equal(lines.some((line) => line.text.includes("internal scaffold")), false);
+    assert.ok(lines.some((line) => line.text === "researcher (Check the upgrade list) · 0 tool uses"));
+    assert.equal(lines.some((line) => /\bsubagent\s*\(/i.test(line.text)), false);
+    assert.equal(lines.some((line) => /You are the researcher/i.test(line.text)), false);
+    assert.equal(displaySubagentTask("You are a researcher subagent\n\nUser request:\nInspect files"), "Inspect files");
   });
 });

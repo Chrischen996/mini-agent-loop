@@ -40,6 +40,9 @@ export function thinkingRenderLines(content: string, options: ThinkingLineOption
 export function estimateThinkingRows(content: string | undefined, options: ThinkingLineOptions & { width: number }): number {
   if (!content || (options.mode === "hidden" && !options.forceExpanded)) return 0;
   const visible = thinkingVisibleLines(content, options);
+  // Collapsed thinking is represented by the single `∴ Thinking` hint in the
+  // Ink feed. The body is only mounted for expanded/full thinking.
+  if (!visible.expanded) return 1;
   const body = visible.lines.join("\n");
-  return 3 + countTerminalRows(body, Math.max(10, options.width - 4)) + (visible.truncated > 0 ? 1 : 0);
+  return 1 + countTerminalRows(body, Math.max(10, options.width - 2)) + (visible.truncated > 0 ? 1 : 0);
 }

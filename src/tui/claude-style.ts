@@ -47,7 +47,9 @@ export function statusLabel(status: string, busy = false): string {
   if (/执行工具|执行计划|整理回复|请求模型|输出|生成|模型输出|stream/i.test(value)) return "Working…";
   if (/任务列表|todo/i.test(value)) return "Updating todos…";
   if (/自动续跑|续跑|continu/i.test(value)) return "Continuing…";
-  if (/子.?agent|编排模式|delegat|orchestrat/i.test(value)) return "Delegating…";
+  if (/子代理.*完成|sub.?agent.*done|delegat.*done/i.test(value)) return "Done";
+  if (/子代理.*失败|sub.?agent.*fail|delegat.*fail/i.test(value)) return "Failed";
+  if (/子代理|子.?agent|编排模式|delegat|orchestrat/i.test(value)) return "Delegating…";
   if (/上下文.*压缩|context.*compact/i.test(value)) return "Context compacted";
   if (/会话.*恢复|恢复会话|session.*resum/i.test(value)) return "Session resumed";
   if (/取消|中止|停止|已停止|cancel|abort|stop/i.test(value)) return "Cancelled";

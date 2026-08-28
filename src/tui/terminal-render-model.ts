@@ -5,10 +5,11 @@ import type { RenderLine } from "./render-lines.ts";
 import { thinkingRenderLines } from "./thinking-lines.ts";
 import { todoPanelRenderLines } from "./todo-lines.ts";
 import { toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
-import { terminalStringWidth } from "./terminal-width.ts";
+import { terminalStringWidth, truncateTerminalPath } from "./terminal-width.ts";
 import { autocompleteRenderLines, panelBottomLine, panelContentLine, panelTopLine, permissionPanelRenderLines, planApprovalRenderLines } from "./terminal-overlay-lines.ts";
 import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
 import { noticeText, noticeTitle, permissionModeLabel, statusLabel, toolArgumentSummary } from "./claude-style.ts";
+import { isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from "./subagent-lines.ts";
 
 export type TerminalRenderOptions = {
   maxMessages?: number;
@@ -74,9 +75,19 @@ export function buildTerminalRenderLines(
 
   for (let index = messageStart; index < state.messages.length; index++) {
     const message = state.messages[index]!;
+    if (message.kind === "assistant" && isSubagentProtocolText(message.text)) continue;
     const visual = toMessageRenderModel(message);
-    addMessageGap(lines, index);
+    // Keep the transcript airy at conversation boundaries, while tool and
+    // subagent progress rows stay attached to the assistant turn that caused
+    // them. This removes the staircase of blank rows visible during a busy
+    // run without changing any message ordering.
+    if (message.kind !== "tool_call" && (index === messageStart || state.messages[index - 1]?.kind !== "tool_call")) {
+      addMessageGap(lines, index);
+    }
     if (message.kind === "user") {
+      // Claude Code keeps the prompt body white on a muted gray row. The
+      // prompt marker is intentionally quiet; user text should not inherit
+      // the blue metadata color used by the model/context chrome.
       lines.push({ key: `message-${index}`, text: truncateUserText(visual.text), prefix: "❯ ", style: "user", background: "user", fillWidth: width });
       for (const [imageIndex, image] of (message.images ?? []).entries()) {
         lines.push({
@@ -127,6 +138,10 @@ export function buildTerminalRenderLines(
       continue;
     }
     if (message.kind === "tool_call") {
+      // The subagent lifecycle has its own progress projection below. The
+      // protocol-level tool call would otherwise duplicate the same action
+      // and expose its internal task schema in the transcript.
+      if (isSubagentToolName(message.name)) continue;
       // Claude Code's main-screen transcript uses compact activity rows; the
       // bordered tool card remains available in fullscreen mode.
       lines.push(...toolCardRenderLines(message, index, scrollback ? undefined : width));
@@ -139,21 +154,7 @@ export function buildTerminalRenderLines(
       continue;
     }
     if (message.kind === "subagent_call") {
-      const tone = message.status === "error" ? "error" : message.status === "running" ? "running" : "success";
-      lines.push({
-        key: `message-${index}-subagent`,
-        text: `${message.profile ?? "Agent"} (${message.task})`,
-        prefix: message.status === "error" ? "✗ " : "⏺ ",
-        style: "tool",
-        tone,
-        bold: true,
-      });
-      if (message.result) {
-        lines.push(...plainPreviewLines(message.result, `message-${index}-subagent-result`).map((line, lineIndex) => ({
-          ...line,
-          prefix: lineIndex === 0 ? "  ⎿ " : "     ",
-        })));
-      }
+      lines.push(...subagentRenderLines(message, index, { width }));
       continue;
     }
     lines.push({ key: `message-${index}-error`, text: message.text, prefix: "✗ ", style: "error", tone: "error" });
@@ -202,13 +203,13 @@ export function buildTerminalRenderLines(
     const pathBudget = width === undefined || !cwd
       ? undefined
       : Math.max(8, width - terminalStringWidth(fixedContext) - 6);
-    const visibleCwd = cwd && pathBudget !== undefined ? truncateTail(cwd, pathBudget) : cwd;
+    const visibleCwd = cwd && pathBudget !== undefined ? truncateTerminalPath(cwd, pathBudget) : cwd;
     const context = [state.modelName, ...(visibleCwd ? [visibleCwd] : []), mode, visibleStatus].join(" · ");
     const statusPrefix = state.busy ? "⟳ " : "· ";
     const stableContext = width === undefined
       ? context
       : truncateTail(context, Math.max(1, width - terminalStringWidth(statusPrefix)));
-    footer.push({ key: "status", text: stableContext, prefix: statusPrefix, style: "muted", tone: state.busy ? "running" : "default", dim: true });
+    footer.push({ key: "status", text: stableContext, prefix: statusPrefix, prefixTone: state.busy ? "running" : "success", style: "muted", dim: true });
   }
   if (options.promptRule && width !== undefined) {
     footer.push({ key: "prompt-rule", text: "─".repeat(Math.max(1, width)), style: "border", dim: true });
@@ -276,9 +277,9 @@ function toolCardRenderLines(
   // Claude Code renders the shell command itself inside the tool title rather
   // than adding a second `$` prompt inside the parentheses.
   const summary = toolArgumentSummary(message.name, message.rawArgs, message.args).replace(/^\$\s*/, "");
-  const duration = message.durationMs === undefined ? "" : ` · ${message.durationMs}ms`;
-  const tone = message.status === "error" ? "error" : message.status === "running" ? "running" : "success";
-  const label = `${toolVisualName(message.name)}${summary ? `(${summary})` : ""}${duration}`;
+  const tone = message.status === "error" ? "error" : undefined;
+  const prefixTone = message.status === "error" ? "error" : message.status === "running" ? "running" : "success";
+  const label = `${toolVisualName(message.name)}${summary ? `(${summary})` : ""}`;
   const title = `${toolVisualStatusIcon(message.status)} ${label}`;
   if (width === undefined) {
     const marker = message.status === "error" ? "✗ " : "⏺ ";
@@ -288,6 +289,7 @@ function toolCardRenderLines(
       prefix: marker,
       style: "tool",
       tone,
+      prefixTone,
       bold: true,
     }];
     if (message.result) {

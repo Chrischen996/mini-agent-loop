@@ -13,4 +13,10 @@ describe("Claude-style status presentation", () => {
     assert.equal(statusLabel("会话已恢复"), "Session resumed");
     assert.equal(statusLabel("已停止"), "Cancelled");
   });
+
+  it("maps subagent lifecycle statuses without leaking Chinese chrome", () => {
+    assert.equal(statusLabel("子代理 (depth 1)...", true), "Delegating…");
+    assert.equal(statusLabel("子代理完成"), "Done");
+    assert.equal(statusLabel("子代理失败"), "Failed");
+  });
 });

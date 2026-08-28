@@ -9,6 +9,8 @@ import type { SessionPhase, ExecutionPlan, PlanActEvent } from "../plan-act/type
 import type { PlanDocument } from "../plan/document.ts";
 import { isTodoRevisionNewer, nextTodoRevision, TODO_WRITE_TOOL_NAME, type TodoItem, type TodoViewMode } from "../todo.ts";
 import { executionPlanToTodoItems } from "./todo-format.ts";
+import { toolArgumentSummary } from "./claude-style.ts";
+import { toolVisualName } from "./tool-lines.ts";
 
 export type { PermissionMode } from "../permissions.ts";
 export type { SessionPhase } from "../plan-act/types.ts";
@@ -65,7 +67,7 @@ export type ChatMessage =
   | { kind: "assistant"; text: string; reasoning?: string }
   | { kind: "notice"; title?: string; text: string }
   | { kind: "tool_call"; id: string; name: string; args: string; rawArgs: Record<string, unknown>; status: ToolState; result?: string; durationMs?: number; startedAt: number }
-  | { kind: "subagent_call"; id: string; task: string; profile?: string; depth: number; status: ToolState; result?: string; turns?: number; totalTokens?: number; tokenBreakdown?: import("../subagent/types.ts").SubagentTokenBreakdown; estimatedCost?: import("../subagent/types.ts").SubagentCost; innerEvents: SubagentInnerEvent[]; toolCallCount: number; startedAt: number; durationMs?: number; expanded: boolean }
+  | { kind: "subagent_call"; id: string; task: string; profile?: string; depth: number; status: ToolState; result?: string; turns?: number; totalTokens?: number; tokenBreakdown?: import("../subagent/types.ts").SubagentTokenBreakdown; estimatedCost?: import("../subagent/types.ts").SubagentCost; lastToolInfo?: string; innerEvents: SubagentInnerEvent[]; toolCallCount: number; startedAt: number; durationMs?: number; expanded: boolean }
   | { kind: "error"; text: string };
 
 export type TuiState = {
@@ -982,6 +984,12 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             : inner.type === "tool_end" ? shortPreview(typeof inner.result.content === "string" ? inner.result.content : "[complex]", 80)
             : undefined;
           const isToolEnd = inner.type === "tool_end";
+          const lastToolInfo = inner.type === "tool_start"
+            ? (() => {
+                const summary = toolArgumentSummary(inner.call.name, inner.call.arguments, JSON.stringify(inner.call.arguments)).replace(/^\$\s*/, "");
+                return `${toolVisualName(inner.call.name)}${summary ? `(${summary})` : ""}`;
+              })()
+            : undefined;
           return {
             ...state,
             messages: state.messages.map((m) => {
@@ -990,6 +998,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
                   ...m,
                   innerEvents: [...m.innerEvents, { type: inner.type, label, detail }],
                   toolCallCount: m.toolCallCount + (isToolEnd ? 1 : 0),
+                  ...(lastToolInfo ? { lastToolInfo } : {}),
                 };
               }
               return m;

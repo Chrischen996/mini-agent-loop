@@ -7,6 +7,7 @@
 export const TUI_COLORS = {
   primary: "#d77757",      // Claude orange for assistant identity and headings
   info: "#b1b9f9",         // light blue-purple for models and paths
+  planMode: "#48968c",      // muted sage green used by Claude Code plan mode
   user: "#7ab4e8",         // muted blue for user prompts and input
   assistant: "#ffffff",    // white for readable response text
   muted: "#999999",        // neutral gray for metadata and hints

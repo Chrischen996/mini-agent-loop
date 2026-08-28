@@ -1,10 +1,9 @@
 import type { ChatMessage, ThinkingDisplayMode } from "./state.ts";
 import { countTerminalRows } from "./terminal-width.ts";
 import { estimateThinkingRows } from "./thinking-lines.ts";
+import { isSubagentProtocolText, isSubagentToolName, subagentRenderLineCount } from "./subagent-lines.ts";
 
-const TOOL_PREVIEW_LINES = 10;
-const SUBAGENT_COLLAPSED_LINES = 3;
-const SUBAGENT_EXPANDED_INNER = 8;
+const TOOL_PREVIEW_LINES = 15;
 
 type ClippedItem = { clipTop: number; visibleHeight: number };
 type RawViewportItem =
@@ -52,6 +51,7 @@ export function estimateMessageHeight(
     case "user":
       return Math.max(1, countTerminalRows(message.displayText ?? message.text, Math.max(10, width - 4))) + (message.images?.length ? 1 : 0);
     case "assistant":
+      if (isSubagentProtocolText(message.text)) return 0;
       return Math.max(
         1,
         thinkingRows(message.reasoning, thinkingMode, expandedThinking.has(index), width) +
@@ -61,13 +61,15 @@ export function estimateMessageHeight(
       // Divider-style notice: optional title row + one text row (no border box).
       return (message.title ? 1 : 0) + Math.max(1, countTerminalRows(message.text, Math.max(10, width - 2)));
     case "tool_call":
-      return 3 + (message.result
-        ? Math.min(TOOL_PREVIEW_LINES, countTerminalRows(message.result, Math.max(10, width - 4)))
-        : message.status === "running" ? 0 : 1);
+      if (isSubagentToolName(message.name)) return 0;
+      // Ink's Claude-style tool row is no longer a bordered card: one title
+      // row plus the nested MessageResponse result (or Running... while the
+      // call is active). Keep this estimate in lockstep with ToolCallRow.
+      return 1 + (message.result
+        ? Math.min(TOOL_PREVIEW_LINES + 1, countTerminalRows(message.result, Math.max(10, width - 4)))
+        : message.status === "running" ? 1 : 0);
     case "subagent_call":
-      return message.expanded
-        ? SUBAGENT_COLLAPSED_LINES + Math.min(SUBAGENT_EXPANDED_INNER, message.innerEvents.length)
-        : SUBAGENT_COLLAPSED_LINES;
+      return subagentRenderLineCount(message, { width });
     case "error":
       return Math.max(1, countTerminalRows(message.text, Math.max(10, width - 2)));
   }

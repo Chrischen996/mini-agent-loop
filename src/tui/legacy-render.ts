@@ -9,6 +9,8 @@ import { TODO_PANEL_MAX_VISIBLE_ITEMS } from "./todo-format.ts";
 import { countTerminalRows, terminalStringWidth } from "./terminal-width.ts";
 import { todoPanelRenderLines } from "./todo-lines.ts";
 import { noticeText, noticeTitle, permissionModeLabel, statusLabel, thinkingLevelLabel } from "./claude-style.ts";
+import { isSubagentProtocolText, isSubagentToolName } from "./subagent-lines.ts";
+import { toolVisualName } from "./tool-lines.ts";
 
 export type LegacyToolView = {
   id: string;
@@ -113,9 +115,24 @@ export function buildLegacyFrameLines(state: LegacyTuiState): string[] {
   ];
 
   for (const message of state.history.filter((item) => item.role !== "system")) {
-    if (message.role === "user") lines.push(`${ANSI.green}❯ ${ANSI.reset}${contentAsString(message.content)}`);
-    if (message.role === "assistant" && message.content) lines.push(`${ANSI.cyan}⏺ ${ANSI.reset}${message.content}`);
-    if (message.role === "tool") lines.push(`${ANSI.dim}⎿ ${message.name} ${short(contentAsString(message.content))}${ANSI.reset}`);
+    const content = contentAsString(message.content);
+    if (message.role === "user") {
+      // A child-agent prompt can be persisted in the parent history by
+      // gateways that flatten nested turns. Keep its protocol scaffold out of
+      // the user-facing transcript; the parent subagent progress row is the
+      // canonical representation.
+      if (/^\s*you are .*subagent\b/i.test(content)) continue;
+      lines.push(`${ANSI.green}❯ ${ANSI.reset}${content}`);
+    }
+    if (message.role === "assistant" && message.content
+      && !isSubagentProtocolText(message.content)
+      && !/^\s*you are .*subagent\b/i.test(message.content)) {
+      lines.push(`${ANSI.cyan}⏺ ${ANSI.reset}${message.content}`);
+    }
+    if (message.role === "tool" && !isSubagentToolName(message.name)) {
+      lines.push(`${ANSI.cyan}⏺ ${toolVisualName(message.name)}${ANSI.reset}`);
+      lines.push(`${ANSI.dim}  ⎿ ${short(content)}${ANSI.reset}`);
+    }
   }
 
   if (state.todoPlan || state.todoItems) {
@@ -140,6 +157,7 @@ export function buildLegacyFrameLines(state: LegacyTuiState): string[] {
   if (state.streamingText) lines.push(`${ANSI.cyan}⏺ ${ANSI.reset}${state.streamingText}`);
 
   for (const tool of state.tools.slice(-4)) {
+    if (isSubagentToolName(tool.name)) continue;
     const icon = tool.status === "running" ? `${ANSI.yellow}⟳` : tool.status === "error" ? `${ANSI.red}✗` : `${ANSI.green}✓`;
     lines.push(`${ANSI.dim}⎿ ${icon}${ANSI.reset} ${tool.name}${tool.preview ? ` ${ANSI.dim}${short(tool.preview, 100)}${ANSI.reset}` : ""}`);
   }

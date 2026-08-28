@@ -43,10 +43,9 @@ export function extractBareFileAcTrigger(input: string): FileAcTrigger | null {
   if (/\s/.test(fragment)) return null;
   if (!/^[\p{L}\p{N}._/\\()+\-]+$/u.test(fragment)) return null;
   if (!/[\p{L}\p{N}]/u.test(fragment)) return null;
-  // A bare ASCII word like "hello" or "world" is normal English text, not a
-  // path fragment. Only trigger file autocomplete when the token looks
-  // path-like: contains a separator (/, \, .) or is a non-ASCII (e.g. CJK) word.
-  if (!/[\/\\.]/u.test(fragment) && /\p{ASCII}/u.test(fragment)) return null;
+  // Keep bare fragments eligible for direct completion. The async candidate
+  // lookup decides whether a matching file exists, so normal prose still
+  // produces no visible picker while names such as `app` remain completable.
   return {
     fragment,
     replaceFn: (chosen) => chosen,

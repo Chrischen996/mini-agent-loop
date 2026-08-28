@@ -7,6 +7,8 @@ export type RenderLine = {
   key: string;
   text: string;
   prefix?: string;
+  /** Optional tone for the marker/prefix while the body keeps its own tone. */
+  prefixTone?: RenderLineTone;
   style: RenderLineStyle;
   tone?: RenderLineTone;
   indent?: number;

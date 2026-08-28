@@ -198,7 +198,30 @@ function formatRenderLine(line: RenderLine): string {
   if (line.italic) codes.push(3);
   if (line.dim) codes.push(2);
   if (line.strikethrough) codes.push(9);
-  const color = line.tone === "success" ? C.success
+  const color = renderLineColor(line);
+  codes.push(hexToAnsi(color));
+  if (line.background) {
+    const background = line.background === "user" ? "48;5;236" : line.background === "selection" ? "48;5;24" : "48;5;178";
+    codes.push(...background.split(";").map(Number));
+  }
+  const prefix = line.prefix ?? "";
+  const visible = `${prefix}${line.text}`;
+  const fill = line.fillWidth === undefined
+    ? ""
+    : " ".repeat(Math.max(0, line.fillWidth - terminalStringWidth(indent + visible)));
+  // The prompt row uses a neutral pointer and white body text, matching
+  // Claude Code's `HighlightedThinkingText` instead of coloring the whole
+  // message blue. Other rows keep a single color escape for compact output.
+  if (prefix && (line.prefixTone !== undefined || line.style === "user")) {
+    const bodyColor = hexToAnsi(line.style === "user" ? C.assistant : color);
+    const pointerColor = hexToAnsi(line.prefixTone === undefined ? C.muted : renderLineColor({ ...line, tone: line.prefixTone }));
+    return `${indent}\x1b[${codes.join(";")}m\x1b[${pointerColor}m${prefix}\x1b[${bodyColor}m${line.text}${fill}\x1b[0m`;
+  }
+  return `${indent}\x1b[${codes.join(";")}m${visible}${fill}\x1b[0m`;
+}
+
+function renderLineColor(line: Pick<RenderLine, "style" | "tone">): string {
+  return line.tone === "success" ? C.success
     : line.tone === "running" ? C.running
       : line.tone === "error" || line.style === "error" ? C.error
         : line.style === "thinking" ? C.thinking
@@ -207,16 +230,6 @@ function formatRenderLine(line: RenderLine): string {
               : line.style === "user" ? C.user
                 : line.style === "border" || line.style === "muted" ? C.muted
                   : C.assistant;
-  codes.push(hexToAnsi(color));
-  if (line.background) {
-    const background = line.background === "user" ? "48;5;236" : line.background === "selection" ? "48;5;24" : "48;5;178";
-    codes.push(...background.split(";").map(Number));
-  }
-  const visible = `${line.prefix ?? ""}${line.text}`;
-  const fill = line.fillWidth === undefined
-    ? ""
-    : " ".repeat(Math.max(0, line.fillWidth - terminalStringWidth(indent + visible)));
-  return `${indent}\x1b[${codes.join(";")}m${visible}${fill}\x1b[0m`;
 }
 
 function hexToAnsi(hex: string): string {

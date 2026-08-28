@@ -60,6 +60,31 @@ describe("legacy TUI renderer", () => {
     assert.match(rendered, /\x1b\[9m/);
   });
 
+  it("keeps nested subagent protocol rows out of the legacy transcript", () => {
+    const lines = buildLegacyFrameLines({
+      history: [
+        { role: "user", content: "Inspect the workspace" },
+        { role: "assistant", content: "subagent(task=Inspect files, profile=researcher)" },
+        { role: "assistant", content: "You are the researcher subagent for a parent orchestrator.\nUser request:\nInspect files" },
+        { role: "tool", toolCallId: "subagent-1", name: "functions.subagent", content: "internal" },
+        { role: "assistant", content: "The relevant files are ready." },
+      ],
+      streamingText: "",
+      tools: [{ id: "subagent-1", name: "mcp.subagent_batch", status: "done", preview: "internal" }],
+      busy: false,
+      input: "",
+      status: "就绪",
+      permissionMode: "plan",
+      thinkingLevel: "off",
+    });
+    const rendered = lines.join("\n");
+    assert.match(rendered, /Inspect the workspace/);
+    assert.match(rendered, /The relevant files are ready/);
+    assert.doesNotMatch(rendered, /subagent\s*\(/i);
+    assert.doesNotMatch(rendered, /You are the researcher/i);
+    assert.doesNotMatch(rendered, /internal/);
+  });
+
   it("updates frames without clearing the entire terminal", () => {
     const output = buildLegacyFrameOutput(["header", "thinking"], 2);
     assert.equal(output.includes("\x1b[2J"), false);

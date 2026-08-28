@@ -311,6 +311,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         : acMode === "model" || acMode === "model-picker" ? Math.min(12, modelCandidates.length)
           : acMode === "profile-list" ? Math.min(10, profileListState?.profiles.length ?? 0)
             : acMode ? 4 : 0;
+  // The reference client keeps the welcome identity above an empty feed only;
+  // after the first prompt the transcript owns the full vertical space.
+  const hasHeader = state.messages.length === 0 && !state.streamingText && !state.busy;
   const todoRows = getTodoPanelRows(
     { plan: state.todoPlan, todos: state.todoItems },
     state.todoViewMode,
@@ -326,6 +329,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     : 0;
   const pickerLayout = getPickerLayout({
     termRows: stdout?.rows,
+    hasHeader,
     requestedItems: requestedPickerItems,
     hasPendingImages: state.pendingImages.length > 0,
     todoRows,
@@ -335,6 +339,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   });
   const feedHeight = getMessageFeedHeight({
     termRows: stdout?.rows,
+    hasHeader,
     hasPendingImages: state.pendingImages.length > 0,
     todoRows,
     pickerRows: pickerLayout.totalRows,
@@ -868,7 +873,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   return (
     <Box flexDirection="column" width={termWidth} height={termHeight} overflow="hidden">
-      <Header modelName={state.modelName} cwd={cwd} />
+      {hasHeader && <Header modelName={state.modelName} cwd={cwd} />}
 
       {(state.todoPlan || state.todoItems) && (
         <TodoPanel

@@ -282,9 +282,10 @@ export async function runTerminalMain(): Promise<void> {
         } : {
           scrollback: true,
         }),
-        // Keep only Claude Code's product title above the transcript. Model,
-        // permission mode, and cwd belong in the bottom status chrome.
-        header: { title: "Claude Code", cwd },
+        // Claude Code only shows its product header on the empty welcome
+        // screen. Once a turn exists, the transcript starts at the first user
+        // prompt and the model/cwd stay in the bottom status chrome.
+        header: { title: "Claude Code", cwd, show: state.messages.length === 0 && !state.streamingText && !state.busy },
         promptRule: true,
         input: input.getValue(),
         cursor: input.getCursor(),
