@@ -23,3 +23,6 @@ export function parseSlashCommand(input: string): SlashCommand {
 
 // Commands that accept a path argument (trigger file autocomplete after selection)
 export const PATH_COMMANDS = new Set(["read", "ls", "find", "grep"]);
+
+/** Commands that accept a finite or discoverable argument list. */
+export const ARGUMENT_COMMANDS = new Set(["copy", "tasks", "skill", "skills", "resume"]);

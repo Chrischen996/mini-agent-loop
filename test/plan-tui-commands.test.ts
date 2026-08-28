@@ -39,7 +39,7 @@ describe("TUI plan slash commands", () => {
     assert.ok(planIndex < helpIndex, "plan commands should appear before help");
   });
 
-  it("exposes Chinese usage descriptions for plan commands", () => {
+  it("exposes Claude-style usage descriptions for plan commands", () => {
     const plan = SLASH_COMMANDS.find((cmd) => cmd.name === "plan");
     assert.equal(plan?.usage, "/plan [task]");
     assert.match(plan?.description ?? "", /plan mode|计划/i);

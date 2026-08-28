@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { type CommandDef } from "../components/FileAutocomplete.tsx";
-import { PATH_COMMANDS } from "../slash-commands.ts";
+import { ARGUMENT_COMMANDS, PATH_COMMANDS } from "../slash-commands.ts";
 import { listCandidates } from "../file-completion.ts";
 import { modelChoices } from "../model-command.ts";
 import { type AcMode, type FileAcTrigger } from "../input-utils.ts";
@@ -118,7 +118,7 @@ export function useAutocomplete({
     (idx: number) => {
       const cmd = cmdCandidates[idx];
       if (!cmd) return;
-      if (PATH_COMMANDS.has(cmd.name)) {
+      if (PATH_COMMANDS.has(cmd.name) || ARGUMENT_COMMANDS.has(cmd.name)) {
         setInput(`/${cmd.name} `);
       } else {
         setInput(`/${cmd.name}`);

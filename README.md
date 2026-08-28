@@ -250,10 +250,10 @@ the fixed model id `kimi-k3-free` to
 #### Model providers
 
 The built-in catalog contains the generated multi-provider model definitions.
-Run the Ink TUI, then use `/model` to search all adapted models:
+Run the TUI, then use `/model` to search all adapted models:
 
 ```bash
-npm run tui:ink
+npm run tui
 
 # examples inside the TUI
 /model
@@ -537,17 +537,49 @@ the local `/model` selector. Permission modes are cycled with `Shift+Tab`:
 | Mode | Executes tools? | Asks user? | Typical use |
 | --- | --- | --- | --- |
 | `plan` (default) | Local read-only only; writes/dangerous shell/MCP hard-denied | No approval path | Risk analysis / planning |
+| `approval` | Yes, after an explicit A/allow decision for risky tools | A allow, D/Enter/Esc deny | Interactive changes with review |
 | `bypass` | Yes, including MCP | Never | Trusted local runs / CI |
 
 ```bash
 npm run tui
 ```
 
-Use `/model`, `/clear`, `/quit`, or `Ctrl+C` inside the terminal client. `/model`
-also accepts `--base-url`, `--api-key-env`, and temporary `--api-key` overrides. The
-previous dependency-free ANSI client remains available as `npm run tui:legacy`.
+The default `npm run tui` entry uses the standalone ANSI renderer and the Claude
+Code-style conversation layout. Completed rows are diffed in place, so streamed
+responses do not issue full-screen `ESC[2J` clears. The same renderer is also
+available under the explicit `tui:terminal` alias:
+
+```bash
+npm run tui:terminal
+```
+
+The previous Ink/React implementation remains available as `npm run tui:ink`
+for compatibility and comparison.
+
+Use `/model`, `/profiles`, `/sessions`, `/resume`, `/clear`, `/quit`, or `Ctrl+C`
+inside the standalone terminal client. `/model` also accepts `--base-url`,
+`--api-key-env`, and temporary `--api-key` overrides. Sessions are persisted
+under the shared `AGENT_DATA_DIR` root and restore history, tool results,
+Todo/Plan state, permission mode, and model settings on the next start. It
+consumes the same reducer, Agent history, permission manager, autocomplete,
+and direct-tool contracts as the Ink entrypoint. The previous dependency-free
+compatibility client remains available as `npm run tui:legacy`.
+The standalone frame follows the Claude Code conversation layout: a compact
+session header, `❯` user prompts, `⏺` assistant responses, `⎿` tool output, and
+a dim `∴ Thinking` block. Todo, permission, plan, attachment, spinner, and
+status rows carry their own visual icons. The prompt footer is pinned to the
+bottom of the available terminal height, while user rows and the prompt
+separator are emitted as incremental terminal rows, so streaming updates do
+not clear the screen.
 TUI supports plan workflow slash commands: `/plan`, `/plan-show`, `/plan-approve`,
 `/plan-reject`, `/plan-run`, `/plan-retry`, `/plan-history`, `/plan-archive`.
+Terminal input follows the Claude Code-style priority order: `Tab`/`↑↓` first
+operate the active command, argument, file, model, or profile picker; when no
+picker is open, `↑`/`↓` recall the last 200 submitted prompts (multiline drafts
+keep vertical cursor movement). `Alt+↑`/`Alt+↓` moves focus between reasoning
+messages, and `Alt+T` expands or collapses the focused reasoning block.
+`/tasks`, `/copy`, `/skills`, and `/resume` provide argument completion;
+`/resume` loads session IDs from the shared session store.
 CLI one-shot runs accept `--mode plan|bypass` (default `plan`).
 `--plan` forces plan mode; `--plan-execute` loads a saved plan and runs it in
 `bypass`. Use `--mode=bypass` for unattended execution that may write files.

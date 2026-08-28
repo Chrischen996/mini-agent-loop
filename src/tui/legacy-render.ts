@@ -8,6 +8,7 @@ import type { TodoItem, TodoViewMode } from "../todo.ts";
 import { TODO_PANEL_MAX_VISIBLE_ITEMS } from "./todo-format.ts";
 import { countTerminalRows, terminalStringWidth } from "./terminal-width.ts";
 import { todoPanelRenderLines } from "./todo-lines.ts";
+import { noticeText, noticeTitle, permissionModeLabel, statusLabel, thinkingLevelLabel } from "./claude-style.ts";
 
 export type LegacyToolView = {
   id: string;
@@ -90,31 +91,31 @@ function appendMemoryCards(lines: string[], events: MemoryUpdateEvent[] | undefi
   if (!events || events.length === 0) return;
   for (const event of events.slice(-3)) {
     const time = new Date(event.at).toLocaleTimeString("zh-CN", { hour12: false });
-    lines.push(`${ANSI.cyan}┌─ 🧠 记忆已更新 ${ANSI.dim}${time}${ANSI.reset}`);
+    lines.push(`${ANSI.cyan}┌─ Memory updated ${ANSI.dim}${time}${ANSI.reset}`);
     const rows: string[] = [];
     for (const key of event.added) {
       const preview = event.previews?.[key] ? ` ${ANSI.dim}— ${short(event.previews[key]!, 60)}${ANSI.reset}` : "";
       rows.push(`${ANSI.green}+${ANSI.reset} ${key}${preview}`);
     }
     for (const key of event.forgotten) {
-      rows.push(`${ANSI.red}−${ANSI.reset} ${key} ${ANSI.dim}(已遗忘)${ANSI.reset}`);
+      rows.push(`${ANSI.red}−${ANSI.reset} ${key} ${ANSI.dim}(forgotten)${ANSI.reset}`);
     }
-    if (rows.length === 0) rows.push(`${ANSI.dim}(无需更新)${ANSI.reset}`);
+    if (rows.length === 0) rows.push(`${ANSI.dim}(no changes)${ANSI.reset}`);
     lines.push(...rows);
-    lines.push(`${ANSI.cyan}└${ANSI.reset}${ANSI.dim} 下轮对话自动生效 · /memory 查看${ANSI.reset}`);
+    lines.push(`${ANSI.cyan}└${ANSI.reset}${ANSI.dim} active next turn · /memory to inspect${ANSI.reset}`);
   }
 }
 
 export function buildLegacyFrameLines(state: LegacyTuiState): string[] {
   const lines: string[] = [
-    `${ANSI.cyan}mini-agent TUI${ANSI.reset} ${ANSI.dim}(Ctrl+R 快切思考，Shift+↑↓ 精调，Shift+Tab 切换权限，输入 /clear 清空会话)${ANSI.reset}`,
+    `${ANSI.cyan}Claude Code${ANSI.reset}`,
     "",
   ];
 
   for (const message of state.history.filter((item) => item.role !== "system")) {
-    if (message.role === "user") lines.push(`${ANSI.green}> ${ANSI.reset}${contentAsString(message.content)}`);
-    if (message.role === "assistant" && message.content) lines.push(`${ANSI.cyan}assistant:${ANSI.reset} ${message.content}`);
-    if (message.role === "tool") lines.push(`${ANSI.dim}[${message.name}] ${short(contentAsString(message.content))}${ANSI.reset}`);
+    if (message.role === "user") lines.push(`${ANSI.green}❯ ${ANSI.reset}${contentAsString(message.content)}`);
+    if (message.role === "assistant" && message.content) lines.push(`${ANSI.cyan}⏺ ${ANSI.reset}${message.content}`);
+    if (message.role === "tool") lines.push(`${ANSI.dim}⎿ ${message.name} ${short(contentAsString(message.content))}${ANSI.reset}`);
   }
 
   if (state.todoPlan || state.todoItems) {
@@ -125,31 +126,28 @@ export function buildLegacyFrameLines(state: LegacyTuiState): string[] {
   appendMemoryCards(lines, state.memoryEvents);
 
   if (state.notice) {
-    if (state.notice.title) lines.push(`${ANSI.cyan}${state.notice.title}:${ANSI.reset}`);
-    const noticeLines = state.notice.text.split("\n");
+    const title = noticeTitle(state.notice.title);
+    if (title) lines.push(`${ANSI.cyan}${title}:${ANSI.reset}`);
+    const noticeLines = noticeText(state.notice.text).split("\n");
     lines.push(...noticeLines.slice(0, 8).map((line) => `${ANSI.dim}${line}${ANSI.reset}`));
     if (noticeLines.length > 8) lines.push(`${ANSI.dim}...${ANSI.reset}`);
   }
 
   if (state.pendingUser) {
     const normalized = state.pendingUser.replace(/\r\n/g, '\n');
-    const lineCount = normalized.split('\n').length;
-    const isMultiLine = lineCount > 1;
-    const charCount = [...normalized].length;
-    const display = isMultiLine ? `${lineCount} 行 / ${charCount} 字` : normalized;
-    lines.push(`${ANSI.green}> ${ANSI.reset}${display}`);
+    lines.push(`${ANSI.green}❯ ${ANSI.reset}${normalized}`);
   }
-  if (state.streamingText) lines.push(`${ANSI.cyan}assistant:${ANSI.reset} ${state.streamingText}`);
+  if (state.streamingText) lines.push(`${ANSI.cyan}⏺ ${ANSI.reset}${state.streamingText}`);
 
   for (const tool of state.tools.slice(-4)) {
-    const icon = tool.status === "running" ? `${ANSI.yellow}*` : tool.status === "error" ? `${ANSI.red}!` : `${ANSI.green}ok`;
-    lines.push(`${icon}${ANSI.reset} ${tool.name}${tool.preview ? ` ${ANSI.dim}${short(tool.preview, 100)}${ANSI.reset}` : ""}`);
+    const icon = tool.status === "running" ? `${ANSI.yellow}⟳` : tool.status === "error" ? `${ANSI.red}✗` : `${ANSI.green}✓`;
+    lines.push(`${ANSI.dim}⎿ ${icon}${ANSI.reset} ${tool.name}${tool.preview ? ` ${ANSI.dim}${short(tool.preview, 100)}${ANSI.reset}` : ""}`);
   }
 
   lines.push(
     "",
-    `${ANSI.dim}思考: ${thinkingLevelToDisplay(state.thinkingLevel)} · 权限: ${state.permissionMode} · ${state.status}${ANSI.reset}`,
-    `${state.busy ? "" : "> "}${state.input}`,
+    `${ANSI.dim}Thinking: ${thinkingLevelLabel(thinkingLevelToDisplay(state.thinkingLevel))} · ${permissionModeLabel(state.permissionMode)} · ${statusLabel(state.status, state.busy)}${ANSI.reset}`,
+    `${state.busy ? "" : "❯ "}${state.input}`,
   );
   return lines;
 }

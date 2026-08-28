@@ -7,8 +7,9 @@ import { TUI_COLORS as C } from "../theme.ts";
 import { selectMessageViewport } from "../message-viewport.ts";
 import { MarkdownText } from "./MarkdownText.tsx";
 import { toMessageRenderModel } from "../render-model.ts";
-import { toolDisplayName, toolStatusIcon } from "../tool-lines.ts";
+import { toolVisualName, toolVisualStatusIcon } from "../tool-lines.ts";
 import { thinkingRenderLines, thinkingVisibleLines } from "../thinking-lines.ts";
+import { noticeText, noticeTitle, statusLabel } from "../claude-style.ts";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -147,8 +148,8 @@ function ReadView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> })
     <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
         {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
-          : <Text color={isError ? C.error : C.success}>{toolStatusIcon(msg.status)}</Text>}
-        <Text dimColor>read</Text>
+          : <Text color={isError ? C.error : C.success}>{toolVisualStatusIcon(msg.status)}</Text>}
+        <Text dimColor>{toolVisualName(msg.name)}</Text>
         <Text color={C.info}>{path}</Text>
         {msg.durationMs !== undefined && <Text dimColor>({msg.durationMs}ms)</Text>}
       </Box>
@@ -174,7 +175,7 @@ function BashView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> })
     <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
         {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
-          : <Text color={isError ? C.error : C.success}>{toolStatusIcon(msg.status)}</Text>}
+          : <Text color={isError ? C.error : C.success}>{toolVisualStatusIcon(msg.status)}</Text>}
         <Text dimColor>$</Text>
         <Text color={C.assistant} bold>{cmd}</Text>
         {msg.durationMs !== undefined && <Text dimColor>({msg.durationMs}ms)</Text>}
@@ -205,8 +206,8 @@ function FileWriteView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" 
     <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
         {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
-          : <Text color={isError ? C.error : C.success}>{toolStatusIcon(msg.status)}</Text>}
-        <Text dimColor>{isEdit ? "edit" : "write"}</Text>
+          : <Text color={isError ? C.error : C.success}>{toolVisualStatusIcon(msg.status)}</Text>}
+        <Text dimColor>{isEdit ? "Edit" : "Write"}</Text>
         <Text color={C.info}>{path}</Text>
         {msg.durationMs !== undefined && <Text dimColor>({msg.durationMs}ms)</Text>}
       </Box>
@@ -242,8 +243,8 @@ function GrepView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> })
     <Box flexDirection="column" marginBottom={0}>
       <Box gap={1}>
         {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
-          : <Text color={isError ? C.error : C.success}>{isError ? "✗" : "✓"}</Text>}
-        <Text dimColor>grep</Text>
+          : <Text color={isError ? C.error : C.success}>{toolVisualStatusIcon(msg.status)}</Text>}
+        <Text dimColor>{toolVisualName(msg.name)}</Text>
         <Text color={C.running}>{pattern}</Text>
         <Text dimColor>in</Text>
         <Text color={C.info}>{searchPath}</Text>
@@ -273,7 +274,7 @@ function FileListView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }
       <Box gap={1}>
         {isRunning ? <Text color={C.running}><Spinner type="dots" /></Text>
           : <Text color={isError ? C.error : C.success}>{isError ? "✗" : "✓"}</Text>}
-        <Text dimColor>{toolDisplayName(msg.name)}</Text>
+        <Text dimColor>{toolVisualName(msg.name)}</Text>
         <Text color={C.info}>{path}/</Text>
         {msg.durationMs !== undefined && <Text dimColor>({msg.durationMs}ms)</Text>}
       </Box>
@@ -321,6 +322,7 @@ function GenericView({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }>
 // ─── dispatcher ──────────────────────────────────────────────────────────────
 
 function ToolCallRow({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> }): React.ReactElement {
+  const borderColor = msg.status === "error" ? C.error : msg.status === "running" ? C.running : C.border;
   let content: React.ReactElement;
   switch (msg.name) {
     case "read":
@@ -346,9 +348,11 @@ function ToolCallRow({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }>
       content = <GenericView msg={msg} />;
   }
   return (
-    <Box flexDirection="row" marginTop={0} marginBottom={0}>
-      <Text color={C.gutter}>⎿ </Text>
-      <Box flexDirection="column" flexGrow={1}>{content}</Box>
+    <Box flexDirection="column" marginTop={0} marginBottom={0} borderStyle="round" borderColor={borderColor} paddingX={1}>
+      <Box flexDirection="row">
+        <Text color={C.gutter}>⎿ </Text>
+        <Box flexDirection="column" flexGrow={1}>{content}</Box>
+      </Box>
     </Box>
   );
 }
@@ -376,6 +380,8 @@ type MessageFeedProps = {
    * 0 = stick to bottom.
    */
   scrollOffset?: number;
+  /** Match Claude Code by leaving clipped history unobstructed. */
+  showHistoryHints?: boolean;
 };
 
 function ViewportSlice({
@@ -405,11 +411,12 @@ export function MessageFeed({
   expandedThinking = [],
   focusedMessageIndex = -1,
   busy = false,
-  status = "思考中...",
+  status = "Thinking…",
   maxMessages = 200,
   availableHeight = 20,
   width = 80,
   scrollOffset = 0,
+  showHistoryHints = false,
 }: MessageFeedProps): React.ReactElement {
   const effectiveMode: ThinkingDisplayMode =
     thinkingMode ?? (showThinking ? "summary" : "hidden");
@@ -426,21 +433,17 @@ export function MessageFeed({
     availableHeight,
     width,
     maxMessages,
+    showHistoryHints,
   });
 
   return (
     <Box flexDirection="column" flexGrow={1} paddingX={1} overflow="hidden">
-      {viewport.items.map((item, itemIndex) => {
+      {viewport.items.map((item) => {
         if (item.kind === "history_hint") {
-          return (
-            <Box key={`hint-${itemIndex}`} marginBottom={0}>
-              <Text color={C.info} dimColor>
-                {item.direction === "above"
-                  ? `↑ 还有 ${item.hiddenRows} 行`
-                  : `↓ 还有 ${item.hiddenRows} 行 · Ctrl+G 回到底部`}
-              </Text>
-            </Box>
-          );
+          // Keep viewport accounting intact, but do not replace transcript
+          // rows with a numeric history hint. Claude Code leaves the clipped
+          // conversation unobstructed and exposes navigation through keys.
+          return null;
         }
         if (item.kind === "streaming_reasoning") {
           return (
@@ -464,7 +467,7 @@ export function MessageFeed({
             <ViewportSlice key="busy-status" clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
               <Box marginBottom={0} gap={1}>
                 <Text color={C.running}><Spinner type="dots" /></Text>
-                <Text color={C.running} dimColor>{status}</Text>
+                <Text color={C.running} dimColor>{statusLabel(status, true)}</Text>
               </Box>
             </ViewportSlice>
           );
@@ -481,11 +484,11 @@ export function MessageFeed({
                 flexDirection="column"
                 paddingX={1}
                 marginTop={1}
+                width="100%"
               >
-                <Box gap={1}>
-                  <Text color={C.user} bold>{visual.marker}</Text>
-                  <Text color={C.assistant}>{msg.displayText ?? msg.text}</Text>
-                </Box>
+                <Text backgroundColor={C.userBg} color={C.assistant} wrap="wrap">
+                  <Text color={C.user} bold>{visual.marker}</Text>{" "}{msg.displayText ?? msg.text}
+                </Text>
                 {msg.images?.length ? (
                   <Box marginLeft={2} marginTop={0} gap={1}>
                     {msg.images.map((image) => (
@@ -528,10 +531,10 @@ export function MessageFeed({
               <Box flexDirection="column" paddingX={1}>
                 {msg.title && (
                   <Text color={C.info} dimColor>
-                    {"─".repeat(6)} {msg.title} {"─".repeat(6)}
+                    {"─".repeat(6)} {noticeTitle(msg.title)} {"─".repeat(6)}
                   </Text>
                 )}
-                <Text color={C.assistant}>{msg.text}</Text>
+                <Text color={C.assistant}>{noticeText(msg.text)}</Text>
               </Box>
             </ViewportSlice>
           );

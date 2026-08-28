@@ -2,6 +2,8 @@
 
 import type { LoopEvent } from "../loop.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
+import { contentAsString } from "../content.ts";
+import type { AgentMessage, MessageContent } from "../types.ts";
 import { PERMISSION_MODES, type PermissionMode } from "../permissions.ts";
 import type { SessionPhase, ExecutionPlan, PlanActEvent } from "../plan-act/types.ts";
 import type { PlanDocument } from "../plan/document.ts";
@@ -34,6 +36,8 @@ export type PendingPermissionState = {
   requestId: string;
   sessionId: string;
   tool: string;
+  /** Read-only snapshot used by the presentation card; never used to decide permission. */
+  arguments?: Record<string, unknown>;
   risk: "safe" | "medium" | "high";
 };
 
@@ -123,6 +127,17 @@ export type TuiState = {
 
 export type TuiAction =
   | { type: "USER_MESSAGE"; text: string; displayText?: string; images?: ImageAttachment[] }
+  | {
+      type: "RESTORE_SESSION";
+      history: AgentMessage[];
+      permissionMode: PermissionMode;
+      modelName?: string;
+      thinkingMode?: ThinkingDisplayMode;
+      phase?: SessionPhase;
+      currentPlan?: ExecutionPlan;
+      todos?: TodoItem[];
+      todoRevision?: number;
+    }
   | { type: "LOOP_EVENT"; event: LoopEvent }
   | { type: "PLAN_ACT_EVENT"; event: PlanActEvent }
   | { type: "AUTO_CONTINUE"; count: number; max: number }
@@ -213,6 +228,23 @@ function resultPreview(content: unknown): string {
   return "";
 }
 
+/** Preserve line breaks for the transcript while keeping unbounded tool
+ * output from taking over the frame. Sidebar cards continue using preview(). */
+function resultContent(content: unknown, max = 4000): string {
+  let text = "";
+  if (typeof content === "string") text = content;
+  else if (Array.isArray(content)) {
+    text = content
+      .filter((part): part is { type: "text"; text: string } =>
+        typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string",
+      )
+      .map((part) => part.text)
+      .join("\n");
+  }
+  const normalized = text.trim();
+  return normalized.length > max ? `${normalized.slice(0, max - 1)}…` : normalized;
+}
+
 export function createInitialState(modelName: string): TuiState {
   return {
     messages: [],
@@ -270,6 +302,82 @@ export function preserveScrollOnAppend(
   return Math.max(0, scrollOffset + (nextCount - previousCount));
 }
 
+/**
+ * Project persisted AgentMessage history into the reducer's chat feed.
+ *
+ * Agent history is the source of truth for the loop; this projection is only
+ * presentation state used by the TUI after a session resume. Tool calls are
+ * paired with their later tool results by id so resumed conversations retain
+ * the same compact activity cards as a live turn.
+ */
+export function chatMessagesFromAgentHistory(history: readonly AgentMessage[]): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  const toolCards = new Map<string, Extract<ChatMessage, { kind: "tool_call" }>>();
+
+  for (const message of history) {
+    if (message.role === "system") continue;
+    if (message.role === "user") {
+      messages.push({ kind: "user", text: contentAsString(message.content) });
+      continue;
+    }
+    if (message.role === "assistant") {
+      const text = contentAsString(message.content);
+      if (text) messages.push({ kind: "assistant", text });
+      for (const call of message.toolCalls ?? []) {
+        const card: Extract<ChatMessage, { kind: "tool_call" }> = {
+          kind: "tool_call",
+          id: call.id,
+          name: call.name,
+          args: JSON.stringify(call.arguments ?? {}),
+          rawArgs: call.arguments ?? {},
+          status: "running",
+          startedAt: Date.now(),
+        };
+        messages.push(card);
+        toolCards.set(call.id, card);
+      }
+      continue;
+    }
+    const card = toolCards.get(message.toolCallId);
+    const result = resultPreviewForChat(message.content);
+    if (card) {
+      card.status = message.isError ? "error" : "done";
+      card.result = result;
+      card.durationMs = 0;
+    } else {
+      messages.push({
+        kind: "tool_call",
+        id: message.toolCallId,
+        name: message.name,
+        args: "{}",
+        rawArgs: {},
+        status: message.isError ? "error" : "done",
+        result,
+        startedAt: Date.now(),
+        durationMs: 0,
+      });
+    }
+  }
+  return messages;
+}
+
+function resultPreviewForChat(content: MessageContent): string {
+  // Kept as a small local formatter to avoid importing reducer internals into
+  // the persistence layer. The actual content shape is handled defensively.
+  if (typeof content === "string") return content.trim().slice(0, 4000);
+  if (Array.isArray(content)) {
+    return content
+      .filter((part): part is { type: "text"; text: string } =>
+        typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string",
+      )
+      .map((part) => part.text)
+      .join("\n")
+      .trim()
+      .slice(0, 4000);
+  }
+  return "";
+}
+
 export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
   switch (action.type) {
     case "USER_MESSAGE":
@@ -289,6 +397,24 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         // New user turns always re-pin the feed to the latest content.
         scrollOffset: 0,
       };
+
+    case "RESTORE_SESSION": {
+      const messages = chatMessagesFromAgentHistory(action.history);
+      const firstUser = messages.find((message): message is Extract<ChatMessage, { kind: "user" }> => message.kind === "user");
+      return {
+        ...createInitialState(action.modelName ?? state.modelName),
+        thinkingMode: action.thinkingMode ?? state.thinkingMode,
+        permissionMode: action.permissionMode,
+        messages,
+        goal: firstUser?.text ?? "",
+        phase: action.phase ?? "planning",
+        currentPlan: action.currentPlan,
+        todoPlan: state.todoPlan,
+        todoItems: action.todos && action.todos.length > 0 ? action.todos : undefined,
+        todoRevision: action.todoRevision ?? nextTodoRevision(),
+        status: "会话已恢复",
+      };
+    }
 
     case "RESET":
       return {
@@ -545,6 +671,11 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             status: `上下文已压缩 ${event.beforeTokens} → ${event.afterTokens} tokens`,
           };
 
+        case "plan_act_event":
+          // Keep plan lifecycle events on the same reducer path regardless of
+          // whether they arrive from Ink or the standalone terminal service.
+          return tuiReducer(state, { type: "PLAN_ACT_EVENT", event: event.event });
+
         case "auto_subagent":
           return {
             ...state,
@@ -631,12 +762,13 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           }
           const now = Date.now();
           const result = resultPreview(event.result.content);
+          const transcriptResult = resultContent(event.result.content);
           const updatedMessages = state.messages.map((m) => {
             if (m.kind === "tool_call" && m.id === event.call.id) {
               return {
                 ...m,
                 status: (event.result.isError ? "error" : "done") as ToolState,
-                result,
+                result: transcriptResult,
                 durationMs: now - m.startedAt,
               };
             }
@@ -673,6 +805,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               requestId: event.request.id,
               sessionId: event.request.sessionId,
               tool: event.request.tool,
+              arguments: event.request.arguments,
               risk: event.request.risk,
             },
             status: `等待权限确认: ${event.request.tool} (${event.request.risk}) [A 允许 / D 拒绝 / Enter 拒绝 / Esc 取消]`,
@@ -974,4 +1107,29 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     default:
       return state;
   }
+}
+
+export type TuiStore = {
+  getState: () => TuiState;
+  dispatch: (action: TuiAction) => void;
+  subscribe: (listener: () => void) => () => void;
+};
+
+/** Store adapter shared by React Ink and the standalone terminal entrypoint. */
+export function createTuiStore(initialState: TuiState): TuiStore {
+  let current = initialState;
+  const listeners = new Set<() => void>();
+  return {
+    getState: () => current,
+    dispatch: (action) => {
+      const next = tuiReducer(current, action);
+      if (next === current) return;
+      current = next;
+      for (const listener of listeners) listener();
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
 }

@@ -84,8 +84,8 @@ describe("TodoPanel formatting", () => {
     assert.ok(rendered.includes("Run tests"));
     assert.ok(rendered.includes("Review output"));
     // Summary header reports the completed/total line.
-    assert.ok(rendered.includes("已完成"));
-    assert.ok(rendered.includes("执行中"));
+    assert.ok(rendered.includes("completed"));
+    assert.ok(rendered.includes("in progress"));
   });
 
   it("limits visible rows and reports overflow", () => {

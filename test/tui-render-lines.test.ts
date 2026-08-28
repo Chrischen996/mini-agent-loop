@@ -19,10 +19,10 @@ describe("TUI shared render lines", () => {
       { id: "active", content: "Run tests", activeForm: "Running tests", status: "in_progress", source: "model" },
     ];
     const lines = todoPanelRenderLines({ todos });
-    assert.match(lines[0]!.text, /1\/2 已完成/);
+    assert.match(lines[0]!.text, /1\/2 completed/);
     assert.equal(lines[1]!.text, "☒ Read files");
     assert.equal(lines[1]!.strikethrough, true);
-    assert.equal(lines[2]!.text, "… Run tests");
+    assert.equal(lines[2]!.text, "◐ Run tests");
 
     const planLines = todoPanelRenderLines({ plan: {
       version: 2, id: "p", prompt: "p", rawMarkdown: "1. Read files", files: [], status: "approved",

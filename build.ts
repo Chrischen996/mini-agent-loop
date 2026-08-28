@@ -10,7 +10,7 @@ await build({
     outDir: "dist",
     chunkSizeLimit: 100000,
     rollupOptions: {
-      input: "src/tui/ink-main.tsx",
+      input: "src/tui/terminal-main.ts",
       output: {
         entryFileNames: "cli.js",
         chunkFileNames: "[name]-[hash].js",

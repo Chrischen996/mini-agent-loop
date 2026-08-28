@@ -5,12 +5,12 @@ import { normalizeTodoText, type TodoItem, type TodoStatus, type TodoViewMode } 
 export const TODO_PANEL_MAX_VISIBLE_ITEMS = 8;
 
 export const TODO_PLAN_STATUS_LABELS: Record<PlanDocument["status"], string> = {
-  pending: "待审批",
-  approved: "已批准",
-  rejected: "已拒绝",
-  executing: "执行中",
-  completed: "已完成",
-  failed: "失败",
+  pending: "pending",
+  approved: "approved",
+  rejected: "rejected",
+  executing: "in progress",
+  completed: "completed",
+  failed: "failed",
 };
 
 const PLAN_STEP_TODO_STATUS: Record<PlanStepStatus, TodoStatus> = {
@@ -71,7 +71,7 @@ export function resolveTodoItems(source: TodoSource): TodoItem[] {
 export function todoIcon(status: TodoStatus): string {
   switch (status) {
     case "completed": return "☒";
-    case "in_progress": return "…";
+    case "in_progress": return "◐";
     case "failed": return "✗";
     case "skipped": return "-";
     default: return "☐";

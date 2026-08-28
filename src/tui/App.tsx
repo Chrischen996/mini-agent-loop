@@ -122,11 +122,11 @@ const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
 export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
-  const termWidth = stdout?.columns ?? 80;
+  const termWidth = Math.max(10, stdout?.columns || 80);
   // Leave two terminal rows unused. Ink's renderer adds a trailing newline and
   // can gain a row from borders/wrapping; staying below the terminal height
   // prevents its visible `clearTerminal` fallback during streamed updates.
-  const termHeight = Math.max(1, (stdout?.rows ?? 24) - 2);
+  const termHeight = Math.max(1, (stdout?.rows || 24) - 2);
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const llmRef = useRef(llm);
   llmRef.current = llm;
@@ -317,8 +317,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   );
   // Approval chrome: the permission card / plan approval bar render between
   // the feed and the input row; reserve their rows in every height budget.
-  const permissionRows = state.pendingPermission ? 4 : 0;
-  const planApprovalRows = state.phase === "review" && state.currentPlan ? 3 : 0;
+  // Ink's bordered approval cards include two border rows plus the content
+  // rows below. Reserve their real footprint so streaming never pushes the
+  // prompt onto the terminal's last row.
+  const permissionRows = state.pendingPermission ? 6 : 0;
+  const planApprovalRows = state.phase === "review" && state.currentPlan
+    ? 6 + Math.min(4, state.currentPlan.steps.length) + (state.currentPlan.steps.length > 4 ? 1 : 0)
+    : 0;
   const pickerLayout = getPickerLayout({
     termRows: stdout?.rows,
     requestedItems: requestedPickerItems,
@@ -652,22 +657,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       abortRef.current.signal,
     );
     permissionTurnRef.current = permissionTurn;
-    // Collapse multi-line pastes into a summary for display, but keep full text for model context.
-    const displaySource = planTurnOverride?.displayText ?? prompt;
-    const normalizedPrompt = displaySource.replace(/\r\n/g, '\n');
-    const isMultiLine = !planTurnOverride && normalizedPrompt.includes('\n');
-    const lineCount = isMultiLine ? normalizedPrompt.split('\n').length : 1;
-    // Count graphemes properly (emoji = 1 char, not 2 UTF-16 units)
-    const charCount = [...normalizedPrompt].length;
-    const displayText = planTurnOverride
-      ? planTurnOverride.displayText
-      : isMultiLine
-        ? `[已折叠 ${lineCount} 行 / ${charCount} 字]`
-        : undefined;
     dispatch({
       type: "USER_MESSAGE",
       text: planTurnOverride ? planTurnOverride.displayText : prompt,
-      ...(displayText !== undefined && !planTurnOverride ? { displayText } : {}),
+      ...(planTurnOverride?.displayText !== undefined ? { displayText: planTurnOverride.displayText } : {}),
       images: pendingImgs,
     });
 
@@ -985,20 +978,22 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                 void handleSubmit(val);
               }}
               placeholder={
-                state.busy ? "运行中，可输入消息并排队"
-                  : acMode === "model-picker" ? "搜索模型"
-                    : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "输入 Base URL"
-                      : acMode === "model-setup" ? "输入 API Key，可留空使用环境变量"
-                        : acMode === "profile-name" ? "输入配置文件名称（例如 coding-fast）"
-                          : acMode === "profile-list" ? "↑↓ 选择配置文件，Enter 激活"
-                            : "输入消息，/ 命令，或 @文件 引用"
+                state.busy ? "Working; type a message to queue"
+                  : acMode === "model-picker" ? "Search models"
+                    : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "Enter Base URL"
+                      : acMode === "model-setup" ? "Enter API key (or leave blank for env)"
+                        : acMode === "profile-name" ? "Enter a profile name (for example coding-fast)"
+                          : acMode === "profile-list" ? "↑↓ select profile, Enter activate"
+                            : "Message, /command, or @file reference"
               }
             />
-            {state.busy && queuedCount > 0 && <Text color={C.running}>队列 {queuedCount}</Text>}
+            {state.busy && queuedCount > 0 && <Text color={C.running}>Queued {queuedCount}</Text>}
           </Box>
         </Box>
         <StatusBar
           modelName={state.modelName}
+          cwd={cwd}
+          width={termWidth}
           tokenEstimate={state.usedTokens || state.contextTokens}
           contextWindow={llm.contextWindow}
           busy={state.busy}

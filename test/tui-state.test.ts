@@ -201,6 +201,7 @@ describe("TUI sidebar state", () => {
       requestId: "perm-1",
       sessionId: "tui_session",
       tool: "write",
+      arguments: { path: "src/app.tsx" },
       risk: "high",
     });
     assert.match(state.status, /等待权限确认: write \(high\).*A 允许.*D 拒绝/);

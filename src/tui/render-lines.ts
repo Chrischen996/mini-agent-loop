@@ -1,5 +1,6 @@
-export type RenderLineStyle = "assistant" | "thinking" | "muted" | "tool" | "todo" | "error";
+export type RenderLineStyle = "assistant" | "thinking" | "muted" | "tool" | "todo" | "error" | "user" | "border";
 export type RenderLineTone = "default" | "success" | "running" | "error";
+export type RenderLineBackground = "user" | "selection" | "badge";
 
 /** A terminal-ready logical line shared by Ink and the incremental renderer. */
 export type RenderLine = {
@@ -11,5 +12,9 @@ export type RenderLine = {
   indent?: number;
   dim?: boolean;
   bold?: boolean;
+  italic?: boolean;
   strikethrough?: boolean;
+  background?: RenderLineBackground;
+  /** Optional terminal width to paint a background across the whole row. */
+  fillWidth?: number;
 };

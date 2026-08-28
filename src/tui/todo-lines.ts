@@ -10,16 +10,16 @@ export function todoPanelRenderLines(options: { plan?: PlanDocument; todos?: rea
   const items = resolveTodoItems({ plan, todos });
   const summary = todoSummary(items);
   const status = plan ? ` [${TODO_PLAN_STATUS_LABELS[plan.status]}]` : "";
-  const header = `TODO  ${summary.completed}/${summary.total} 已完成${summary.inProgress ? `  ${summary.inProgress} 执行中` : ""}${summary.failed ? `  ${summary.failed} 失败` : ""}${status}`;
-  const lines: RenderLine[] = [{ key: "todo-header", text: header, style: "todo", bold: true }];
+  const header = `Todos  ${summary.completed}/${summary.total} completed${summary.inProgress ? `  ${summary.inProgress} in progress` : ""}${summary.failed ? `  ${summary.failed} failed` : ""}${status ? `  ${status}` : ""}`;
+  const lines: RenderLine[] = [{ key: "todo-header", text: header, prefix: "☷ ", style: "todo", bold: true }];
   if (viewMode === "compact") {
-    lines.push({ key: "todo-compact", text: items.find((item) => item.status === "in_progress")?.activeForm ?? (items.length ? "任务列表已折叠" : "暂无结构化任务"), style: "muted", dim: true });
+    lines.push({ key: "todo-compact", text: items.find((item) => item.status === "in_progress")?.activeForm ?? (items.length ? "Todo list collapsed" : "No todos"), style: "muted", dim: true });
     return lines;
   }
   const visible = items.slice(0, maxVisibleItems);
-  if (!visible.length) lines.push({ key: "todo-empty", text: "暂无结构化任务", style: "muted", dim: true });
+  if (!visible.length) lines.push({ key: "todo-empty", text: "No todos", style: "muted", dim: true });
   for (const [index, item] of visible.entries()) lines.push({ key: `todo-${item.id}`, text: `${todoIcon(item.status)} ${item.source === "plan" ? `${index + 1}. ` : ""}${todoText(item.content)}`, style: "todo", tone: todoTone(item.status), strikethrough: item.status === "completed", dim: item.status === "skipped" });
-  if (items.length > visible.length) lines.push({ key: "todo-more", text: `... 还有 ${items.length - visible.length} 项`, style: "muted", dim: true });
+  if (items.length > visible.length) lines.push({ key: "todo-more", text: `… ${items.length - visible.length} more`, style: "muted", dim: true });
   return lines;
 }
 

@@ -1,7 +1,7 @@
 import React from "react";
 import { render } from "ink";
 import { App } from "./App.tsx";
-import { createAllTools, createTools, createToolsWithSandbox } from "../tools/index.ts";
+import { createAllTools, createTools } from "../tools/index.ts";
 import { createSandboxRunner } from "../sandbox/index.ts";
 import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";

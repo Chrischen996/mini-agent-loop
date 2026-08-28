@@ -21,7 +21,6 @@ export type PromptInputProps = {
   attachments?: string[];
 };
 
-const COLLAPSE_THRESHOLD = 3;
 const MAX_VISIBLE_LINES = 10;
 
 const graphemeSegmenter = typeof Intl !== "undefined" && "Segmenter" in Intl
@@ -200,9 +199,6 @@ export function PromptInput({
   const displayParts = mask
     ? currentMaskedParts(parts.length, mask)
     : parts;
-  const lineCount = value.split("\n").length;
-  const collapsed = lineCount > COLLAPSE_THRESHOLD;
-  const charCount = parts.length;
   const safeCursor = clampCursor(cursor, displayParts.length);
 
   return (
@@ -214,19 +210,12 @@ export function PromptInput({
           ))}
         </Box>
       )}
-      {collapsed && (
-        <Text color={C.muted}>[已折叠 {lineCount} 行 / {charCount} 字]</Text>
-      )}
       <PromptLines
         parts={displayParts}
         cursor={safeCursor}
         focus={focus}
         placeholder={placeholder}
-        collapsed={collapsed}
       />
-      {collapsed && (
-        <Text dimColor>Enter 提交 · Alt+Enter 换行</Text>
-      )}
     </Box>
   );
 }
@@ -241,13 +230,11 @@ function PromptLines({
   cursor,
   focus,
   placeholder,
-  collapsed,
 }: {
   parts: string[];
   cursor: number;
   focus: boolean;
   placeholder: string;
-  collapsed: boolean;
 }): React.ReactElement {
   if (parts.length === 0) {
     if (!focus) return <Text dimColor>{placeholder}</Text>;
@@ -262,7 +249,7 @@ function PromptLines({
   }
 
   const lines = splitDisplayLines(parts, cursor);
-  const visible = collapsed ? lines.slice(-1) : lines.slice(0, MAX_VISIBLE_LINES);
+  const visible = lines.slice(0, MAX_VISIBLE_LINES);
 
   return (
     <Box flexDirection="column">

@@ -5,18 +5,18 @@
  * truecolor support will downgrade them to their nearest ANSI color.
  */
 export const TUI_COLORS = {
-  primary: "#e8b86a",      // warm brass for titles and primary navigation
-  info: "#8fc5d3",         // mist blue for models, paths, and values
-  user: "#9bc7a5",         // sage for user prompt and input cursor
-  assistant: "#e7e9ec",    // soft white for readable response text
-  muted: "#8b949e",        // neutral gray for metadata and hints
-  border: "#4b5563",       // quiet neutral panel borders
-  selection: "#77a9d6",    // restrained blue for active row/focus
-  thinking: "#b9a1d2",     // muted lilac for reasoning
-  running: "#e8b86a",      // brass for in-progress work
-  success: "#9bc7a5",      // sage for completed work
-  error: "#df8790",        // muted coral for errors and rejected actions
-  badgeText: "#1c2126",    // readable text on status badges
-  userBg: "#1e2a36",       // dark blue for user message background (Claude Code style)
-  gutter: "#4b5563",       // dim gray for message gutter (⎿ marker)
+  primary: "#d77757",      // Claude orange for assistant identity and headings
+  info: "#b1b9f9",         // light blue-purple for models and paths
+  user: "#7ab4e8",         // muted blue for user prompts and input
+  assistant: "#ffffff",    // white for readable response text
+  muted: "#999999",        // neutral gray for metadata and hints
+  border: "#505050",       // quiet neutral panel borders
+  selection: "#264f78",    // classic dark-mode selection blue
+  thinking: "#af87ff",     // electric violet for reasoning
+  running: "#ffc107",      // amber for in-progress work
+  success: "#4eba65",      // bright green for completed work
+  error: "#ff6b80",        // bright red for errors and rejected actions
+  badgeText: "#000000",    // readable text on status badges
+  userBg: "#373737",       // gray user message background (Claude Code style)
+  gutter: "#505050",       // dim gray for message gutter (⎿ marker)
 } as const;

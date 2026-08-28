@@ -29,8 +29,8 @@ describe("legacy TUI renderer", () => {
     });
 
     const rendered = lines.join("\n");
-    assert.match(rendered, /TODO/);
-    assert.match(rendered, /执行中/);
+    assert.match(rendered, /Todos/);
+    assert.match(rendered, /in progress/);
     assert.match(rendered, /1\. Read/);
     assert.match(rendered, /2\. Write/);
   });
@@ -54,7 +54,7 @@ describe("legacy TUI renderer", () => {
       todoViewMode: "expanded",
     });
     const rendered = lines.join("\n");
-    assert.match(rendered, /TODO/);
+    assert.match(rendered, /Todos/);
     assert.match(rendered, /Read files/);
     assert.match(rendered, /Edit code/);
     assert.match(rendered, /\x1b\[9m/);

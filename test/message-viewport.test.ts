@@ -175,4 +175,24 @@ describe("message viewport", () => {
     assert.equal(clampScrollOffset(99, 10), 10);
     assert.equal(clampScrollOffset(1, 0), 0);
   });
+
+  it("can omit history hint rows without reducing the visible message budget", () => {
+    const messages = Array.from({ length: 12 }, (_, index) => user(`msg-${index}`));
+    const viewport = selectMessageViewport({
+      messages,
+      streamingText: "",
+      streamingReasoning: "",
+      busy: false,
+      thinkingMode: "hidden",
+      expandedThinking: [],
+      scrollOffset: 3,
+      availableHeight: 5,
+      width: 80,
+      showHistoryHints: false,
+    });
+
+    assert.ok(viewport.hiddenAbove > 0);
+    assert.ok(viewport.hiddenBelow > 0);
+    assert.equal(viewport.items.some((item) => item.kind === "history_hint"), false);
+  });
 });

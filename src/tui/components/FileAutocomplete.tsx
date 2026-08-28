@@ -12,30 +12,34 @@ export type CommandDef = {
 };
 
 export const SLASH_COMMANDS: CommandDef[] = [
-  { name: "model", usage: "/model [ref] [url] [key]", description: "切换模型和网关" },
-  { name: "image", usage: "/image <path>",            description: "添加本地图片" },
-  { name: "paste-image", usage: "/paste-image",      description: "添加剪贴板图片" },
-  { name: "read",  usage: "/read <path>",          description: "读取文件内容" },
-  { name: "bash",  usage: "/bash <cmd>",            description: "执行 Shell 命令" },
-  { name: "ls",    usage: "/ls [path]",             description: "列出目录" },
-  { name: "find",  usage: "/find <glob> [path]",   description: "按 glob 查找文件" },
-  { name: "grep",  usage: "/grep <pattern> [path]", description: "搜索文件内容" },
-  { name: "clear", usage: "/clear",                 description: "清空对话" },
-  { name: "tasks", usage: TODO_COMMAND_USAGE, description: "显示或管理 Todo 任务" },
-  { name: "context", usage: "/context",             description: "显示上下文/token 统计" },
-  { name: "plan", usage: "/plan [task]",            description: "生成执行计划（plan mode）" },
-  { name: "plan-show", usage: "/plan-show",         description: "显示当前计划" },
-  { name: "plan-approve", usage: "/plan-approve",   description: "批准当前计划" },
-  { name: "plan-reject", usage: "/plan-reject",     description: "拒绝当前计划" },
-  { name: "plan-run", usage: "/plan-run",           description: "执行已批准计划" },
-  { name: "plan-retry", usage: "/plan-retry",       description: "重试失败的计划" },
-  { name: "plan-history", usage: "/plan-history",   description: "列出计划历史" },
-  { name: "plan-archive", usage: "/plan-archive",   description: "归档当前计划" },
-  { name: "copy", usage: "/copy [last|assistant|input|tool|thinking|user]", description: "复制焦点消息或上一条原文到剪贴板" },
-  { name: "skill", usage: "/skill [on|off|list|clear] [name]", description: "查看或切换当前会话 Skills" },
-  { name: "skills", usage: "/skills [on|off|list|clear] [name]", description: "查看或切换当前会话 Skills" },
-  { name: "help",  usage: "/help",                  description: "显示帮助" },
-  { name: "exit",  usage: "/exit",                  description: "退出" },
+  { name: "model", usage: "/model [ref] [url] [key]", description: "Switch model and gateway" },
+  { name: "profiles", usage: "/profiles", description: "List and activate model profiles" },
+  { name: "image", usage: "/image <path>",            description: "Attach a local image" },
+  { name: "paste-image", usage: "/paste-image",      description: "Attach an image from the clipboard" },
+  { name: "read",  usage: "/read <path>",          description: "Read a file" },
+  { name: "bash",  usage: "/bash <cmd>",            description: "Run a shell command" },
+  { name: "ls",    usage: "/ls [path]",             description: "List a directory" },
+  { name: "find",  usage: "/find <glob> [path]",   description: "Find files by glob" },
+  { name: "grep",  usage: "/grep <pattern> [path]", description: "Search file contents" },
+  { name: "clear", usage: "/clear",                 description: "Clear the conversation" },
+  { name: "sessions", usage: "/sessions",           description: "List saved sessions" },
+  { name: "resume", usage: "/resume [id]",          description: "Resume a saved session" },
+  { name: "tasks", usage: TODO_COMMAND_USAGE, description: "Show or manage todos" },
+  { name: "context", usage: "/context",             description: "Show context and token usage" },
+  { name: "plan", usage: "/plan [task]",            description: "Generate an execution plan (plan mode)" },
+  { name: "plan-show", usage: "/plan-show",         description: "Show the current plan" },
+  { name: "plan-approve", usage: "/plan-approve",   description: "Approve the current plan" },
+  { name: "plan-reject", usage: "/plan-reject",     description: "Reject the current plan" },
+  { name: "plan-run", usage: "/plan-run",           description: "Run the approved plan" },
+  { name: "plan-retry", usage: "/plan-retry",       description: "Retry a failed plan" },
+  { name: "plan-history", usage: "/plan-history",   description: "List plan history" },
+  { name: "plan-archive", usage: "/plan-archive",   description: "Archive the current plan" },
+  { name: "copy", usage: "/copy [last|assistant|input|tool|thinking|user]", description: "Copy a message or transcript to the clipboard" },
+  { name: "skill", usage: "/skill [on|off|list|clear] [name]", description: "Manage session skills" },
+  { name: "skills", usage: "/skills [on|off|list|clear] [name]", description: "Manage session skills" },
+  { name: "help",  usage: "/help",                  description: "Show help" },
+  { name: "exit",  usage: "/exit",                  description: "Exit" },
+  { name: "quit",  usage: "/quit",                  description: "Exit" },
 ];
 
 type CommandPaletteProps = {
@@ -57,7 +61,7 @@ export function CommandPalette({ filter, selectedIndex, candidates, maxVisible =
 
   return (
     <Box flexDirection="column" paddingX={2}>
-      <Text dimColor>── 命令 /{filter} ──────────────</Text>
+      <Text dimColor>── Commands /{filter} ──────────────</Text>
       {visible.map((cmd, i) => {
         const index = start + i;
         return (
@@ -72,7 +76,7 @@ export function CommandPalette({ filter, selectedIndex, candidates, maxVisible =
         </Box>
         );
       })}
-      <Text dimColor>Tab/Enter 选中  ↑↓ 导航  Esc 关闭</Text>
+      <Text dimColor>Tab/Enter select  ↑↓ navigate  Esc close</Text>
     </Box>
   );
 }
@@ -92,7 +96,7 @@ export function FileAutocomplete({ candidates, selectedIndex, prefix, maxVisible
 
   return (
     <Box flexDirection="column" paddingX={2}>
-      <Text dimColor>── 文件 {prefix} ──────────────</Text>
+      <Text dimColor>── Files {prefix} ──────────────</Text>
       {visible.map((candidate, i) => {
         const index = start + i;
         return (
@@ -109,8 +113,8 @@ export function FileAutocomplete({ candidates, selectedIndex, prefix, maxVisible
         </Box>
         );
       })}
-      {candidates.length > visible.length && <Text dimColor>显示 {start + 1}-{start + visible.length} / {candidates.length}</Text>}
-      <Text dimColor>Tab/→ 补全  ↑↓ 导航  Esc 关闭</Text>
+      {candidates.length > visible.length && <Text dimColor>Showing {start + 1}-{start + visible.length} / {candidates.length}</Text>}
+      <Text dimColor>Tab/→ complete  ↑↓ navigate  Esc close</Text>
     </Box>
   );
 }
@@ -136,8 +140,8 @@ export function ModelPicker({ candidates, contextWindows, selectedIndex, query, 
   const visible = candidates.slice(start, start + pageSize);
   return (
     <Box flexDirection="column" paddingX={2}>
-      <Text dimColor>── 模型 {query || "全部"} ──────────────</Text>
-      {visible.length === 0 && <Text color={C.running}>没有匹配的模型</Text>}
+      <Text dimColor>── Models {query || "all"} ──────────────</Text>
+      {visible.length === 0 && <Text color={C.running}>No matching models</Text>}
       {visible.map((model, i) => {
         const index = start + i;
         return (
@@ -151,9 +155,9 @@ export function ModelPicker({ candidates, contextWindows, selectedIndex, query, 
         );
       })}
       {candidates.length > pageSize && (
-        <Text dimColor>显示 {start + 1}-{Math.min(start + pageSize, candidates.length)} / {candidates.length}</Text>
+        <Text dimColor>Showing {start + 1}-{Math.min(start + pageSize, candidates.length)} / {candidates.length}</Text>
       )}
-      <Text dimColor>Enter 选择  ↑↓ 导航  Esc 取消</Text>
+      <Text dimColor>Enter select  ↑↓ navigate  Esc cancel</Text>
     </Box>
   );
 }

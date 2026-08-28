@@ -79,12 +79,12 @@ export function Overlays({
   if (acMode === "model-setup" && modelSetup) {
     return (
       <Box flexDirection="column" paddingX={2}>
-        <Text color={C.primary} bold>── 配置模型 ──</Text>
-        <Text>模型: {modelSetup.model.provider}/{modelSetup.model.id}</Text>
-        <Text dimColor>Base URL: {modelSetup.field === "baseUrl" ? "正在编辑" : modelSetup.baseUrl}</Text>
-        <Text dimColor>API Key: {modelSetup.field === "apiKey" ? "正在编辑" : "已设置"}</Text>
+        <Text color={C.primary} bold>── Configure model ──</Text>
+        <Text>Model: {modelSetup.model.provider}/{modelSetup.model.id}</Text>
+        <Text dimColor>Base URL: {modelSetup.field === "baseUrl" ? "editing" : modelSetup.baseUrl}</Text>
+        <Text dimColor>API key: {modelSetup.field === "apiKey" ? "editing" : "set"}</Text>
         {modelSetup.error && <Text color={C.error}>{modelSetup.error}</Text>}
-        <Text dimColor>Enter 确认当前字段，Esc 取消</Text>
+        <Text dimColor>Enter confirm field, Esc cancel</Text>
       </Box>
     );
   }
@@ -92,9 +92,9 @@ export function Overlays({
   if (acMode === "profile-name" && pendingProfileSetup) {
     return (
       <Box flexDirection="column" paddingX={2}>
-        <Text color={C.primary} bold>── 保存配置文件 ──</Text>
-        <Text>模型: {pendingProfileSetup.model.provider}/{pendingProfileSetup.model.id}</Text>
-        <Text dimColor>输入配置文件名称（Enter 保存，Esc 跳过）:</Text>
+        <Text color={C.primary} bold>── Save model profile ──</Text>
+        <Text>Model: {pendingProfileSetup.model.provider}/{pendingProfileSetup.model.id}</Text>
+        <Text dimColor>Type a profile name (Enter save, Esc skip):</Text>
       </Box>
     );
   }
@@ -108,8 +108,8 @@ export function Overlays({
     const visible = profileListState.profiles.slice(start, start + count);
     return (
       <Box flexDirection="column" paddingX={2}>
-        <Text color={C.primary} bold>── 配置文件列表 ──</Text>
-        {profileListState.profiles.length === 0 && <Text dimColor>无已保存的配置文件</Text>}
+        <Text color={C.primary} bold>── Model profiles ──</Text>
+        {profileListState.profiles.length === 0 && <Text dimColor>No saved profiles</Text>}
         {visible.map((profile, visibleIndex) => {
           const index = start + visibleIndex;
           return (
@@ -121,9 +121,9 @@ export function Overlays({
           );
         })}
         {profileListState.profiles.length > visible.length && (
-          <Text dimColor>显示 {start + 1}-{start + visible.length} / {profileListState.profiles.length}</Text>
+          <Text dimColor>Showing {start + 1}-{start + visible.length} / {profileListState.profiles.length}</Text>
         )}
-        <Text dimColor>↑↓ 选择，Enter 激活，Esc 取消，/profiles delete &lt;name&gt; 删除</Text>
+        <Text dimColor>↑↓ select, Enter activate, Esc cancel, /profiles delete &lt;name&gt;</Text>
       </Box>
     );
   }
