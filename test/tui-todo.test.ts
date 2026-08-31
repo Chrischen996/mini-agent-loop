@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { getTodoPanelRows, planToTodoItems } from "../src/tui/todo-format.ts";
+import { getTodoPanelRows, planToTodoItems, todoProgressMeter } from "../src/tui/todo-format.ts";
 import { TodoPanel } from "../src/tui/components/TodoPanel.tsx";
 import { createInitialState, tuiReducer } from "../src/tui/state.ts";
 import { getMessageFeedHeight, getPickerLayout } from "../src/tui/layout.ts";
@@ -69,6 +69,11 @@ describe("TUI todo state", () => {
 });
 
 describe("TodoPanel formatting", () => {
+  it("shows a compact progress meter without adding a panel row", () => {
+    assert.equal(todoProgressMeter(2, 4), "▰▰▰▱▱▱");
+    assert.equal(todoProgressMeter(0, 0), "······");
+  });
+
   it("renders status symbols and active form text via the unified panel", () => {
     const todos: TodoItem[] = [
       { id: "done", content: "Read config", activeForm: "Reading config", status: "completed", source: "model" as const },

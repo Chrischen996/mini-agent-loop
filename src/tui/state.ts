@@ -84,6 +84,10 @@ export type TuiState = {
   todos: TodoItem[];
   streamingText: string;
   streamingReasoning: string;
+  /** Wall-clock start of the active user turn; presentation-only. */
+  turnStartedAt?: number;
+  /** Last streamed reasoning/answer delta; used to surface a stalled stream. */
+  lastStreamAt?: number;
   /** Track context compaction events for /context command. */
   contextCompactions: { before: number; after: number; reason: string; turn: number }[];
   busy: boolean;
@@ -257,6 +261,8 @@ export function createInitialState(modelName: string): TuiState {
     todos: [],
     streamingText: "",
     streamingReasoning: "",
+    turnStartedAt: undefined,
+    lastStreamAt: undefined,
     busy: false,
     status: "就绪",
     modelName,
@@ -396,6 +402,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         status: "思考中...",
         streamingText: "",
         streamingReasoning: "",
+        turnStartedAt: Date.now(),
+        lastStreamAt: undefined,
         // New user turns always re-pin the feed to the latest content.
         scrollOffset: 0,
       };
@@ -470,6 +478,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         busy: false,
         streamingText: "",
         streamingReasoning: "",
+        turnStartedAt: undefined,
+        lastStreamAt: undefined,
         status: "Generation cancelled (ESC)",
       };
 
@@ -479,6 +489,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         busy: true,
         streamingText: "",
         streamingReasoning: "",
+        lastStreamAt: undefined,
         status: `自动续跑 (${action.count}/${action.max})...`,
       };
 
@@ -583,6 +594,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: event.kind === "reasoning"
               ? state.streamingReasoning + event.text
               : state.streamingReasoning,
+            lastStreamAt: Date.now(),
             status: "输出中...",
           };
 
@@ -628,6 +640,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             messages: newMessages,
             streamingText: "",
             streamingReasoning: "",
+            turnStartedAt: undefined,
+            lastStreamAt: undefined,
             pendingPermission: undefined,
             status: "请求失败",
             scrollOffset: preserveScrollOnAppend(
@@ -643,6 +657,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             streamingText: "",
             streamingReasoning: "",
+            lastStreamAt: undefined,
             status: event.reason === "stream_truncated"
               ? `连接中断，正在重试 (${event.attempt})...`
               : `思考结果不完整，正在重试 (${event.attempt})...`,
@@ -653,6 +668,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             streamingText: "",
             streamingReasoning: "",
+            lastStreamAt: undefined,
             status: event.errorType === "timeout"
               ? `请求超时，正在重试 (${event.attempt}/${event.maxRetries})...`
               : `请求失败，正在重试 (${event.attempt}/${event.maxRetries})...`,
@@ -819,6 +835,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             busy: false,
             streamingText: "",
             streamingReasoning: "",
+            turnStartedAt: undefined,
+            lastStreamAt: undefined,
             pendingPermission: undefined,
             status: "已中止",
           };
@@ -829,6 +847,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             busy: false,
             streamingText: "",
             streamingReasoning: "",
+            turnStartedAt: undefined,
+            lastStreamAt: undefined,
             pendingPermission: undefined,
             status: "就绪",
           };

@@ -143,6 +143,7 @@ type Session = {
   id: string;
   messages: AgentMessage[];
   createdAt: number;
+  lastActiveAt?: number;
   busy: boolean;
   /** Per-session model identifier (e.g. "openai/gpt-4o-mini"). */
   modelId?: string;
@@ -155,6 +156,7 @@ type Session = {
   permissionManager: PermissionManager;
   parentSessionId?: string;
   forkedFromMessage?: number;
+  forkedFromMessageId?: string;
   /** Currently resolved skill names for this session. */
   skillNames?: string[];
   /** Current Plan-Act workflow phase. */
@@ -237,6 +239,7 @@ function safeMessage(message: AgentMessage): Record<string, unknown> {
   if (message.role === "system" || message.role === "assistant") {
     return {
       role: message.role,
+      ...(message.id ? { id: message.id } : {}),
       content: message.content,
       ...(message.role === "assistant" && message.toolCalls
         ? {
@@ -250,10 +253,15 @@ function safeMessage(message: AgentMessage): Record<string, unknown> {
     };
   }
   if (message.role === "user") {
-    return { role: "user", content: contentAsString(message.content) };
+    return {
+      role: "user",
+      ...(message.id ? { id: message.id } : {}),
+      content: contentAsString(message.content),
+    };
   }
   return {
     role: "tool",
+    ...(message.id ? { id: message.id } : {}),
     toolCallId: message.toolCallId,
     name: message.name,
     content: contentAsString(message.content),
@@ -537,6 +545,40 @@ export function truncateSessionMessages(messages: AgentMessage[], visibleCount: 
 
 function visibleMessageCount(messages: AgentMessage[]): number {
   return messages.filter((message) => message.role !== "system").length;
+}
+
+function resolveMessageBoundary(
+  visibleMessages: AgentMessage[],
+  body: { messageId?: unknown; messageIndex?: unknown } | undefined,
+  defaultToEnd: boolean,
+): { messageIndex: number } | { error: string } {
+  if (body?.messageId !== undefined && body?.messageIndex !== undefined) {
+    return { error: "messageId and messageIndex are mutually exclusive" };
+  }
+  if (body?.messageId !== undefined) {
+    if (typeof body.messageId !== "string" || body.messageId.length === 0) {
+      return { error: "messageId must be a non-empty string" };
+    }
+    const index = visibleMessages.findIndex((message) => message.id === body.messageId);
+    if (index < 0) return { error: `messageId not found: ${body.messageId}` };
+    // A message ID identifies the last message to retain, while the legacy
+    // index API identifies the number of messages to retain.
+    return { messageIndex: index + 1 };
+  }
+  if (body?.messageIndex === undefined && defaultToEnd) {
+    return { messageIndex: visibleMessages.length };
+  }
+  const messageIndex = Number(body?.messageIndex);
+  if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex > visibleMessages.length) {
+    return { error: `messageIndex must be an integer between 0 and ${visibleMessages.length}` };
+  }
+  return { messageIndex };
+}
+
+function messageIdAtBoundary(messages: AgentMessage[], visibleCount: number): string | undefined {
+  return messages
+    .filter((message) => message.role !== "system")
+    .at(visibleCount - 1)?.id;
 }
 
 export function buildModelPrompt(input: {
@@ -837,7 +879,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     );
   }
   const documentStore = new DocumentStore(path.join(dataRoot, "documents"));
-  const sessionStore = new SessionStore(path.join(dataRoot, "sessions"));
+  const sessionStore = new SessionStore(path.join(dataRoot, "sessions"), { workspaceId: workspace });
   const jobManager = new JobManager(new JobStore(path.join(dataRoot, "jobs")));
   const memoryStore = new MemoryStore(path.join(dataRoot, "memory", "records.json"));
   // Persistent memory digest for system-prompt injection (Claude Code-style).
@@ -851,6 +893,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
   const persistedSession = (session: Session): PersistedSession => ({
     id: session.id,
     createdAt: session.createdAt,
+    lastActiveAt: session.lastActiveAt,
+    workspaceId: workspace,
     modelId: session.modelId,
     thinkingLevel: session.thinkingLevel,
     thinkingMode: session.thinkingMode,
@@ -864,7 +908,20 @@ export function createAgentServer(options: AgentServerOptions): Express {
     parentSessionId: session.parentSessionId,
     forkedFromMessage: session.forkedFromMessage,
   });
-  const saveSession = (session: Session): Promise<void> => sessionStore.save(persistedSession(session));
+  const saveSession = async (session: Session): Promise<void> => {
+    session.lastActiveAt = Date.now();
+    await sessionStore.save(persistedSession(session));
+  };
+  const persistTurnStart = async (session: Session, content: MessageContent): Promise<void> => {
+    session.lastActiveAt = Date.now();
+    await sessionStore.save({
+      ...persistedSession(session),
+      messages: [
+        ...session.messages,
+        { role: "user", content },
+      ],
+    });
+  };
   const updateSessionTodos = async (session: Session, snapshot: unknown): Promise<void> => {
     const todos = validateTodoSnapshot(snapshot);
     session.todos = todos;
@@ -883,12 +940,14 @@ export function createAgentServer(options: AgentServerOptions): Express {
         id: persisted.id,
         messages: persisted.messages,
         createdAt: persisted.createdAt,
+        lastActiveAt: persisted.lastActiveAt,
         busy: false,
         permissionManager: new PermissionManager(persisted.permissionMode ?? defaultPermissionMode),
         modelId: persisted.modelId,
         thinkingLevel: persisted.thinkingLevel,
         thinkingMode: persisted.thinkingMode,
         skillNames: persisted.skillNames ?? [...defaultSkillNames],
+        currentPlan: persisted.currentPlan,
         todos: persisted.todos ?? [],
         todoVersion: persisted.todoVersion ?? 0,
         parentSessionId: persisted.parentSessionId,
@@ -1026,6 +1085,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
           return workflow.reviewReport?.findings.join("\n");
         }
 
+        await persistTurnStart(session, taskPrompt);
         session.messages = await runAgentTurn(
           session.messages,
           taskPrompt,
@@ -1463,10 +1523,13 @@ export function createAgentServer(options: AgentServerOptions): Express {
 
   app.get("/api/sessions", (_request, response) => {
     const items = [...sessions.values()]
-      .sort((a, b) => a.createdAt - b.createdAt)
+      .sort((a, b) =>
+        (b.lastActiveAt ?? b.createdAt) - (a.lastActiveAt ?? a.createdAt),
+      )
       .map((session) => ({
         id: session.id,
         createdAt: session.createdAt,
+        lastActiveAt: session.lastActiveAt ?? session.createdAt,
         busy: isSessionBusy(session),
         parentSessionId: session.parentSessionId ?? null,
         forkedFromMessage: session.forkedFromMessage ?? null,
@@ -2109,6 +2172,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       const sessionTools: ToolProvider = addSessionTodoTool(session, tools);
 
       try {
+        await persistTurnStart(session, generatePrompt);
         session.messages = await runAgentTurn(
           session.messages,
           generatePrompt,
@@ -2259,6 +2323,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         onSubagentEvent: (subEvent) => send(safeEvent(subEvent)),
       });
 
+      await persistTurnStart(session, executionUserText);
       session.messages = await runAgentTurn(
         session.messages,
         executionUserText,
@@ -2611,6 +2676,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
           thinkingMode: input.thinkingMode ?? session.thinkingMode,
           onSubagentEvent: (subEvent) => send(safeEvent(subEvent)),
         });
+        await persistTurnStart(session, userContent ?? input.modelPrompt);
         session.messages = await runAgentTurn(
           session.messages,
           input.modelPrompt,

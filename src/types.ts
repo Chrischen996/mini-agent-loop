@@ -24,11 +24,15 @@ export type ContentPart = TextPart | ImagePart | VisionAnalysisPart;
 export type MessageContent = string | ContentPart[];
 
 export type UserMessage = {
+  /** Stable identity used by persisted sessions and fork/rewind APIs. */
+  id?: string;
   role: "user";
   content: MessageContent;
 };
 
 export type AssistantMessage = {
+  /** Stable identity used by persisted sessions and fork/rewind APIs. */
+  id?: string;
   role: "assistant";
   /** Assistant stays text-only in this teaching cut. */
   content: string;
@@ -36,11 +40,15 @@ export type AssistantMessage = {
 };
 
 export type SystemMessage = {
+  /** Stable identity used by persisted sessions and fork/rewind APIs. */
+  id?: string;
   role: "system";
   content: string;
 };
 
 export type ToolResultMessage = {
+  /** Stable identity used by persisted sessions and fork/rewind APIs. */
+  id?: string;
   role: "tool";
   toolCallId: string;
   name: string;

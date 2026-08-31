@@ -11,6 +11,7 @@ type TodoPanelProps = {
   todos?: readonly TodoItem[];
   viewMode?: TodoViewMode;
   maxVisibleItems?: number;
+  width?: number;
 };
 
 export function TodoPanel({
@@ -18,12 +19,13 @@ export function TodoPanel({
   todos,
   viewMode = "expanded",
   maxVisibleItems = TODO_PANEL_MAX_VISIBLE_ITEMS,
+  width,
 }: TodoPanelProps): React.ReactElement | null {
   const lines = todoPanelRenderLines({ plan, todos, viewMode, maxVisibleItems });
   if (!lines.length) return null;
 
   return (
-    <Box flexDirection="column" paddingX={1} flexShrink={0}>
+    <Box flexDirection="column" paddingX={1} flexShrink={0} width={width} minWidth={0} overflow="hidden">
       {lines.map((line) => (
         <Text
           key={line.key}

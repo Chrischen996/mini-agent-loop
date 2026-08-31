@@ -175,7 +175,11 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState): Rend
     ];
   }
   rows.push({ key: "autocomplete-title", text: title, prefix: "⌘ ", style: "muted", bold: true });
-  for (const [index, value] of values.slice(0, 12).entries()) {
+  const visibleValues = values.slice(0, 12);
+  if (visibleValues.length === 0) {
+    rows.push({ key: "autocomplete-empty", text: state.mode === "model" || state.mode === "model-picker" ? "No matching models" : "No matches", style: "muted", tone: "running", dim: true });
+  }
+  for (const [index, value] of visibleValues.entries()) {
     rows.push({
       key: `autocomplete-${index}-${value}`,
       text: `${index === state.index ? "❯" : " "} ${value}`,
@@ -183,5 +187,16 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState): Rend
       tone: index === state.index ? "running" : "default",
     });
   }
+  if (values.length > visibleValues.length) {
+    rows.push({ key: "autocomplete-more", text: `Showing ${visibleValues.length} / ${values.length}`, style: "muted", dim: true });
+  }
+  const hint = state.argumentCandidates && state.argumentPrefix
+    ? "Tab/Enter select  ↑↓ navigate  Esc close"
+    : state.mode === "command"
+      ? "Tab/Enter select  ↑↓ navigate  Esc close"
+      : state.mode === "file"
+        ? "Tab/→ complete  ↑↓ navigate  Esc close"
+        : "Enter select  ↑↓ navigate  Esc cancel";
+  rows.push({ key: "autocomplete-hint", text: hint, style: "muted", dim: true });
   return rows;
 }

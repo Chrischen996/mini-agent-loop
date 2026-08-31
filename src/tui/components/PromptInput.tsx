@@ -249,7 +249,14 @@ function PromptLines({
   }
 
   const lines = splitDisplayLines(parts, cursor);
-  const visible = lines.slice(0, MAX_VISIBLE_LINES);
+  // Keep the cursor in view when a multiline prompt grows beyond the fixed
+  // input viewport. The old head-only slice made editing the later lines feel
+  // broken because the active cell disappeared from the screen.
+  const cursorLine = Math.max(0, lines.findIndex((line) =>
+    line.cursorAtEnd || line.cells.some((cell) => cell.cursor),
+  ));
+  const start = Math.max(0, Math.min(cursorLine - MAX_VISIBLE_LINES + 1, lines.length - MAX_VISIBLE_LINES));
+  const visible = lines.slice(start, start + MAX_VISIBLE_LINES);
 
   return (
     <Box flexDirection="column">

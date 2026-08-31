@@ -10,6 +10,7 @@ import { countTerminalRows, terminalStringWidth } from "./terminal-width.ts";
 import { todoPanelRenderLines } from "./todo-lines.ts";
 import { noticeText, noticeTitle, permissionModeLabel, statusLabel, thinkingLevelLabel } from "./claude-style.ts";
 import { isSubagentProtocolText, isSubagentToolName } from "./subagent-lines.ts";
+import { stripInlineMarkdown } from "./markdown-lines.ts";
 import { toolVisualName } from "./tool-lines.ts";
 import type { RenderLine } from "./render-lines.ts";
 import { formatRenderLine } from "./render-line-format.ts";
@@ -126,7 +127,7 @@ export function buildLegacyRenderLines(state: LegacyTuiState, width = 80): Rende
     if (message.role === "assistant" && message.content
       && !isSubagentProtocolText(message.content)
       && !/^\s*you are .*subagent\b/i.test(message.content)) {
-      appendTextLines(lines, `history-${messageIndex}`, message.content, { prefix: "⏺ ", style: "assistant" });
+      appendTextLines(lines, `history-${messageIndex}`, stripInlineMarkdown(message.content), { prefix: "⏺ ", style: "assistant" });
     }
     if (message.role === "tool" && !isSubagentToolName(message.name)) {
       lines.push({ key: `history-${messageIndex}-tool`, text: toolVisualName(message.name), prefix: "⏺ ", style: "tool", bold: true, prefixTone: message.isError ? "error" : "success", tone: message.isError ? "error" : undefined });
@@ -152,7 +153,7 @@ export function buildLegacyRenderLines(state: LegacyTuiState, width = 80): Rende
   if (state.pendingUser) {
     appendTextLines(lines, "legacy-pending-user", state.pendingUser, { prefix: "❯ ", style: "user", background: "user", fillWidth: width });
   }
-  if (state.streamingText) appendTextLines(lines, "legacy-streaming", state.streamingText, { prefix: "⏺ ", style: "assistant", prefixTone: "running" });
+  if (state.streamingText) appendTextLines(lines, "legacy-streaming", stripInlineMarkdown(state.streamingText), { prefix: "⏺ ", style: "assistant", prefixTone: "running" });
 
   // A completed turn is present in both the persisted Agent history and the
   // transient tool list until the next submission resets that list. Keep the

@@ -9,7 +9,7 @@ export function getTuiViewportHeight(termRows: number | undefined): number {
 
 /**
  * Estimate rows available for the scrollable message feed after chrome.
- * Welcome header (~1 when the feed is empty) + input (~2) + status bar (~4) + optional image strip / pickers
+ * Welcome header (~1 when the feed is empty) + input (~2) + status row (~1) + optional image strip / pickers
  * / permission panel / plan approval bar.
  */
 export function getMessageFeedHeight(options: {
@@ -28,7 +28,7 @@ export function getMessageFeedHeight(options: {
   const chrome =
     (options.hasHeader === false ? 0 : 1) + // Claude Code title row
     2 + // input row
-    4 + // status bar border box (fixed two content rows)
+    1 + // stable model/context metadata row; activity stays in the feed
     (options.hasPendingImages ? 1 : 0) +
     (options.todoRows ?? 0) +
     (options.pickerRows ?? 0) +
@@ -49,7 +49,7 @@ export function getPickerLayout(options: {
 }): { itemRows: number; totalRows: number } {
   const viewport = getTuiViewportHeight(options.termRows);
   const fixedChrome =
-    (options.hasHeader === false ? 0 : 1) + 2 + 4 + (options.hasPendingImages ? 1 : 0) + (options.todoRows ?? 0) +
+    (options.hasHeader === false ? 0 : 1) + 2 + 1 + (options.hasPendingImages ? 1 : 0) + (options.todoRows ?? 0) +
     (options.permissionRows ?? 0) + (options.planApprovalRows ?? 0);
   const extraRows = options.extraRows ?? 2;
   const maxTotal = Math.max(0, viewport - fixedChrome - 3);

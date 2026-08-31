@@ -37,29 +37,25 @@ export function StatusBar({ modelName, cwd, width = 80, tokenEstimate, contextWi
     ? truncateTerminalPath(cwd, cwdWidth)
     : cwd;
 
+  const idleStatus = !busy && visibleStatus !== "Ready" ? visibleStatus : undefined;
+
   return (
-    <Box
-      borderStyle="single"
-      borderColor={C.border}
-      paddingX={1}
-      flexDirection="column"
-      overflow="hidden"
-    >
-      <Box gap={1} flexWrap="nowrap" minWidth={0}>
-        <Text color={busy ? C.running : C.success}>{busy ? "⟳" : "·"}</Text>
-        <Text color={busy ? C.running : C.success} bold wrap="truncate-end">{visibleStatus}</Text>
-        {queuedCount > 0 && <Text color={C.running} dimColor wrap="truncate-end">{queuedCount} queued</Text>}
-      </Box>
-      <Box gap={1} flexWrap="nowrap" minWidth={0}>
-        <Text color={C.info} wrap="truncate-end">{modelName}</Text>
-        {visibleCwd && <Text color={C.muted} wrap="truncate-end">{visibleCwd}</Text>}
-        <Text dimColor>·</Text>
-        <Text color={C.thinking} wrap="truncate-end">{thinkingLevelLabel(thinkingLevelToDisplay(thinkingLevel))}</Text>
-        <Text dimColor>·</Text>
-        <Text dimColor wrap="truncate-end">{tokenEstimate} / {formatContextWindow(contextWindow)}</Text>
-        <Text color={modeColor} dimColor wrap="truncate-end">{modeLabel}</Text>
-        {cacheLabel && <Text color={C.info} dimColor wrap="truncate-end">{cacheLabel}</Text>}
-      </Box>
+    <Box paddingX={1} gap={1} flexWrap="nowrap" minWidth={0} overflow="hidden">
+      <Text color={C.success}>·</Text>
+      <Text color={C.info} wrap="truncate-end">{modelName}</Text>
+      {visibleCwd && width >= 52 && <Text color={C.muted} wrap="truncate-end">{visibleCwd}</Text>}
+      <Text dimColor>·</Text>
+      {width >= 68 && (
+        <>
+          <Text color={C.thinking} wrap="truncate-end">{thinkingLevelLabel(thinkingLevelToDisplay(thinkingLevel))}</Text>
+          <Text dimColor>·</Text>
+        </>
+      )}
+      <Text dimColor wrap="truncate-end">Context {tokenEstimate} / {formatContextWindow(contextWindow)}</Text>
+      <Text color={modeColor} dimColor wrap="truncate-end">{modeLabel}</Text>
+      {idleStatus && <Text color={C.muted} dimColor wrap="truncate-end">{idleStatus}</Text>}
+      {queuedCount > 0 && <Text color={C.running} dimColor wrap="truncate-end">{queuedCount} queued</Text>}
+      {cacheLabel && width >= 100 && <Text color={C.info} dimColor wrap="truncate-end">{cacheLabel}</Text>}
     </Box>
   );
 }

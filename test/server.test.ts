@@ -113,10 +113,11 @@ describe("agent server", () => {
       for (let attempt = 0; attempt < 50; attempt += 1) {
         const session = await request(app).get(`/api/sessions/${sessionId}`);
         busy = Boolean((session.body as { busy?: boolean }).busy);
-        if (busy) break;
+        if (busy && modelCalls === 1) break;
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
       assert.equal(busy, true);
+      assert.equal(modelCalls, 1, "the first model call must be active before switching mode");
 
       const changed = await request(app)
         .put(`/api/sessions/${sessionId}/permission-mode`)
@@ -402,6 +403,44 @@ describe("agent server", () => {
       assert.equal(restored.status, 200);
       assert.match(restored.text, /remember this/);
       assert.match(restored.text, /persisted reply/);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("restores a turn-start prompt when the model fails before replying", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-session-turn-start-"));
+    try {
+      const firstApp = createAgentServer({
+        llm,
+        tools: [],
+        dataDir,
+        chat: async () => {
+          throw new Error("provider unavailable");
+        },
+      });
+      const created = await request(firstApp).post("/api/sessions");
+      const sessionId = (created.body as { id: string }).id;
+      const failed = await request(firstApp)
+        .post(`/api/sessions/${sessionId}/messages`)
+        .field("prompt", "keep this prompt");
+
+      assert.equal(failed.status, 200);
+      assert.match(failed.text, /provider unavailable/);
+
+      const restoredApp = createAgentServer({
+        llm,
+        tools: [],
+        dataDir,
+        chat: async () => ({ role: "assistant" as const, content: "unused" }),
+      });
+      const restored = await request(restoredApp).get(`/api/sessions/${sessionId}`);
+      assert.equal(restored.status, 200);
+      assert.equal(
+        (restored.body as { messages: Array<{ role: string; content: string }> }).messages
+          .find((message) => message.role === "user")?.content,
+        "keep this prompt",
+      );
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }

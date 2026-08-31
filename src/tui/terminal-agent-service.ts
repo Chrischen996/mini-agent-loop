@@ -40,6 +40,8 @@ export type TerminalAgentServiceOptions = {
   chat?: ChatFn;
   onLlmChange?: (llm: LlmConfig) => void;
   onPermissionTurnChange?: (turn: PermissionTurnContext | undefined) => void;
+  /** Persist the user message before the first model request. */
+  onTurnStarted?: (result: { prompt: string; history: AgentMessage[] }) => void | Promise<void>;
   onTurnFinished?: (result: TerminalTurnResult) => void | Promise<void>;
 };
 
@@ -162,6 +164,10 @@ export class TerminalAgentService {
     return this.activeTurn !== undefined;
   }
 
+  getQueuedCount(): number {
+    return this.queuedSubmissions.length;
+  }
+
   /** Submit one user turn; concurrent prompts are drained FIFO after the active turn. */
   submit(prompt: string, submitOptions: TerminalSubmitOptions = {}): Promise<TerminalTurnResult> {
     if (this.activeTurn) {
@@ -228,8 +234,8 @@ export class TerminalAgentService {
       (request) => this.dispatch({ type: "LOOP_EVENT", event: { type: "permission_required", request } }),
       abortController.signal,
     );
-    this.options.onPermissionTurnChange?.(permissionTurn);
-    const runId = this.streamBuffer.start();
+      this.options.onPermissionTurnChange?.(permissionTurn);
+      const runId = this.streamBuffer.start();
     let currentPrompt = prompt;
     let userContent = submitOptions.userContent;
     let continueCount = 0;
@@ -238,6 +244,13 @@ export class TerminalAgentService {
     let aborted = false;
 
     try {
+      await this.options.onTurnStarted?.({
+        prompt,
+        history: [
+          ...this.history,
+          { role: "user", content: submitOptions.userContent ?? prompt },
+        ],
+      });
       if (userContent === undefined) {
         userContent = await resolveAtRefs(text, permissionTurn, this.options.tools);
       }

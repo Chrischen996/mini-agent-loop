@@ -13,7 +13,7 @@ import { createVisionPreprocessor, loadVisionConfigFromEnv } from "../preprocess
 import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 import { applySkillCommand, discoverWorkspaceSkills, loadSkillNamesFromEnv, defaultSkillRegistry } from "../skills/index.ts";
 import { PermissionManager } from "../permissions.ts";
-import { applyPermissionModePrompt, createAgentHistory, type AgentRuntimeRef } from "../loop.ts";
+import { applyPermissionModePrompt, createAgentHistory, restoreAgentHistory, type AgentRuntimeRef } from "../loop.ts";
 import { cycleThinkingLevel, thinkingLevelToDisplay, withThinkingLevel } from "../think-intensity.ts";
 import { nextPermissionMode, switchPermissionMode } from "./permission-utils.ts";
 import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
@@ -65,7 +65,7 @@ export async function runTerminalMain(): Promise<void> {
   const skillNames = loadSkillNamesFromEnv();
   const store = createTuiStore(createInitialState(activeLlm.model));
   const permissionManager = new PermissionManager("plan");
-  const sessionStore = new SessionStore(path.join(getDataRoot(), "sessions"));
+  const sessionStore = new SessionStore(path.join(getDataRoot(), "sessions"), { workspaceId: cwd });
   let activeSessionId = process.env.MINI_AGENT_SESSION_ID ?? randomUUID();
   const sessionRef = { current: activeSessionId };
   let initialHistory: AgentMessage[] = createAgentHistory(undefined, permissionManager.getMode());
@@ -97,10 +97,9 @@ export async function runTerminalMain(): Promise<void> {
         activeLlm = withThinkingLevel(activeLlm, target.thinkingLevel);
       }
       if (target.thinkingMode) activeThinkingMode = target.thinkingMode;
-      initialHistory = [
-        ...createAgentHistory(undefined, mode),
-        ...target.messages.filter((message) => message.role !== "system"),
-      ];
+      const baseHistory = createAgentHistory(undefined, mode);
+      const systemPrompt = typeof baseHistory[0]?.content === "string" ? baseHistory[0].content : "";
+      initialHistory = restoreAgentHistory(target.messages, systemPrompt);
       store.dispatch({
         type: "RESTORE_SESSION",
         history: initialHistory,
@@ -194,6 +193,29 @@ export async function runTerminalMain(): Promise<void> {
       sessionId: activeSessionId,
       onLlmChange: (llm) => { activeLlm = llm; },
       onPermissionTurnChange: (turn) => { activePermissionTurn = turn; },
+      onTurnStarted: async ({ history }) => {
+        try {
+          const existing = await sessionStore.load(sessionRef.current);
+          const persisted: PersistedSession = {
+            id: sessionRef.current,
+            createdAt: existing?.createdAt ?? Date.now(),
+            modelId: activeLlm.model,
+            thinkingLevel: activeLlm.thinkingLevel,
+            thinkingMode: activeThinkingMode,
+            permissionMode: permissionManager.getMode(),
+            skillNames,
+            phase: store.getState().phase,
+            currentPlan: store.getState().currentPlan,
+            messages: history,
+            todos: persistableTodos(store.getState().todoItems),
+            todoVersion: store.getState().todoRevision,
+          };
+          if (existing) await sessionStore.save(persisted);
+          else await sessionStore.create(persisted);
+        } catch {
+          // Persistence is best-effort; a disk error must not break chat.
+        }
+      },
       onTurnFinished: async (result) => {
         await finalizePlanCapture({
           cwd,
@@ -256,6 +278,7 @@ export async function runTerminalMain(): Promise<void> {
     const scrollbackWidth = process.stdout.columns || 80;
     let autocomplete: TerminalAutocompleteController;
     let render: () => void = () => undefined;
+    let animationTimer: ReturnType<typeof setInterval> | undefined;
     const directAbortRef: { current?: AbortController } = {};
     const input = new TerminalInputController({
       onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionStore, sessionRef, allTools, runtimeContext, directAbortRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); } }),
@@ -274,10 +297,9 @@ export async function runTerminalMain(): Promise<void> {
     });
     render = () => {
       const state = store.getState();
-      renderer.renderLines(buildTerminalRenderLines(state, {
+      const renderOptions = {
         width: fullscreen ? process.stdout.columns || 80 : scrollbackWidth,
         ...(fullscreen ? {
-          height: Math.max(1, (process.stdout.rows || 24) - 1),
           scrollOffset: state.scrollOffset,
         } : {
           scrollback: true,
@@ -291,15 +313,49 @@ export async function runTerminalMain(): Promise<void> {
         cursor: input.getCursor(),
         autocomplete: autocomplete.getState(),
         maskInput: autocomplete.getState().mode === "model-setup" && autocomplete.getState().modelSetup?.field === "apiKey",
-      }));
+        now: Date.now(),
+        contextWindow: service.getLlm().contextWindow,
+        queuedCount: service.getQueuedCount(),
+        thinkingLevel: service.getLlm().thinkingLevel,
+      };
+      if (!fullscreen) {
+        renderer.renderLines(buildTerminalRenderLines(state, renderOptions));
+        return;
+      }
+
+      // Keep short fullscreen sessions compact. Once the natural frame is
+      // taller than the terminal, switch to the fixed viewport so scrolling
+      // and the prompt remain stable without manufacturing a wall of blank
+      // rows during the first few subagent updates.
+      const naturalLines = buildTerminalRenderLines(state, renderOptions);
+      const frameHeight = Math.max(1, (process.stdout.rows || 24) - 1);
+      renderer.renderLines(naturalLines.length > frameHeight
+        ? buildTerminalRenderLines(state, { ...renderOptions, height: frameHeight })
+        : naturalLines);
     };
-    const unsubscribe = store.subscribe(render);
+    const syncAnimation = () => {
+      const shouldAnimate = store.getState().busy || Boolean(store.getState().pendingPermission);
+      if (shouldAnimate && !animationTimer) {
+        animationTimer = setInterval(() => {
+          if (screenActive && !quitting) render();
+        }, 120);
+      } else if (!shouldAnimate && animationTimer) {
+        clearInterval(animationTimer);
+        animationTimer = undefined;
+      }
+    };
+    const unsubscribe = store.subscribe(() => {
+      syncAnimation();
+      render();
+    });
     let screenActive = false;
     let quitting = false;
     let finishLoop: () => void = () => undefined;
     const cleanup = () => {
       if (!screenActive) return;
       screenActive = false;
+      if (animationTimer) clearInterval(animationTimer);
+      animationTimer = undefined;
       process.stdin.removeAllListeners("data");
       process.stdout.removeListener("resize", render);
       if (process.stdin.isRaw) process.stdin.setRawMode(false);
@@ -329,6 +385,7 @@ export async function runTerminalMain(): Promise<void> {
       process.stdout.write("\x1b[2K\r\x1b[?25l");
     }
     screenActive = true;
+    syncAnimation();
     process.stdin.setRawMode(true);
     process.stdin.setEncoding("utf8");
     process.stdin.resume();
@@ -787,10 +844,9 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
       store.dispatch({ type: "MODEL_CHANGED", modelName: restoredLlm.model });
     }
     if (restored.thinkingMode) deps.setThinkingMode(restored.thinkingMode);
-    const restoredHistory = [
-      ...createAgentHistory(undefined, mode),
-      ...restored.messages.filter((message) => message.role !== "system"),
-    ];
+    const baseHistory = createAgentHistory(undefined, mode);
+    const systemPrompt = typeof baseHistory[0]?.content === "string" ? baseHistory[0].content : "";
+    const restoredHistory = restoreAgentHistory(restored.messages, systemPrompt);
     service.replaceHistory(restoredHistory);
     deps.sessionRef.current = restored.id;
     service.setSessionId(restored.id);

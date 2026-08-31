@@ -92,6 +92,14 @@ export function todoText(value: string, max = 100): string {
   return normalized.length > max ? `${normalized.slice(0, Math.max(1, max - 3))}...` : normalized;
 }
 
+/** Compact progress meter kept inline with the Todo header to avoid adding rows. */
+export function todoProgressMeter(completed: number, total: number, width = 6): string {
+  const slots = Math.max(1, width);
+  if (total <= 0) return "·".repeat(slots);
+  const filled = Math.max(0, Math.min(slots, Math.round((completed / total) * slots)));
+  return `${"▰".repeat(filled)}${"▱".repeat(slots - filled)}`;
+}
+
 export function getTodoPanelRows(
   source: TodoSource,
   viewMode: TodoViewMode = "expanded",

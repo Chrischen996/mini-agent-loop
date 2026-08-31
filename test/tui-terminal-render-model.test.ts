@@ -5,6 +5,7 @@ import { permissionPanelRenderLines, planApprovalRenderLines } from "../src/tui/
 import { createInitialState, tuiReducer } from "../src/tui/state.ts";
 import { terminalStringWidth, truncateTerminalPath } from "../src/tui/terminal-width.ts";
 import { displaySubagentTask, isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from "../src/tui/subagent-lines.ts";
+import { stripInlineMarkdown } from "../src/tui/markdown-lines.ts";
 
 describe("standalone terminal render model", () => {
   it("keeps the final path segments visible when compacting cwd", () => {
@@ -25,6 +26,15 @@ describe("standalone terminal render model", () => {
     assert.ok(lines.some((line) => line.text.includes("hello")));
     assert.ok(lines.some((line) => line.text.includes("answer")));
     assert.deepEqual(state, before);
+  });
+
+  it("keeps inline Markdown out of ANSI transcript rows", () => {
+    assert.equal(stripInlineMarkdown("**Plan** with `npm test` and [docs](https://example.com)"), "Plan with npm test and docs");
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "assistant_delta", text: "**Planning targeted subagent exploration**", kind: "answer" } });
+    const lines = buildTerminalRenderLines(state);
+    assert.ok(lines.some((line) => line.text === "Planning targeted subagent exploration"));
+    assert.equal(lines.some((line) => line.text.includes("**")), false);
   });
 
   it("keeps a stable key for unchanged line identities", () => {
@@ -140,8 +150,20 @@ describe("standalone terminal render model", () => {
     assert.equal(lines.find((line) => line.key.startsWith("message-1"))?.prefix, "⏺ ");
     assert.ok(lines.some((line) => line.key.startsWith("message-gap-")));
     assert.equal(lines.find((line) => line.key === "prompt-rule")?.text.length, 100);
-    assert.equal(lines.find((line) => line.key === "status")?.prefix, "⟳ ");
-    assert.match(lines.find((line) => line.key === "status")?.text ?? "", /claude-sonnet · \/workspace · Plan mode · Working…/);
+    assert.equal(lines.find((line) => line.key === "activity")?.prefix, "· ");
+    assert.match(lines.find((line) => line.key === "activity")?.text ?? "", /Finalizing response/);
+    assert.equal(lines.find((line) => line.key === "status")?.prefix, "· ");
+    assert.match(lines.find((line) => line.key === "status")?.text ?? "", /claude-sonnet · \/workspace · Plan mode/);
+  });
+
+  it("shows the active thinking level in wide status metadata", () => {
+    const state = createInitialState("claude-sonnet");
+    const lines = buildTerminalRenderLines(state, {
+      width: 100,
+      header: { title: "Claude Code", cwd: "/workspace" },
+      thinkingLevel: "high",
+    });
+    assert.match(lines.find((line) => line.key === "status")?.text ?? "", /Plan mode · high/);
   });
 
   it("keeps model and cwd out of the optional title row", () => {
@@ -162,6 +184,16 @@ describe("standalone terminal render model", () => {
     assert.match(tool?.text ?? "", /Read\(src\/app\.tsx\)/);
     assert.equal(tool?.prefix, "⏺ ");
     assert.equal(lines.find((line) => line.key.endsWith("-result-0"))?.prefix, "  ⎿ ");
+  });
+
+  it("keeps standalone errors readable instead of painting the full row red", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "error", message: "The provider returned a long diagnostic" } });
+    const error = buildTerminalRenderLines(state).find((line) => line.key.endsWith("-error"));
+    assert.equal(error?.prefix, "✗ ");
+    assert.equal(error?.prefixTone, "error");
+    assert.equal(error?.style, "assistant");
+    assert.equal(error?.tone, undefined);
   });
 
   it("renders completed tools as full-width cards when terminal width is known", () => {
@@ -427,6 +459,29 @@ describe("standalone terminal render model", () => {
     const completedRows = subagentRenderLines({ ...message, expanded: false, result: "review complete" }, "done");
     assert.match(completedRows[1]?.text ?? "", /Done \(1 tool use · 3\.2k tokens · 1\.3s\)/);
     assert.equal(completedRows[2]?.prefix, "     ");
+  });
+
+  it("keeps a failed subagent title neutral while emphasizing its status", () => {
+    const message = {
+      kind: "subagent_call" as const,
+      id: "agent-failed",
+      task: "Audit the external repository loading and spinner presentation",
+      profile: "researcher",
+      depth: 1,
+      status: "error" as const,
+      innerEvents: [],
+      toolCallCount: 6,
+      totalTokens: 16_000,
+      startedAt: 0,
+      expanded: false,
+      result: "No final assistant summary was produced. Recovered recent tool output: command failed",
+    };
+    const rows = subagentRenderLines(message, "failed");
+    assert.equal(rows[0]?.tone, undefined);
+    assert.equal(rows[0]?.prefixTone, "error");
+    assert.equal(rows[1]?.tone, "error");
+    assert.match(rows[2]?.text ?? "", /^Recovered:/);
+    assert.equal(rows[2]?.tone, undefined);
   });
 
   it("counts active tools and omits assistant bookkeeping rows", () => {

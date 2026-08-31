@@ -1,4 +1,5 @@
 import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from "react";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Box, Text, useApp, useStdout } from "ink";
 import { MessageFeed } from "./components/MessageFeed.tsx";
@@ -30,12 +31,13 @@ import { tuiReducer, createInitialState } from "./state.ts";
 import {
   createAgentHistory,
   MaxTurnsExceededError,
+  restoreAgentHistory,
   runAgentTurn,
   type AgentRuntimeRef,
   type LoopEvent,
 } from "../loop.ts";
 import { LlmTimeoutError } from "../llm/retry.ts";
-import { loadLlmConfigFromEnv, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
+import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
 import {
   buildIntenseLlm,
   cycleThinkingLevel,
@@ -115,6 +117,7 @@ import { PlanApprovalBar } from "./components/PlanApprovalBar.tsx";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
 import { isTuiFeatureEnabled } from "./execution-policy.ts";
+import { SessionStore, getDataRoot, type PersistedSession } from "../session-store.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
@@ -159,8 +162,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   }, [llm, vision]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
+  const stateRef = useRef(state);
+  stateRef.current = state;
   // Generate a stable conversation session ID on startup
   const [conversationId, setConversationId] = useState(() => process.env.MINI_AGENT_SESSION_ID ?? randomUUID());
+  const sessionStoreRef = useRef<SessionStore>();
+  if (!sessionStoreRef.current) {
+    sessionStoreRef.current = new SessionStore(path.join(getDataRoot(), "sessions"), { workspaceId: cwd });
+  }
   
   const pendingImagesRef = useRef<ImageAttachment[]>([]);
   pendingImagesRef.current = state.pendingImages;
@@ -274,6 +283,94 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       .then((plan) => dispatch({ type: "SET_TODO_PLAN", plan: plan ?? undefined }))
       .catch(() => { /* a missing or unreadable plan is non-fatal */ });
   }, [cwd]);
+
+  const persistSession = useCallback(async (history: AgentMessage[], id = conversationId): Promise<void> => {
+    try {
+      const sessionStore = sessionStoreRef.current!;
+      const existing = await sessionStore.load(id);
+      const permissionMode = getPermissionManager().getMode();
+      const currentState = stateRef.current;
+      const todos = (currentState.todoItems ?? currentState.todos).map((item) => ({
+        id: item.id,
+        content: item.content,
+        activeForm: item.activeForm,
+        // The HTTP/session wire format predates TUI-only failed/skipped states.
+        status: item.status === "completed"
+          ? "completed" as const
+          : item.status === "in_progress"
+            ? "in_progress" as const
+            : "pending" as const,
+      }));
+      const persisted: PersistedSession = {
+        id,
+        createdAt: existing?.createdAt ?? Date.now(),
+        workspaceId: cwd,
+        modelId: llmRef.current.model,
+        thinkingLevel: llmRef.current.thinkingLevel,
+        permissionMode,
+        skillNames: skillNamesRef.current,
+        phase: currentState.phase,
+        currentPlan: currentState.currentPlan,
+        messages: [...history],
+        todos,
+        todoVersion: currentState.todoRevision,
+      };
+      if (existing) await sessionStore.save(persisted);
+      else await sessionStore.create(persisted);
+    } catch {
+      // Persistence is best-effort; a disk error must not break chat.
+    }
+  }, [conversationId, cwd, getPermissionManager]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const sessionStore = sessionStoreRef.current!;
+      const requestedId = process.env.MINI_AGENT_SESSION_ID;
+      const targetId = requestedId ?? (await sessionStore.listSessions())[0]?.id;
+      if (!targetId) return;
+      const restored = await sessionStore.load(targetId);
+      if (!restored || cancelled || historyRef.current.length > 1) return;
+      const mode = restored.permissionMode ?? getPermissionManager().getMode();
+      getPermissionManager().setMode(mode);
+      let restoredLlm = llmRef.current;
+      if (restored.modelId && restored.modelId !== restoredLlm.model) {
+        try {
+          restoredLlm = switchLlmModel(restoredLlm, restored.modelId);
+        } catch {
+          // Keep the current environment-backed model when it is unavailable.
+        }
+      }
+      if (restored.thinkingLevel) restoredLlm = withThinkingLevel(restoredLlm, restored.thinkingLevel);
+      if (restoredLlm !== llmRef.current) {
+        llmRef.current = restoredLlm;
+        setLlm(restoredLlm);
+      }
+      if (restored.skillNames) setSkillNames([...restored.skillNames]);
+      const base = createAgentHistory(undefined, mode);
+      const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
+      const history = restoreAgentHistory(restored.messages, systemPrompt);
+      historyRef.current = history;
+      setConversationId(restored.id);
+      dispatch({
+        type: "RESTORE_SESSION",
+        history,
+        permissionMode: mode,
+        modelName: restoredLlm.model,
+        phase: restored.phase,
+        currentPlan: restored.currentPlan,
+        todos: restored.todos?.map((item) => ({
+          id: item.id,
+          content: item.content,
+          activeForm: item.activeForm ?? item.content,
+          status: item.status,
+          source: "model" as const,
+        })),
+        todoRevision: restored.todoVersion,
+      });
+    })().catch(() => { /* Session resume is best-effort. */ });
+    return () => { cancelled = true; };
+  }, [cwd, getPermissionManager]);
 
   // ── model switching ─────────────────────────────────────────────────────
 
@@ -707,6 +804,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     };
 
     try {
+      await persistSession([
+        ...historyRef.current,
+        { role: "user", content: currentUserText },
+      ]);
       let currentUserContent = planTurnOverride
         ? prompt
         : await resolveAtRefsRef(prompt, permissionTurn);
@@ -824,6 +925,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         }
       }
 
+      await persistSession(historyRef.current);
+
       await finalizePlanCapture({
         cwd,
         planCaptureRef,
@@ -840,7 +943,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         dispatch,
       });
     }
-  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit]);
+  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit, persistSession]);
 
   // Start the next queued prompt only after the current turn has emitted done/error/aborted.
   useEffect(() => {
@@ -862,6 +965,24 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     width: termWidth,
     maxMessages: 200,
   });
+  // Do not force a short session to occupy the entire alternate screen. The
+  // fixed-height viewport is useful once the transcript reaches the terminal
+  // edge, but before that point it creates a large empty band above the prompt
+  // (most noticeable while a restored session is still loading).
+  const fixedChromeRows =
+    (hasHeader ? 1 : 0) +
+    todoRows +
+    pickerLayout.totalRows +
+    permissionRows +
+    planApprovalRows +
+    (state.pendingImages.length > 0 ? 1 : 0) +
+    (state.spinnerMessage ? 1 : 0) +
+    2; // prompt + stable status row
+  const naturalFrameHeight = Math.max(
+    1,
+    fixedChromeRows + Math.min(viewportContentHeight, feedHeight),
+  );
+  const frameHeight = Math.min(termHeight, naturalFrameHeight);
   const previousViewportHeightRef = useRef(viewportContentHeight);
   useLayoutEffect(() => {
     const previous = previousViewportHeightRef.current;
@@ -872,14 +993,15 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   }, [viewportContentHeight, state.scrollOffset]);
 
   return (
-    <Box flexDirection="column" width={termWidth} height={termHeight} overflow="hidden">
-      {hasHeader && <Header modelName={state.modelName} cwd={cwd} />}
+    <Box flexDirection="column" width={termWidth} height={frameHeight} overflow="hidden">
+      {hasHeader && <Header modelName={state.modelName} cwd={cwd} width={termWidth} />}
 
       {(state.todoPlan || state.todoItems) && (
         <TodoPanel
           plan={state.todoPlan}
           todos={state.todoItems}
           viewMode={state.todoViewMode}
+          width={termWidth}
         />
       )}
 
@@ -893,6 +1015,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           focusedMessageIndex={state.focusedMessageIndex}
           busy={state.busy}
           status={state.status}
+          pendingPermission={state.pendingPermission}
+          turnStartedAt={state.turnStartedAt}
+          lastStreamAt={state.lastStreamAt}
           availableHeight={feedHeight}
           width={termWidth}
           scrollOffset={state.scrollOffset}
@@ -912,15 +1037,16 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           pendingProfileSetup={pendingProfileSetup}
           profileListState={profileListState}
           pickerItemRows={pickerLayout.itemRows}
+          width={termWidth}
         />
       </Box>
 
       <Box flexDirection="column" flexShrink={0}>
         {state.pendingPermission && (
-          <PermissionPanel request={state.pendingPermission} />
+          <PermissionPanel request={state.pendingPermission} width={termWidth} />
         )}
         {state.phase === "review" && state.currentPlan && (
-          <PlanApprovalBar plan={state.currentPlan} />
+          <PlanApprovalBar plan={state.currentPlan} width={termWidth} />
         )}
 
         {state.pendingImages.length > 0 && (
@@ -999,7 +1125,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           modelName={state.modelName}
           cwd={cwd}
           width={termWidth}
-          tokenEstimate={state.usedTokens || state.contextTokens}
+          tokenEstimate={state.contextTokens}
           contextWindow={llm.contextWindow}
           busy={state.busy}
           status={state.status}

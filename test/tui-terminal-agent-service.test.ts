@@ -24,6 +24,29 @@ function testLlm(): LlmConfig {
 }
 
 describe("terminal agent service", () => {
+  it("persists the prompt before invoking the model", async () => {
+    const store = createTuiStore(createInitialState("test-model"));
+    const phases: string[] = [];
+    const service = new TerminalAgentService({
+      store,
+      llm: testLlm(),
+      tools: [],
+      permissionManager: new PermissionManager("bypass"),
+      permissionSessionId: "start-hook-session",
+      onTurnStarted: ({ history }) => {
+        phases.push(history.at(-1)?.role ?? "missing");
+      },
+      chat: async () => {
+        phases.push("model");
+        return { role: "assistant", content: "answer" };
+      },
+    });
+
+    await service.submit("hello");
+
+    assert.deepEqual(phases, ["user", "model"]);
+  });
+
   it("keeps one loop history while projecting events into the store", async () => {
     const store = createTuiStore(createInitialState("test-model"));
     const service = new TerminalAgentService({

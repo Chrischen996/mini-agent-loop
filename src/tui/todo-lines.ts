@@ -1,7 +1,7 @@
 import type { PlanDocument } from "../plan/document.ts";
 import type { TodoItem, TodoStatus, TodoViewMode } from "../todo.ts";
 import { todoSummary } from "../todo.ts";
-import { resolveTodoItems, todoIcon, todoText, TODO_PANEL_MAX_VISIBLE_ITEMS, TODO_PLAN_STATUS_LABELS } from "./todo-format.ts";
+import { resolveTodoItems, todoIcon, todoProgressMeter, todoText, TODO_PANEL_MAX_VISIBLE_ITEMS, TODO_PLAN_STATUS_LABELS } from "./todo-format.ts";
 import type { RenderLine } from "./render-lines.ts";
 
 export function todoPanelRenderLines(options: { plan?: PlanDocument; todos?: readonly TodoItem[]; viewMode?: TodoViewMode; maxVisibleItems?: number }): RenderLine[] {
@@ -10,7 +10,8 @@ export function todoPanelRenderLines(options: { plan?: PlanDocument; todos?: rea
   const items = resolveTodoItems({ plan, todos });
   const summary = todoSummary(items);
   const status = plan ? ` [${TODO_PLAN_STATUS_LABELS[plan.status]}]` : "";
-  const header = `Todos  ${summary.completed}/${summary.total} completed${summary.inProgress ? `  ${summary.inProgress} in progress` : ""}${summary.failed ? `  ${summary.failed} failed` : ""}${status ? `  ${status}` : ""}`;
+  const meter = todoProgressMeter(summary.completed, summary.total);
+  const header = `Todos  ${meter}  ${summary.completed}/${summary.total} completed${summary.inProgress ? `  ${summary.inProgress} in progress` : ""}${summary.failed ? `  ${summary.failed} failed` : ""}${status ? `  ${status}` : ""}`;
   const lines: RenderLine[] = [{ key: "todo-header", text: header, prefix: "☷ ", style: "todo", bold: true }];
   if (viewMode === "compact") {
     lines.push({ key: "todo-compact", text: items.find((item) => item.status === "in_progress")?.activeForm ?? (items.length ? "Todo list collapsed" : "No todos"), style: "muted", dim: true });

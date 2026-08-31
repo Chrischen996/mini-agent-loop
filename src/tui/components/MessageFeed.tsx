@@ -1,16 +1,17 @@
 import React from "react";
 import { Box, Text } from "ink";
-import Spinner from "ink-spinner";
-import type { ChatMessage, ThinkingDisplayMode } from "../state.ts";
+import type { ChatMessage, PendingPermissionState, ThinkingDisplayMode } from "../state.ts";
 import { SubagentCard } from "./SubagentCard.tsx";
 import { TUI_COLORS as C } from "../theme.ts";
 import { selectMessageViewport } from "../message-viewport.ts";
 import { MarkdownText } from "./MarkdownText.tsx";
 import { toMessageRenderModel } from "../render-model.ts";
-import { toolVisualName } from "../tool-lines.ts";
+import { toolVisualName, toolVisualStatusIcon } from "../tool-lines.ts";
 import { thinkingRenderLines, thinkingVisibleLines } from "../thinking-lines.ts";
 import { noticeText, noticeTitle, statusLabel, toolArgumentSummary } from "../claude-style.ts";
 import { isSubagentProtocolText, isSubagentToolName } from "../subagent-lines.ts";
+import { activityPresentation, formatActivity, loadingGlyph, LOADING_FRAME_MS } from "../activity.ts";
+import { stripInlineMarkdown } from "../markdown-lines.ts";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -61,7 +62,7 @@ export function ThinkingBlock({
   if (!showFull) {
     return (
       <Box marginTop={0}>
-        <Text color={focused ? C.selection : C.thinking} dimColor italic>
+        <Text color={focused ? C.running : C.thinking} dimColor italic>
           ∴ Thinking ▸
         </Text>
       </Box>
@@ -86,7 +87,7 @@ export function ThinkingBlock({
       marginBottom={0}
       width="100%"
     >
-      <Text color={focused ? C.selection : C.thinking} dimColor italic>∴ Thinking…</Text>
+      <Text color={focused ? C.running : C.thinking} dimColor italic>∴ Thinking…</Text>
       <Box paddingLeft={2} flexDirection="column">
         {body}
       </Box>
@@ -113,7 +114,7 @@ function ToolCallRow({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }>
   return (
     <Box flexDirection="column" marginTop={0} marginBottom={0}>
       <Box flexDirection="row">
-        <Text color={markerColor} bold>{isError ? "✗" : "⏺"} </Text>
+        <Text color={markerColor} bold>{toolVisualStatusIcon(msg.status)} </Text>
         <Text color={isError ? C.error : C.info} bold>{toolVisualName(msg.name)}</Text>
         {argument ? <Text color={C.assistant}>({argument})</Text> : null}
       </Box>
@@ -145,6 +146,9 @@ type MessageFeedProps = {
   focusedMessageIndex?: number;
   busy?: boolean;
   status?: string;
+  pendingPermission?: PendingPermissionState;
+  turnStartedAt?: number;
+  lastStreamAt?: number;
   maxMessages?: number;
   /** Rows available for the feed after chrome (header/input/status). */
   availableHeight?: number;
@@ -177,6 +181,51 @@ function ViewportSlice({
   );
 }
 
+function ActivityRow({
+  status,
+  streamingText,
+  streamingReasoning,
+  messages,
+  pendingPermission,
+  turnStartedAt,
+  lastStreamAt,
+}: {
+  status: string;
+  streamingText: string;
+  streamingReasoning: string;
+  messages: ChatMessage[];
+  pendingPermission?: PendingPermissionState;
+  turnStartedAt?: number;
+  lastStreamAt?: number;
+}): React.ReactElement {
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), LOADING_FRAME_MS);
+    return () => clearInterval(timer);
+  }, []);
+  const activity = activityPresentation({
+    busy: true,
+    status,
+    streamingText,
+    streamingReasoning,
+    messages,
+    pendingPermission,
+    turnStartedAt,
+    lastStreamAt,
+  }, { now });
+
+  return (
+    <Box marginBottom={0} gap={1} flexWrap="nowrap" minWidth={0}>
+      <Text color={activity?.stalled ? C.error : C.running} bold>
+        {loadingGlyph(now, turnStartedAt)}
+      </Text>
+      <Text color={activity?.stalled ? C.error : C.running} dimColor wrap="truncate-end">
+        {activity ? formatActivity(activity) : statusLabel(status, true)}
+      </Text>
+    </Box>
+  );
+}
+
 export function MessageFeed({
   messages,
   streamingText,
@@ -187,6 +236,9 @@ export function MessageFeed({
   focusedMessageIndex = -1,
   busy = false,
   status = "Thinking…",
+  pendingPermission,
+  turnStartedAt,
+  lastStreamAt,
   maxMessages = 200,
   availableHeight = 20,
   width = 80,
@@ -212,7 +264,7 @@ export function MessageFeed({
   });
 
   return (
-    <Box flexDirection="column" flexGrow={1} paddingX={1} overflow="hidden">
+    <Box flexDirection="column" flexGrow={1} paddingX={1} width={width} minWidth={0} overflow="hidden">
       {viewport.items.map((item) => {
         if (item.kind === "history_hint") {
           // Keep viewport accounting intact, but do not replace transcript
@@ -232,7 +284,7 @@ export function MessageFeed({
             <ViewportSlice key="streaming-text" clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
               <Box flexDirection="row">
                 <Text color={C.primary} bold>⏺ </Text>
-                <Text color={C.assistant} wrap="wrap">{streamingText}</Text>
+                <Text color={C.assistant} wrap="wrap">{stripInlineMarkdown(streamingText)}</Text>
               </Box>
             </ViewportSlice>
           );
@@ -240,10 +292,15 @@ export function MessageFeed({
         if (item.kind === "busy_status") {
           return (
             <ViewportSlice key="busy-status" clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
-              <Box marginBottom={0} gap={1}>
-                <Text color={C.running}><Spinner type="dots" /></Text>
-                <Text color={C.running} dimColor>{statusLabel(status, true)}</Text>
-              </Box>
+              <ActivityRow
+                status={status}
+                streamingText={streamingText}
+                streamingReasoning={streamingReasoning}
+                messages={messages}
+                pendingPermission={pendingPermission}
+                turnStartedAt={turnStartedAt}
+                lastStreamAt={lastStreamAt}
+              />
             </ViewportSlice>
           );
         }
@@ -292,7 +349,7 @@ export function MessageFeed({
                         focused={focusedMessageIndex === absoluteIndex}
                       />
                     )}
-                    {msg.text && <MarkdownText text={msg.text} />}
+                    {msg.text && <MarkdownText text={msg.text} width={width} />}
                   </Box>
                 </Box>
               </Box>
@@ -323,7 +380,10 @@ export function MessageFeed({
         if (msg.kind === "error") {
           return (
             <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
-              <Text color={C.error}>✗ {msg.text}</Text>
+              <Box flexDirection="row" minWidth={0}>
+                <Text color={C.error} bold>✗ </Text>
+                <Text color={C.assistant} wrap="wrap">{msg.text}</Text>
+              </Box>
             </ViewportSlice>
           );
         }

@@ -43,11 +43,12 @@ function renderInline(text: string, keyPrefix: string, baseColor?: string): Reac
 
 const RULE_WIDTH = 48;
 
-export function MarkdownText({ text }: { text: string }): React.ReactElement {
+export function MarkdownText({ text, width }: { text: string; width?: number }): React.ReactElement {
   const lines = parseMarkdownLines(text);
+  const ruleWidth = Math.max(1, Math.min(RULE_WIDTH, (width ?? RULE_WIDTH) - 2));
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={width} minWidth={0} overflow="hidden">
       {lines.map((line, i) => {
         if (line.kind === "code-fence") return <Text key={i} color={C.muted}>{line.text}</Text>;
         if (line.kind === "code") return <Text key={i} color={C.info}>{line.text}</Text>;
@@ -56,14 +57,14 @@ export function MarkdownText({ text }: { text: string }): React.ReactElement {
           if (level <= 2) {
             return <Text key={i} color={C.primary} bold>▸ {line.text}</Text>;
           }
-          return <Text key={i} color={C.selection} bold>· {line.text}</Text>;
+          return <Text key={i} color={C.info} bold>· {line.text}</Text>;
         }
-        if (line.kind === "rule") return <Text key={i} color={C.border}>{"─".repeat(RULE_WIDTH)}</Text>;
+        if (line.kind === "rule") return <Text key={i} color={C.border}>{"─".repeat(ruleWidth)}</Text>;
         if (line.kind === "list") {
           return (
-            <Box key={i} paddingLeft={line.indent * 2} gap={1}>
+            <Box key={i} paddingLeft={line.indent * 2} gap={1} minWidth={0}>
               <Text color={C.running}>{line.ordered ? line.marker : "•"}</Text>
-              <Text color={C.assistant}>{renderInline(line.text, `li${i}`, C.assistant)}</Text>
+              <Text color={C.assistant} wrap="wrap">{renderInline(line.text, `li${i}`, C.assistant)}</Text>
             </Box>
           );
         }

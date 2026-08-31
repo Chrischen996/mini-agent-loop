@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { truncateSessionMessages } from "../src/server.ts";
 import { SessionStore } from "../src/session-store.ts";
 import type { TodoItem } from "../src/tools/todo.ts";
+import type { ExecutionPlan } from "../src/plan-act/types.ts";
 
 describe("SessionStore", () => {
   it("truncates an incomplete assistant tool-call block as one unit", () => {
@@ -36,6 +37,10 @@ describe("SessionStore", () => {
       const recent = { id: "recent-session", createdAt: Date.now(), messages: [{ role: "user" as const, content: "new" }] };
       await store.create(old);
       await store.create(recent);
+      await store.compact({
+        ...old,
+        lastActiveAt: Date.now() - 5_000,
+      });
 
       const loaded = await new SessionStore(root, { sessionTtlMs: 1_000 }).loadAll();
       assert.equal(loaded.has("old-session"), false, "expired session should be evicted");
@@ -286,6 +291,94 @@ describe("SessionStore", () => {
       assert.equal(loaded.has("stale"), true, "recently-active session should survive");
       const restored = loaded.get("stale")!;
       assert.ok(restored.lastActiveAt !== undefined, "lastActiveAt should round-trip");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("filters sessions by workspace scope", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-workspace-"));
+    try {
+      const first = new SessionStore(root, { workspaceId: "/workspace/one" });
+      const second = new SessionStore(root, { workspaceId: "/workspace/two" });
+      await first.create({ id: "one", createdAt: Date.now(), messages: [] });
+      await second.create({ id: "two", createdAt: Date.now(), messages: [] });
+
+      assert.equal((await first.listSessions()).map((item) => item.id).join(), "one");
+      assert.equal((await second.listSessions()).map((item) => item.id).join(), "two");
+      assert.equal(await first.load("two"), undefined);
+      assert.equal((await new SessionStore(root).listSessions()).length, 2);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("claims legacy unscoped sessions for the first workspace that opens them", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-legacy-scope-"));
+    try {
+      const legacy = new SessionStore(root);
+      await legacy.create({
+        id: "legacy-scope-session",
+        createdAt: Date.now(),
+        messages: [{ role: "user", content: "old prompt" }],
+      });
+
+      const firstWorkspace = new SessionStore(root, { workspaceId: "/workspace/first" });
+      const restored = await firstWorkspace.load("legacy-scope-session");
+      assert.equal(restored?.workspaceId, "/workspace/first");
+      assert.equal(restored?.messages[0]?.content, "old prompt");
+
+      const secondWorkspace = new SessionStore(root, { workspaceId: "/workspace/second" });
+      assert.equal(await secondWorkspace.load("legacy-scope-session"), undefined);
+      assert.deepEqual(
+        (await firstWorkspace.listSessions()).map((item) => item.id),
+        ["legacy-scope-session"],
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats null currentPlan as an explicit clear", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-plan-clear-"));
+    try {
+      const store = new SessionStore(root);
+      const plan: ExecutionPlan = {
+        id: "plan-1",
+        sessionId: "plan-session",
+        createdAt: Date.now(),
+        summary: "do it",
+        steps: [],
+        risks: [],
+        requiredTools: [],
+        status: "draft",
+      };
+      await store.create({ id: "plan-session", createdAt: Date.now(), currentPlan: plan, messages: [] });
+      await store.save({ id: "plan-session", createdAt: Date.now(), currentPlan: undefined, messages: [] });
+
+      assert.equal((await store.load("plan-session"))?.currentPlan, undefined);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes concurrent saves without losing snapshots", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-lock-"));
+    try {
+      const first = new SessionStore(root, { compactThreshold: 100 });
+      const second = new SessionStore(root, { compactThreshold: 100 });
+      const session = { id: "locked-session", createdAt: Date.now(), messages: [] };
+      await first.create(session);
+      await Promise.all([
+        first.save({ ...session, messages: [{ role: "user", content: "first" }] }),
+        second.save({ ...session, messages: [{ role: "user", content: "second" }] }),
+      ]);
+
+      const lines = (await readFile(path.join(root, session.id, "events.jsonl"), "utf8"))
+        .split("\n")
+        .filter(Boolean);
+      assert.equal(lines.length, 4);
+      assert.ok(["first", "second"].includes((await new SessionStore(root).load(session.id))?.messages[0]?.content as string));
     } finally {
       await rm(root, { recursive: true, force: true });
     }

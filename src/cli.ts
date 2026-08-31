@@ -600,7 +600,7 @@ async function main(): Promise<void> {
   }
 
   // ── Session resume (Claude Code-style --continue / --resume) ───────────────
-  const sessionStore = new SessionStore(path.join(getDataRoot(), "sessions"));
+  const sessionStore = new SessionStore(path.join(getDataRoot(), "sessions"), { workspaceId: cwd });
   let resumedSessionId: string | undefined;
   let resumedMessages: AgentMessage[] | undefined;
   if (continueSession || resumeSessionId !== undefined) {
@@ -782,11 +782,38 @@ async function main(): Promise<void> {
     tools = () => enrichedTools;
   }
 
+  const persistenceSessionId = resumedSessionId ?? "cli_session";
+  const persistTurnStart = async (): Promise<void> => {
+    try {
+      const existing = await sessionStore.load(persistenceSessionId);
+      const userMessage = userContent ?? (prompt + planSuffix || "Please analyze the attached image(s).");
+      const persisted = {
+        id: persistenceSessionId,
+        createdAt: existing?.createdAt ?? Date.now(),
+        modelId: requestLlm.model,
+        thinkingLevel: requestLlm.thinkingLevel,
+        thinkingMode,
+        permissionMode: effectiveMode,
+        skillNames,
+        messages: [
+          ...(resumedMessages ?? []),
+          { role: "user" as const, content: userMessage },
+        ],
+        parentSessionId: existing?.parentSessionId,
+        forkedFromMessage: existing?.forkedFromMessage,
+      };
+      if (existing) await sessionStore.save(persisted);
+      else await sessionStore.create(persisted);
+    } catch (error) {
+      console.error(`[session] turn-start save failed: ${error instanceof Error ? error.message : error}`);
+    }
+  };
   let messages;
   console.error(`[config] mode=${effectiveMode}`);
   const activePermissionTurn = permissionManager.beginTurn("cli_session", onPermissionRequest);
   permissionTurn = activePermissionTurn;
   try {
+    await persistTurnStart();
     messages = await runAgentLoop(prompt + planSuffix || "Please analyze the attached image(s).", {
       llm: requestLlm,
       tools,
@@ -852,7 +879,7 @@ async function main(): Promise<void> {
   // ── Persist the session and extract memories (Claude Code-style) ──────────
   if (messages.length > 0) {
     try {
-      const sessionId = resumedSessionId ?? "cli_session";
+      const sessionId = persistenceSessionId;
       const existing = await sessionStore.load(sessionId);
       const persisted = {
         id: sessionId,

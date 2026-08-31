@@ -2,7 +2,7 @@ import process from "node:process";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { contentAsString } from "../content.ts";
-import { loadLlmConfigFromEnv } from "../llm/index.ts";
+import { loadLlmConfigFromEnv, switchLlmModel } from "../llm/index.ts";
 import {
   cycleThinkingLevel,
   buildIntenseLlm,
@@ -15,6 +15,7 @@ import { loadThinkingModeFromEnv } from "../thinking-policy.ts";
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import {
   createAgentHistory,
+  restoreAgentHistory,
   MaxTurnsExceededError,
   runAgentTurn,
   type AgentRuntimeRef,
@@ -55,8 +56,9 @@ import {
   parsePlanTurnOverride,
 } from "./plan-commands.ts";
 import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
-import { SessionStore, getDataRoot, type PersistedSessionMeta } from "../session-store.ts";
+import { SessionStore, getDataRoot, type PersistedSession, type PersistedSessionMeta } from "../session-store.ts";
 import type { AgentMessage } from "../types.ts";
+import type { TodoItem } from "../todo.ts";
 import { MemoryStore } from "../orchestration/memory-store.ts";
 import { createAutoMemoryHook, isAutoMemoryEnabled } from "../memory/auto-memory.ts";
 import type { TuiAction } from "./state.ts";
@@ -65,6 +67,32 @@ import { isTuiFeatureEnabled } from "./execution-policy.ts";
 function short(value: string, max = 160): string {
   const oneLine = value.replace(/\s+/g, " ").trim();
   return oneLine.length > max ? `${oneLine.slice(0, max)}...` : oneLine;
+}
+
+function persistableTodos(items: TodoItem[] | undefined): PersistedSession["todos"] {
+  if (!items) return undefined;
+  return items.map((item) => ({
+    id: item.id,
+    content: item.content,
+    activeForm: item.activeForm,
+    // The HTTP/session wire format predates TUI-only failed/skipped states.
+    status: item.status === "completed"
+      ? "completed" as const
+      : item.status === "in_progress"
+        ? "in_progress" as const
+        : "pending" as const,
+  }));
+}
+
+function restoreableTodos(items: PersistedSession["todos"]): TodoItem[] | undefined {
+  if (!items) return undefined;
+  return items.map((item) => ({
+    id: item.id,
+    content: item.content,
+    activeForm: item.activeForm ?? item.content,
+    status: item.status,
+    source: "model" as const,
+  }));
 }
 
 type TuiState = LegacyTuiState & {
@@ -175,8 +203,8 @@ async function main(): Promise<void> {
   let activeSkillNames = loadSkillNamesFromEnv();
 
   // ── Session persistence + auto memory (Claude Code-style) ─────────────────
-  const sessionStore = new SessionStore(path.join(getDataRoot(), "sessions"));
-  const sessionId = randomUUID();
+  const sessionStore = new SessionStore(path.join(getDataRoot(), "sessions"), { workspaceId: cwd });
+  let activeSessionId: string = randomUUID();
   const memoryStore = new MemoryStore(path.join(getDataRoot(), "memory", "records.json"));
   const buildTuiHistory = async (permissionMode: PermissionMode): Promise<AgentMessage[]> => {
     const base = createAgentHistory(undefined, permissionMode);
@@ -196,14 +224,16 @@ async function main(): Promise<void> {
   };
   const persistTurn = async (history: AgentMessage[]): Promise<void> => {
     try {
-      const existing = await sessionStore.load(sessionId);
+      const existing = await sessionStore.load(activeSessionId);
       const persisted = {
-        id: sessionId,
+        id: activeSessionId,
         createdAt: existing?.createdAt ?? Date.now(),
         modelId: activeLlm.model,
         thinkingLevel: activeLlm.thinkingLevel,
         permissionMode: state.permissionMode,
         skillNames: activeSkillNames,
+        todos: persistableTodos(state.todoItems),
+        todoVersion: state.todoRevision,
         messages: [...history],
       };
       if (existing) await sessionStore.save(persisted);
@@ -235,11 +265,24 @@ async function main(): Promise<void> {
     if (mostRecent) {
       const restored = await sessionStore.load(mostRecent.id);
       if (restored && restored.messages.length > 0) {
-        const base = await buildTuiHistory(state.permissionMode);
-        state.history = [
-          ...base,
-          ...restored.messages.filter((message) => message.role !== "system"),
-        ];
+        const mode = restored.permissionMode ?? state.permissionMode;
+        state.permissionMode = mode;
+        if (restored.modelId && restored.modelId !== activeLlm.model) {
+          try {
+            activeLlm = switchLlmModel(activeLlm, restored.modelId);
+          } catch {
+            // Keep the current environment-backed model when it is unavailable.
+          }
+        }
+        if (restored.thinkingLevel) activeLlm = withThinkingLevel(activeLlm, restored.thinkingLevel);
+        state.thinkingLevel = activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off");
+        if (restored.skillNames) activeSkillNames = [...restored.skillNames];
+        const base = await buildTuiHistory(mode);
+        const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
+        state.history = restoreAgentHistory(restored.messages, systemPrompt);
+        activeSessionId = restored.id;
+        state.todoItems = restoreableTodos(restored.todos);
+        state.todoRevision = restored.todoVersion ?? nextTodoRevision();
         state.status = `已恢复会话 ${mostRecent.id.slice(0, 8)} (${restored.messages.length} 条消息)，/clear 可重新开始`;
       }
     }
@@ -430,11 +473,27 @@ async function main(): Promise<void> {
         render(state);
         return;
       }
-      const base = await buildTuiHistory(state.permissionMode);
-      state.history = [
-        ...base,
-        ...restoredSession.messages.filter((message) => message.role !== "system"),
-      ];
+      const mode = restoredSession.permissionMode ?? state.permissionMode;
+      permissionManager.setMode(mode);
+      state.permissionMode = mode;
+      if (restoredSession.modelId && restoredSession.modelId !== activeLlm.model) {
+        try {
+          activeLlm = switchLlmModel(activeLlm, restoredSession.modelId);
+        } catch {
+          // Keep the current environment-backed model when it is unavailable.
+        }
+      }
+      if (restoredSession.thinkingLevel) {
+        activeLlm = withThinkingLevel(activeLlm, restoredSession.thinkingLevel);
+        state.thinkingLevel = activeLlm.thinkingLevel ?? state.thinkingLevel;
+      }
+      if (restoredSession.skillNames) activeSkillNames = [...restoredSession.skillNames];
+      const base = await buildTuiHistory(mode);
+      const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
+      state.history = restoreAgentHistory(restoredSession.messages, systemPrompt);
+      activeSessionId = restoredSession.id;
+      state.todoItems = restoreableTodos(restoredSession.todos);
+      state.todoRevision = restoredSession.todoVersion ?? nextTodoRevision();
       state.tools = [];
       state.pendingUser = undefined;
       state.status = `已恢复会话 ${target.id.slice(0, 8)} (${restoredSession.messages.length} 条消息)`;
@@ -539,6 +598,10 @@ async function main(): Promise<void> {
     let turnSucceeded = false;
     let turnErrorMessage: string | undefined;
     try {
+      await persistTurn([
+        ...state.history,
+        { role: "user", content: planTurnOverride?.prompt ?? text },
+      ]);
       state.history = await runAgentTurn(state.history, planTurnOverride?.prompt ?? text, {
         llm: turnLlm,
         tools,
@@ -586,9 +649,11 @@ async function main(): Promise<void> {
         permissionManager.setMode(planTurnOverride.restoreMode);
         dispatchPlanAction({ type: "SET_PERMISSION_MODE", mode: planTurnOverride.restoreMode });
       }
+      // Persist both completed and interrupted turns. The turn-start snapshot
+      // guarantees the prompt survives a crash before the first model reply.
+      await persistTurn(state.history);
       if (turnSucceeded) {
-        // Persist the turn and extract memories — both best-effort.
-        await persistTurn(state.history);
+        // Extract memories — best-effort and never blocks the answer.
         if (isAutoMemoryEnabled()) {
           // Reuse the module-scope memoryStore (same records.json path).
           const extract = createAutoMemoryHook(activeLlm, memoryStore);

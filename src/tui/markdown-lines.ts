@@ -7,6 +7,22 @@ export type MarkdownLine =
   | { kind: "quote"; text: string }
   | { kind: "text"; text: string };
 
+/**
+ * Remove inline Markdown decoration for renderers that only have one styled
+ * terminal string per row. The Ink renderer applies richer inline styles, but
+ * the ANSI projection should never expose protocol-like `**markers**` to the
+ * user when it cannot represent the spans independently.
+ */
+export function stripInlineMarkdown(text: string): string {
+  return text
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/~~([^~]+)~~/g, "$1")
+    .replace(/`([^`]+)`/g, "$1");
+}
+
 /** Parse Markdown one source line at a time without creating React nodes. */
 export function parseMarkdownLines(source: string): MarkdownLine[] {
   const lines = source.split("\n");
@@ -27,4 +43,3 @@ export function parseMarkdownLines(source: string): MarkdownLine[] {
     return { kind: "text", text: line };
   });
 }
-

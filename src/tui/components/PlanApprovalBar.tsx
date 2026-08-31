@@ -6,6 +6,7 @@ import { executionStepStatusToTodoStatus, todoIcon } from "../todo-format.ts";
 
 type PlanApprovalBarProps = {
   plan: ExecutionPlan;
+  width?: number;
 };
 
 function countRisks(plan: ExecutionPlan): { high: number; medium: number; total: number } {
@@ -27,12 +28,12 @@ function countRisks(plan: ExecutionPlan): { high: number; medium: number; total:
  * `useKeyboardHandler` and are unchanged. The layout reserves the full
  * bordered card footprint, including up to four step rows.
  */
-export function PlanApprovalBar({ plan }: PlanApprovalBarProps): React.ReactElement {
+export function PlanApprovalBar({ plan, width }: PlanApprovalBarProps): React.ReactElement {
   const risks = countRisks(plan);
   return (
-    <Box flexDirection="column" paddingX={1} borderStyle="round" borderColor={C.primary}>
-      <Box gap={1}>
-        <Text color={C.primary} bold>Plan approval</Text>
+    <Box flexDirection="column" paddingX={1} borderStyle="round" borderColor={C.primary} width={width} minWidth={0} overflow="hidden">
+      <Box gap={1} minWidth={0}>
+        <Text color={C.primary} bold wrap="truncate-end">▣ Plan approval</Text>
       </Box>
       <Text color={C.assistant} wrap="truncate-end">{plan.summary}</Text>
       {plan.steps.slice(0, 4).map((step, index) => (
@@ -46,7 +47,7 @@ export function PlanApprovalBar({ plan }: PlanApprovalBarProps): React.ReactElem
         {risks.high > 0 && <Text color={C.error}>{risks.high} high risk</Text>}
         {risks.medium > 0 && <Text color={C.running}>{risks.medium} medium risk</Text>}
         <Text color={C.muted}>·</Text>
-        <Text color={C.selection} bold>❯ Approve</Text>
+        <Text color={C.running} bold>❯ Approve</Text>
         <Text color={C.muted}>·</Text>
         <Text color={C.assistant}>Reject</Text>
       </Box>

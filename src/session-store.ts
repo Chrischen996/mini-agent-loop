@@ -1,4 +1,5 @@
-import { appendFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { contentAsString } from "./content.ts";
@@ -24,6 +25,8 @@ type SessionCreatedEvent = {
   todoVersion?: number;
   parentSessionId?: string;
   forkedFromMessage?: number;
+  forkedFromMessageId?: string;
+  workspaceId?: string;
 };
 
 type SessionSnapshotEvent = {
@@ -38,12 +41,14 @@ type SessionSnapshotEvent = {
   permissionMode?: PermissionMode;
   skillNames?: string[];
   phase?: SessionPhase;
-  currentPlan?: ExecutionPlan;
+  currentPlan?: ExecutionPlan | null;
   messages: AgentMessage[];
   todos?: TodoItem[];
   todoVersion?: number;
   parentSessionId?: string;
   forkedFromMessage?: number;
+  forkedFromMessageId?: string;
+  workspaceId?: string;
 };
 
 type SessionEvent = SessionCreatedEvent | SessionSnapshotEvent;
@@ -63,11 +68,14 @@ export type PersistedSession = {
   phase?: SessionPhase;
   /** Currently active execution plan. */
   currentPlan?: ExecutionPlan;
+  /** Stable project/workspace scope used to prevent cross-project resume. */
+  workspaceId?: string;
   messages: AgentMessage[];
   todos?: TodoItem[];
   todoVersion?: number;
   parentSessionId?: string;
   forkedFromMessage?: number;
+  forkedFromMessageId?: string;
 };
 
 /** Lightweight metadata for resume pickers (CLI `--resume`, TUI `/sessions`). */
@@ -78,6 +86,8 @@ export type PersistedSessionMeta = {
   modelId?: string;
   messageCount: number;
   parentSessionId?: string;
+  forkedFromMessageId?: string;
+  workspaceId?: string;
   preview: string;
 };
 
@@ -102,11 +112,16 @@ export type SessionStoreOptions = {
    * not grow without bound. Default: 20.
    */
   compactThreshold?: number;
+  /** Only expose sessions belonging to this workspace when set. */
+  workspaceId?: string;
 };
 
 const DEFAULT_MAX_SESSIONS = 100;
 const DEFAULT_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1_000; // 7 days
 const DEFAULT_COMPACT_THRESHOLD = 20;
+const LOCK_RETRY_MS = 25;
+const LOCK_TIMEOUT_MS = 10_000;
+const LOCK_STALE_MS = 30_000;
 
 /**
  * Shared data root for persisted state (sessions, memory, documents).
@@ -123,6 +138,7 @@ export class SessionStore {
   private readonly maxSessions: number;
   private readonly sessionTtlMs: number;
   private readonly compactThreshold: number;
+  private readonly workspaceId: string | undefined;
   /** Per-session snapshot-event counters to avoid re-reading files on save. */
   private readonly snapshotCounts = new Map<string, number>();
 
@@ -133,6 +149,7 @@ export class SessionStore {
     this.maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
     this.sessionTtlMs = options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
     this.compactThreshold = options.compactThreshold ?? DEFAULT_COMPACT_THRESHOLD;
+    this.workspaceId = options.workspaceId;
   }
 
   async initialize(): Promise<void> {
@@ -151,10 +168,14 @@ export class SessionStore {
 
     for (const name of names) {
       if (!/^[a-zA-Z0-9_-]+$/.test(name)) continue;
-      const parsed = await this.parseEventsFile(name);
-      if (parsed) {
+      let parsed = await this.parseEventsFile(name);
+      if (parsed && this.isLegacyUnscoped(parsed)) {
+        parsed = await this.claimLegacy(parsed);
+      }
+      if (parsed && this.matchesWorkspace(parsed)) {
         sessions.set(parsed.id, parsed);
-        this.snapshotCounts.set(parsed.id, Number.POSITIVE_INFINITY);
+        // The latest snapshot is the new compaction baseline after a restart.
+        this.snapshotCounts.set(parsed.id, 1);
       }
     }
     // Evict expired and excess sessions on load
@@ -165,7 +186,9 @@ export class SessionStore {
   /** Load a single session by id, or undefined when it does not exist. */
   async load(sessionId: string): Promise<PersistedSession | undefined> {
     if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) return undefined;
-    return this.parseEventsFile(sessionId);
+    let session = await this.parseEventsFile(sessionId);
+    if (session && this.isLegacyUnscoped(session)) session = await this.claimLegacy(session);
+    return session && this.matchesWorkspace(session) ? session : undefined;
   }
 
   /**
@@ -173,23 +196,35 @@ export class SessionStore {
    * `/sessions`). Ordered most-recently-active first.
    */
   async listSessions(): Promise<PersistedSessionMeta[]> {
-    const sessions = await this.loadAll();
-    return [...sessions.values()]
-      .map((session) => ({
-        id: session.id,
-        createdAt: session.createdAt,
-        lastActiveAt: session.lastActiveAt ?? session.createdAt,
-        modelId: session.modelId,
-        messageCount: session.messages.length,
-        parentSessionId: session.parentSessionId,
-        preview:
-          session.messages.find((message) => message.role === "user") !== undefined
-            ? contentAsString(
-                session.messages.find((message) => message.role === "user")!.content,
-              ).slice(0, 80)
-            : "",
-      }))
-      .sort((a, b) => b.lastActiveAt - a.lastActiveAt);
+    await this.initialize();
+    let names: string[];
+    try {
+      names = await readdir(this.root);
+    } catch {
+      return [];
+    }
+
+    const metas: PersistedSessionMeta[] = [];
+    for (const name of names) {
+      if (!/^[a-zA-Z0-9_-]+$/.test(name)) continue;
+      const meta = await this.readMetaFile(name);
+      if (meta && this.matchesWorkspace(meta)) {
+        metas.push(meta);
+        continue;
+      }
+      // Legacy sessions have no workspace binding (and older metadata may
+      // also be unscoped). Read the transcript once so the first workspace
+      // that opens the record can claim it safely under the session lock.
+      if (!meta || meta.workspaceId === undefined) {
+        let session = await this.parseEventsFile(name);
+        if (session && this.isLegacyUnscoped(session)) session = await this.claimLegacy(session);
+        if (session && this.matchesWorkspace(session)) metas.push(this.sessionMeta(session));
+      }
+    }
+
+    const retained = this.retainMetadata(metas);
+    await Promise.all(retained.evictedIds.map((id) => this.remove(id).catch(() => {})));
+    return retained.sessions.sort((a, b) => b.lastActiveAt - a.lastActiveAt);
   }
 
   /**
@@ -202,7 +237,7 @@ export class SessionStore {
 
     // 1. Remove sessions older than TTL
     for (const [id, session] of sessions) {
-      if (now - session.createdAt > this.sessionTtlMs) {
+      if (now - (session.lastActiveAt ?? session.createdAt) > this.sessionTtlMs) {
         evictedIds.push(id);
         sessions.delete(id);
       }
@@ -227,27 +262,36 @@ export class SessionStore {
   }
 
   async create(session: PersistedSession): Promise<void> {
-    this.snapshotCounts.set(session.id, 0);
-    await this.append({
-      type: "session_created",
-      sessionId: session.id,
-      createdAt: session.createdAt,
-      modelId: session.modelId,
-      thinkingLevel: session.thinkingLevel,
-      thinkingMode: session.thinkingMode,
-      permissionMode: session.permissionMode,
-      skillNames: session.skillNames,
-      phase: session.phase,
-      currentPlan: session.currentPlan,
-      todos: session.todos,
-      todoVersion: session.todoVersion,
-      parentSessionId: session.parentSessionId,
-      forkedFromMessage: session.forkedFromMessage,
+    await this.withSessionLock(session.id, async () => {
+      this.snapshotCounts.set(session.id, 0);
+      await this.append({
+        type: "session_created",
+        sessionId: session.id,
+        createdAt: session.createdAt,
+        modelId: session.modelId,
+        thinkingLevel: session.thinkingLevel,
+        thinkingMode: session.thinkingMode,
+        permissionMode: session.permissionMode,
+        skillNames: session.skillNames,
+        phase: session.phase,
+        currentPlan: session.currentPlan,
+        todos: session.todos,
+        todoVersion: session.todoVersion,
+        parentSessionId: session.parentSessionId,
+        forkedFromMessage: session.forkedFromMessage,
+        forkedFromMessageId: session.forkedFromMessageId,
+        workspaceId: session.workspaceId ?? this.workspaceId,
+      });
+      await this.saveLocked(session);
     });
-    await this.save(session);
   }
 
   async save(session: PersistedSession): Promise<void> {
+    await this.withSessionLock(session.id, () => this.saveLocked(session));
+  }
+
+  private async saveLocked(session: PersistedSession): Promise<void> {
+    this.ensureMessageIds(session.messages);
     const lastActiveAt = Date.now();
     await this.append({
       type: "session_snapshot",
@@ -260,18 +304,21 @@ export class SessionStore {
       permissionMode: session.permissionMode,
       skillNames: session.skillNames,
       phase: session.phase,
-      currentPlan: session.currentPlan,
+      currentPlan: session.currentPlan ?? null,
       messages: session.messages,
       todos: session.todos,
       todoVersion: session.todoVersion,
       parentSessionId: session.parentSessionId,
       forkedFromMessage: session.forkedFromMessage,
+      forkedFromMessageId: session.forkedFromMessageId,
+      workspaceId: session.workspaceId ?? this.workspaceId,
     });
+    await this.writeMeta(this.sessionMeta({ ...session, lastActiveAt }));
     // Keep the append-only log bounded (Claude Code-style transcript compaction).
     const count = (this.snapshotCounts.get(session.id) ?? 0) + 1;
     this.snapshotCounts.set(session.id, count);
     if (count >= this.compactThreshold) {
-      await this.compact({ ...session, lastActiveAt });
+      await this.compactLocked({ ...session, lastActiveAt });
     }
   }
 
@@ -280,10 +327,16 @@ export class SessionStore {
    * writes stay the fast path; compaction is the rare exception.
    */
   async compact(session: PersistedSession): Promise<void> {
+    await this.withSessionLock(session.id, () => this.compactLocked(session));
+  }
+
+  private async compactLocked(session: PersistedSession): Promise<void> {
+    this.ensureMessageIds(session.messages);
     const directory = path.join(this.root, session.id);
     await mkdir(directory, { recursive: true });
     const snapshot = JSON.stringify(this.snapshotEvent(session));
-    await writeFile(path.join(directory, "events.jsonl"), `${snapshot}\n`, "utf8");
+    await this.writeAtomic(path.join(directory, "events.jsonl"), `${snapshot}\n`);
+    await this.writeMeta(this.sessionMeta(session));
     this.snapshotCounts.set(session.id, 1);
   }
 
@@ -293,8 +346,10 @@ export class SessionStore {
   }
 
   async remove(sessionId: string): Promise<void> {
-    this.snapshotCounts.delete(sessionId);
-    await rm(path.join(this.root, sessionId), { recursive: true, force: true });
+    await this.withSessionLock(sessionId, async () => {
+      this.snapshotCounts.delete(sessionId);
+      await rm(path.join(this.root, sessionId), { recursive: true, force: true });
+    });
   }
 
   private snapshotEvent(session: PersistedSession): SessionSnapshotEvent {
@@ -309,12 +364,15 @@ export class SessionStore {
       permissionMode: session.permissionMode,
       skillNames: session.skillNames,
       phase: session.phase,
-      currentPlan: session.currentPlan,
       messages: session.messages,
       todos: session.todos,
       todoVersion: session.todoVersion,
       parentSessionId: session.parentSessionId,
       forkedFromMessage: session.forkedFromMessage,
+      forkedFromMessageId: session.forkedFromMessageId,
+      workspaceId: session.workspaceId ?? this.workspaceId,
+      // null is intentional: it clears a previously persisted plan.
+      currentPlan: session.currentPlan ?? null,
     };
   }
 
@@ -349,6 +407,8 @@ export class SessionStore {
             todoVersion: parsed.todoVersion ?? 0,
             parentSessionId: parsed.parentSessionId,
             forkedFromMessage: parsed.forkedFromMessage,
+            forkedFromMessageId: parsed.forkedFromMessageId,
+            workspaceId: parsed.workspaceId,
           };
         } else if (Array.isArray(parsed.messages)) {
           current = {
@@ -361,18 +421,22 @@ export class SessionStore {
             permissionMode: parsed.permissionMode ?? current?.permissionMode,
             skillNames: parsed.skillNames ?? current?.skillNames,
             phase: parsed.phase ?? current?.phase,
-            currentPlan: parsed.currentPlan ?? current?.currentPlan,
+            currentPlan: parsed.currentPlan === null ? undefined : parsed.currentPlan ?? current?.currentPlan,
             messages: parsed.messages,
             todos: parsed.todos ?? current?.todos ?? [],
             todoVersion: parsed.todoVersion ?? current?.todoVersion ?? 0,
             parentSessionId: parsed.parentSessionId ?? current?.parentSessionId,
             forkedFromMessage: parsed.forkedFromMessage ?? current?.forkedFromMessage,
+            forkedFromMessageId: parsed.forkedFromMessageId ?? current?.forkedFromMessageId,
+            workspaceId: parsed.workspaceId ?? current?.workspaceId,
           };
         }
       } catch {
         // Ignore one malformed JSONL record and recover later snapshots.
       }
     }
+    if (!current) return undefined;
+    this.ensureMessageIds(current.messages);
     return current;
   }
 
@@ -384,5 +448,170 @@ export class SessionStore {
       `${JSON.stringify(event)}\n`,
       "utf8",
     );
+  }
+
+  private matchesWorkspace(session: { workspaceId?: string }): boolean {
+    return this.workspaceId === undefined || session.workspaceId === this.workspaceId;
+  }
+
+  private isLegacyUnscoped(session: { workspaceId?: string }): boolean {
+    return this.workspaceId !== undefined && session.workspaceId === undefined;
+  }
+
+  /**
+   * Older releases stored sessions in one global directory without a scope.
+   * There is no historical workspace value to recover, so the first scoped
+   * process that opens such a session claims it. The lock and compacted
+   * snapshot make that claim visible to other processes before they resume it.
+   */
+  private async claimLegacy(session: PersistedSession): Promise<PersistedSession> {
+    if (this.workspaceId === undefined || session.workspaceId !== undefined) return session;
+    return this.withSessionLock(session.id, async () => {
+      const latest = await this.parseEventsFile(session.id);
+      if (!latest || latest.workspaceId !== undefined) return latest ?? session;
+      const claimed = { ...latest, workspaceId: this.workspaceId };
+      await this.compactLocked(claimed);
+      return claimed;
+    });
+  }
+
+  private sessionMeta(session: PersistedSession): PersistedSessionMeta {
+    const firstUser = session.messages.find((message) => message.role === "user");
+    return {
+      id: session.id,
+      createdAt: session.createdAt,
+      lastActiveAt: session.lastActiveAt ?? session.createdAt,
+      modelId: session.modelId,
+      messageCount: session.messages.length,
+      parentSessionId: session.parentSessionId,
+      forkedFromMessageId: session.forkedFromMessageId,
+      workspaceId: session.workspaceId ?? this.workspaceId,
+      preview: firstUser ? contentAsString(firstUser.content).slice(0, 80) : "",
+    };
+  }
+
+  private async readMetaFile(name: string): Promise<PersistedSessionMeta | undefined> {
+    try {
+      const value = JSON.parse(
+        await readFile(path.join(this.root, name, "meta.json"), "utf8"),
+      ) as Partial<PersistedSessionMeta>;
+      if (
+        value.id !== name ||
+        typeof value.createdAt !== "number" ||
+        typeof value.lastActiveAt !== "number" ||
+        typeof value.messageCount !== "number" ||
+        typeof value.preview !== "string"
+      ) return undefined;
+      return {
+        id: value.id,
+        createdAt: value.createdAt,
+        lastActiveAt: value.lastActiveAt,
+        modelId: value.modelId,
+        messageCount: value.messageCount,
+        parentSessionId: value.parentSessionId,
+        forkedFromMessageId: value.forkedFromMessageId,
+        workspaceId: value.workspaceId,
+        preview: value.preview,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async writeMeta(meta: PersistedSessionMeta): Promise<void> {
+    await this.writeAtomic(
+      path.join(this.root, meta.id, "meta.json"),
+      `${JSON.stringify(meta)}\n`,
+    );
+  }
+
+  /**
+   * Backfill IDs for old transcripts and for callers that build messages
+   * directly. The content plus visible position makes legacy IDs repeatable
+   * across loads while preserving explicitly assigned IDs.
+   */
+  private ensureMessageIds(messages: AgentMessage[]): void {
+    const seen = new Set<string>();
+    for (const [index, message] of messages.entries()) {
+      let id = message.id;
+      if (!id || seen.has(id)) {
+        const fingerprint = JSON.stringify({
+          index,
+          role: message.role,
+          content: message.content,
+          ...(message.role === "assistant" ? { toolCalls: message.toolCalls } : {}),
+          ...(message.role === "tool"
+            ? { toolCallId: message.toolCallId, name: message.name, isError: message.isError }
+            : {}),
+        });
+        id = `msg_${createHash("sha256").update(fingerprint).digest("hex").slice(0, 24)}`;
+        let suffix = 1;
+        while (seen.has(id)) id = `${id}-${suffix++}`;
+        message.id = id;
+      }
+      seen.add(id);
+    }
+  }
+
+  private retainMetadata(metas: PersistedSessionMeta[]): {
+    sessions: PersistedSessionMeta[];
+    evictedIds: string[];
+  } {
+    const now = Date.now();
+    const sessions = metas.filter((meta) => now - meta.lastActiveAt <= this.sessionTtlMs);
+    const evictedIds = metas.filter((meta) => !sessions.includes(meta)).map((meta) => meta.id);
+    if (sessions.length > this.maxSessions) {
+      const sorted = [...sessions].sort((a, b) => a.lastActiveAt - b.lastActiveAt);
+      const excess = sorted.slice(0, sessions.length - this.maxSessions);
+      evictedIds.push(...excess.map((meta) => meta.id));
+      return {
+        sessions: sessions.filter((meta) => !excess.includes(meta)),
+        evictedIds,
+      };
+    }
+    return { sessions, evictedIds };
+  }
+
+  private async writeAtomic(filePath: string, contents: string): Promise<void> {
+    const tempPath = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      await writeFile(tempPath, contents, "utf8");
+      await rename(tempPath, filePath);
+    } finally {
+      await rm(tempPath, { force: true }).catch(() => {});
+    }
+  }
+
+  private async withSessionLock<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const directory = path.join(this.root, sessionId);
+    const lockPath = path.join(directory, ".lock");
+    await mkdir(directory, { recursive: true });
+    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    while (true) {
+      try {
+        await mkdir(lockPath);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        try {
+          const lockStat = await stat(lockPath);
+          if (Date.now() - lockStat.mtimeMs > LOCK_STALE_MS) {
+            await rm(lockPath, { recursive: true, force: true });
+            continue;
+          }
+        } catch {
+          // The owner may have released the lock between mkdir and stat.
+        }
+        if (Date.now() >= deadline) {
+          throw new Error(`Timed out waiting for session lock: ${sessionId}`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+      }
+    }
+    try {
+      return await operation();
+    } finally {
+      await rm(lockPath, { recursive: true, force: true }).catch(() => {});
+    }
   }
 }

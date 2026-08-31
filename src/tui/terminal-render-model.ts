@@ -1,5 +1,5 @@
 import type { ChatMessage, TuiState } from "./state.ts";
-import { parseMarkdownLines } from "./markdown-lines.ts";
+import { parseMarkdownLines, stripInlineMarkdown } from "./markdown-lines.ts";
 import { toMessageRenderModel } from "./render-model.ts";
 import type { RenderLine } from "./render-lines.ts";
 import { thinkingRenderLines } from "./thinking-lines.ts";
@@ -8,8 +8,10 @@ import { toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
 import { terminalStringWidth, truncateTerminalPath } from "./terminal-width.ts";
 import { autocompleteRenderLines, panelBottomLine, panelContentLine, panelTopLine, permissionPanelRenderLines, planApprovalRenderLines } from "./terminal-overlay-lines.ts";
 import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
-import { noticeText, noticeTitle, permissionModeLabel, statusLabel, toolArgumentSummary } from "./claude-style.ts";
+import { noticeText, noticeTitle, permissionModeLabel, statusLabel, thinkingLevelLabel, toolArgumentSummary } from "./claude-style.ts";
+import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import { isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from "./subagent-lines.ts";
+import { activityPresentation, formatActivity, loadingGlyph } from "./activity.ts";
 
 export type TerminalRenderOptions = {
   maxMessages?: number;
@@ -39,6 +41,13 @@ export type TerminalRenderOptions = {
   cursor?: number;
   autocomplete?: TerminalAutocompleteState;
   maskInput?: boolean;
+  /** Current clock sample for deterministic activity rendering and tests. */
+  now?: number;
+  /** Active model context window shown in the stable LLM metadata row. */
+  contextWindow?: number;
+  queuedCount?: number;
+  /** Active reasoning level shown in the wide status row. */
+  thinkingLevel?: ModelThinkingLevel;
 };
 
 /**
@@ -157,7 +166,9 @@ export function buildTerminalRenderLines(
       lines.push(...subagentRenderLines(message, index, { width }));
       continue;
     }
-    lines.push({ key: `message-${index}-error`, text: message.text, prefix: "✗ ", style: "error", tone: "error" });
+    // Keep the error marker red while leaving the diagnostic readable. A full
+    // red row becomes visually dominant when a provider returns a long error.
+    lines.push({ key: `message-${index}-error`, text: message.text, prefix: "✗ ", style: "assistant", prefixTone: "error" });
   }
 
   if (state.streamingReasoning) {
@@ -174,7 +185,7 @@ export function buildTerminalRenderLines(
   }
   if (state.streamingText) {
     addMessageGap(lines, state.messages.length + 1);
-    lines.push({ key: "streaming-text", text: state.streamingText, prefix: "⏺ ", style: "assistant", ...(scrollback ? { ephemeral: true } : {}) });
+    lines.push({ key: "streaming-text", text: stripInlineMarkdown(state.streamingText), prefix: "⏺ ", style: "assistant", ...(scrollback ? { ephemeral: true } : {}) });
   }
   const wrappedPanel = width === undefined ? panelLinesAboveBody : panelLinesAboveBody.flatMap((line) => wrapRenderLine(line, width));
   const bodyLines = scrollback ? lines.map((line) => line.tone === "running" ? markEphemeral(line) : line) : lines;
@@ -195,21 +206,43 @@ export function buildTerminalRenderLines(
     });
   }
   if (state.spinnerMessage) footer.push({ key: "spinner", text: state.spinnerMessage, prefix: "✻ ", style: "muted", dim: true });
+  const now = options.now ?? Date.now();
+  const activity = activityPresentation(state, { now, queuedCount: options.queuedCount });
+  if (activity) {
+    const activityPrefix = `${loadingGlyph(now, state.turnStartedAt)} `;
+    const activityWidth = width === undefined ? undefined : Math.max(1, width - terminalStringWidth(activityPrefix));
+    footer.push({
+      key: "activity",
+      text: activityWidth === undefined ? formatActivity(activity) : truncateEnd(formatActivity(activity), activityWidth),
+      prefix: activityPrefix,
+      style: "muted",
+      tone: activity.stalled ? "error" : "running",
+      bold: true,
+    });
+  }
   if (options.includeStatus !== false) {
     const cwd = options.header?.cwd?.trim();
     const mode = permissionModeLabel(state.permissionMode);
     const visibleStatus = statusLabel(state.status, state.busy);
-    const fixedContext = `${state.modelName} · ${mode} · ${visibleStatus}`;
+    const thinking = options.thinkingLevel ? thinkingLevelLabel(options.thinkingLevel) : undefined;
+    const showThinking = Boolean(thinking && (width === undefined || width >= 68));
+    const contextUsage = options.contextWindow
+      ? `Context ${formatCompactNumber(state.contextTokens)}/${formatCompactNumber(options.contextWindow)}`
+      : state.contextTokens > 0
+        ? `Context ${formatCompactNumber(state.contextTokens)}`
+        : undefined;
+    const idleStatus = !state.busy && visibleStatus !== "Ready" ? visibleStatus : undefined;
+    const fixedContext = [state.modelName, mode, ...(showThinking ? [thinking] : []), contextUsage, idleStatus].filter(Boolean).join(" · ");
     const pathBudget = width === undefined || !cwd
       ? undefined
       : Math.max(8, width - terminalStringWidth(fixedContext) - 6);
     const visibleCwd = cwd && pathBudget !== undefined ? truncateTerminalPath(cwd, pathBudget) : cwd;
-    const context = [state.modelName, ...(visibleCwd ? [visibleCwd] : []), mode, visibleStatus].join(" · ");
-    const statusPrefix = state.busy ? "⟳ " : "· ";
+    const context = [state.modelName, ...(visibleCwd ? [visibleCwd] : []), mode, ...(showThinking ? [thinking] : []), contextUsage, idleStatus].filter(Boolean).join(" · ");
+    const statusPrefix = "· ";
     const stableContext = width === undefined
       ? context
       : truncateTail(context, Math.max(1, width - terminalStringWidth(statusPrefix)));
-    footer.push({ key: "status", text: stableContext, prefix: statusPrefix, prefixTone: state.busy ? "running" : "success", style: "muted", dim: true });
+    footer.push({ key: "status", text: stableContext, prefix: statusPrefix, prefixTone: "success", style: "muted", dim: true });
   }
   if (options.promptRule && width !== undefined) {
     footer.push({ key: "prompt-rule", text: "─".repeat(Math.max(1, width)), style: "border", dim: true });
@@ -236,12 +269,26 @@ export function buildTerminalRenderLines(
   const end = Math.max(0, wrappedBody.length - offset);
   const cropStart = Math.max(0, end - bodyHeight);
   const clipped = wrappedBody.slice(cropStart, end);
-  // Keep a stable number of physical rows. Apart from making the prompt feel
-  // fixed to the bottom, this prevents terminal resize and streaming updates
-  // from leaving stale content below a shorter frame. Hidden rows stay hidden;
-  // Claude Code does not replace conversation content with a row-count hint.
-  while (clipped.length < bodyHeight) {
-    clipped.push({ key: `frame-spacer-${clipped.length}`, text: "", style: "muted" });
+  // Keep a stable number of physical rows without splitting the transcript.
+  // Spare rows are inserted into the footer below the live activity so the
+  // prompt remains anchored while message and subagent rows stay together.
+  const padding = Math.max(0, bodyHeight - clipped.length);
+  if (padding > 0) {
+    const spacers = Array.from({ length: padding }, (_, index) => ({
+      key: `frame-spacer-${index}`,
+      text: "",
+      style: "muted" as const,
+    }));
+    // Keep the transcript and the live activity contiguous. The spare rows
+    // belong between activity metadata and the fixed prompt chrome; putting
+    // them before the body makes old history look disconnected from the work
+    // currently happening (especially with multiple subagents).
+    const activityIndex = clippedFooter.findIndex((line) => line.key === "activity");
+    const promptChromeIndex = clippedFooter.findIndex((line) => line.key === "status" || line.key === "prompt-rule" || line.key.startsWith("input-"));
+    const insertAt = activityIndex >= 0
+      ? activityIndex + 1
+      : promptChromeIndex >= 0 ? promptChromeIndex : clippedFooter.length;
+    clippedFooter.splice(insertAt, 0, ...spacers);
   }
   return [...visibleHeader, ...visiblePanel, ...clipped, ...clippedFooter];
 }
@@ -258,6 +305,26 @@ function truncateTail(value: string, maxWidth: number): string {
     used += glyphWidth;
   }
   return `…${suffix}`;
+}
+
+function truncateEnd(value: string, maxWidth: number): string {
+  if (terminalStringWidth(value) <= maxWidth) return value;
+  if (maxWidth <= 1) return "…";
+  let visible = "";
+  let used = 0;
+  for (const grapheme of value) {
+    const glyphWidth = Math.max(1, terminalStringWidth(grapheme));
+    if (used + glyphWidth > maxWidth - 1) break;
+    visible += grapheme;
+    used += glyphWidth;
+  }
+  return `${visible}…`;
+}
+
+function formatCompactNumber(value: number): string {
+  if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1))}m`;
+  if (value >= 1_000) return `${Number((value / 1_000).toFixed(value >= 100_000 ? 0 : 1))}k`;
+  return String(Math.max(0, Math.round(value)));
 }
 
 function addMessageGap(lines: RenderLine[], messageIndex: number | string): void {
@@ -391,7 +458,12 @@ function splitGraphemes(value: string): string[] {
 function markdownLines(text: string, prefix: string): RenderLine[] {
   return parseMarkdownLines(text).map((line, index) => ({
     key: `${prefix}-${index}`,
-    text: line.kind === "rule" ? "─".repeat(48) : line.kind === "heading" ? line.text : line.kind === "list" ? `${line.ordered ? line.marker : "•"} ${line.text}` : line.kind === "quote" ? `│ ${line.text}` : line.text,
+    text: line.kind === "rule" ? "─".repeat(48)
+      : line.kind === "heading" ? stripInlineMarkdown(line.text)
+        : line.kind === "list" ? `${line.ordered ? line.marker : "•"} ${stripInlineMarkdown(line.text)}`
+          : line.kind === "quote" ? `│ ${stripInlineMarkdown(line.text)}`
+            : line.kind === "code" || line.kind === "code-fence" ? line.text
+              : stripInlineMarkdown(line.text),
     style: line.kind === "code" || line.kind === "code-fence" ? "thinking" : line.kind === "heading" ? "assistant" : "assistant",
     indent: line.kind === "list" ? line.indent * 2 : undefined,
     bold: line.kind === "heading",

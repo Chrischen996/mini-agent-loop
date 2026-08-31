@@ -85,8 +85,11 @@ function isScaffoldLine(line: string): boolean {
 /** Keep the title stable and single-line while preserving the user's task. */
 function compactTask(value: string): string {
   const oneLine = value.replace(/\s+/g, " ").trim();
-  if (oneLine.length <= 180) return oneLine;
-  return `${oneLine.slice(0, 177).trimEnd()}…`;
+  // A subagent row is progress chrome, not a second prompt. Keep enough of the
+  // task to identify the worker while leaving room for tool/token stats.
+  const max = 96;
+  if (oneLine.length <= max) return oneLine;
+  return `${oneLine.slice(0, max - 1).trimEnd()}…`;
 }
 
 /** Claude Code-style compact token formatting. */
@@ -141,6 +144,13 @@ function duration(message: SubagentMessage): string {
   return `${(message.durationMs / 1_000).toFixed(1).replace(/\.0$/, "")}s`;
 }
 
+function compactResult(value: string, max = 150): string {
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  const recovered = /^No final assistant summary was produced\.\s*Recovered recent tool output:\s*/i.exec(oneLine);
+  const visible = recovered ? `Recovered: ${oneLine.slice(recovered[0].length)}` : oneLine;
+  return visible.length <= max ? visible : `${visible.slice(0, max - 1).trimEnd()}…`;
+}
+
 /**
  * Project one subagent lifecycle state into Claude Code-style transcript rows.
  * This function is presentation-only: it never changes the agent history or
@@ -166,7 +176,7 @@ export function subagentRenderLines(
       text: `${title} · ${stats(message)}`,
       prefix: marker,
       style: "tool",
-      tone: isError ? "error" : undefined,
+      tone: undefined,
       prefixTone: isError ? "error" : isRunning ? "running" : "success",
       bold: false,
       dim: isRunning,
@@ -179,7 +189,10 @@ export function subagentRenderLines(
     text: `${title} · ${stats(message)}`,
     prefix: marker,
     style: "tool",
-    tone: isError ? "error" : undefined,
+    // Keep the title informational even when the worker failed. The red
+    // marker and status communicate failure; colouring the whole task title
+    // makes a long diagnostic dominate the transcript.
+    tone: undefined,
     prefixTone: isError ? "error" : isRunning ? "running" : "success",
     bold: false,
     dim: isRunning,
@@ -231,10 +244,12 @@ export function subagentRenderLines(
     if (!message.result) return lines;
     lines.push({
       key: `message-${key}-subagent-result`,
-      text: message.result.replace(/\s+/g, " ").trim().slice(0, 200) + (message.result.length > 200 ? "…" : ""),
+      text: compactResult(message.result),
       prefix: "     ",
-      style: isError ? "error" : "muted",
-      tone: isError ? "error" : undefined,
+      // Keep the failure marker/status red; the recovered diagnostic itself is
+      // secondary information and should not paint the whole transcript red.
+      style: "muted",
+      tone: undefined,
       dim: true,
     });
   } else if (!message.expanded || events.length === 0) {

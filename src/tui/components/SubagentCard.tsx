@@ -28,7 +28,7 @@ function lineColor(line: RenderLine): string {
 export function SubagentCard({ msg, width }: { msg: SubagentCallMessage; width?: number }): React.ReactElement {
   const rows = subagentRenderLines(msg, msg.id, { width });
   return (
-    <Box flexDirection="column" marginTop={1} marginBottom={0}>
+    <Box flexDirection="column" marginTop={1} marginBottom={0} width={width} minWidth={0} overflow="hidden">
       {rows.map((line) => (
         <Text
           key={line.key}
@@ -37,7 +37,7 @@ export function SubagentCard({ msg, width }: { msg: SubagentCallMessage; width?:
           bold={line.bold}
           italic={line.italic}
           strikethrough={line.strikethrough}
-          wrap="wrap"
+          wrap="truncate-end"
         >
           {`${" ".repeat(Math.max(0, line.indent ?? 0))}${line.prefix ?? ""}${line.text}`}
         </Text>

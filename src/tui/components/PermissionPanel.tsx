@@ -7,6 +7,7 @@ import { toolVisualName } from "../tool-lines.ts";
 
 type PermissionPanelProps = {
   request: PendingPermissionState;
+  width?: number;
 };
 
 function riskColor(risk: PendingPermissionState["risk"]): string {
@@ -23,26 +24,26 @@ function riskColor(risk: PendingPermissionState["risk"]): string {
  * occupies six terminal rows (2 border rows + 4 content rows) so the feed
  * height budget can reserve it deterministically.
  */
-export function PermissionPanel({ request }: PermissionPanelProps): React.ReactElement {
+export function PermissionPanel({ request, width }: PermissionPanelProps): React.ReactElement {
   const accent = riskColor(request.risk);
   const argument = toolArgumentSummary(request.tool, request.arguments ?? {});
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={accent} paddingX={1}>
-      <Box gap={1}>
-        <Text color={accent} bold>Permission required</Text>
-        <Text color={C.assistant} bold>{toolVisualName(request.tool)}</Text>
+    <Box flexDirection="column" borderStyle="round" borderColor={accent} paddingX={1} width={width} minWidth={0} overflow="hidden">
+      <Box gap={1} minWidth={0}>
+        <Text color={accent} bold wrap="truncate-end">⚠ Permission required</Text>
+        <Text color={C.assistant} bold wrap="truncate-end">{toolVisualName(request.tool)}</Text>
         {argument && <Text color={C.info} wrap="truncate-end">({argument})</Text>}
       </Box>
       <Box gap={1}>
-        <Text color={C.muted} dimColor>Risk: {permissionRiskLabel(request.risk)}</Text>
+        <Text color={C.muted} dimColor wrap="truncate-end">Risk: {permissionRiskLabel(request.risk)}</Text>
       </Box>
       <Box gap={1}>
-        <Text color={C.assistant}>Do you want to proceed?</Text>
+        <Text color={C.assistant} wrap="truncate-end">Do you want to proceed?</Text>
       </Box>
       <Box gap={1}>
-        <Text color={C.selection} bold>❯ Allow</Text>
+        <Text color={C.running} bold>❯ A Allow</Text>
         <Text color={C.muted}>·</Text>
-        <Text color={C.assistant}>Deny</Text>
+        <Text color={C.assistant}>D/Enter Deny</Text>
         <Text color={C.muted}>·</Text>
         <Text color={C.muted}>Esc cancel</Text>
       </Box>

@@ -85,6 +85,22 @@ describe("legacy TUI renderer", () => {
     assert.doesNotMatch(rendered, /internal/);
   });
 
+  it("does not expose inline Markdown markers in legacy assistant output", () => {
+    const lines = buildLegacyFrameLines({
+      history: [{ role: "assistant", content: "**Done** with `npm test`" }],
+      streamingText: "",
+      tools: [],
+      busy: false,
+      input: "",
+      status: "就绪",
+      permissionMode: "plan",
+      thinkingLevel: "off",
+    });
+    const rendered = lines.join("\n");
+    assert.match(rendered, /Done with npm test/);
+    assert.doesNotMatch(rendered, /\*\*|`/);
+  });
+
   it("does not render a completed tool twice while transient state is retained", () => {
     const lines = buildLegacyFrameLines({
       history: [

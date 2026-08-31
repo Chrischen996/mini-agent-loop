@@ -47,6 +47,7 @@ type CommandPaletteProps = {
   selectedIndex: number;
   candidates: CommandDef[];
   maxVisible?: number;
+  width?: number;
 };
 
 function visibleWindow<T>(items: T[], selectedIndex: number, maxVisible: number): { visible: T[]; start: number } {
@@ -55,28 +56,28 @@ function visibleWindow<T>(items: T[], selectedIndex: number, maxVisible: number)
   return { visible: items.slice(start, start + count), start };
 }
 
-export function CommandPalette({ filter, selectedIndex, candidates, maxVisible = 6 }: CommandPaletteProps): React.ReactElement | null {
-  if (candidates.length === 0) return null;
+export function CommandPalette({ filter, selectedIndex, candidates, maxVisible = 6, width }: CommandPaletteProps): React.ReactElement | null {
   const { visible, start } = visibleWindow(candidates, selectedIndex, maxVisible);
 
   return (
-    <Box flexDirection="column" paddingX={2}>
-      <Text dimColor>── Commands /{filter} ──────────────</Text>
+    <Box flexDirection="column" paddingX={2} width={width} minWidth={0} overflow="hidden">
+      <Text dimColor wrap="truncate-end">── Commands /{filter}</Text>
+      {candidates.length === 0 && <Text color={C.running} wrap="truncate-end">No matching commands</Text>}
       {visible.map((cmd, i) => {
         const index = start + i;
         return (
-        <Box key={cmd.name} gap={2}>
-          <Text color={index === selectedIndex ? C.selection : undefined}>
+        <Box key={cmd.name} gap={1} minWidth={0}>
+          <Text color={index === selectedIndex ? C.running : undefined} bold={index === selectedIndex}>
             {index === selectedIndex ? "▶" : " "}
           </Text>
-          <Text color={index === selectedIndex ? C.assistant : C.muted} bold={index === selectedIndex}>
+          <Text color={index === selectedIndex ? C.assistant : C.muted} bold={index === selectedIndex} wrap="truncate-end">
             {cmd.usage}
           </Text>
-          <Text dimColor>{cmd.description}</Text>
+          <Text dimColor wrap="truncate-end">{cmd.description}</Text>
         </Box>
         );
       })}
-      <Text dimColor>Tab/Enter select  ↑↓ navigate  Esc close</Text>
+      <Text dimColor wrap="truncate-end">Tab/Enter select  ↑↓ navigate  Esc close</Text>
     </Box>
   );
 }
@@ -88,33 +89,35 @@ type FileAutocompleteProps = {
   selectedIndex: number;
   prefix: string;
   maxVisible?: number;
+  width?: number;
 };
 
-export function FileAutocomplete({ candidates, selectedIndex, prefix, maxVisible = 8 }: FileAutocompleteProps): React.ReactElement | null {
-  if (candidates.length === 0) return null;
+export function FileAutocomplete({ candidates, selectedIndex, prefix, maxVisible = 8, width }: FileAutocompleteProps): React.ReactElement | null {
   const { visible, start } = visibleWindow(candidates, selectedIndex, maxVisible);
 
   return (
-    <Box flexDirection="column" paddingX={2}>
-      <Text dimColor>── Files {prefix} ──────────────</Text>
+    <Box flexDirection="column" paddingX={2} width={width} minWidth={0} overflow="hidden">
+      <Text dimColor wrap="truncate-end">── Files {prefix}</Text>
+      {candidates.length === 0 && <Text color={C.running} wrap="truncate-end">No matching files</Text>}
       {visible.map((candidate, i) => {
         const index = start + i;
         return (
-        <Box key={candidate} gap={1}>
-          <Text color={index === selectedIndex ? C.selection : undefined}>
+        <Box key={candidate} gap={1} minWidth={0}>
+          <Text color={index === selectedIndex ? C.running : undefined} bold={index === selectedIndex}>
             {index === selectedIndex ? "▶" : " "}
           </Text>
           <Text
             color={index === selectedIndex ? C.assistant : C.muted}
             bold={index === selectedIndex}
+            wrap="truncate-end"
           >
             {candidate}
           </Text>
         </Box>
         );
       })}
-      {candidates.length > visible.length && <Text dimColor>Showing {start + 1}-{start + visible.length} / {candidates.length}</Text>}
-      <Text dimColor>Tab/→ complete  ↑↓ navigate  Esc close</Text>
+      {candidates.length > visible.length && <Text dimColor wrap="truncate-end">Showing {start + 1}-{start + visible.length} / {candidates.length}</Text>}
+      <Text dimColor wrap="truncate-end">Tab/→ complete  ↑↓ navigate  Esc close</Text>
     </Box>
   );
 }
@@ -126,6 +129,7 @@ type ModelPickerProps = {
   query: string;
   current: string;
   maxVisible?: number;
+  width?: number;
 };
 
 export function formatContextWindow(value: number): string {
@@ -134,30 +138,30 @@ export function formatContextWindow(value: number): string {
   return String(value);
 }
 
-export function ModelPicker({ candidates, contextWindows, selectedIndex, query, current, maxVisible = 12 }: ModelPickerProps): React.ReactElement | null {
+export function ModelPicker({ candidates, contextWindows, selectedIndex, query, current, maxVisible = 12, width }: ModelPickerProps): React.ReactElement | null {
   const pageSize = Math.max(1, maxVisible);
   const start = Math.max(0, Math.min(selectedIndex - pageSize + 1, candidates.length - pageSize));
   const visible = candidates.slice(start, start + pageSize);
   return (
-    <Box flexDirection="column" paddingX={2}>
-      <Text dimColor>── Models {query || "all"} ──────────────</Text>
-      {visible.length === 0 && <Text color={C.running}>No matching models</Text>}
+    <Box flexDirection="column" paddingX={2} width={width} minWidth={0} overflow="hidden">
+      <Text dimColor wrap="truncate-end">── Models {query || "all"}</Text>
+      {visible.length === 0 && <Text color={C.running} wrap="truncate-end">No matching models</Text>}
       {visible.map((model, i) => {
         const index = start + i;
         return (
-        <Box key={model} gap={1}>
-          <Text color={index === selectedIndex ? C.selection : undefined}>{index === selectedIndex ? "▶" : " "}</Text>
-          <Text color={index === selectedIndex ? C.assistant : C.muted} bold={index === selectedIndex}>
+        <Box key={model} gap={1} minWidth={0}>
+          <Text color={index === selectedIndex ? C.running : undefined} bold={index === selectedIndex}>{index === selectedIndex ? "▶" : " "}</Text>
+          <Text color={index === selectedIndex ? C.assistant : C.muted} bold={index === selectedIndex} wrap="truncate-end">
             {model === current ? "✓ " : "  "}{model}
           </Text>
-          <Text dimColor>{formatContextWindow(contextWindows[model] ?? 0)} context</Text>
+          <Text dimColor wrap="truncate-end">{formatContextWindow(contextWindows[model] ?? 0)} context</Text>
         </Box>
         );
       })}
       {candidates.length > pageSize && (
-        <Text dimColor>Showing {start + 1}-{Math.min(start + pageSize, candidates.length)} / {candidates.length}</Text>
+        <Text dimColor wrap="truncate-end">Showing {start + 1}-{Math.min(start + pageSize, candidates.length)} / {candidates.length}</Text>
       )}
-      <Text dimColor>Enter select  ↑↓ navigate  Esc cancel</Text>
+      <Text dimColor wrap="truncate-end">Enter select  ↑↓ navigate  Esc cancel</Text>
     </Box>
   );
 }

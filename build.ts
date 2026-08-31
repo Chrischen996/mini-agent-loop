@@ -1,11 +1,16 @@
 import { build } from "vite";
-import { nodeResolve } from "@vitejs/plugin-node";
+import { nodeResolve } from "@rollup/plugin-node-resolve";
 import { builtinModules } from "module";
+
+const nodeBuiltins = new Set(
+  builtinModules.flatMap((name) => [name, `node:${name}`]),
+);
 
 await build({
   configFile: false,
   logLevel: "info",
   build: {
+    ssr: true,
     target: "node22",
     outDir: "dist",
     chunkSizeLimit: 100000,
@@ -17,12 +22,11 @@ await build({
         format: "esm",
         preserveModules: false,
       },
-      external: [
-        "react",
-        "react-dom",
-        "ink",
-        ...builtinModules,
-      ],
+      external: (id) =>
+        id === "react" ||
+        id === "react-dom" ||
+        id === "ink" ||
+        nodeBuiltins.has(id),
     },
     minify: process.env.NODE_ENV === "production",
   },

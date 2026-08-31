@@ -459,6 +459,20 @@ export function createAgentHistory(
   return [{ role: "system", content: prompt }];
 }
 
+/**
+ * Rebuild the base prompt for a resumed session without dropping compacted
+ * summaries or other transcript-level system messages.
+ */
+export function restoreAgentHistory(
+  initialMessages: AgentMessage[],
+  systemPrompt: string,
+): AgentMessage[] {
+  const [first, ...rest] = initialMessages;
+  return first?.role === "system"
+    ? [{ ...first, content: systemPrompt }, ...rest]
+    : [{ role: "system", content: systemPrompt }, ...initialMessages];
+}
+
 /** Get the default system prompt for a given permission mode. */
 export function getDefaultSystemPrompt(mode?: PermissionMode, agentsMd?: string, memorySection?: string): string {
   return buildSystemPrompt(mode, agentsMd, memorySection);
@@ -561,12 +575,9 @@ export async function runAgentLoop(
   if (turnOptions._parentHistory) {
     history = inheritHistoryWithPrompt(turnOptions._parentHistory, prompt);
   } else if (initialMessages && initialMessages.length > 0) {
-    // Resumed session: rebuild the system prompt (it may have changed between
-    // runs) and keep the restored conversation after it.
-    const [first, ...rest] = initialMessages;
-    history = first?.role === "system"
-      ? [{ ...first, content: prompt }, ...rest]
-      : [{ role: "system", content: prompt }, ...initialMessages];
+    // Resumed session: rebuild the base prompt while retaining transcript
+    // system messages such as compacted conversation summaries.
+    history = restoreAgentHistory(initialMessages, prompt);
   } else {
     history = createAgentHistory(prompt, activePermissionMode);
   }

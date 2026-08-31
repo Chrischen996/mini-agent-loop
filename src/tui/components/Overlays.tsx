@@ -21,6 +21,7 @@ export type OverlaysProps = {
   pendingProfileSetup?: PendingProfileSetup | null;
   profileListState?: ProfileListState | null;
   pickerItemRows: number;
+  width?: number;
 };
 
 export function Overlays({
@@ -38,8 +39,13 @@ export function Overlays({
   pendingProfileSetup,
   profileListState,
   pickerItemRows,
+  width,
 }: OverlaysProps): React.ReactElement | null {
   if (!acMode) return null;
+  // A very short terminal may have no spare picker rows. Keep the prompt and
+  // status chrome visible instead of letting a zero-budget overlay push them
+  // off the frame.
+  if (pickerItemRows <= 0 && ["command", "file", "model", "model-picker"].includes(acMode)) return null;
 
   if (acMode === "command") {
     return (
@@ -48,6 +54,7 @@ export function Overlays({
         selectedIndex={acIndex}
         candidates={cmdCandidates}
         maxVisible={pickerItemRows}
+        width={width}
       />
     );
   }
@@ -59,6 +66,7 @@ export function Overlays({
         selectedIndex={acIndex}
         prefix={fileFragment}
         maxVisible={pickerItemRows}
+        width={width}
       />
     );
   }
@@ -72,29 +80,30 @@ export function Overlays({
         query={modelQuery}
         current={currentModel}
         maxVisible={pickerItemRows}
+        width={width}
       />
     );
   }
 
   if (acMode === "model-setup" && modelSetup) {
     return (
-      <Box flexDirection="column" paddingX={2}>
-        <Text color={C.primary} bold>── Configure model ──</Text>
-        <Text>Model: {modelSetup.model.provider}/{modelSetup.model.id}</Text>
-        <Text dimColor>Base URL: {modelSetup.field === "baseUrl" ? "editing" : modelSetup.baseUrl}</Text>
-        <Text dimColor>API key: {modelSetup.field === "apiKey" ? "editing" : "set"}</Text>
-        {modelSetup.error && <Text color={C.error}>{modelSetup.error}</Text>}
-        <Text dimColor>Enter confirm field, Esc cancel</Text>
+      <Box flexDirection="column" paddingX={2} width={width} minWidth={0}>
+        <Text color={C.primary} bold wrap="truncate-end">⚙ Configure model</Text>
+        <Text wrap="truncate-end">Model: {modelSetup.model.provider}/{modelSetup.model.id}</Text>
+        <Text dimColor wrap="truncate-end">Base URL: {modelSetup.field === "baseUrl" ? "editing" : modelSetup.baseUrl}</Text>
+        <Text dimColor wrap="truncate-end">API key: {modelSetup.field === "apiKey" ? "editing" : "set"}</Text>
+        {modelSetup.error && <Text color={C.error} wrap="truncate-end">{modelSetup.error}</Text>}
+        <Text dimColor wrap="truncate-end">Enter confirm field  ·  Esc cancel</Text>
       </Box>
     );
   }
 
   if (acMode === "profile-name" && pendingProfileSetup) {
     return (
-      <Box flexDirection="column" paddingX={2}>
-        <Text color={C.primary} bold>── Save model profile ──</Text>
-        <Text>Model: {pendingProfileSetup.model.provider}/{pendingProfileSetup.model.id}</Text>
-        <Text dimColor>Type a profile name (Enter save, Esc skip):</Text>
+      <Box flexDirection="column" paddingX={2} width={width} minWidth={0}>
+        <Text color={C.primary} bold wrap="truncate-end">▣ Save model profile</Text>
+        <Text wrap="truncate-end">Model: {pendingProfileSetup.model.provider}/{pendingProfileSetup.model.id}</Text>
+        <Text dimColor wrap="truncate-end">Type a profile name  ·  Enter save  ·  Esc skip</Text>
       </Box>
     );
   }
@@ -107,13 +116,13 @@ export function Overlays({
     ));
     const visible = profileListState.profiles.slice(start, start + count);
     return (
-      <Box flexDirection="column" paddingX={2}>
-        <Text color={C.primary} bold>── Model profiles ──</Text>
-        {profileListState.profiles.length === 0 && <Text dimColor>No saved profiles</Text>}
+      <Box flexDirection="column" paddingX={2} width={width} minWidth={0}>
+        <Text color={C.primary} bold wrap="truncate-end">▣ Model profiles</Text>
+        {profileListState.profiles.length === 0 && <Text dimColor wrap="truncate-end">No saved profiles</Text>}
         {visible.map((profile, visibleIndex) => {
           const index = start + visibleIndex;
           return (
-            <Text key={profile.name} color={index === profileListState.selectedIndex ? C.selection : undefined}>
+            <Text key={profile.name} color={index === profileListState.selectedIndex ? C.assistant : C.muted} wrap="truncate-end">
               {index === profileListState.selectedIndex ? "▶ " : "  "}
               {profile.active ? "✓ " : "  "}
               {profile.name} ({profile.model}) — {profile.baseUrl}
@@ -121,9 +130,9 @@ export function Overlays({
           );
         })}
         {profileListState.profiles.length > visible.length && (
-          <Text dimColor>Showing {start + 1}-{start + visible.length} / {profileListState.profiles.length}</Text>
+          <Text dimColor wrap="truncate-end">Showing {start + 1}-{start + visible.length} / {profileListState.profiles.length}</Text>
         )}
-        <Text dimColor>↑↓ select, Enter activate, Esc cancel, /profiles delete &lt;name&gt;</Text>
+        <Text dimColor wrap="truncate-end">↑↓ select  ·  Enter activate  ·  Esc cancel  ·  /profiles delete &lt;name&gt;</Text>
       </Box>
     );
   }

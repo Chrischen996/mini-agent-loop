@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import {
   applyPermissionModePrompt,
   createAgentHistory,
+  restoreAgentHistory,
   MaxTurnsExceededError,
   runAgentLoop,
   runAgentTurn,
@@ -41,6 +42,25 @@ const dummyLlm = makeLlmConfig({
 });
 
 describe("runAgentLoop", () => {
+  it("replaces only the base prompt when restoring a compacted history", () => {
+    const summary = {
+      role: "system" as const,
+      content: "[Conversation summary - older messages were compacted to fit the context window]\nkeep this\n[End conversation summary]",
+    };
+    const restored = restoreAgentHistory(
+      [
+        { role: "system", content: "old system" },
+        summary,
+        { role: "user", content: "continue" },
+      ],
+      "new system",
+    );
+
+    assert.equal(restored[0]?.content, "new system");
+    assert.equal(restored[1], summary);
+    assert.equal(restored[2]?.content, "continue");
+  });
+
   it("emits todo_updated without adding a visible TodoWrite result to the model contract", async () => {
     let calls = 0;
     const events: import("../src/loop.ts").LoopEvent[] = [];
