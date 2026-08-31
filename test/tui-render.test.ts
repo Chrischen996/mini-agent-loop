@@ -85,6 +85,26 @@ describe("legacy TUI renderer", () => {
     assert.doesNotMatch(rendered, /internal/);
   });
 
+  it("does not render a completed tool twice while transient state is retained", () => {
+    const lines = buildLegacyFrameLines({
+      history: [
+        { role: "user", content: "list files" },
+        { role: "tool", toolCallId: "call-1", name: "bash", content: "file.txt" },
+      ],
+      streamingText: "",
+      tools: [{ id: "call-1", name: "bash", status: "done", preview: "file.txt" }],
+      busy: false,
+      input: "",
+      status: "就绪",
+      permissionMode: "plan",
+      thinkingLevel: "off",
+    });
+
+    const rendered = lines.join("\n");
+    assert.equal((rendered.match(/Bash/g) ?? []).length, 1);
+    assert.equal((rendered.match(/file\.txt/g) ?? []).length, 1);
+  });
+
   it("updates frames without clearing the entire terminal", () => {
     const output = buildLegacyFrameOutput(["header", "thinking"], 2);
     assert.equal(output.includes("\x1b[2J"), false);

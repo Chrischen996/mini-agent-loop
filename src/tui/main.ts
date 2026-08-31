@@ -77,8 +77,8 @@ type TuiState = LegacyTuiState & {
 let previousFrameRowCount = 0;
 
 function render(state: TuiState): void {
-  const lines = buildLegacyFrameLines(state);
   const columns = process.stdout.columns || 80;
+  const lines = buildLegacyFrameLines(state, columns);
   process.stdout.write(buildLegacyFrameOutput(lines, previousFrameRowCount, columns));
   process.stdout.write(buildLegacyCursorOutput(lines, state, columns));
   previousFrameRowCount = buildLegacyFrameRowCount(lines, columns);
@@ -178,8 +178,8 @@ async function main(): Promise<void> {
   const sessionStore = new SessionStore(path.join(getDataRoot(), "sessions"));
   const sessionId = randomUUID();
   const memoryStore = new MemoryStore(path.join(getDataRoot(), "memory", "records.json"));
-  const buildTuiHistory = async (): Promise<AgentMessage[]> => {
-    const base = createAgentHistory(undefined, state.permissionMode);
+  const buildTuiHistory = async (permissionMode: PermissionMode): Promise<AgentMessage[]> => {
+    const base = createAgentHistory(undefined, permissionMode);
     if (!isAutoMemoryEnabled()) return base;
     try {
       const section = await memoryStore.buildSystemMemoryPrompt();
@@ -214,7 +214,7 @@ async function main(): Promise<void> {
   };
 
   const state: TuiState = {
-    history: await buildTuiHistory(),
+    history: await buildTuiHistory("plan"),
     streamingText: "",
     tools: [],
     busy: false,
@@ -235,7 +235,7 @@ async function main(): Promise<void> {
     if (mostRecent) {
       const restored = await sessionStore.load(mostRecent.id);
       if (restored && restored.messages.length > 0) {
-        const base = await buildTuiHistory();
+        const base = await buildTuiHistory(state.permissionMode);
         state.history = [
           ...base,
           ...restored.messages.filter((message) => message.role !== "system"),
@@ -392,7 +392,7 @@ async function main(): Promise<void> {
     if (!text || state.busy) return;
     if (text === "/exit" || text === "/quit") return quit();
     if (text === "/clear") {
-      state.history = await buildTuiHistory();
+      state.history = await buildTuiHistory(state.permissionMode);
       state.tools = [];
       state.status = "已清空会话";
       state.todoItems = undefined;
@@ -430,7 +430,7 @@ async function main(): Promise<void> {
         render(state);
         return;
       }
-      const base = await buildTuiHistory();
+      const base = await buildTuiHistory(state.permissionMode);
       state.history = [
         ...base,
         ...restoredSession.messages.filter((message) => message.role !== "system"),
