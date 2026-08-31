@@ -907,6 +907,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     todoVersion: session.todoVersion,
     parentSessionId: session.parentSessionId,
     forkedFromMessage: session.forkedFromMessage,
+    forkedFromMessageId: session.forkedFromMessageId,
   });
   const saveSession = async (session: Session): Promise<void> => {
     session.lastActiveAt = Date.now();
@@ -952,6 +953,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         todoVersion: persisted.todoVersion ?? 0,
         parentSessionId: persisted.parentSessionId,
         forkedFromMessage: persisted.forkedFromMessage,
+        forkedFromMessageId: persisted.forkedFromMessageId,
       };
       // Restore the model choice first, then apply the persisted effort level
       // even when the session stayed on the server default model.
@@ -1533,6 +1535,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         busy: isSessionBusy(session),
         parentSessionId: session.parentSessionId ?? null,
         forkedFromMessage: session.forkedFromMessage ?? null,
+        forkedFromMessageId: session.forkedFromMessageId ?? null,
         messageCount: visibleMessageCount(session.messages),
         modelId: session.modelId,
         thinkingLevel: session.thinkingLevel ?? (session.llmOverride ?? options.llm).thinkingLevel ?? "off",
@@ -1573,15 +1576,13 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(404).json({ error: "Session not found" });
       return;
     }
-    const requestedIndex = request.body?.messageIndex;
     const visibleMessages = parent.messages.filter((message) => message.role !== "system");
-    const messageIndex = requestedIndex === undefined
-      ? visibleMessages.length
-      : Number(requestedIndex);
-    if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex > visibleMessages.length) {
-      response.status(400).json({ error: `messageIndex must be an integer between 0 and ${visibleMessages.length}` });
+    const boundary = resolveMessageBoundary(visibleMessages, request.body, true);
+    if ("error" in boundary) {
+      response.status(400).json({ error: boundary.error });
       return;
     }
+    const messageIndex = boundary.messageIndex;
     const lease = reserveSession(parent, "fork");
     if (!lease) {
       response.status(409).json({ error: "Session is busy" });
@@ -1590,6 +1591,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     try {
       const messages = truncateSessionMessages(parent.messages, messageIndex);
       const safeMessageIndex = visibleMessageCount(messages);
+      const forkedFromMessageId = messageIdAtBoundary(messages, safeMessageIndex);
       const id = randomUUID();
       const child: Session = {
         id,
@@ -1605,6 +1607,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         todoVersion: parent.todoVersion,
         parentSessionId: parent.id,
         forkedFromMessage: safeMessageIndex,
+        forkedFromMessageId,
         skillNames: [...(parent.skillNames ?? [])],
       };
       sessions.set(id, child);
@@ -1614,6 +1617,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         id,
         parentSessionId: parent.id,
         forkedFromMessage: safeMessageIndex,
+        forkedFromMessageId: forkedFromMessageId ?? null,
         createdAt: child.createdAt,
         messageCount: safeMessageIndex,
       });
@@ -1629,11 +1633,12 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     const visibleMessages = session.messages.filter((message) => message.role !== "system");
-    const messageIndex = Number(request.body?.messageIndex);
-    if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex > visibleMessages.length) {
-      response.status(400).json({ error: `messageIndex must be an integer between 0 and ${visibleMessages.length}` });
+    const boundary = resolveMessageBoundary(visibleMessages, request.body, false);
+    if ("error" in boundary) {
+      response.status(400).json({ error: boundary.error });
       return;
     }
+    const messageIndex = boundary.messageIndex;
     const lease = reserveSession(session, "rewind");
     if (!lease) {
       response.status(409).json({ error: "Session is busy" });
@@ -1643,7 +1648,12 @@ export function createAgentServer(options: AgentServerOptions): Express {
       session.messages = truncateSessionMessages(session.messages, messageIndex);
       const safeMessageIndex = visibleMessageCount(session.messages);
       await saveSession(session);
-      response.json({ id: session.id, messageIndex: safeMessageIndex, messageCount: safeMessageIndex });
+      response.json({
+        id: session.id,
+        messageIndex: safeMessageIndex,
+        messageId: messageIdAtBoundary(session.messages, safeMessageIndex) ?? null,
+        messageCount: safeMessageIndex,
+      });
     } finally {
       releaseSession(session, lease);
     }
@@ -1655,6 +1665,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       createdAt: session.createdAt,
       parentSessionId: session.parentSessionId ?? null,
       forkedFromMessage: session.forkedFromMessage ?? null,
+      forkedFromMessageId: session.forkedFromMessageId ?? null,
       messageCount: visibleMessageCount(session.messages),
       busy: isSessionBusy(session),
       children: [] as string[],
@@ -2450,6 +2461,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       thinkingMode: session.thinkingMode ?? loadThinkingModeFromEnv(),
       parentSessionId: session.parentSessionId ?? null,
       forkedFromMessage: session.forkedFromMessage ?? null,
+      forkedFromMessageId: session.forkedFromMessageId ?? null,
       permissionMode: session.permissionManager.getMode(),
       planStatus,
       model: effectiveLlm.model,

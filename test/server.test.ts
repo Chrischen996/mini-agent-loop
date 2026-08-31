@@ -238,6 +238,71 @@ describe("agent server", () => {
     assert.doesNotMatch(history.text, /must-not-leak/);
   });
 
+  it("supports stable message IDs for fork and rewind while keeping index compatibility", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-server-message-ids-"));
+    try {
+      const app = createAgentServer({
+        llm,
+        tools: [],
+        dataDir,
+        chat: async (_config, messages) => ({
+          role: "assistant",
+          content: `reply ${messages.filter((message) => message.role === "user").length}`,
+        }),
+      });
+      const created = await request(app).post("/api/sessions");
+      const sessionId = (created.body as { id: string }).id;
+
+      await request(app).post(`/api/sessions/${sessionId}/messages`).field("prompt", "first");
+      await request(app).post(`/api/sessions/${sessionId}/messages`).field("prompt", "second");
+
+      const history = await request(app).get(`/api/sessions/${sessionId}`);
+      const messages = (history.body as { messages: Array<{ id?: string; role: string; content: string }> }).messages;
+      assert.equal(messages.every((message) => typeof message.id === "string" && message.id.length > 0), true);
+      const firstUser = messages.find((message) => message.role === "user" && message.content === "first");
+      const firstAssistant = messages.find((message) => message.role === "assistant" && message.content === "reply 1");
+      assert.ok(firstUser?.id);
+      assert.ok(firstAssistant?.id);
+
+      const forked = await request(app)
+        .post(`/api/sessions/${sessionId}/fork`)
+        .send({ messageId: firstAssistant.id });
+      assert.equal(forked.status, 201);
+      assert.equal((forked.body as { forkedFromMessage: number }).forkedFromMessage, 2);
+      assert.equal((forked.body as { forkedFromMessageId: string }).forkedFromMessageId, firstAssistant.id);
+      const forkHistory = await request(app).get(`/api/sessions/${(forked.body as { id: string }).id}`);
+      assert.deepEqual(
+        (forkHistory.body as { messages: Array<{ role: string; content: string }> }).messages.map((message) => message.content),
+        ["first", "reply 1"],
+      );
+
+      const rewound = await request(app)
+        .post(`/api/sessions/${sessionId}/rewind`)
+        .send({ messageId: firstUser.id });
+      assert.equal(rewound.status, 200);
+      assert.equal((rewound.body as { messageId: string }).messageId, firstUser.id);
+      const afterRewind = await request(app).get(`/api/sessions/${sessionId}`);
+      assert.deepEqual(
+        (afterRewind.body as { messages: Array<{ role: string; content: string }> }).messages.map((message) => message.content),
+        ["first"],
+      );
+
+      const indexedFork = await request(app)
+        .post(`/api/sessions/${sessionId}/fork`)
+        .send({ messageIndex: 0 });
+      assert.equal(indexedFork.status, 201);
+      assert.equal((indexedFork.body as { forkedFromMessage: number }).forkedFromMessage, 0);
+
+      const conflict = await request(app)
+        .post(`/api/sessions/${sessionId}/rewind`)
+        .send({ messageId: firstUser.id, messageIndex: 1 });
+      assert.equal(conflict.status, 400);
+      assert.match(conflict.text, /mutually exclusive/);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("binds todo updates to sessions, persists them, and inherits them on fork", async () => {
     const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-server-todos-"));
     const seenToolNames: string[][] = [];

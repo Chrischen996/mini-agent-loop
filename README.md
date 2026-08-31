@@ -510,6 +510,14 @@ PUT    /api/sessions/:id/permission-mode  { mode: plan|bypass }
 POST   /api/sessions/:id/permissions/:requestId  { decision: allow|deny }
 DELETE /api/sessions/:id
 POST   /api/sessions/:id/messages  multipart(prompt, referencedPaths, images) -> NDJSON stream
+POST   /api/sessions/:id/fork     { messageId? | messageIndex? } -> new session
+POST   /api/sessions/:id/rewind   { messageId? | messageIndex } -> truncated session
+GET    /api/sessions/tree         session fork tree
+
+Session detail messages include stable `id` values. `messageId` retains the
+selected message and everything before it; `messageIndex` remains supported
+for clients using the original count-based API. Truncation never leaves a
+partial assistant tool-call block.
 
 # Per-session plan workflow (stored under dataDir/session-plans/:id)
 GET    /api/sessions/:id/plan

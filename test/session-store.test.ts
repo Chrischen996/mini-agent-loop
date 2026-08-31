@@ -103,11 +103,13 @@ describe("SessionStore", () => {
         createdAt: Date.now(),
         parentSessionId: "parent-session",
         forkedFromMessage: 3,
+        forkedFromMessageId: "msg-parent-3",
         messages: [],
       });
       const restored = await store.loadAll();
       assert.equal(restored.get("child-session")?.parentSessionId, "parent-session");
       assert.equal(restored.get("child-session")?.forkedFromMessage, 3);
+      assert.equal(restored.get("child-session")?.forkedFromMessageId, "msg-parent-3");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -222,9 +224,9 @@ describe("SessionStore", () => {
       assert.ok(lines.length < 5, `expected compaction, got ${lines.length} lines`);
       // The surviving snapshot must be the latest state.
       const restored = await new SessionStore(root).loadAll();
-      assert.deepEqual(restored.get(session.id)?.messages, [
-        { role: "user", content: "v5" },
-      ]);
+      assert.equal(restored.get(session.id)?.messages[0]?.role, "user");
+      assert.equal(restored.get(session.id)?.messages[0]?.content, "v5");
+      assert.match(restored.get(session.id)?.messages[0]?.id ?? "", /^msg_[a-f0-9]{24}$/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

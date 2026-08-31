@@ -634,7 +634,9 @@ async function main(): Promise<void> {
       // Fork: keep old messages under a fresh session id.
       resumedSessionId = randomUUID();
       restored.parentSessionId = restored.id;
-      restored.forkedFromMessage = restored.messages.length;
+      const visibleMessages = restored.messages.filter((message) => message.role !== "system");
+      restored.forkedFromMessage = visibleMessages.length;
+      restored.forkedFromMessageId = visibleMessages.at(-1)?.id;
       restored.id = resumedSessionId;
       await sessionStore.create(restored);
       console.error(`[session] forked from ${targetId} as ${resumedSessionId}`);
