@@ -50,6 +50,28 @@ describe("SessionStore", () => {
     }
   });
 
+  it("does not bypass TTL when loading an explicit session id", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-explicit-ttl-"));
+    try {
+      const store = new SessionStore(root, { sessionTtlMs: 1_000 });
+      const stale = {
+        id: "expired-explicit",
+        createdAt: Date.now() - 2_000,
+        messages: [{ role: "user" as const, content: "stale" }],
+      };
+      await store.create(stale);
+      await store.compact({ ...stale, lastActiveAt: Date.now() - 2_000 });
+
+      assert.equal(await store.load("expired-explicit"), undefined);
+      await assert.rejects(
+        readFile(path.join(root, "expired-explicit", "events.jsonl")),
+        /ENOENT/,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("evicts oldest sessions when exceeding maxSessions", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-max-"));
     try {
@@ -254,6 +276,22 @@ describe("SessionStore", () => {
     }
   });
 
+  it("rejects unsafe session ids before touching the filesystem", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-id-validation-"));
+    try {
+      const store = new SessionStore(root);
+      const unsafe = { id: "../outside", createdAt: Date.now(), messages: [] };
+
+      await assert.rejects(store.save(unsafe), /Invalid session id/);
+      await assert.rejects(store.create(unsafe), /Invalid session id/);
+      await assert.rejects(store.remove("../outside"), /Invalid session id/);
+      await assert.rejects(store.compact(unsafe), /Invalid session id/);
+      assert.equal(await store.load("../outside"), undefined);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("lists sessions most-recently-active first with previews", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-list-"));
     try {
@@ -381,6 +419,24 @@ describe("SessionStore", () => {
         .filter(Boolean);
       assert.equal(lines.length, 4);
       assert.ok(["first", "second"].includes((await new SessionStore(root).load(session.id))?.messages[0]?.content as string));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps create() from appending a second session_created event", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-create-once-"));
+    try {
+      const store = new SessionStore(root);
+      const session = { id: "create-once", createdAt: Date.now(), messages: [] };
+      await store.create(session);
+      await assert.rejects(store.create(session), /Session already exists/);
+
+      const events = (await readFile(path.join(root, session.id, "events.jsonl"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { type: string });
+      assert.equal(events.filter((event) => event.type === "session_created").length, 1);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

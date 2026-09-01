@@ -1,5 +1,4 @@
 import process from "node:process";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createSandboxRunner } from "../sandbox/index.ts";
@@ -13,7 +12,7 @@ import { createVisionPreprocessor, loadVisionConfigFromEnv } from "../preprocess
 import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 import { applySkillCommand, discoverWorkspaceSkills, loadSkillNamesFromEnv, defaultSkillRegistry } from "../skills/index.ts";
 import { PermissionManager } from "../permissions.ts";
-import { applyPermissionModePrompt, createAgentHistory, restoreAgentHistory, type AgentRuntimeRef } from "../loop.ts";
+import { applyPermissionModePrompt, createAgentHistory, type AgentRuntimeRef } from "../loop.ts";
 import { cycleThinkingLevel, thinkingLevelToDisplay, withThinkingLevel } from "../think-intensity.ts";
 import { nextPermissionMode, switchPermissionMode } from "./permission-utils.ts";
 import { executeTodoCommand, parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
@@ -37,12 +36,15 @@ import { loadImageAttachment } from "./image-attachments.ts";
 import { formatCopyResultNotice, parseCopyCommand, resolveCopyTarget } from "./copy-text.ts";
 import { writeClipboardText } from "./clipboard.ts";
 import { finalizeExecCapture, finalizePlanCapture, parsePlanTurnOverride } from "./plan-commands.ts";
-import { SessionStore, getDataRoot, type PersistedSession } from "../session-store.ts";
+import { SessionStore, type PersistedSession, type PersistedSessionMeta } from "../session-store.ts";
+import { SessionManager } from "../session-manager.ts";
 import type { AgentMessage } from "../types.ts";
+import { formatAmbiguousSessionNotice, getStartupSessionRequest, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
 import { adaptHistoryForModel } from "../message-adapter.ts";
 import { activateProfile, listProfiles, loadProfileStore, removeProfile, saveProfile } from "../profile-store.ts";
 import { parseModelCommand, shouldSubmitTypedModelCommand } from "./model-command.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
+import { TUI_BRAND_NAME, TUI_BRAND_VERSION } from "./brand.ts";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 
 const ALTERNATE_SCREEN = "\x1b[?1049h";
@@ -64,44 +66,55 @@ export async function runTerminalMain(): Promise<void> {
   const vision = loadVisionConfigFromEnv();
   const autoSubagent = loadAutoSubagentOptionsFromEnv();
   await discoverWorkspaceSkills(cwd).catch(() => undefined);
-  const skillNames = loadSkillNamesFromEnv();
+  let activeSkillNames = loadSkillNamesFromEnv();
   const store = createTuiStore(createInitialState(activeLlm.model));
   const permissionManager = new PermissionManager("plan");
-  const sessionStore = new SessionStore(path.join(getDataRoot(), "sessions"), { workspaceId: cwd });
-  let activeSessionId = process.env.MINI_AGENT_SESSION_ID ?? randomUUID();
+  const startup = getStartupSessionRequest();
+  const startupSessionId = startup.sessionId;
+  const sessionManager = new SessionManager({
+    workspaceId: cwd,
+  });
+  let activeSessionId = sessionManager.sessionId;
   const sessionRef = { current: activeSessionId };
   let initialHistory: AgentMessage[] = createAgentHistory(undefined, permissionManager.getMode());
   let restoredSession: PersistedSession | undefined;
   try {
     let target: PersistedSession | undefined;
-    if (process.env.MINI_AGENT_SESSION_ID) {
-      target = await sessionStore.load(process.env.MINI_AGENT_SESSION_ID);
-    } else {
-      const metas = await sessionStore.listSessions();
-      const mostRecent = metas[0];
-      if (mostRecent) target = await sessionStore.load(mostRecent.id);
+    const startupSelection = startup.resume
+      ? resolveSessionByPrefix(
+          await sessionManager.list(),
+          startupSessionId ?? "",
+        )
+      : { candidates: [] };
+    if (!startupSelection.session && startupSelection.candidates.length > 1) {
+      store.dispatch({
+        type: "ADD_NOTICE",
+        title: "恢复会话",
+        text: formatAmbiguousSessionNotice(startupSessionId ?? "", startupSelection.candidates),
+      });
     }
+    target = startupSelection.session
+      ? await sessionManager.load(startupSelection.session.id)
+      : undefined;
+    if (target && startup.fork) target = await sessionManager.fork(target.id);
     if (target && target.messages.length > 0) {
       restoredSession = target;
       activeSessionId = target.id;
       sessionRef.current = target.id;
+      sessionManager.setSessionId(target.id);
       const mode = target.permissionMode ?? permissionManager.getMode();
       permissionManager.setMode(mode);
-      if (target.modelId && target.modelId !== activeLlm.model) {
-        try {
-          activeLlm = switchLlmModel(activeLlm, target.modelId);
-        } catch {
-          // A restored model may no longer have credentials; keep the current
-          // environment-backed model while still restoring the conversation.
-        }
-      }
-      if (target.thinkingLevel) {
-        activeLlm = withThinkingLevel(activeLlm, target.thinkingLevel);
-      }
+      activeLlm = restoreLlmConfig(activeLlm, target);
       if (target.thinkingMode) activeThinkingMode = target.thinkingMode;
+      if (target.skillNames) activeSkillNames = [...target.skillNames];
       const baseHistory = createAgentHistory(undefined, mode);
       const systemPrompt = typeof baseHistory[0]?.content === "string" ? baseHistory[0].content : "";
-      initialHistory = restoreAgentHistory(target.messages, systemPrompt);
+      const restoredState = restoreTuiSession(
+        target,
+        systemPrompt,
+        (session, prompt) => sessionManager.restoreHistory(session, prompt),
+      );
+      initialHistory = restoredState.history;
       store.dispatch({
         type: "RESTORE_SESSION",
         history: initialHistory,
@@ -109,14 +122,8 @@ export async function runTerminalMain(): Promise<void> {
         modelName: activeLlm.model,
         phase: target.phase,
         currentPlan: target.currentPlan,
-        todos: target.todos?.map((item) => ({
-          id: item.id,
-          content: item.content,
-          activeForm: item.activeForm ?? item.content,
-          status: item.status,
-          source: "model" as const,
-        })),
-        todoRevision: target.todoVersion,
+        todos: restoredState.todos,
+        todoRevision: restoredState.todoRevision,
       });
     }
   } catch {
@@ -173,13 +180,33 @@ export async function runTerminalMain(): Promise<void> {
         globalConcurrencyLimit: loadGlobalConcurrencyLimitFromEnv(),
       }),
     ];
+    const persistSessionSnapshot = async (history: AgentMessage[]): Promise<void> => {
+      try {
+        const state = store.getState();
+        await sessionManager.save({
+          id: sessionRef.current,
+          modelId: activeLlm.model,
+          thinkingLevel: activeLlm.thinkingLevel,
+          thinkingMode: activeThinkingMode,
+          permissionMode: permissionManager.getMode(),
+          skillNames: activeSkillNames,
+          phase: state.phase,
+          currentPlan: state.currentPlan,
+          messages: history,
+          todos: toPersistedTodos(state.todoItems),
+          todoVersion: state.todoRevision,
+        });
+      } catch {
+        // Persistence is best-effort; a disk error must not break chat.
+      }
+    };
 
     const service = new TerminalAgentService({
       store,
       llm: activeLlm,
       tools: parentTools,
       permissionManager,
-      permissionSessionId: "tui_session",
+      getPermissionSessionId: () => sessionRef.current,
       autoSubagent,
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
       runtimeRef: parentRuntime,
@@ -190,34 +217,12 @@ export async function runTerminalMain(): Promise<void> {
       thinkingMode: activeThinkingMode,
       autoValidate: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_VALIDATE),
       autoCheckpoint: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_CHECKPOINT),
-      skillNames,
+      skillNames: activeSkillNames,
       skillRegistry: defaultSkillRegistry,
       sessionId: activeSessionId,
       onLlmChange: (llm) => { activeLlm = llm; },
       onPermissionTurnChange: (turn) => { activePermissionTurn = turn; },
-      onTurnStarted: async ({ history }) => {
-        try {
-          const existing = await sessionStore.load(sessionRef.current);
-          const persisted: PersistedSession = {
-            id: sessionRef.current,
-            createdAt: existing?.createdAt ?? Date.now(),
-            modelId: activeLlm.model,
-            thinkingLevel: activeLlm.thinkingLevel,
-            thinkingMode: activeThinkingMode,
-            permissionMode: permissionManager.getMode(),
-            skillNames,
-            phase: store.getState().phase,
-            currentPlan: store.getState().currentPlan,
-            messages: history,
-            todos: persistableTodos(store.getState().todoItems),
-            todoVersion: store.getState().todoRevision,
-          };
-          if (existing) await sessionStore.save(persisted);
-          else await sessionStore.create(persisted);
-        } catch {
-          // Persistence is best-effort; a disk error must not break chat.
-        }
-      },
+      onTurnStarted: async ({ history }) => persistSessionSnapshot(history),
       onTurnFinished: async (result) => {
         await finalizePlanCapture({
           cwd,
@@ -235,27 +240,7 @@ export async function runTerminalMain(): Promise<void> {
           dispatch: store.dispatch,
         });
         if (result.history.length <= 1) return;
-        try {
-          const existing = await sessionStore.load(sessionRef.current);
-          const persisted: PersistedSession = {
-            id: sessionRef.current,
-            createdAt: existing?.createdAt ?? Date.now(),
-            modelId: activeLlm.model,
-            thinkingLevel: activeLlm.thinkingLevel,
-            thinkingMode: activeThinkingMode,
-            permissionMode: permissionManager.getMode(),
-            skillNames,
-            phase: store.getState().phase,
-            currentPlan: store.getState().currentPlan,
-            messages: result.history,
-            todos: persistableTodos(store.getState().todoItems),
-            todoVersion: store.getState().todoRevision,
-          };
-          if (existing) await sessionStore.save(persisted);
-          else await sessionStore.create(persisted);
-        } catch {
-          // Persistence is best-effort; a disk error must not break chat.
-        }
+        await persistSessionSnapshot(result.history);
       },
     });
 
@@ -284,24 +269,23 @@ export async function runTerminalMain(): Promise<void> {
     let animationTimer: ReturnType<typeof setInterval> | undefined;
     const persistTodoState = async (todos: readonly TodoItem[]): Promise<void> => {
       try {
-        const existing = await sessionStore.load(sessionRef.current);
+        const existing = await sessionManager.load(sessionRef.current);
+        const state = store.getState();
         const history = service.getHistory();
-        const persisted: PersistedSession = {
+        await sessionManager.save({
           id: sessionRef.current,
-          createdAt: existing?.createdAt ?? Date.now(),
           modelId: activeLlm.model,
           thinkingLevel: activeLlm.thinkingLevel,
           thinkingMode: activeThinkingMode,
           permissionMode: permissionManager.getMode(),
-          skillNames,
-          phase: store.getState().phase,
-          currentPlan: store.getState().currentPlan,
+          skillNames: activeSkillNames,
+          phase: state.phase,
+          currentPlan: state.currentPlan,
           messages: history,
           todos: persistableTodos(todos),
-          todoVersion: store.getState().todoRevision,
-        };
-        if (existing) await sessionStore.save(persisted);
-        else await sessionStore.create(persisted);
+          todoVersion: state.todoRevision,
+          ...(existing?.createdAt ? { createdAt: existing.createdAt } : {}),
+        });
       } catch {
         // Persistence is best-effort; a disk error must not break the TUI.
       }
@@ -317,7 +301,7 @@ export async function runTerminalMain(): Promise<void> {
         planCaptureRef,
         execCaptureRef,
         autocomplete,
-        sessionStore,
+        sessionAccess: sessionManager,
         sessionRef,
         allTools,
         runtimeContext,
@@ -353,7 +337,8 @@ export async function runTerminalMain(): Promise<void> {
         autocomplete.update(value);
         render();
       },
-      listSessionIds: async () => (await sessionStore.listSessions()).map((session) => session.id),
+      listSessionIds: async () => (await sessionManager.list()).map((session) => session.id),
+      listSessions: () => sessionManager.list(),
       onChange: () => render(),
     });
     render = () => {
@@ -365,10 +350,18 @@ export async function runTerminalMain(): Promise<void> {
         } : {
           scrollback: true,
         }),
-        // Claude Code only shows its product header on the empty welcome
-        // screen. Once a turn exists, the transcript starts at the first user
-        // prompt and the model/cwd stay in the bottom status chrome.
-        header: { title: "Claude Code", cwd, show: state.messages.length === 0 && !state.streamingText && !state.busy },
+        // Keep the product identity pinned above the transcript, including
+        // restored sessions and active turns.
+        header: {
+          title: TUI_BRAND_NAME,
+          cwd,
+          version: TUI_BRAND_VERSION,
+          model: `${service.getLlm().provider}/${service.getLlm().model}`,
+          billing: "API Usage Billing",
+          // Scrollback keeps the welcome frame as the first committed
+          // transcript segment; fullscreen condenses it after the first turn.
+          showWelcome: !fullscreen || (state.messages.length === 0 && !state.busy && !state.pendingPermission),
+        },
         promptRule: true,
         input: input.getValue(),
         cursor: input.getCursor(),
@@ -484,7 +477,11 @@ export type InputDeps = {
   planCaptureRef: { current: { prompt: string } | null };
   execCaptureRef: { current: { mode: "run" | "retry" } | null };
   autocomplete: TerminalAutocompleteController;
-  sessionStore: SessionStore;
+  /** Preferred session boundary used by the production terminal entrypoint. */
+  sessionAccess?: SessionAccess;
+  /** Legacy fallback kept for callers/tests that construct InputDeps directly. */
+  sessionStore?: SessionStore;
+  sessionManager?: SessionManager;
   sessionRef: { current: string };
   allTools: ToolProvider;
   runtimeContext: RuntimeExecutionContext;
@@ -497,6 +494,27 @@ export type InputDeps = {
   };
   commitTodoEditor?: () => void;
 };
+
+export type SessionAccess = {
+  list(): Promise<PersistedSessionMeta[]>;
+  load(sessionId: string): Promise<PersistedSession | undefined>;
+  newSession(): string;
+  setSessionId(sessionId: string): void;
+  restoreHistory(session: PersistedSession, systemPrompt: string): AgentMessage[];
+};
+
+function getSessionAccess(deps: InputDeps): SessionAccess {
+  if (deps.sessionAccess) return deps.sessionAccess;
+  if (deps.sessionManager) return deps.sessionManager;
+  if (!deps.sessionStore) throw new Error("A session access implementation is required");
+  return {
+    list: () => deps.sessionStore!.listSessions(),
+    load: (sessionId) => deps.sessionStore!.load(sessionId),
+    newSession: () => randomUUID(),
+    setSessionId: () => undefined,
+    restoreHistory: (session, systemPrompt) => restoreTuiSession(session, systemPrompt).history,
+  };
+}
 
 export function handleInputAction(action: TerminalInputAction, deps: InputDeps): void {
   const { store, service, permissionManager, input, cwd } = deps;
@@ -599,6 +617,15 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
       store.dispatch({ type: "ADD_NOTICE", title: "正在执行", text: "当前 turn 完成后再切换模型或配置文件。普通消息仍会排队。" });
       return;
     }
+    if (autocompleteState.mode === "session-list") {
+      const selected = autocompleteState.sessions[autocompleteState.index];
+      const command = autocompleteState.sessionCommand === "resume" && selected
+        ? `/resume ${selected.id}`
+        : action.value;
+      deps.autocomplete.clear();
+      void submitInput(command, deps);
+      return;
+    }
     // Sticky overlays own Enter. Keep their state intact until the async
     // handler consumes the field (model setup or profile activation).
     if (autocompleteState.mode === "model-setup"
@@ -609,7 +636,7 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
     }
     if (autocompleteState.mode === "command") {
       const selected = autocompleteState.commands[autocompleteState.index];
-      if (!selected || !isExactSlashCommand(action.value, selected.name)) {
+      if (!selected || !isExactSlashCommand(action.value, selected.name, autocompleteState.argumentCandidates)) {
         deps.autocomplete.handleKey({ tab: true });
         return;
       }
@@ -755,11 +782,12 @@ function handleShortcut(action: Extract<TerminalInputAction, { type: "shortcut" 
 async function submitInput(value: string, deps: InputDeps): Promise<void> {
   const text = value.trim();
   const { store, service, permissionManager, input } = deps;
+  const sessionAccess = getSessionAccess(deps);
   const autocompleteState = deps.autocomplete.getState();
   const allowEmptyApiKey = autocompleteState.mode === "model-setup" && autocompleteState.modelSetup?.field === "apiKey";
   const allowEmptyProfileSelection = autocompleteState.mode === "profile-list";
   if (!text && !allowEmptyApiKey && !allowEmptyProfileSelection) return;
-  if (store.getState().busy && /^\/(?:clear|resume|model|profiles?|plan(?:-|\s|$))/i.test(text)) {
+  if (store.getState().busy && /^(?:resume|\/(?:clear|resume|model|profiles?|plan(?:-|\s|$)))/i.test(text)) {
     store.dispatch({ type: "ADD_NOTICE", title: "正在执行", text: "当前 turn 完成后才能执行该控制命令。普通消息会排队。" });
     input.clear();
     return;
@@ -772,7 +800,7 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
   }
   if (text === "/clear") {
     service.resetHistory(permissionManager.getMode());
-    deps.sessionRef.current = randomUUID();
+    deps.sessionRef.current = sessionAccess.newSession();
     service.setSessionId(deps.sessionRef.current);
     deps.runtimeContext.sessionId = deps.sessionRef.current;
     store.dispatch({ type: "RESET" });
@@ -780,7 +808,7 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
     return;
   }
   if (text === "/sessions") {
-    const sessions = await deps.sessionStore.listSessions().catch(() => []);
+    const sessions = await sessionAccess.list().catch(() => []);
     store.dispatch({
       type: "ADD_NOTICE",
       title: "会话列表",
@@ -923,7 +951,7 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
     try {
       const directResult = await runDirectTool(slashCommand.cmd, args, {
         allTools: deps.allTools,
-        permissionSessionId: "tui_session",
+        permissionSessionId: deps.sessionRef.current,
         getPermissionManager: () => permissionManager,
         abortSignal: abortController.signal,
         dispatch: store.dispatch,
@@ -935,17 +963,27 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
     }
     return;
   }
-  const resumeMatch = text.match(/^\/resume(?:\s+(.*))?$/i);
-  if (resumeMatch) {
-    const prefix = resumeMatch[1]?.trim() ?? "";
-    const sessions = await deps.sessionStore.listSessions().catch(() => []);
-    const target = (prefix && sessions.find((session) => session.id.startsWith(prefix))) ?? (!prefix ? sessions[0] : undefined);
+  const resumeCommand = parseResumeCommand(text);
+  if (resumeCommand) {
+    const prefix = resumeCommand.prefix;
+    const sessions = await sessionAccess.list().catch(() => []);
+    const selection = resolveSessionByPrefix(sessions, prefix);
+    if (!selection.session && selection.candidates.length > 1) {
+      store.dispatch({
+        type: "ADD_NOTICE",
+        title: "恢复会话",
+        text: formatAmbiguousSessionNotice(prefix, selection.candidates),
+      });
+      input.clear();
+      return;
+    }
+    const target = selection.session;
     if (!target) {
       store.dispatch({ type: "ADD_NOTICE", title: "恢复会话", text: prefix ? `未找到会话: ${prefix}` : "没有可恢复的会话。" });
       input.clear();
       return;
     }
-    const restored = await deps.sessionStore.load(target.id);
+    const restored = await sessionAccess.load(target.id);
     if (!restored) {
       store.dispatch({ type: "ADD_NOTICE", title: "恢复会话", text: `无法读取会话: ${target.id}` });
       input.clear();
@@ -967,29 +1005,25 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
       service.setLlm(restoredLlm);
       store.dispatch({ type: "MODEL_CHANGED", modelName: restoredLlm.model });
     }
+    if (restored.skillNames) service.setSkillNames(restored.skillNames);
     if (restored.thinkingMode) deps.setThinkingMode(restored.thinkingMode);
     const baseHistory = createAgentHistory(undefined, mode);
     const systemPrompt = typeof baseHistory[0]?.content === "string" ? baseHistory[0].content : "";
-    const restoredHistory = restoreAgentHistory(restored.messages, systemPrompt);
-    service.replaceHistory(restoredHistory);
+    const restoredState = restoreTuiSession(restored, systemPrompt, (session, prompt) => sessionAccess.restoreHistory(session, prompt));
+    service.replaceHistory(restoredState.history);
     deps.sessionRef.current = restored.id;
+    sessionAccess.setSessionId(restored.id);
     service.setSessionId(restored.id);
     deps.runtimeContext.sessionId = restored.id;
     store.dispatch({
       type: "RESTORE_SESSION",
-      history: restoredHistory,
+      history: restoredState.history,
       permissionMode: mode,
       modelName: service.getLlm().model,
       phase: restored.phase,
       currentPlan: restored.currentPlan,
-      todos: restored.todos?.map((item) => ({
-        id: item.id,
-        content: item.content,
-        activeForm: item.activeForm ?? item.content,
-        status: item.status,
-        source: "model" as const,
-      })),
-      todoRevision: restored.todoVersion,
+      todos: restoredState.todos,
+      todoRevision: restoredState.todoRevision,
     });
     store.dispatch({ type: "ADD_NOTICE", title: "会话已恢复", text: `${restored.id.slice(0, 8)} · ${restored.messages.length} 条消息` });
     input.clear();

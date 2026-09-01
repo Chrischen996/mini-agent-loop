@@ -1,3 +1,5 @@
+import { TUI_BRAND_HEADER_HEIGHT } from "./brand.ts";
+
 /**
  * Keep Ink's dynamic output below the terminal height. Ink clears the whole
  * terminal when the rendered output reaches the last row, which is visible as
@@ -9,13 +11,14 @@ export function getTuiViewportHeight(termRows: number | undefined): number {
 
 /**
  * Estimate rows available for the scrollable message feed after chrome.
- * Welcome header (~1 when the feed is empty) + input (~2) + status row (~1) + optional image strip / pickers
+ * Welcome header (compact or expanded) + input (~2) + status row (~1) + optional image strip / pickers
  * / permission panel / plan approval bar.
  */
 export function getMessageFeedHeight(options: {
   termRows: number | undefined;
-  /** Whether the one-row welcome header is mounted. */
+  /** Whether the welcome identity is mounted. */
   hasHeader?: boolean;
+  headerRows?: number;
   hasPendingImages?: boolean;
   todoRows?: number;
   pickerRows?: number;
@@ -26,7 +29,7 @@ export function getMessageFeedHeight(options: {
 }): number {
   const viewport = getTuiViewportHeight(options.termRows);
   const chrome =
-    (options.hasHeader === false ? 0 : 1) + // Claude Code title row
+    (options.hasHeader === false ? 0 : options.headerRows ?? TUI_BRAND_HEADER_HEIGHT) + // welcome identity
     2 + // input row
     1 + // stable model/context metadata row; activity stays in the feed
     (options.hasPendingImages ? 1 : 0) +
@@ -40,6 +43,7 @@ export function getMessageFeedHeight(options: {
 export function getPickerLayout(options: {
   termRows: number | undefined;
   hasHeader?: boolean;
+  headerRows?: number;
   requestedItems: number;
   hasPendingImages?: boolean;
   todoRows?: number;
@@ -49,7 +53,7 @@ export function getPickerLayout(options: {
 }): { itemRows: number; totalRows: number } {
   const viewport = getTuiViewportHeight(options.termRows);
   const fixedChrome =
-    (options.hasHeader === false ? 0 : 1) + 2 + 1 + (options.hasPendingImages ? 1 : 0) + (options.todoRows ?? 0) +
+    (options.hasHeader === false ? 0 : options.headerRows ?? TUI_BRAND_HEADER_HEIGHT) + 2 + 1 + (options.hasPendingImages ? 1 : 0) + (options.todoRows ?? 0) +
     (options.permissionRows ?? 0) + (options.planApprovalRows ?? 0);
   const extraRows = options.extraRows ?? 2;
   const maxTotal = Math.max(0, viewport - fixedChrome - 3);

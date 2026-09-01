@@ -1,4 +1,5 @@
 import type { PermissionMode, PermissionRisk } from "../permissions.ts";
+import { compactText } from "./text-utils.ts";
 
 /** Human-facing labels used by both the ANSI and Ink presentation paths. */
 export function permissionModeLabel(mode: PermissionMode): string {
@@ -104,21 +105,16 @@ export function noticeText(text: string): string {
   return /[\u3400-\u9fff]/.test(result) ? result.replace(/[\u3400-\u9fff][^\n]*/g, "") : result;
 }
 
-function short(value: string, max = 96): string {
-  const oneLine = value.replace(/\s+/g, " ").trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
-}
-
 /** Compact argument text matching Claude Code's inline tool-use summary. */
 export function toolArgumentSummary(name: string, args: Record<string, unknown>, fallback?: string): string {
   const command = ["command", "cmd", "input"].map((key) => args[key]).find((value): value is string => typeof value === "string" && Boolean(value.trim()));
-  if (command) return `$ ${short(command)}`;
+  if (command) return `$ ${compactText(command, 96, "…", { maxIncludesEllipsis: true })}`;
   const target = ["path", "file", "pattern", "query", "url", "source", "destination"].map((key) => args[key]).find((value): value is string => typeof value === "string" && Boolean(value.trim()));
-  if (target) return short(target);
+  if (target) return compactText(target, 96, "…", { maxIncludesEllipsis: true });
   const entries = Object.entries(args)
     .filter(([, value]) => value !== undefined && value !== null && value !== "")
     .slice(0, 2)
-    .map(([key, value]) => `${key}=${typeof value === "string" ? short(value, 36) : short(JSON.stringify(value), 36)}`);
+    .map(([key, value]) => `${key}=${typeof value === "string" ? compactText(value, 36, "…", { maxIncludesEllipsis: true }) : compactText(JSON.stringify(value), 36, "…", { maxIncludesEllipsis: true })}`);
   if (entries.length) return entries.join(", ");
   if (fallback) {
     try {

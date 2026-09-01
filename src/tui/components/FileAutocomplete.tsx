@@ -2,7 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { TUI_COLORS as C } from "../theme.ts";
 import { TODO_COMMAND_USAGE } from "../todo-commands.ts";
-
+import type { PersistedSessionMeta } from "../../session-store.ts";
 // ─── Command palette ─────────────────────────────────────────────────────────
 
 export type CommandDef = {
@@ -10,7 +10,6 @@ export type CommandDef = {
   usage: string;      // e.g. "/read <path>"
   description: string;
 };
-
 export const SLASH_COMMANDS: CommandDef[] = [
   { name: "model", usage: "/model [ref] [url] [key]", description: "Switch model and gateway" },
   { name: "profiles", usage: "/profiles", description: "List and activate model profiles" },
@@ -83,8 +82,47 @@ export function CommandPalette({ filter, selectedIndex, candidates, maxVisible =
   );
 }
 
-// ─── File autocomplete ────────────────────────────────────────────────────────
+type SessionPaletteProps = {
+  sessions: PersistedSessionMeta[];
+  selectedIndex: number;
+  command: "resume" | "sessions";
+  loading: boolean;
+  maxVisible?: number;
+  width?: number;
+};
 
+export function SessionPalette({ sessions, selectedIndex, command, loading, maxVisible = 6, width }: SessionPaletteProps): React.ReactElement {
+  const { visible, start } = visibleWindow(sessions, selectedIndex, maxVisible);
+  return (
+    <Box flexDirection="column" paddingX={2} width={width} minWidth={0} overflow="hidden">
+      <Text dimColor wrap="truncate-end">── {command === "resume" ? "Resume sessions" : "Saved sessions"}</Text>
+      {loading && <Text dimColor wrap="truncate-end">Loading saved sessions...</Text>}
+      {!loading && sessions.length === 0 && <Text color={C.running} wrap="truncate-end">No saved sessions</Text>}
+      {!loading && visible.map((session, index) => {
+        const absoluteIndex = start + index;
+        const preview = session.preview.replace(/\s+/g, " ").trim();
+        return (
+          <Box key={session.id} gap={1} minWidth={0}>
+            <Text color={absoluteIndex === selectedIndex ? C.running : undefined} bold={absoluteIndex === selectedIndex}>
+              {absoluteIndex === selectedIndex ? "▶" : " "}
+            </Text>
+            <Text color={absoluteIndex === selectedIndex ? C.assistant : C.muted} bold={absoluteIndex === selectedIndex} wrap="truncate-end">
+              {session.id.slice(0, 12)}  {session.messageCount} msgs{preview ? `  ${preview}` : ""}
+            </Text>
+          </Box>
+        );
+      })}
+      {!loading && sessions.length > visible.length && (
+        <Text dimColor wrap="truncate-end">Showing {visible.length} / {sessions.length}</Text>
+      )}
+      <Text dimColor wrap="truncate-end">
+        {command === "resume" ? "Tab fill /resume  ·  Enter resume selected" : "Tab fill /resume"}  ↑↓ navigate  Esc close
+      </Text>
+    </Box>
+  );
+}
+
+// ─── File autocomplete ────────────────────────────────────────────────────────
 type FileAutocompleteProps = {
   candidates: string[];
   selectedIndex: number;

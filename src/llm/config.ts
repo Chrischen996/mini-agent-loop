@@ -260,7 +260,7 @@ export function createRequestSignal(
 
 /**
  * Load KEY=VALUE pairs from a local .env file into process.env (no overwrite).
- * Teaching-friendly: avoids a dotenv dependency.
+ * Keeps configuration self-contained and avoids an additional dotenv dependency.
  */
 export function loadDotEnvFile(
   filePath = path.join(process.cwd(), ".env"),

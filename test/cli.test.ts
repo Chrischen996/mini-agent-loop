@@ -3,6 +3,12 @@ import { describe, it } from "node:test";
 import { parseCliArgs } from "../src/cli.ts";
 
 describe("parseCliArgs", () => {
+  it("makes --fork-session resume the latest session when used alone", () => {
+    const result = parseCliArgs(["--fork-session"]);
+    assert.equal(result.forkSession, true);
+    assert.equal(result.continueSession, true);
+  });
+
   it("extracts a plain prompt from positional arguments", () => {
     const result = parseCliArgs(["read", "package.json"]);
     assert.equal(result.prompt, "read package.json");

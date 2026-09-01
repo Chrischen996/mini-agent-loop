@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { PermissionManager } from "../src/permissions.ts";
 import type { ModelRef } from "../src/models.ts";
-import { SessionStore } from "../src/session-store.ts";
+import { SessionStore, type PersistedSession, type PersistedSessionMeta } from "../src/session-store.ts";
 import { createInitialState, createTuiStore } from "../src/tui/state.ts";
 import { TerminalAutocompleteController } from "../src/tui/terminal-autocomplete-controller.ts";
 import { TerminalInputController } from "../src/tui/terminal-input-controller.ts";
@@ -210,5 +210,113 @@ describe("terminal main input routing", () => {
     assert.equal(editorRef.current, null);
     assert.equal(deps.store.getState().todos[0]?.content, "Changed");
     assert.equal(deps.service.getHistory().filter((message) => message.role === "user").length, 0);
+  });
+
+  it("restores the visible transcript for the bare resume command", async () => {
+    const deps = dependencies();
+    const session: PersistedSession = {
+      id: "resume-session",
+      createdAt: 1,
+      messages: [
+        { role: "system", content: "system" },
+        { role: "user", content: "previous question" },
+        { role: "assistant", content: "previous answer" },
+      ],
+    };
+    const meta: PersistedSessionMeta = {
+      id: session.id,
+      createdAt: session.createdAt,
+      lastActiveAt: 2,
+      messageCount: session.messages.length,
+      preview: "previous question",
+    };
+    deps.sessionAccess = {
+      list: async () => [meta],
+      load: async () => session,
+      newSession: () => "new-session",
+      setSessionId: () => undefined,
+      restoreHistory: (value, prompt) => [{ role: "system", content: prompt }, ...value.messages.slice(1)],
+    };
+
+    deps.input.setValue("resume");
+    handleInputAction({ type: "submit", value: "resume" }, deps);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    assert.deepEqual(
+      deps.store.getState().messages.filter((message) => message.kind === "user" || message.kind === "assistant"),
+      [
+        { kind: "user", text: "previous question" },
+        { kind: "assistant", text: "previous answer" },
+      ],
+    );
+    assert.equal(deps.service.getHistory().at(-1)?.content, "previous answer");
+  });
+
+  it("submits a fully typed /resume id instead of consuming Enter for completion", async () => {
+    const deps = dependencies();
+    const session: PersistedSession = {
+      id: "abc123",
+      createdAt: 1,
+      messages: [
+        { role: "system", content: "system" },
+        { role: "user", content: "restored" },
+      ],
+    };
+    deps.sessionAccess = {
+      list: async () => [{ id: session.id, createdAt: 1, lastActiveAt: 2, messageCount: 2, preview: "restored" }],
+      load: async () => session,
+      newSession: () => "new-session",
+      setSessionId: () => undefined,
+      restoreHistory: (value, prompt) => [{ role: "system", content: prompt }, ...value.messages.slice(1)],
+    };
+    deps.autocomplete = new TerminalAutocompleteController({
+      cwd: process.cwd(),
+      getInput: () => deps.input.getValue(),
+      setInput: (value) => deps.input.setValue(value),
+      listSessionIds: async () => [session.id],
+    });
+    deps.input.setValue("/resume abc123");
+    deps.autocomplete.update();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    handleInputAction({ type: "submit", value: "/resume abc123" }, deps);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    assert.equal(deps.store.getState().messages.find((message) => message.kind === "user")?.text, "restored");
+    assert.equal(deps.autocomplete.getState().mode, null);
+  });
+
+  it("resumes the selected session when Enter is pressed in the session picker", async () => {
+    const deps = dependencies();
+    const session: PersistedSession = {
+      id: "picker-session",
+      createdAt: 1,
+      messages: [
+        { role: "system", content: "system" },
+        { role: "user", content: "picked prompt" },
+      ],
+    };
+    deps.sessionAccess = {
+      list: async () => [{ id: session.id, createdAt: 1, lastActiveAt: 2, messageCount: 2, preview: "picked prompt" }],
+      load: async () => session,
+      newSession: () => "new-session",
+      setSessionId: () => undefined,
+      restoreHistory: (value, prompt) => [{ role: "system", content: prompt }, ...value.messages.slice(1)],
+    };
+    deps.autocomplete = new TerminalAutocompleteController({
+      cwd: process.cwd(),
+      getInput: () => deps.input.getValue(),
+      setInput: (value) => deps.input.setValue(value),
+      listSessions: () => deps.sessionAccess!.list(),
+    });
+    deps.input.setValue("/resume");
+    deps.autocomplete.update();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    handleInputAction({ type: "submit", value: "/resume" }, deps);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    assert.equal(deps.store.getState().messages.find((message) => message.kind === "user")?.text, "picked prompt");
+    assert.equal(deps.autocomplete.getState().mode, null);
   });
 });

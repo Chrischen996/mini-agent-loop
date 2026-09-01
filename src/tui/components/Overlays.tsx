@@ -1,12 +1,13 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { CommandPalette, FileAutocomplete, ModelPicker } from "./FileAutocomplete.tsx";
+import { CommandPalette, FileAutocomplete, ModelPicker, SessionPalette } from "./FileAutocomplete.tsx";
 import { TUI_COLORS as C } from "../theme.ts";
 import type { ModelSetupState, PendingProfileSetup, ProfileListState } from "../types.ts";
 import type { CommandDef } from "./FileAutocomplete.tsx";
 import type { AcMode } from "../input-utils.ts";
 import { TodoEditor } from "./TodoEditor.tsx";
 import type { TodoEditorState } from "../todo-editor.ts";
+import type { PersistedSessionMeta } from "../../session-store.ts";
 
 export type OverlaysProps = {
   acMode: AcMode;
@@ -18,6 +19,9 @@ export type OverlaysProps = {
   modelCandidates: string[];
   modelContextWindows: Record<string, number>;
   modelQuery: string;
+  sessionCandidates: PersistedSessionMeta[];
+  sessionCommand?: "resume" | "sessions";
+  sessionLoading: boolean;
   currentModel: string;
   modelSetup?: ModelSetupState;
   pendingProfileSetup?: PendingProfileSetup | null;
@@ -40,6 +44,9 @@ export function Overlays({
   modelCandidates,
   modelContextWindows,
   modelQuery,
+  sessionCandidates,
+  sessionCommand,
+  sessionLoading,
   currentModel,
   modelSetup,
   pendingProfileSetup,
@@ -58,7 +65,7 @@ export function Overlays({
   // A very short terminal may have no spare picker rows. Keep the prompt and
   // status chrome visible instead of letting a zero-budget overlay push them
   // off the frame.
-  if (pickerItemRows <= 0 && ["command", "file", "model", "model-picker"].includes(acMode)) return null;
+  if (pickerItemRows <= 0 && ["command", "file", "model", "model-picker", "session-list"].includes(acMode)) return null;
 
   if (acMode === "command") {
     return (
@@ -66,6 +73,19 @@ export function Overlays({
         filter={input.slice(1)}
         selectedIndex={acIndex}
         candidates={cmdCandidates}
+        maxVisible={pickerItemRows}
+        width={width}
+      />
+    );
+  }
+
+  if (acMode === "session-list" && sessionCommand) {
+    return (
+      <SessionPalette
+        sessions={sessionCandidates}
+        selectedIndex={acIndex}
+        command={sessionCommand}
+        loading={sessionLoading}
         maxVisible={pickerItemRows}
         width={width}
       />

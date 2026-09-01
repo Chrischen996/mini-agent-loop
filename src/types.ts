@@ -20,7 +20,7 @@ export type VisionAnalysisPart = {
 
 export type ContentPart = TextPart | ImagePart | VisionAnalysisPart;
 
-/** Plain string stays supported for teaching / backward compatibility. */
+/** Plain strings remain supported for compatibility with existing callers. */
 export type MessageContent = string | ContentPart[];
 
 export type UserMessage = {
@@ -34,7 +34,7 @@ export type AssistantMessage = {
   /** Stable identity used by persisted sessions and fork/rewind APIs. */
   id?: string;
   role: "assistant";
-  /** Assistant stays text-only in this teaching cut. */
+  /** Assistant response text is kept separate from structured tool calls. */
   content: string;
   toolCalls?: ToolCall[];
 };

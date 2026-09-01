@@ -1,8 +1,13 @@
-# Mini Tool Agent - Next Phases Status Report
+# Mini Agent - Historical Phase Status
+
+> This document records an earlier phase checkpoint. It is retained for
+> history, but it is not the current project roadmap or a production-readiness
+> certification. Use the source, tests, README, and release workflow as the
+> current references.
 
 ## 当前状态评估
 
-根据对代码库的全面分析，**Next Development Plan 中提到的所有功能已经实现**：
+该报告对应早期的 Phase 4-8 评估，不能代表当前仓库的完整能力边界：
 
 ### ✅ Phase 4 - 真实模型与协议稳定性
 - **状态**: ✅ 已完成
@@ -71,4 +76,5 @@
 
 ## 结论
 
-**项目已达到生产就绪状态**，核心功能完整，测试覆盖良好，TypeScript 类型安全。
+项目当前按可实际使用的 Agent Runtime 持续开发。是否满足某个生产部署场景，
+仍需结合目标环境重新验证 provider、sandbox、持久化、观测和恢复能力。

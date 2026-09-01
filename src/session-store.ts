@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -103,7 +103,7 @@ function isSessionEvent(value: unknown): value is SessionEvent {
 export type SessionStoreOptions = {
   /** Maximum number of sessions to retain. Default: 100. */
   maxSessions?: number;
-  /** Session time-to-live in milliseconds. Default: 7 days (604_800_000). */
+  /** Session time-to-live in milliseconds. Default: 30 days. */
   sessionTtlMs?: number;
   /**
    * Number of snapshot events tolerated in `events.jsonl` before the file is
@@ -117,11 +117,16 @@ export type SessionStoreOptions = {
 };
 
 const DEFAULT_MAX_SESSIONS = 100;
-const DEFAULT_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1_000; // 7 days
+const DEFAULT_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000; // 30 days
 const DEFAULT_COMPACT_THRESHOLD = 20;
 const LOCK_RETRY_MS = 25;
 const LOCK_TIMEOUT_MS = 10_000;
 const LOCK_STALE_MS = 30_000;
+const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
+export function isValidSessionId(sessionId: string): boolean {
+  return SESSION_ID_PATTERN.test(sessionId);
+}
 
 /**
  * Shared data root for persisted state (sessions, memory, documents).
@@ -167,15 +172,13 @@ export class SessionStore {
     }
 
     for (const name of names) {
-      if (!/^[a-zA-Z0-9_-]+$/.test(name)) continue;
+      if (!isValidSessionId(name)) continue;
       let parsed = await this.parseEventsFile(name);
       if (parsed && this.isLegacyUnscoped(parsed)) {
         parsed = await this.claimLegacy(parsed);
       }
       if (parsed && this.matchesWorkspace(parsed)) {
         sessions.set(parsed.id, parsed);
-        // The latest snapshot is the new compaction baseline after a restart.
-        this.snapshotCounts.set(parsed.id, 1);
       }
     }
     // Evict expired and excess sessions on load
@@ -185,10 +188,15 @@ export class SessionStore {
 
   /** Load a single session by id, or undefined when it does not exist. */
   async load(sessionId: string): Promise<PersistedSession | undefined> {
-    if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) return undefined;
+    if (!isValidSessionId(sessionId)) return undefined;
     let session = await this.parseEventsFile(sessionId);
     if (session && this.isLegacyUnscoped(session)) session = await this.claimLegacy(session);
-    return session && this.matchesWorkspace(session) ? session : undefined;
+    if (!session || !this.matchesWorkspace(session)) return undefined;
+    if (this.isExpired(session)) {
+      await this.remove(session.id).catch(() => {});
+      return undefined;
+    }
+    return session;
   }
 
   /**
@@ -206,7 +214,7 @@ export class SessionStore {
 
     const metas: PersistedSessionMeta[] = [];
     for (const name of names) {
-      if (!/^[a-zA-Z0-9_-]+$/.test(name)) continue;
+      if (!isValidSessionId(name)) continue;
       const meta = await this.readMetaFile(name);
       if (meta && this.matchesWorkspace(meta)) {
         metas.push(meta);
@@ -222,9 +230,11 @@ export class SessionStore {
       }
     }
 
-    const retained = this.retainMetadata(metas);
-    await Promise.all(retained.evictedIds.map((id) => this.remove(id).catch(() => {})));
-    return retained.sessions.sort((a, b) => b.lastActiveAt - a.lastActiveAt);
+    const retention = this.retainSessionIds(metas);
+    await Promise.all(retention.evictedIds.map((id) => this.remove(id).catch(() => {})));
+    return metas
+      .filter((meta) => retention.retainedIds.has(meta.id))
+      .sort((a, b) => b.lastActiveAt - a.lastActiveAt);
   }
 
   /**
@@ -232,62 +242,84 @@ export class SessionStore {
    * Deletes evicted sessions from disk and mutates the provided map.
    */
   async evict(sessions: Map<string, PersistedSession>): Promise<string[]> {
-    const evictedIds: string[] = [];
-    const now = Date.now();
-
-    // 1. Remove sessions older than TTL
-    for (const [id, session] of sessions) {
-      if (now - (session.lastActiveAt ?? session.createdAt) > this.sessionTtlMs) {
-        evictedIds.push(id);
-        sessions.delete(id);
-      }
-    }
-
-    // 2. Enforce maxSessions by removing least-recently-active first
-    if (sessions.size > this.maxSessions) {
-      const sorted = [...sessions.entries()].sort(
-        (a, b) =>
-          (a[1].lastActiveAt ?? a[1].createdAt) - (b[1].lastActiveAt ?? b[1].createdAt),
-      );
-      const excess = sorted.slice(0, sessions.size - this.maxSessions);
-      for (const [id] of excess) {
-        evictedIds.push(id);
-        sessions.delete(id);
-      }
-    }
-
-    // 3. Remove evicted sessions from disk in parallel
-    await Promise.all(evictedIds.map((id) => this.remove(id).catch(() => {})));
-    return evictedIds;
+    const retention = this.retainSessionIds(sessions.values());
+    for (const id of retention.evictedIds) sessions.delete(id);
+    await Promise.all(retention.evictedIds.map((id) => this.remove(id).catch(() => {})));
+    return retention.evictedIds;
   }
 
   async create(session: PersistedSession): Promise<void> {
+    this.assertSessionId(session.id);
     await this.withSessionLock(session.id, async () => {
-      this.snapshotCounts.set(session.id, 0);
-      await this.append({
-        type: "session_created",
-        sessionId: session.id,
-        createdAt: session.createdAt,
-        modelId: session.modelId,
-        thinkingLevel: session.thinkingLevel,
-        thinkingMode: session.thinkingMode,
-        permissionMode: session.permissionMode,
-        skillNames: session.skillNames,
-        phase: session.phase,
-        currentPlan: session.currentPlan,
-        todos: session.todos,
-        todoVersion: session.todoVersion,
-        parentSessionId: session.parentSessionId,
-        forkedFromMessage: session.forkedFromMessage,
-        forkedFromMessageId: session.forkedFromMessageId,
-        workspaceId: session.workspaceId ?? this.workspaceId,
-      });
-      await this.saveLocked(session);
+      if (await this.parseEventsFile(session.id)) {
+        throw new Error(`Session already exists: ${session.id}`);
+      }
+      await this.createLocked(session);
     });
   }
 
+  /**
+   * Atomically create or update a session. Entry points use this for both
+   * turn-start recovery checkpoints and turn-end snapshots, so a first write
+   * cannot race another process into duplicate session_created records.
+   */
+  async upsert(session: PersistedSession): Promise<PersistedSession> {
+    this.assertSessionId(session.id);
+    let persisted: PersistedSession = session;
+    await this.withSessionLock(session.id, async () => {
+      const existing = await this.parseEventsFile(session.id);
+      if (existing) {
+        this.assertWritable(existing, session.id);
+        persisted = {
+          ...session,
+          createdAt: existing.createdAt,
+          workspaceId: session.workspaceId ?? existing.workspaceId ?? this.workspaceId,
+          parentSessionId: session.parentSessionId ?? existing.parentSessionId,
+          forkedFromMessage: session.forkedFromMessage ?? existing.forkedFromMessage,
+          forkedFromMessageId: session.forkedFromMessageId ?? existing.forkedFromMessageId,
+        };
+        await this.saveLocked(persisted);
+        return;
+      }
+      persisted = {
+        ...session,
+        workspaceId: session.workspaceId ?? this.workspaceId,
+      };
+      await this.createLocked(persisted);
+    });
+    return persisted;
+  }
+
+  private async createLocked(session: PersistedSession): Promise<void> {
+    this.snapshotCounts.set(session.id, 0);
+    await this.append({
+      type: "session_created",
+      sessionId: session.id,
+      createdAt: session.createdAt,
+      modelId: session.modelId,
+      thinkingLevel: session.thinkingLevel,
+      thinkingMode: session.thinkingMode,
+      permissionMode: session.permissionMode,
+      skillNames: session.skillNames,
+      phase: session.phase,
+      currentPlan: session.currentPlan,
+      todos: session.todos,
+      todoVersion: session.todoVersion,
+      parentSessionId: session.parentSessionId,
+      forkedFromMessage: session.forkedFromMessage,
+      forkedFromMessageId: session.forkedFromMessageId,
+      workspaceId: session.workspaceId ?? this.workspaceId,
+    });
+    await this.saveLocked(session);
+  }
+
   async save(session: PersistedSession): Promise<void> {
-    await this.withSessionLock(session.id, () => this.saveLocked(session));
+    this.assertSessionId(session.id);
+    await this.withSessionLock(session.id, async () => {
+      const existing = await this.parseEventsFile(session.id);
+      if (existing) this.assertWritable(existing, session.id);
+      await this.saveLocked(session);
+    });
   }
 
   private async saveLocked(session: PersistedSession): Promise<void> {
@@ -327,6 +359,7 @@ export class SessionStore {
    * writes stay the fast path; compaction is the rare exception.
    */
   async compact(session: PersistedSession): Promise<void> {
+    this.assertSessionId(session.id);
     await this.withSessionLock(session.id, () => this.compactLocked(session));
   }
 
@@ -346,6 +379,7 @@ export class SessionStore {
   }
 
   async remove(sessionId: string): Promise<void> {
+    this.assertSessionId(sessionId);
     await this.withSessionLock(sessionId, async () => {
       this.snapshotCounts.delete(sessionId);
       await rm(path.join(this.root, sessionId), { recursive: true, force: true });
@@ -386,11 +420,12 @@ export class SessionStore {
     }
 
     let current: PersistedSession | undefined;
+    let snapshotCount = 0;
     for (const line of raw.split("\n")) {
       if (!line.trim()) continue;
       try {
         const parsed: unknown = JSON.parse(line);
-        if (!isSessionEvent(parsed)) continue;
+        if (!isSessionEvent(parsed) || parsed.sessionId !== name) continue;
         if (parsed.type === "session_created") {
           current ??= {
             id: parsed.sessionId,
@@ -411,6 +446,7 @@ export class SessionStore {
             workspaceId: parsed.workspaceId,
           };
         } else if (Array.isArray(parsed.messages)) {
+          snapshotCount += 1;
           current = {
             id: parsed.sessionId,
             createdAt: parsed.createdAt,
@@ -436,6 +472,7 @@ export class SessionStore {
       }
     }
     if (!current) return undefined;
+    this.snapshotCounts.set(name, snapshotCount);
     this.ensureMessageIds(current.messages);
     return current;
   }
@@ -456,6 +493,12 @@ export class SessionStore {
 
   private isLegacyUnscoped(session: { workspaceId?: string }): boolean {
     return this.workspaceId !== undefined && session.workspaceId === undefined;
+  }
+
+  private assertWritable(session: { workspaceId?: string }, sessionId: string): void {
+    if (!this.matchesWorkspace(session) && !this.isLegacyUnscoped(session)) {
+      throw new Error(`Cannot write session from another workspace: ${sessionId}`);
+    }
   }
 
   /**
@@ -553,23 +596,46 @@ export class SessionStore {
     }
   }
 
-  private retainMetadata(metas: PersistedSessionMeta[]): {
-    sessions: PersistedSessionMeta[];
+  private retainSessionIds(records: Iterable<{
+    id: string;
+    createdAt: number;
+    lastActiveAt?: number;
+  }>): {
+    retainedIds: Set<string>;
     evictedIds: string[];
   } {
+    const candidates = [...records];
     const now = Date.now();
-    const sessions = metas.filter((meta) => now - meta.lastActiveAt <= this.sessionTtlMs);
-    const evictedIds = metas.filter((meta) => !sessions.includes(meta)).map((meta) => meta.id);
-    if (sessions.length > this.maxSessions) {
-      const sorted = [...sessions].sort((a, b) => a.lastActiveAt - b.lastActiveAt);
-      const excess = sorted.slice(0, sessions.length - this.maxSessions);
-      evictedIds.push(...excess.map((meta) => meta.id));
-      return {
-        sessions: sessions.filter((meta) => !excess.includes(meta)),
-        evictedIds,
-      };
+    const active = candidates.filter((record) => {
+      return !this.isExpired(record, now);
+    });
+    const activeIds = new Set(active.map((record) => record.id));
+    const evictedIds = candidates
+      .filter((record) => !activeIds.has(record.id))
+      .map((record) => record.id);
+    if (active.length > this.maxSessions) {
+      const excess = [...active]
+        .sort((a, b) => {
+          const aLastActiveAt = a.lastActiveAt ?? a.createdAt;
+          const bLastActiveAt = b.lastActiveAt ?? b.createdAt;
+          return aLastActiveAt - bLastActiveAt;
+        })
+        .slice(0, active.length - this.maxSessions);
+      evictedIds.push(...excess.map((record) => record.id));
     }
-    return { sessions, evictedIds };
+    const evictedSet = new Set(evictedIds);
+    return {
+      retainedIds: new Set(active.filter((record) => !evictedSet.has(record.id)).map((record) => record.id)),
+      evictedIds,
+    };
+  }
+
+  private isExpired(
+    record: { createdAt: number; lastActiveAt?: number },
+    now = Date.now(),
+  ): boolean {
+    const lastActiveAt = record.lastActiveAt ?? record.createdAt;
+    return now - lastActiveAt > this.sessionTtlMs;
   }
 
   private async writeAtomic(filePath: string, contents: string): Promise<void> {
@@ -583,6 +649,7 @@ export class SessionStore {
   }
 
   private async withSessionLock<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    this.assertSessionId(sessionId);
     const directory = path.join(this.root, sessionId);
     const lockPath = path.join(directory, ".lock");
     await mkdir(directory, { recursive: true });
@@ -609,9 +676,23 @@ export class SessionStore {
       }
     }
     try {
-      return await operation();
+      const heartbeat = setInterval(() => {
+        void utimes(lockPath, new Date(), new Date()).catch(() => {});
+      }, Math.max(1_000, Math.floor(LOCK_STALE_MS / 3)));
+      heartbeat.unref?.();
+      try {
+        return await operation();
+      } finally {
+        clearInterval(heartbeat);
+      }
     } finally {
       await rm(lockPath, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  private assertSessionId(sessionId: string): void {
+    if (!isValidSessionId(sessionId)) {
+      throw new Error(`Invalid session id: ${sessionId}`);
     }
   }
 }

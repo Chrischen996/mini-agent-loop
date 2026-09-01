@@ -116,4 +116,41 @@ describe("terminal autocomplete controller", () => {
     controller.handleKey({ tab: true });
     assert.equal(value, "/resume abc123");
   });
+
+  it("loads visible session metadata for a bare /resume picker", async () => {
+    let value = "/resume";
+    const controller = new TerminalAutocompleteController({
+      cwd: process.cwd(),
+      getInput: () => value,
+      setInput: (next) => { value = next; },
+      listSessions: async () => [
+        { id: "abc123", createdAt: 1, lastActiveAt: 3, messageCount: 4, preview: "first prompt" },
+        { id: "def456", createdAt: 1, lastActiveAt: 2, messageCount: 2, preview: "second prompt" },
+      ],
+    });
+
+    controller.update();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(controller.getState().mode, "session-list");
+    assert.deepEqual(controller.getState().sessions.map((session) => session.id), ["abc123", "def456"]);
+    controller.handleKey({ downArrow: true });
+    controller.handleKey({ tab: true });
+    assert.equal(value, "/resume def456");
+    assert.equal(controller.getState().mode, null);
+  });
+
+  it("filters command candidates while the session command is still being typed", () => {
+    let value = "/s";
+    const controller = new TerminalAutocompleteController({
+      cwd: process.cwd(),
+      getInput: () => value,
+      setInput: (next) => { value = next; },
+    });
+
+    controller.update();
+    assert.deepEqual(controller.getState().commands.map((command) => command.name), ["sessions", "skill", "skills"]);
+    value = "/sess";
+    controller.update();
+    assert.deepEqual(controller.getState().commands.map((command) => command.name), ["sessions"]);
+  });
 });

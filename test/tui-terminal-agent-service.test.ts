@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { LlmConfig } from "../src/llm/index.ts";
-import { PermissionManager } from "../src/permissions.ts";
+import { PermissionManager, type PermissionRequest, type PermissionTurnContext } from "../src/permissions.ts";
 import { createInitialState, createTuiStore } from "../src/tui/state.ts";
 import { TerminalAgentService } from "../src/tui/terminal-agent-service.ts";
 
@@ -23,7 +23,40 @@ function testLlm(): LlmConfig {
   };
 }
 
+class RecordingPermissionManager extends PermissionManager {
+  readonly sessionIds: string[] = [];
+
+  override beginTurn(
+    sessionId: string,
+    onRequest: (request: PermissionRequest) => void,
+    externalSignal?: AbortSignal,
+  ): PermissionTurnContext {
+    this.sessionIds.push(sessionId);
+    return super.beginTurn(sessionId, onRequest, externalSignal);
+  }
+}
+
 describe("terminal agent service", () => {
+  it("resolves the permission namespace from the active session", async () => {
+    const store = createTuiStore(createInitialState("test-model"));
+    const permissionManager = new RecordingPermissionManager("bypass");
+    let activeSessionId = "session-one";
+    const service = new TerminalAgentService({
+      store,
+      llm: testLlm(),
+      tools: [],
+      permissionManager,
+      getPermissionSessionId: () => activeSessionId,
+      chat: async () => ({ role: "assistant", content: "answer" }),
+    });
+
+    await service.submit("first");
+    activeSessionId = "session-two";
+    await service.submit("second");
+
+    assert.deepEqual(permissionManager.sessionIds, ["session-one", "session-two"]);
+  });
+
   it("persists the prompt before invoking the model", async () => {
     const store = createTuiStore(createInitialState("test-model"));
     const phases: string[] = [];

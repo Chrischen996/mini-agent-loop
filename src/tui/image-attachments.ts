@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { ImagePart } from "../types.ts";
 import type { ImageAttachment } from "./state.ts";
+import { runChildProcess } from "./child-process.ts";
 
 export const MAX_TUI_IMAGE_BYTES = 4 * 1024 * 1024;
 export const MAX_TUI_IMAGES = 5;
@@ -103,29 +104,10 @@ async function exportMacClipboardPng(outputPath: string): Promise<void> {
     "close access outputFile",
   ];
 
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    const child = spawn("osascript", script.flatMap((line) => ["-e", line]), {
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    let settled = false;
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error) rejectPromise(error);
-      else resolvePromise();
-    };
-    const timeout = setTimeout(() => {
-      child.kill();
-      finish(new Error("clipboard read timed out"));
-    }, 5_000);
-
-    child.stderr?.resume();
-    child.once("error", (error) => finish(error));
-    child.once("close", (code) => {
-      if (code === 0) finish();
-      else finish(new Error("clipboard does not contain a PNG-compatible image"));
-    });
+  await runChildProcess("osascript", script.flatMap((line) => ["-e", line]), {
+    stdio: ["ignore", "ignore", "pipe"],
+    timeoutMessage: "clipboard read timed out",
+    failureMessage: () => "clipboard does not contain a PNG-compatible image",
   });
 }
 
@@ -162,30 +144,10 @@ export function buildWindowsClipboardCommand(outputPath: string): WindowsClipboa
 async function exportWindowsClipboardPng(outputPath: string): Promise<void> {
   const { command, args } = buildWindowsClipboardCommand(outputPath);
 
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    const child = spawn(command, args, {
-      stdio: ["ignore", "ignore", "pipe"],
-      windowsHide: true,
-    });
-    let settled = false;
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error) rejectPromise(error);
-      else resolvePromise();
-    };
-    const timeout = setTimeout(() => {
-      child.kill();
-      finish(new Error("clipboard read timed out"));
-    }, 5_000);
-
-    child.stderr?.resume();
-    child.once("error", (error) => finish(error));
-    child.once("close", (code) => {
-      if (code === 0) finish();
-      else finish(new Error("clipboard does not contain an image"));
-    });
+  await runChildProcess(command, args, {
+    stdio: ["ignore", "ignore", "pipe"],
+    timeoutMessage: "clipboard read timed out",
+    failureMessage: () => "clipboard does not contain an image",
   });
 }
 

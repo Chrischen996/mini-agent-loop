@@ -3,7 +3,7 @@ import { extractFileAcTrigger, type AcMode, type FileAcTrigger } from "./input-u
 import { modelSearchQuery, parseModelCommand } from "./model-command.ts";
 
 export const STICKY_AC_MODES = new Set<AcMode>(["model-setup", "profile-name", "profile-list"]);
-export const PICKER_AC_MODES = new Set<AcMode>(["file", "command", "model", "model-picker"]);
+export const PICKER_AC_MODES = new Set<AcMode>(["file", "command", "model", "model-picker", "session-list"]);
 
 export function isStickyAcMode(mode: AcMode): boolean {
   return STICKY_AC_MODES.has(mode);
@@ -43,6 +43,13 @@ export function isCommandPaletteInput(input: string): boolean {
   return /^\/[^/\s]*$/.test(input);
 }
 
+/** Bare session commands open the saved-session picker after the command is complete. */
+export function sessionListCommand(input: string): "resume" | "sessions" | null {
+  const match = input.trim().match(/^(\/?resume|\/sessions)$/i);
+  if (!match) return null;
+  return match[1]!.replace(/^\//, "").toLowerCase() as "resume" | "sessions";
+}
+
 export function matchSlashCommands(
   input: string,
   commands: readonly CommandDef[] = SLASH_COMMANDS,
@@ -52,8 +59,19 @@ export function matchSlashCommands(
 }
 
 /** A fully typed slash command should submit instead of reopening its picker. */
-export function isExactSlashCommand(input: string, commandName: string): boolean {
-  return input.trim().toLowerCase() === `/${commandName.trim().toLowerCase()}`;
+export function isExactSlashCommand(
+  input: string,
+  commandName: string,
+  argumentCandidates?: readonly string[],
+): boolean {
+  const value = input.trim().toLowerCase();
+  const name = commandName.trim().toLowerCase();
+  if (value === `/${name}`) return true;
+  if (!argumentCandidates || argumentCandidates.length === 0) return false;
+  const prefix = `/${name}`;
+  if (!value.startsWith(`${prefix} `)) return false;
+  const argument = value.slice(prefix.length).trim();
+  return argumentCandidates.some((candidate) => candidate.trim().toLowerCase() === argument);
 }
 
 /**
@@ -69,6 +87,7 @@ export function extractInlineModelQuery(input: string): string | null {
 
 export type AutocompleteResolution =
   | { kind: "sticky" }
+  | { kind: "session-list"; command: "resume" | "sessions" }
   | { kind: "model-picker"; query: string }
   | { kind: "command"; candidates: CommandDef[] }
   | { kind: "model"; query: string }
@@ -88,6 +107,9 @@ export function resolveAutocompleteInput(
     return { kind: "model-picker", query: modelSearchQuery(input) };
   }
   if (isStickyAcMode(acMode)) return { kind: "sticky" };
+
+  const sessionCommand = sessionListCommand(input);
+  if (sessionCommand) return { kind: "session-list", command: sessionCommand };
 
   if (isCommandPaletteInput(input)) {
     return { kind: "command", candidates: matchSlashCommands(input, commands) };
@@ -120,6 +142,7 @@ export type AutocompleteNavAction =
   | { type: "accept-command" }
   | { type: "accept-file" }
   | { type: "accept-model" }
+  | { type: "accept-session" }
   | { type: "cancel"; clearInput?: boolean };
 
 /**
@@ -130,7 +153,7 @@ export function resolveAutocompleteNav(
   acMode: AcMode,
   key: AutocompleteNavKey,
   acIndex: number,
-  lengths: { commands: number; files: number; models: number; profiles: number },
+  lengths: { commands: number; files: number; models: number; profiles: number; sessions?: number },
 ): AutocompleteNavAction {
   if (acMode === "profile-name" || acMode === "model-setup") {
     if (key.escape) return { type: "cancel", clearInput: true };
@@ -166,6 +189,14 @@ export function resolveAutocompleteNav(
     if (key.tab && !key.shift) return { type: "accept-model" };
     if (key.escape) return { type: "cancel", clearInput: true };
     return { type: "none" };
+  }
+
+  if (acMode === "session-list") {
+    if (key.upArrow) return { type: "move", index: nextWrappedIndex(acIndex, -1, lengths.sessions ?? 0) };
+    if (key.downArrow) return { type: "move", index: nextWrappedIndex(acIndex, 1, lengths.sessions ?? 0) };
+    if (key.tab && !key.shift) return { type: "accept-session" };
+    if (key.escape) return { type: "cancel" };
+    return { type: "ignore" };
   }
 
   return { type: "none" };

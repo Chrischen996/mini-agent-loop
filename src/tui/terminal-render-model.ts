@@ -13,6 +13,8 @@ import { noticeText, noticeTitle, permissionModeLabel, statusLabel, thinkingLeve
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import { isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from "./subagent-lines.ts";
 import { activityPresentation, formatActivity, loadingGlyph } from "./activity.ts";
+import { TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "./brand.ts";
+import { welcomePanelRenderLines, type WelcomePanelData } from "./welcome-panel.ts";
 
 export type TerminalRenderOptions = {
   maxMessages?: number;
@@ -20,8 +22,12 @@ export type TerminalRenderOptions = {
   /** Claude Code-style condensed session header. Disabled unless supplied. */
   header?: {
     title?: string;
+    version?: string;
+    model?: string;
+    billing?: string;
     cwd?: string;
     show?: boolean;
+    showWelcome?: boolean;
   };
   /** Draw the thin separator immediately above the prompt row. */
   promptRule?: boolean;
@@ -72,7 +78,7 @@ export function buildTerminalRenderLines(
   const messageStart = scrollback
     ? 0
     : Math.max(0, state.messages.length - (options.maxMessages ?? 200));
-  const header = options.header?.show === false ? [] : options.header ? headerRenderLines(state, options.header) : [];
+  const header = options.header?.show === false ? [] : options.header ? headerRenderLines(state, options.header, width) : [];
 
   // Fullscreen keeps the task panel above the message feed. In main-screen
   // mode it belongs to the live tail so Todo updates never require rewriting
@@ -387,12 +393,30 @@ function toolCardRenderLines(
   return rows;
 }
 
-function headerRenderLines(state: TuiState, options: NonNullable<TerminalRenderOptions["header"]>): RenderLine[] {
+function headerRenderLines(
+  state: TuiState,
+  options: NonNullable<TerminalRenderOptions["header"]>,
+  width: number | undefined,
+): RenderLine[] {
+  if (options.showWelcome && width !== undefined && width >= 70) {
+    const welcome: WelcomePanelData = {
+      title: options.title,
+      version: options.version,
+      model: options.model,
+      billing: options.billing,
+      cwd: options.cwd,
+    };
+    return welcomePanelRenderLines(width, welcome);
+  }
   // Claude Code keeps model and cwd in its footer/status chrome. The optional
   // title remains for compatibility with callers that explicitly request a
   // welcome row, but no project-specific identity leaks into the transcript.
-  const title = options.title ?? "Claude Code";
-  return [{ key: "header-title", text: title, prefix: "✻ ", style: "assistant", bold: true, tone: "running" }];
+  const title = options.title ?? TUI_BRAND_NAME;
+  return [
+    { key: "header-spark-top", text: TUI_BRAND_SPARK, prefix: "  ", style: "assistant", bold: true, tone: "running" },
+    { key: "header-title", text: title, prefix: `${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}  `, prefixTone: "running", style: "assistant", bold: true },
+    { key: "header-spark-bottom", text: TUI_BRAND_SPARK, prefix: "  ", style: "assistant", bold: true, tone: "running" },
+  ];
 }
 
 function thinkingHeaderLines(content: string, mode: TuiState["thinkingMode"], streaming: boolean, key: number | string, focused: boolean): RenderLine[] {

@@ -14,7 +14,9 @@ import { documentTextPart, MAX_ATTACHMENT_BYTES } from "./attachments.ts";
 import { contentAsString, imagePart, textPart } from "./content.ts";
 import { loadInstructionBundle } from "./agents-md.ts";
 import { DocumentStore } from "./documents.ts";
-import { SessionStore, type PersistedSession } from "./session-store.ts";
+import type { PersistedSession } from "./session-store.ts";
+import { SessionManager } from "./session-manager.ts";
+import { sanitizeResumableMessages } from "./session-history.ts";
 import { isAbortError, loadLlmConfigFromEnv, switchLlmModel, type ChatFn, type LlmConfig } from "./llm/index.ts";
 import { getAvailableModels, resolveModel, searchModels } from "./models.ts";
 import { getActiveProfile, loadProfileStore } from "./profile-store.ts";
@@ -524,23 +526,7 @@ function formatReferencedBlock(paths: string[]): string {
 }
 
 export function truncateSessionMessages(messages: AgentMessage[], visibleCount: number): AgentMessage[] {
-  const system = messages.filter((message) => message.role === "system");
-  const visible = messages.filter((message) => message.role !== "system").slice(0, visibleCount);
-  for (let index = 0; index < visible.length; index += 1) {
-    const message = visible[index];
-    if (message.role !== "assistant" || !message.toolCalls?.length) continue;
-    const expected = new Set(message.toolCalls.map((call) => call.id));
-    const found = new Set<string>();
-    for (const candidate of visible.slice(index + 1)) {
-      if (candidate.role === "tool") found.add(candidate.toolCallId);
-      if (candidate.role === "user" || candidate.role === "assistant") break;
-    }
-    if ([...expected].some((id) => !found.has(id))) {
-      visible.splice(index);
-      break;
-    }
-  }
-  return [...system, ...visible];
+  return sanitizeResumableMessages(messages, visibleCount);
 }
 
 function visibleMessageCount(messages: AgentMessage[]): number {
@@ -879,7 +865,10 @@ export function createAgentServer(options: AgentServerOptions): Express {
     );
   }
   const documentStore = new DocumentStore(path.join(dataRoot, "documents"));
-  const sessionStore = new SessionStore(path.join(dataRoot, "sessions"), { workspaceId: workspace });
+  const sessionManager = new SessionManager({
+    dataDir: path.join(dataRoot, "sessions"),
+    workspaceId: workspace,
+  });
   const jobManager = new JobManager(new JobStore(path.join(dataRoot, "jobs")));
   const memoryStore = new MemoryStore(path.join(dataRoot, "memory", "records.json"));
   // Persistent memory digest for system-prompt injection (Claude Code-style).
@@ -911,16 +900,13 @@ export function createAgentServer(options: AgentServerOptions): Express {
   });
   const saveSession = async (session: Session): Promise<void> => {
     session.lastActiveAt = Date.now();
-    await sessionStore.save(persistedSession(session));
+    await sessionManager.save(persistedSession(session));
   };
   const persistTurnStart = async (session: Session, content: MessageContent): Promise<void> => {
     session.lastActiveAt = Date.now();
-    await sessionStore.save({
+    await sessionManager.saveTurnStart({
       ...persistedSession(session),
-      messages: [
-        ...session.messages,
-        { role: "user", content },
-      ],
+      content,
     });
   };
   const updateSessionTodos = async (session: Session, snapshot: unknown): Promise<void> => {
@@ -935,8 +921,14 @@ export function createAgentServer(options: AgentServerOptions): Express {
     const todoTool = createSessionTodoTool(session);
     return () => [...resolveToolProvider(baseTools), todoTool];
   };
-  const restoreSessions = sessionStore.loadAll().then((restored) => {
+  const restoreSessions = sessionManager.loadAll().then((restored) => {
     return Promise.all([...restored.values()].map(async (persisted) => {
+      const restoredPlan = persisted.currentPlan
+        ? planManager.restorePlan({
+            ...persisted.currentPlan,
+            sessionId: persisted.id,
+          })
+        : undefined;
       const session: Session = {
         id: persisted.id,
         messages: persisted.messages,
@@ -948,7 +940,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
         thinkingLevel: persisted.thinkingLevel,
         thinkingMode: persisted.thinkingMode,
         skillNames: persisted.skillNames ?? [...defaultSkillNames],
-        currentPlan: persisted.currentPlan,
+        phase: persisted.phase,
+        currentPlan: restoredPlan,
         todos: persisted.todos ?? [],
         todoVersion: persisted.todoVersion ?? 0,
         parentSessionId: persisted.parentSessionId,
@@ -1565,7 +1558,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       todoVersion: 0,
     };
     sessions.set(id, session);
-    await sessionStore.create(persistedSession(session));
+    await sessionManager.save(persistedSession(session));
     void documentStore.createSession(id);
     response.status(201).json({ id, createdAt: session.createdAt, permissionMode: session.permissionManager.getMode() });
   });
@@ -1589,10 +1582,15 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     try {
-      const messages = truncateSessionMessages(parent.messages, messageIndex);
+      // Keep the fork fully independent: later tool/result updates must not
+      // mutate message content or nested tool arguments in the parent.
+      const messages = structuredClone(truncateSessionMessages(parent.messages, messageIndex));
       const safeMessageIndex = visibleMessageCount(messages);
       const forkedFromMessageId = messageIdAtBoundary(messages, safeMessageIndex);
       const id = randomUUID();
+      const childPlan = parent.currentPlan
+        ? planManager.clonePlan(parent.currentPlan, id)
+        : undefined;
       const child: Session = {
         id,
         messages,
@@ -1603,6 +1601,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
         thinkingLevel: parent.thinkingLevel,
         thinkingMode: parent.thinkingMode,
         permissionManager: new PermissionManager(parent.permissionManager.getMode()),
+        phase: parent.phase,
+        currentPlan: childPlan,
         todos: parent.todos.map((todo) => ({ ...todo })),
         todoVersion: parent.todoVersion,
         parentSessionId: parent.id,
@@ -1610,8 +1610,13 @@ export function createAgentServer(options: AgentServerOptions): Express {
         forkedFromMessageId,
         skillNames: [...(parent.skillNames ?? [])],
       };
+      try {
+        await sessionManager.save(persistedSession(child));
+      } catch (error) {
+        if (childPlan) planManager.deletePlan(childPlan.id);
+        throw error;
+      }
       sessions.set(id, child);
-      await sessionStore.create(persistedSession(child));
       await documentStore.createSession(id);
       response.status(201).json({
         id,
@@ -2552,7 +2557,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
     try {
       sessions.delete(request.params.id);
-      await sessionStore.remove(request.params.id);
+      await sessionManager.remove(request.params.id);
       void documentStore.removeSession(request.params.id);
       response.status(204).end();
     } finally {

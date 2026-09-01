@@ -23,7 +23,8 @@ export type TerminalAgentServiceOptions = {
   llm: LlmConfig;
   tools: ToolProvider;
   permissionManager: PermissionManager;
-  permissionSessionId: string;
+  permissionSessionId?: string;
+  getPermissionSessionId?: () => string;
   history?: AgentMessage[];
   autoSubagent?: AutoSubagentOptions;
   preprocessors?: MessagePreprocessor[];
@@ -230,7 +231,7 @@ export class TerminalAgentService {
     const abortController = new AbortController();
     this.abortController = abortController;
     const permissionTurn = this.options.permissionManager.beginTurn(
-      this.options.permissionSessionId,
+      this.options.getPermissionSessionId?.() ?? this.options.permissionSessionId ?? this.activeSessionId ?? "tui-session",
       (request) => this.dispatch({ type: "LOOP_EVENT", event: { type: "permission_required", request } }),
       abortController.signal,
     );

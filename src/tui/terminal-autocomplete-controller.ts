@@ -3,10 +3,12 @@ import { ARGUMENT_COMMANDS, PATH_COMMANDS } from "./slash-commands.ts";
 import { listCandidates } from "./file-completion.ts";
 import { modelChoices } from "./model-command.ts";
 import type { ModelRef } from "../models.ts";
+import type { PersistedSessionMeta } from "../session-store.ts";
 import type { ModelSetupState, PendingProfileSetup, ProfileListState } from "./types.ts";
-import type { AcMode, FileAcTrigger } from "./input-utils.ts";
+import { type AcMode, type FileAcTrigger } from "./input-utils.ts";
 import {
   currentAutocompleteNavIndex,
+  sessionListCommand,
   resolveAutocompleteInput,
   resolveAutocompleteNav,
   type AutocompleteNavKey,
@@ -19,6 +21,7 @@ export type TerminalAutocompleteState = {
   commands: CommandDef[];
   files: string[];
   models: string[];
+  sessions: PersistedSessionMeta[];
   modelContextWindows: Record<string, number>;
   modelQuery: string;
   fileFragment: string;
@@ -28,6 +31,8 @@ export type TerminalAutocompleteState = {
   /** Candidate arguments for commands such as /tasks, /todo, /copy, and /resume. */
   argumentCandidates?: string[];
   argumentPrefix?: string;
+  sessionCommand?: "resume" | "sessions";
+  sessionLoading: boolean;
 };
 
 export type TerminalAutocompleteOptions = {
@@ -37,6 +42,7 @@ export type TerminalAutocompleteOptions = {
   onChange?: (state: TerminalAutocompleteState) => void;
   commands?: readonly CommandDef[];
   listSessionIds?: () => Promise<string[]>;
+  listSessions?: () => Promise<PersistedSessionMeta[]>;
 };
 
 const EMPTY_STATE: TerminalAutocompleteState = {
@@ -45,6 +51,7 @@ const EMPTY_STATE: TerminalAutocompleteState = {
   commands: [],
   files: [],
   models: [],
+  sessions: [],
   modelContextWindows: {},
   modelQuery: "",
   fileFragment: "",
@@ -53,6 +60,8 @@ const EMPTY_STATE: TerminalAutocompleteState = {
   profileListState: undefined,
   argumentCandidates: undefined,
   argumentPrefix: undefined,
+  sessionCommand: undefined,
+  sessionLoading: false,
 };
 
 /** Non-React counterpart of useAutocomplete for the ANSI entrypoint. */
@@ -111,6 +120,36 @@ export class TerminalAutocompleteController {
         argumentCandidates: candidates,
         argumentPrefix: argument.prefix,
       });
+      return;
+    }
+    const sessionCommand = sessionListCommand(input);
+    if (sessionCommand && (this.options.listSessions || this.options.listSessionIds)) {
+      this.fileTrigger = null;
+      this.setState({
+        ...EMPTY_STATE,
+        mode: "session-list",
+        sessionCommand,
+        sessionLoading: true,
+      });
+      this.timer = setTimeout(async () => {
+        const sessions = this.options.listSessions
+          ? await this.options.listSessions().catch(() => [])
+          : (await this.options.listSessionIds!().catch(() => [])).map((id) => ({
+            id,
+            createdAt: 0,
+            lastActiveAt: 0,
+            messageCount: 0,
+            preview: "",
+          }));
+        if (updateId !== this.requestId) return;
+        this.setState({
+          ...this.state,
+          mode: "session-list",
+          sessions,
+          sessionLoading: false,
+          index: 0,
+        });
+      }, 0);
       return;
     }
     const resolution = resolveAutocompleteInput(input, this.state.mode, this.options.commands ?? SLASH_COMMANDS);
@@ -186,6 +225,7 @@ export class TerminalAutocompleteController {
       files: state.files.length,
       models: state.models.length,
       profiles: state.profileListState?.profiles.length ?? 0,
+      sessions: state.sessions.length,
     });
     switch (action.type) {
       case "none": return false;
@@ -220,6 +260,12 @@ export class TerminalAutocompleteController {
       case "accept-model": {
         const chosen = state.models[state.index];
         if (chosen) this.options.setInput(`/model ${chosen}`);
+        this.clear();
+        return true;
+      }
+      case "accept-session": {
+        const session = state.sessions[state.index];
+        if (session) this.options.setInput(`/resume ${session.id}`);
         this.clear();
         return true;
       }
