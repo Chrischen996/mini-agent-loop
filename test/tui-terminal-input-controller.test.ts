@@ -31,6 +31,15 @@ describe("terminal input controller", () => {
     ]);
   });
 
+  it("maps kitty Ctrl+Shift+T to the Todo editor shortcut", () => {
+    const actions: TerminalInputAction[] = [];
+    const controller = new TerminalInputController({ onAction: (action) => actions.push(action) });
+
+    controller.handle("\x1b[116;6u");
+
+    assert.deepEqual(actions, [{ type: "shortcut", name: "todo" }]);
+  });
+
   it("maps Alt+Up/Down to reasoning-message focus navigation", () => {
     const actions: TerminalInputAction[] = [];
     const controller = new TerminalInputController({ onAction: (action) => actions.push(action) });

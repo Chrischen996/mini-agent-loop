@@ -470,7 +470,12 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return { ...state, status: action.status };
 
     case "SET_TODOS":
-      return { ...state, todos: action.todos };
+      return {
+        ...state,
+        todos: action.todos,
+        todoItems: action.todos.length > 0 ? action.todos : undefined,
+        todoRevision: nextTodoRevision(),
+      };
 
     case "CANCEL_GENERATION":
       return {

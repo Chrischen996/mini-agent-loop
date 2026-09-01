@@ -16,7 +16,9 @@ import { PermissionManager } from "../permissions.ts";
 import { applyPermissionModePrompt, createAgentHistory, restoreAgentHistory, type AgentRuntimeRef } from "../loop.ts";
 import { cycleThinkingLevel, thinkingLevelToDisplay, withThinkingLevel } from "../think-intensity.ts";
 import { nextPermissionMode, switchPermissionMode } from "./permission-utils.ts";
-import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
+import { executeTodoCommand, parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
+import { confirmTodoEditor, createTodoEditorState, reduceTodoEditor, type TodoEditorAction, type TodoEditorState } from "./todo-editor.ts";
+import type { TodoItem } from "../todo.ts";
 import { parseSlashCommand } from "./slash-commands.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
 import { createInitialState, createTuiStore } from "./state.ts";
@@ -277,11 +279,70 @@ export async function runTerminalMain(): Promise<void> {
     // to the terminal, so keep the initial width for the append-only path.
     const scrollbackWidth = process.stdout.columns || 80;
     let autocomplete: TerminalAutocompleteController;
+    let todoEditorState: TodoEditorState | null = null;
     let render: () => void = () => undefined;
     let animationTimer: ReturnType<typeof setInterval> | undefined;
+    const persistTodoState = async (todos: readonly TodoItem[]): Promise<void> => {
+      try {
+        const existing = await sessionStore.load(sessionRef.current);
+        const history = service.getHistory();
+        const persisted: PersistedSession = {
+          id: sessionRef.current,
+          createdAt: existing?.createdAt ?? Date.now(),
+          modelId: activeLlm.model,
+          thinkingLevel: activeLlm.thinkingLevel,
+          thinkingMode: activeThinkingMode,
+          permissionMode: permissionManager.getMode(),
+          skillNames,
+          phase: store.getState().phase,
+          currentPlan: store.getState().currentPlan,
+          messages: history,
+          todos: persistableTodos(todos),
+          todoVersion: store.getState().todoRevision,
+        };
+        if (existing) await sessionStore.save(persisted);
+        else await sessionStore.create(persisted);
+      } catch {
+        // Persistence is best-effort; a disk error must not break the TUI.
+      }
+    };
     const directAbortRef: { current?: AbortController } = {};
     const input = new TerminalInputController({
-      onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionStore, sessionRef, allTools, runtimeContext, directAbortRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); } }),
+      onAction: (action) => handleInputAction(action, {
+        store,
+        service,
+        permissionManager,
+        input,
+        cwd,
+        planCaptureRef,
+        execCaptureRef,
+        autocomplete,
+        sessionStore,
+        sessionRef,
+        allTools,
+        runtimeContext,
+        directAbortRef,
+        setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); },
+        persistTodoState,
+        todoEditor: {
+          getState: () => todoEditorState,
+          setState: (next) => { todoEditorState = next; render(); },
+        },
+        commitTodoEditor: () => {
+          if (!todoEditorState) return;
+          const next = confirmTodoEditor(todoEditorState);
+          if (next.error) {
+            todoEditorState = next;
+            render();
+            return;
+          }
+          store.dispatch({ type: "SET_TODOS", todos: next.todos });
+          store.dispatch({ type: "ADD_NOTICE", title: "Todo", text: "Todo list updated." });
+          todoEditorState = null;
+          input.clear();
+          void persistTodoState(next.todos);
+        },
+      }),
       getScrollPageSize: () => Math.max(1, (process.stdout.rows || 24) - 8),
     });
     autocomplete = new TerminalAutocompleteController({
@@ -317,6 +378,7 @@ export async function runTerminalMain(): Promise<void> {
         contextWindow: service.getLlm().contextWindow,
         queuedCount: service.getQueuedCount(),
         thinkingLevel: service.getLlm().thinkingLevel,
+        todoEditor: todoEditorState ?? undefined,
       };
       if (!fullscreen) {
         renderer.renderLines(buildTerminalRenderLines(state, renderOptions));
@@ -428,11 +490,29 @@ export type InputDeps = {
   runtimeContext: RuntimeExecutionContext;
   directAbortRef: { current?: AbortController };
   setThinkingMode: (mode: "fixed" | "adaptive") => void;
+  persistTodoState?: (todos: readonly TodoItem[]) => void | Promise<void>;
+  todoEditor?: {
+    getState: () => TodoEditorState | null;
+    setState: (state: TodoEditorState | null) => void;
+  };
+  commitTodoEditor?: () => void;
 };
 
 export function handleInputAction(action: TerminalInputAction, deps: InputDeps): void {
   const { store, service, permissionManager, input, cwd } = deps;
   const state = store.getState();
+  const editor = deps.todoEditor?.getState() ?? null;
+  if (action.type === "shortcut" && action.name === "todo") {
+    if (!editor && !state.busy && !state.pendingPermission && !deps.autocomplete.getState().mode && deps.todoEditor) {
+      const todos = state.todos.length > 0 ? state.todos : state.todoItems ?? [];
+      deps.todoEditor.setState(createTodoEditorState(todos));
+    }
+    return;
+  }
+  if (editor && deps.todoEditor) {
+    handleTodoEditorInput(action, deps, editor);
+    return;
+  }
   if (action.type === "exit") {
     service.abort();
     deps.directAbortRef.current?.abort();
@@ -550,7 +630,46 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
   }
 }
 
-function persistableTodos(items: ReturnType<typeof createInitialState>["todoItems"]): PersistedSession["todos"] {
+function handleTodoEditorInput(action: TerminalInputAction, deps: InputDeps, editor: TodoEditorState): void {
+  const todoEditor = deps.todoEditor;
+  if (!todoEditor) return;
+  if (action.type === "cancel") {
+    todoEditor.setState(null);
+    deps.input.clear();
+    return;
+  }
+  if (editor.mode === "select") {
+    if (action.type === "cursor" && (action.direction === "up" || action.direction === "down")) {
+      todoEditor.setState(reduceTodoEditor(editor, { type: "MOVE", delta: action.direction === "up" ? -1 : 1 }));
+      return;
+    }
+    if (action.type === "insert") {
+      const value = action.value.slice(-1);
+      const editorAction: TodoEditorAction | undefined = value.toLowerCase() === "a"
+        ? { type: "BEGIN_ADD" }
+        : value.toLowerCase() === "e" ? { type: "BEGIN_EDIT" }
+          : value.toLowerCase() === "s" ? { type: "CYCLE_STATUS" }
+            : value.toLowerCase() === "d" ? { type: "DELETE" }
+              : undefined;
+      if (editorAction) todoEditor.setState(reduceTodoEditor(editor, editorAction));
+      return;
+    }
+    if (action.type === "submit") {
+      deps.commitTodoEditor?.();
+      return;
+    }
+    return;
+  }
+  if (action.type === "insert" || action.type === "backspace") {
+    todoEditor.setState(reduceTodoEditor(editor, { type: "INPUT", value: deps.input.getValue() }));
+    return;
+  }
+  if (action.type === "submit") {
+    deps.commitTodoEditor?.();
+  }
+}
+
+function persistableTodos(items: readonly TodoItem[] | undefined): PersistedSession["todos"] {
   if (!items) return undefined;
   return items.map((item) => ({
     id: item.id,
@@ -783,6 +902,13 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
     return;
   }
   const slashCommand = parseSlashCommand(text);
+  if (slashCommand?.cmd === "todo") {
+    const todos = store.getState().todos.length > 0 ? store.getState().todos : store.getState().todoItems ?? [];
+    const result = executeTodoCommand(todos, slashCommand.todo, store.dispatch);
+    if (result.ok) void deps.persistTodoState?.(result.todos);
+    input.clear();
+    return;
+  }
   if (slashCommand) {
     input.recordSubmission(text);
     input.clear();
@@ -792,9 +918,7 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
       ? { path: slashCommand.path }
       : slashCommand.cmd === "bash"
         ? { command: slashCommand.command }
-        : slashCommand.cmd === "find"
-          ? { pattern: slashCommand.pattern, path: slashCommand.path }
-          : { pattern: slashCommand.pattern, path: slashCommand.path };
+        : { pattern: slashCommand.pattern, path: slashCommand.path };
     deps.directAbortRef.current = abortController;
     try {
       const directResult = await runDirectTool(slashCommand.cmd, args, {

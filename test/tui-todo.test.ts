@@ -5,8 +5,67 @@ import { TodoPanel } from "../src/tui/components/TodoPanel.tsx";
 import { createInitialState, tuiReducer } from "../src/tui/state.ts";
 import { getMessageFeedHeight, getPickerLayout } from "../src/tui/layout.ts";
 import type { TodoItem } from "../src/todo.ts";
+import { confirmTodoEditor, createTodoEditorState, reduceTodoEditor } from "../src/tui/todo-editor.ts";
 
 describe("TUI todo state", () => {
+  const editableTodos: TodoItem[] = [
+    { id: "a", content: "First", activeForm: "First", status: "pending", source: "model" },
+    { id: "b", content: "Running", activeForm: "Running", status: "in_progress", source: "model" },
+  ];
+
+  it("cycles status exclusively and clamps selection after delete", () => {
+    let editor = createTodoEditorState(editableTodos);
+    editor = reduceTodoEditor(editor, { type: "MOVE", delta: 1 });
+    editor = reduceTodoEditor(editor, { type: "CYCLE_STATUS" });
+    assert.deepEqual(editor.todos.map((todo) => todo.status), ["pending", "completed"]);
+    editor = reduceTodoEditor(editor, { type: "CYCLE_STATUS" });
+    assert.deepEqual(editor.todos.map((todo) => todo.status), ["pending", "pending"]);
+    editor = reduceTodoEditor(editor, { type: "CYCLE_STATUS" });
+    assert.deepEqual(editor.todos.map((todo) => todo.status), ["pending", "in_progress"]);
+    editor = reduceTodoEditor(editor, { type: "DELETE" });
+    assert.equal(editor.selectedIndex, 0);
+    assert.deepEqual(editor.todos, [editableTodos[0]]);
+  });
+
+  it("confirms add and edit drafts and cancels without changing the snapshot", () => {
+    let editor = createTodoEditorState(editableTodos);
+    editor = reduceTodoEditor(editor, { type: "BEGIN_ADD" });
+    editor = reduceTodoEditor(editor, { type: "INPUT", value: "New item" });
+    editor = reduceTodoEditor(editor, { type: "CONFIRM" });
+    assert.equal(editor.mode, "select");
+    assert.equal(editor.todos.at(-1)?.content, "New item");
+
+    editor = reduceTodoEditor(editor, { type: "MOVE", delta: -2 });
+    editor = reduceTodoEditor(editor, { type: "BEGIN_EDIT" });
+    editor = reduceTodoEditor(editor, { type: "INPUT", value: "Changed" });
+    editor = reduceTodoEditor(editor, { type: "CONFIRM" });
+    assert.equal(editor.todos[0]?.content, "Changed");
+
+    const beforeCancel = editor.todos;
+    editor = reduceTodoEditor(editor, { type: "BEGIN_EDIT" });
+    editor = reduceTodoEditor(editor, { type: "INPUT", value: "Discarded" });
+    editor = reduceTodoEditor(editor, { type: "CANCEL" });
+    assert.deepEqual(editor.todos, beforeCancel);
+    assert.equal(editor.mode, "select");
+  });
+
+  it("keeps the old snapshot when a draft confirmation is invalid", () => {
+    let editor = reduceTodoEditor(createTodoEditorState(editableTodos), { type: "BEGIN_ADD" });
+    editor = reduceTodoEditor(editor, { type: "INPUT", value: "   " });
+    const failed = reduceTodoEditor(editor, { type: "CONFIRM" });
+    assert.deepEqual(failed.todos, editableTodos);
+    assert.equal(failed.mode, "add");
+    assert.match(failed.error ?? "", /non-empty/i);
+  });
+
+  it("confirms the current editor snapshot for select-mode Enter", () => {
+    let editor = createTodoEditorState(editableTodos);
+    editor = reduceTodoEditor(editor, { type: "DELETE" });
+    const confirmed = confirmTodoEditor(editor);
+    assert.deepEqual(confirmed.todos, [editableTodos[1]]);
+    assert.equal(confirmed, editor);
+  });
+
   it("replaces the independent todo snapshot with a revision guard", () => {
     const todos: TodoItem[] = [{ id: "a", content: "Run tests", activeForm: "Running tests", status: "in_progress", source: "model" as const }];
     const next = tuiReducer(createInitialState("model"), {

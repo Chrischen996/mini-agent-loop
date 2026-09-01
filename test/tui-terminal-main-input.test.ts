@@ -8,6 +8,7 @@ import { TerminalAutocompleteController } from "../src/tui/terminal-autocomplete
 import { TerminalInputController } from "../src/tui/terminal-input-controller.ts";
 import { TerminalAgentService } from "../src/tui/terminal-agent-service.ts";
 import { handleInputAction, type InputDeps } from "../src/tui/terminal-main.ts";
+import { confirmTodoEditor, type TodoEditorState } from "../src/tui/todo-editor.ts";
 
 function model(): ModelRef {
   return {
@@ -25,7 +26,7 @@ function model(): ModelRef {
   };
 }
 
-function dependencies() {
+function dependencies(): InputDeps {
   const store = createTuiStore(createInitialState("model"));
   const permissionManager = new PermissionManager("plan");
   const service = new TerminalAgentService({
@@ -68,7 +69,7 @@ function dependencies() {
     runtimeContext: { sessionId: "test", workspaceId: process.cwd() },
     directAbortRef: {},
     setThinkingMode: () => {},
-  } satisfies InputDeps;
+  };
 }
 
 describe("terminal main input routing", () => {
@@ -143,5 +144,71 @@ describe("terminal main input routing", () => {
     const notice = deps.store.getState().messages.at(-1);
     assert.equal(notice?.kind, "notice");
     assert.match(notice?.kind === "notice" ? notice.text : "", /没有可复制/);
+  });
+
+  it("handles /todo locally instead of starting an Agent turn", async () => {
+    const deps = dependencies();
+    deps.input.setValue("/todo add Ship it");
+
+    handleInputAction({ type: "submit", value: "/todo add Ship it" }, deps);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.deepEqual(deps.store.getState().todos, [{
+      id: "todo-1",
+      content: "Ship it",
+      activeForm: "Ship it",
+      status: "pending",
+      source: "model",
+    }]);
+    assert.equal(deps.service.getHistory().filter((message) => message.role === "user").length, 0);
+  });
+
+  it("passes an explicit empty snapshot to persistence when /todo clear removes the last item", async () => {
+    const deps = dependencies();
+    deps.store.dispatch({ type: "SET_TODOS", todos: [{ id: "todo-1", content: "First", activeForm: "First", status: "pending", source: "model" }] });
+    let persisted: unknown = undefined;
+    deps.persistTodoState = (...args: unknown[]) => {
+      persisted = args[0];
+    };
+
+    deps.input.setValue("/todo clear");
+    handleInputAction({ type: "submit", value: "/todo clear" }, deps);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.deepEqual(persisted, []);
+  });
+
+  it("routes ANSI Todo editor input without leaking it into the prompt", () => {
+    const deps = dependencies();
+    deps.store.dispatch({ type: "SET_TODOS", todos: [{ id: "todo-1", content: "First", activeForm: "First", status: "pending", source: "model" }] });
+    const editorRef: { current: TodoEditorState | null } = { current: null };
+    deps.todoEditor = {
+      getState: () => editorRef.current,
+      setState: (next) => { editorRef.current = next; },
+    };
+    deps.commitTodoEditor = () => {
+      if (!editorRef.current) return;
+      const next = confirmTodoEditor(editorRef.current);
+      if (!next.error) {
+        deps.store.dispatch({ type: "SET_TODOS", todos: next.todos });
+        editorRef.current = null;
+        deps.input.clear();
+      } else {
+        editorRef.current = next;
+      }
+    };
+
+    handleInputAction({ type: "shortcut", name: "todo" }, deps);
+    assert.equal(editorRef.current?.mode, "select");
+    handleInputAction({ type: "insert", value: "e" }, deps);
+    assert.equal(editorRef.current?.mode, "edit");
+    deps.input.setValue("Changed");
+    handleInputAction({ type: "insert", value: "Changed" }, deps);
+    assert.equal(editorRef.current?.draft, "Changed");
+    handleInputAction({ type: "submit", value: "Changed" }, deps);
+
+    assert.equal(editorRef.current, null);
+    assert.equal(deps.store.getState().todos[0]?.content, "Changed");
+    assert.equal(deps.service.getHistory().filter((message) => message.role === "user").length, 0);
   });
 });

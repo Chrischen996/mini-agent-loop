@@ -6,6 +6,7 @@ import { permissionRiskLabel, toolArgumentSummary } from "./claude-style.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { toolVisualName } from "./tool-lines.ts";
 import { executionStepStatusToTodoStatus, todoIcon } from "./todo-format.ts";
+import type { TodoEditorState } from "./todo-editor.ts";
 
 type PanelTone = RenderLine["tone"];
 
@@ -124,7 +125,100 @@ export function planApprovalRenderLines(plan?: ExecutionPlan, width?: number): R
   return rows;
 }
 
+function todoEditorStatusTone(status: TodoEditorState["todos"][number]["status"]): PanelTone | undefined {
+  if (status === "completed") return "success";
+  if (status === "in_progress") return "running";
+  if (status === "failed") return "error";
+  return undefined;
+}
+
+function todoEditorStatusSymbol(status: TodoEditorState["todos"][number]["status"]): string {
+  switch (status) {
+    case "completed": return "✓";
+    case "in_progress": return "▶";
+    case "failed": return "✗";
+    case "skipped": return "-";
+    default: return "○";
+  }
+}
+
+/** Terminal rows for the shared Todo editor overlay. */
+export function todoEditorRenderLines(state?: TodoEditorState, width?: number): RenderLine[] {
+  if (!state) return [];
+  const rows: RenderLine[] = [panelTopLine("todo-editor-top", "Todo editor", width, "running")];
+  if (state.todos.length === 0) {
+    rows.push(panelContentLine("todo-editor-empty", "No todos", "muted", { width, dim: true }));
+  } else {
+    for (const [index, todo] of state.todos.entries()) {
+      const selected = index === state.selectedIndex;
+      rows.push(panelContentLine(
+        `todo-editor-${todo.id}`,
+        `${selected ? "❯" : " "} ${todoEditorStatusSymbol(todo.status)} ${todo.id}: ${todo.content}`,
+        "todo",
+        {
+          width,
+          tone: selected ? "running" : todoEditorStatusTone(todo.status),
+          bold: selected,
+          dim: todo.status === "skipped",
+          strikethrough: todo.status === "completed",
+        },
+      ));
+    }
+  }
+  if (state.error) rows.push(panelContentLine("todo-editor-error", state.error, "error", { width, tone: "error" }));
+  rows.push(
+    panelContentLine("todo-editor-hint-confirm", "Enter confirm  Esc close  ↑↓ move", "muted", { width, dim: true }),
+    panelContentLine("todo-editor-hint-actions", "S status  A add  E edit  D delete", "muted", { width, dim: true }),
+  );
+  rows.push(panelBottomLine("todo-editor-bottom", width));
+  return rows;
+}
+
 /** Terminal rows for command/file/model candidates. */
+/** Compact Claude Code-style activity summary for the fullscreen/sidebar area. */
+export function workflowPanelRenderLines(
+  state: Pick<import("./state.ts").TuiState, "goal" | "steps" | "touchedFiles" | "toolCards">,
+  width?: number,
+): RenderLine[] {
+  const activeSteps = state.steps.slice(-6);
+  const files = state.touchedFiles.slice(-6);
+  const tools = state.toolCards.slice(-4);
+  if (activeSteps.length === 0 && files.length === 0 && tools.length === 0) return [];
+
+  const rows: RenderLine[] = [panelTopLine("workflow-top", "Workspace activity", width, "running")];
+  if (state.goal.trim()) {
+    rows.push(panelContentLine("workflow-goal", `Task: ${state.goal.trim().replace(/\s+/g, " ").slice(0, 100)}`, "assistant", { width, dim: true }));
+  }
+  if (activeSteps.length > 0) {
+    rows.push(panelContentLine("workflow-steps-title", "Steps", "muted", { width, bold: true }));
+    for (const step of activeSteps) {
+      const icon = step.status === "done" ? "✓" : step.status === "error" ? "✗" : step.status === "running" ? "›" : "·";
+      rows.push(panelContentLine(`workflow-step-${step.id}`, `${icon} ${step.label}`, "muted", {
+        width,
+        tone: step.status === "error" ? "error" : step.status === "running" ? "running" : step.status === "done" ? "success" : undefined,
+        dim: step.status === "done",
+      }));
+    }
+  }
+  if (files.length > 0) {
+    rows.push(panelContentLine("workflow-files-title", `Files (${state.touchedFiles.length})`, "muted", { width, bold: true }));
+    for (const file of files) rows.push(panelContentLine(`workflow-file-${file}`, `· ${file}`, "muted", { width, dim: true }));
+  }
+  if (tools.length > 0) {
+    rows.push(panelContentLine("workflow-tools-title", "Recent tools", "muted", { width, bold: true }));
+    for (const tool of tools) {
+      const icon = tool.status === "done" ? "✓" : tool.status === "error" ? "✗" : "⟳";
+      const duration = tool.durationMs !== undefined ? ` · ${Math.round(tool.durationMs / 100) / 10}s` : "";
+      rows.push(panelContentLine(`workflow-tool-${tool.id}`, `${icon} ${toolVisualName(tool.name)}${duration}`, "muted", {
+        width,
+        tone: tool.status === "error" ? "error" : tool.status === "running" ? "running" : "success",
+      }));
+    }
+  }
+  rows.push(panelBottomLine("workflow-bottom", width));
+  return rows;
+}
+
 export function autocompleteRenderLines(state?: TerminalAutocompleteState): RenderLine[] {
   if (!state?.mode) return [];
   const rows: RenderLine[] = [];

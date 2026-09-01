@@ -26,8 +26,8 @@
   },
   "scripts": {
     "start": "tsx src/cli.ts",
-    "tui": "tsx src/tui/terminal-main.ts",
-    "tui:terminal": "tsx src/tui/terminal-main.ts",
+    "tui": "node scripts/run-tui.mjs",
+    "tui:terminal": "node scripts/run-tui.mjs",
     "tui:legacy": "tsx src/tui/main.ts",
     "tui:ink": "tsx src/tui/ink-main.tsx",
     "dev": "tsx watch src/server.ts",

@@ -5,6 +5,8 @@ import { TUI_COLORS as C } from "../theme.ts";
 import type { ModelSetupState, PendingProfileSetup, ProfileListState } from "../types.ts";
 import type { CommandDef } from "./FileAutocomplete.tsx";
 import type { AcMode } from "../input-utils.ts";
+import { TodoEditor } from "./TodoEditor.tsx";
+import type { TodoEditorState } from "../todo-editor.ts";
 
 export type OverlaysProps = {
   acMode: AcMode;
@@ -22,6 +24,10 @@ export type OverlaysProps = {
   profileListState?: ProfileListState | null;
   pickerItemRows: number;
   width?: number;
+  todoEditorState?: TodoEditorState;
+  onTodoCancel?: () => void;
+  onTodoInput?: (value: string) => void;
+  onTodoConfirm?: () => void;
 };
 
 export function Overlays({
@@ -40,7 +46,14 @@ export function Overlays({
   profileListState,
   pickerItemRows,
   width,
+  todoEditorState,
+  onTodoCancel,
+  onTodoInput,
+  onTodoConfirm,
 }: OverlaysProps): React.ReactElement | null {
+  if (todoEditorState && onTodoCancel && onTodoInput && onTodoConfirm) {
+    return <TodoEditor state={todoEditorState} onCancel={onTodoCancel} onStateChange={onTodoInput} onConfirm={onTodoConfirm} />;
+  }
   if (!acMode) return null;
   // A very short terminal may have no spare picker rows. Keep the prompt and
   // status chrome visible instead of letting a zero-budget overlay push them

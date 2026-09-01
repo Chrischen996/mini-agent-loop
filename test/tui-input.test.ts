@@ -13,6 +13,8 @@ import {
   isPasteShortcut,
   PromptInput,
 } from "../src/tui/components/PromptInput.tsx";
+import { routeTodoEditorKey } from "../src/tui/hooks/useKeyboardHandler.ts";
+import type { Key } from "ink";
 
 const nextFrame = () => new Promise((resolve) => setTimeout(resolve, 25));
 
@@ -32,6 +34,21 @@ function createTerminal() {
 }
 
 describe("TUI input utils", () => {
+  const key = (value: Partial<Key>): Key => value as Key;
+
+  it("routes Ctrl+Shift+T to the Todo editor without replacing Ctrl+T thinking mode", () => {
+    assert.equal(routeTodoEditorKey({ editorOpen: false, mode: "select", acMode: null, busy: false, pendingPermission: false, ch: "t", key: key({ ctrl: true, shift: true }) }), "open");
+    assert.equal(routeTodoEditorKey({ editorOpen: false, mode: "select", acMode: null, busy: false, pendingPermission: false, ch: "t", key: key({ ctrl: true, shift: false }) }), "thinking");
+    assert.equal(routeTodoEditorKey({ editorOpen: false, mode: "select", acMode: "command", busy: false, pendingPermission: false, ch: "t", key: key({ ctrl: true, shift: true }) }), "none");
+  });
+
+  it("routes editor navigation and draft keys before prompt input", () => {
+    assert.equal(routeTodoEditorKey({ editorOpen: true, mode: "select", acMode: null, busy: false, pendingPermission: false, ch: "", key: key({ upArrow: true }) }), "move-up");
+    assert.equal(routeTodoEditorKey({ editorOpen: true, mode: "select", acMode: null, busy: false, pendingPermission: false, ch: "a", key: key({}) }), "add");
+    assert.equal(routeTodoEditorKey({ editorOpen: true, mode: "add", acMode: null, busy: false, pendingPermission: false, ch: "e", key: key({}) }), "prompt");
+    assert.equal(routeTodoEditorKey({ editorOpen: true, mode: "select", acMode: null, busy: false, pendingPermission: false, ch: "", key: key({ escape: true }) }), "close");
+  });
+
   it("keeps newlines and tabs while stripping other control characters", () => {
     assert.equal(sanitizeInput("a\nb\tc\u0001d\u0014e\u007Ff"), "a\nb\tcdef");
   });

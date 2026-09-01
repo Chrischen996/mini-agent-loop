@@ -79,7 +79,8 @@ import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./l
 import { estimateViewportContentHeight } from "./message-viewport.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
-import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
+import { executeTodoCommand, parseLegacyTodoCommand, parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
+import { confirmTodoEditor, createTodoEditorState, reduceTodoEditor, type TodoEditorAction, type TodoEditorState } from "./todo-editor.ts";
 import { addPendingImage, handlePasteImage } from "./image-handler.ts";
 import { startModelSetup, commitModelSetup, openProfileList } from "./profile-manager.ts";
 import { selectModel } from "./model-switcher.ts";
@@ -163,6 +164,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
   const stateRef = useRef(state);
+  const [todoEditorState, setTodoEditorState] = useState<TodoEditorState | null>(null);
   stateRef.current = state;
   // Generate a stable conversation session ID on startup
   const [conversationId, setConversationId] = useState(() => process.env.MINI_AGENT_SESSION_ID ?? randomUUID());
@@ -467,6 +469,19 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     });
   }, [input, state.focusedMessageIndex, state.messages, state.streamingReasoning, state.streamingText]);
 
+  const editableTodos = state.todos.length > 0 ? state.todos : state.todoItems ?? [];
+  const commitTodoEditor = useCallback(() => {
+    if (!todoEditorState) return;
+    const next = confirmTodoEditor(todoEditorState);
+    if (next.error) {
+      setTodoEditorState(next);
+      return;
+    }
+    dispatch({ type: "SET_TODOS", todos: next.todos });
+    dispatch({ type: "ADD_NOTICE", title: "Todo", text: "Todo list updated." });
+    setTodoEditorState(null);
+  }, [todoEditorState]);
+
   // ── keyboard handler ─────────────────────────────────────────────────────
 
   useKeyboardHandler({
@@ -474,6 +489,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     adjustThinkingLevel, resolvePendingPermission, dispatch,
     acMode, state, feedHeight, handleAutocompleteKey, historyRef,
     suppressInputEchoRef, pendingPermissionRef,
+    todoEditorOpen: todoEditorState !== null,
+    todoEditorMode: todoEditorState?.mode ?? "select",
+    openTodoEditor: () => setTodoEditorState(createTodoEditorState(editableTodos)),
+    closeTodoEditor: () => setTodoEditorState(null),
+    todoEditorAction: (action: TodoEditorAction) => setTodoEditorState((current) => current ? reduceTodoEditor(current, action) : current),
+    commitTodoEditor,
   });
 
   // ── direct tool invocation ────────────────────────────────────────────────
@@ -592,6 +613,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
 
+    const legacyTodo = parseLegacyTodoCommand(trimmed);
+    if (legacyTodo) {
+      executeTodoCommand(editableTodos, legacyTodo, dispatch);
+      setInput("");
+      return;
+    }
     const todoCommand = parseTodoCommand(trimmed);
     if (todoCommand) {
       if (todoCommand === "clear") {
@@ -1038,6 +1065,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           profileListState={profileListState}
           pickerItemRows={pickerLayout.itemRows}
           width={termWidth}
+          todoEditorState={todoEditorState ?? undefined}
+          onTodoCancel={() => setTodoEditorState(null)}
+          onTodoInput={(value) => setTodoEditorState((current) => current ? reduceTodoEditor(current, { type: "INPUT", value }) : current)}
+          onTodoConfirm={commitTodoEditor}
         />
       </Box>
 
@@ -1076,8 +1107,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               onChange={setInputSafe}
               onPasteImage={handlePasteImageRef}
               onTab={handleTabAt}
-              pasteEnabled={!state.pendingPermission}
-              focus={!state.pendingPermission}
+              pasteEnabled={!state.pendingPermission && todoEditorState === null}
+              focus={!state.pendingPermission && todoEditorState === null}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {
                 if (shouldAcceptAutocompleteOnEnter(acMode)) {
