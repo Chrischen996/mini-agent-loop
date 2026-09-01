@@ -5,6 +5,8 @@ import type { AgentMessage } from "../types.ts";
 import type { PermissionMode } from "../permissions.ts";
 import type { PlanDocument } from "../plan/document.ts";
 import type { TodoItem, TodoViewMode } from "../todo.ts";
+import type { ThinkingMode } from "../thinking-policy.ts";
+import { compactText } from "./text-utils.ts";
 import { TODO_PANEL_MAX_VISIBLE_ITEMS } from "./todo-format.ts";
 import { countTerminalRows, terminalStringWidth } from "./terminal-width.ts";
 import { todoPanelRenderLines } from "./todo-lines.ts";
@@ -14,6 +16,8 @@ import { stripInlineMarkdown } from "./markdown-lines.ts";
 import { toolVisualName } from "./tool-lines.ts";
 import type { RenderLine } from "./render-lines.ts";
 import { formatRenderLine } from "./render-line-format.ts";
+import { TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "./brand.ts";
+import { buildWelcomePanelRows, WELCOME_PANEL_MIN_WIDTH } from "./welcome-panel.ts";
 
 export type LegacyToolView = {
   id: string;
@@ -49,6 +53,7 @@ export type LegacyTuiState = {
   status: string;
   permissionMode: PermissionMode;
   thinkingLevel: ModelThinkingLevel;
+  thinkingMode?: ThinkingMode;
   todoPlan?: PlanDocument;
   todoItems?: TodoItem[];
   todoRevision?: number;
@@ -56,6 +61,11 @@ export type LegacyTuiState = {
   notice?: LegacyNotice;
   /** Auto-memory updates from completed turns, rendered as inline cards. */
   memoryEvents?: MemoryUpdateEvent[];
+  cwd?: string;
+  modelName?: string;
+  billingLabel?: string;
+  version?: string;
+  showWelcome?: boolean;
 };
 
 const ANSI = {
@@ -66,18 +76,13 @@ const ANSI = {
   moveTo: (row: number, col: number) => `\x1b[${row};${col}H`,
 };
 
-function short(value: string, max = 160): string {
-  const oneLine = value.replace(/\s+/g, " ").trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max)}...` : oneLine;
-}
-
 function appendMemoryCards(lines: RenderLine[], events: MemoryUpdateEvent[] | undefined): void {
   if (!events || events.length === 0) return;
   for (const [eventIndex, event] of events.slice(-3).entries()) {
     const time = new Date(event.at).toLocaleTimeString("zh-CN", { hour12: false });
     lines.push({ key: `memory-${eventIndex}-top`, text: `Memory updated ${time}`, prefix: "┌─ ", style: "border", bold: true });
     for (const key of event.added) {
-      const preview = event.previews?.[key] ? ` — ${short(event.previews[key]!, 60)}` : "";
+      const preview = event.previews?.[key] ? ` — ${compactText(event.previews[key]!, 60)}` : "";
       lines.push({ key: `memory-${eventIndex}-add-${key}`, text: `${key}${preview}`, prefix: "+ ", style: "muted", tone: "success" });
     }
     for (const key of event.forgotten) {
@@ -107,10 +112,29 @@ function appendTextLines(
 
 /** Build the legacy frame from the same row model consumed by the ANSI path. */
 export function buildLegacyRenderLines(state: LegacyTuiState, width = 80): RenderLine[] {
-  const lines: RenderLine[] = [
-    { key: "legacy-header", text: "Claude Code", prefix: "✻ ", style: "assistant", bold: true },
-    { key: "legacy-header-gap", text: "", style: "muted" },
-  ];
+  const hasConversation = state.history.some((message) => message.role !== "system");
+  const showWelcome = state.showWelcome === true && !hasConversation && !state.pendingUser && !state.streamingText;
+  const lines: RenderLine[] = showWelcome && width >= WELCOME_PANEL_MIN_WIDTH
+    ? buildWelcomePanelRows(width, {
+      title: TUI_BRAND_NAME,
+      version: state.version,
+      model: state.modelName,
+      billing: state.billingLabel,
+      cwd: state.cwd,
+    }).map((row, index) => ({
+      key: `legacy-header-welcome-${index}`,
+      text: row.text,
+      style: row.kind === "border" ? "border" : row.kind === "heading" || row.kind === "art" ? "assistant" : "muted",
+      tone: row.kind === "border" || row.kind === "heading" || row.kind === "art" ? "running" : undefined,
+      bold: row.kind === "heading" || row.kind === "art",
+      dim: row.kind === "body",
+    }))
+    : [
+      { key: "legacy-header-spark-top", text: TUI_BRAND_SPARK, prefix: "  ", style: "assistant", bold: true, tone: "running" },
+      { key: "legacy-header", text: TUI_BRAND_NAME, prefix: `${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}  `, prefixTone: "running", style: "assistant", bold: true },
+      { key: "legacy-header-spark-bottom", text: TUI_BRAND_SPARK, prefix: "  ", style: "assistant", bold: true, tone: "running" },
+      { key: "legacy-header-gap", text: "", style: "muted" },
+    ];
 
   for (const [messageIndex, message] of state.history.filter((item) => item.role !== "system").entries()) {
     const content = contentAsString(message.content);
@@ -131,7 +155,7 @@ export function buildLegacyRenderLines(state: LegacyTuiState, width = 80): Rende
     }
     if (message.role === "tool" && !isSubagentToolName(message.name)) {
       lines.push({ key: `history-${messageIndex}-tool`, text: toolVisualName(message.name), prefix: "⏺ ", style: "tool", bold: true, prefixTone: message.isError ? "error" : "success", tone: message.isError ? "error" : undefined });
-      appendTextLines(lines, `history-${messageIndex}-result`, short(content), { prefix: "  ⎿ ", style: "muted", dim: true, tone: message.isError ? "error" : undefined });
+      appendTextLines(lines, `history-${messageIndex}-result`, compactText(content, 160), { prefix: "  ⎿ ", style: "muted", dim: true, tone: message.isError ? "error" : undefined });
     }
   }
 
@@ -169,7 +193,7 @@ export function buildLegacyRenderLines(state: LegacyTuiState, width = 80): Rende
     if (committedToolIds.has(tool.id)) continue;
     const tone = tool.status === "error" ? "error" : tool.status === "running" ? "running" : "success";
     lines.push({ key: `legacy-tool-${tool.id}`, text: toolVisualName(tool.name), prefix: "⏺ ", style: "tool", bold: true, prefixTone: tone, tone: tool.status === "error" ? "error" : undefined });
-    if (tool.preview) appendTextLines(lines, `legacy-tool-${tool.id}-result`, short(tool.preview, 100), { prefix: "  ⎿ ", style: "muted", dim: true, tone: tool.status === "error" ? "error" : undefined });
+    if (tool.preview) appendTextLines(lines, `legacy-tool-${tool.id}-result`, compactText(tool.preview, 100), { prefix: "  ⎿ ", style: "muted", dim: true, tone: tool.status === "error" ? "error" : undefined });
   }
 
   lines.push(

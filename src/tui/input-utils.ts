@@ -69,6 +69,7 @@ export type AcMode =
   | "file"
   | "model"
   | "model-picker"
+  | "session-list"
   | "model-setup"
   | "profile-name"
   | "profile-list"
@@ -79,7 +80,8 @@ export function shouldAcceptAutocompleteOnEnter(acMode: AcMode): boolean {
   return acMode === "command"
     || acMode === "file"
     || acMode === "model"
-    || acMode === "model-picker";
+    || acMode === "model-picker"
+    || acMode === "session-list";
 }
 
 function extractAtFileAcTrigger(input: string): FileAcTrigger | null {

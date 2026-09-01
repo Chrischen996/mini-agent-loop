@@ -6,8 +6,46 @@ import { createInitialState, tuiReducer } from "../src/tui/state.ts";
 import { terminalStringWidth, truncateTerminalPath } from "../src/tui/terminal-width.ts";
 import { displaySubagentTask, isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from "../src/tui/subagent-lines.ts";
 import { stripInlineMarkdown } from "../src/tui/markdown-lines.ts";
+import { TUI_BRAND_HEADER_HEIGHT, TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "../src/tui/brand.ts";
+import { buildWelcomePanelRows } from "../src/tui/welcome-panel.ts";
+import type { TerminalAutocompleteState } from "../src/tui/terminal-autocomplete-controller.ts";
 
 describe("standalone terminal render model", () => {
+  it("uses the mini-agent mark and name for the default welcome row", () => {
+    const lines = buildTerminalRenderLines(createInitialState("test-model"), { header: {} });
+
+    assert.equal(lines.filter((line) => line.key.startsWith("header-")).length, TUI_BRAND_HEADER_HEIGHT);
+    assert.equal(lines[0]?.key, "header-spark-top");
+    assert.equal(lines[1]?.key, "header-title");
+    assert.equal(lines[1]?.prefix, `${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}  `);
+    assert.equal(lines[1]?.text, TUI_BRAND_NAME);
+    assert.equal(lines[2]?.key, "header-spark-bottom");
+  });
+
+  it("renders a fixed-width LogoV2-style welcome panel on wide terminals", () => {
+    const width = 100;
+    const rows = buildWelcomePanelRows(width, {
+      model: "anthropic/claude-sonnet",
+      cwd: "/Users/chenjiaxu/Project/agent loop/mini-agent",
+    });
+    assert.equal(rows.length, 10);
+    for (const row of rows) assert.equal(terminalStringWidth(row.text), width);
+    assert.match(rows[0]?.text ?? "", /╭─ mini-agent v0\.1\.0/);
+    assert.match(rows[1]?.text ?? "", /Welcome back!/);
+    assert.match(rows[1]?.text ?? "", /Tips for getting started/);
+    assert.match(rows[5]?.text ?? "", /What's new/);
+    assert.match(rows.at(-1)?.text ?? "", /╰─+╯/);
+  });
+
+  it("keeps the compact identity below the wide welcome breakpoint", () => {
+    const lines = buildTerminalRenderLines(createInitialState("test-model"), {
+      width: 60,
+      header: { showWelcome: true },
+    });
+    assert.equal(lines.filter((line) => line.key.startsWith("header-")).length, TUI_BRAND_HEADER_HEIGHT);
+    assert.equal(lines.some((line) => line.text.includes("Tips for getting started")), false);
+  });
+
   it("keeps the final path segments visible when compacting cwd", () => {
     const compact = truncateTerminalPath("/Users/chenjiaxu/Project/agent loop/mini-agent", 24);
     assert.equal(compact, "…/agent loop/mini-agent");
@@ -26,6 +64,25 @@ describe("standalone terminal render model", () => {
     assert.ok(lines.some((line) => line.text.includes("hello")));
     assert.ok(lines.some((line) => line.text.includes("answer")));
     assert.deepEqual(state, before);
+  });
+
+  it("renders saved session previews in the terminal picker", () => {
+    const autocomplete: TerminalAutocompleteState = {
+      mode: "session-list",
+      index: 0,
+      commands: [],
+      files: [],
+      models: [],
+      sessions: [{ id: "abc123456789", createdAt: 1, lastActiveAt: 2, messageCount: 3, preview: "inspect the repository" }],
+      modelContextWindows: {},
+      modelQuery: "",
+      fileFragment: "",
+      sessionCommand: "resume",
+      sessionLoading: false,
+    };
+    const lines = buildTerminalRenderLines(createInitialState("test-model"), { autocomplete, input: "/resume" });
+    assert.ok(lines.some((line) => line.text.includes("abc123456789")));
+    assert.ok(lines.some((line) => line.text.includes("inspect the repository")));
   });
 
   it("keeps inline Markdown out of ANSI transcript rows", () => {
@@ -142,9 +199,11 @@ describe("standalone terminal render model", () => {
       input: "next",
     });
 
-    assert.equal(lines[0]?.key, "header-title");
-    assert.equal(lines[0]?.text, "Claude Code");
-    assert.equal(lines[0]?.prefix, "✻ ");
+    const headerRows = lines.filter((line) => line.key.startsWith("header-"));
+    assert.equal(headerRows.length, TUI_BRAND_HEADER_HEIGHT);
+    assert.equal(headerRows[1]?.key, "header-title");
+    assert.equal(headerRows[1]?.text, "Claude Code");
+    assert.equal(headerRows[1]?.prefix, `${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}  `);
     assert.equal(lines.find((line) => line.key.startsWith("message-0"))?.prefix, "❯ ");
     assert.equal(lines.find((line) => line.key.startsWith("message-0"))?.background, "user");
     assert.equal(lines.find((line) => line.key.startsWith("message-1"))?.prefix, "⏺ ");
@@ -154,6 +213,17 @@ describe("standalone terminal render model", () => {
     assert.match(lines.find((line) => line.key === "activity")?.text ?? "", /Finalizing response/);
     assert.equal(lines.find((line) => line.key === "status")?.prefix, "· ");
     assert.match(lines.find((line) => line.key === "status")?.text ?? "", /claude-sonnet · \/workspace · Plan mode/);
+  });
+
+  it("keeps the three-row brand header above restored conversation messages", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "restored prompt" });
+
+    const lines = buildTerminalRenderLines(state, { header: {} });
+    const headerRows = lines.filter((line) => line.key.startsWith("header-"));
+
+    assert.equal(headerRows.length, TUI_BRAND_HEADER_HEIGHT);
+    assert.equal(lines.findIndex((line) => line.key === "message-0"), TUI_BRAND_HEADER_HEIGHT);
   });
 
   it("shows the active thinking level in wide status metadata", () => {
@@ -170,7 +240,9 @@ describe("standalone terminal render model", () => {
     const state = createInitialState("claude-sonnet");
     const lines = buildTerminalRenderLines(state, { header: { title: "Claude Code", cwd: "/workspace" } });
     assert.deepEqual(lines.filter((line) => line.key.startsWith("header-")), [
-      { key: "header-title", text: "Claude Code", prefix: "✻ ", style: "assistant", bold: true, tone: "running" },
+      { key: "header-spark-top", text: TUI_BRAND_SPARK, prefix: "  ", style: "assistant", bold: true, tone: "running" },
+      { key: "header-title", text: "Claude Code", prefix: `${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}  `, prefixTone: "running", style: "assistant", bold: true },
+      { key: "header-spark-bottom", text: TUI_BRAND_SPARK, prefix: "  ", style: "assistant", bold: true, tone: "running" },
     ]);
   });
 

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { runChildProcess } from "./child-process.ts";
 
 export type ClipboardWriteResult = {
   ok: boolean;
@@ -17,37 +17,6 @@ const CLIPBOARD_TIMEOUT_MS = 5_000;
 
 function encodeOsc52(text: string): string {
   return `\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`;
-}
-
-async function runClipboardCommand(command: string, args: string[], input: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: ["pipe", "ignore", "pipe"],
-      windowsHide: true,
-    });
-    let settled = false;
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error) reject(error);
-      else resolve();
-    };
-    const timeout = setTimeout(() => {
-      child.kill();
-      finish(new Error(`${command} timed out`));
-    }, CLIPBOARD_TIMEOUT_MS);
-
-    child.once("error", (error) => finish(error));
-    child.once("close", (code) => {
-      if (code === 0) finish();
-      else finish(new Error(`${command} exited with code ${code ?? "unknown"}`));
-    });
-    child.stdin?.once("error", () => {
-      /* The child may exit before stdin finishes flushing. */
-    });
-    child.stdin?.end(input);
-  });
 }
 
 function nativeCandidates(
@@ -76,7 +45,11 @@ export async function writeClipboardText(
 
   const platform = io.platform ?? process.platform;
   const env = io.env ?? process.env;
-  const run = io.run ?? runClipboardCommand;
+  const run = io.run ?? ((command: string, args: string[], input: string) => runChildProcess(command, args, {
+    input,
+    timeoutMs: CLIPBOARD_TIMEOUT_MS,
+    stdio: ["pipe", "ignore", "pipe"],
+  }));
   const writeStdout = io.writeStdout ?? ((data: string) => process.stdout.write(data));
 
   // ── 第一路径：OSC 52（首选，~0ms，终端原生支持）──────────────────────────

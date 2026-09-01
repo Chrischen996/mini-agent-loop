@@ -124,9 +124,51 @@ export function planApprovalRenderLines(plan?: ExecutionPlan, width?: number): R
   return rows;
 }
 
-/** Terminal rows for command/file/model candidates. */
+/** Terminal rows for command, session, file, and model candidates. */
 export function autocompleteRenderLines(state?: TerminalAutocompleteState): RenderLine[] {
   if (!state?.mode) return [];
+  if (state.mode === "session-list") {
+    const rows: RenderLine[] = [
+      {
+        key: "autocomplete-session-title",
+        text: state.sessionCommand === "resume" ? "Resume sessions" : "Saved sessions",
+        prefix: "⌘ ",
+        style: "muted",
+        bold: true,
+      },
+    ];
+    if (state.sessionLoading) {
+      rows.push({ key: "autocomplete-session-loading", text: "Loading saved sessions…", style: "muted", dim: true });
+    } else if (state.sessions.length === 0) {
+      rows.push({ key: "autocomplete-session-empty", text: "No saved sessions", style: "muted", tone: "running", dim: true });
+    } else {
+      for (const [index, session] of state.sessions.slice(0, 8).entries()) {
+        const preview = session.preview.replace(/\s+/g, " ").trim();
+        const detail = [
+          `${session.messageCount} msgs`,
+          preview ? preview.slice(0, 48) : undefined,
+        ].filter(Boolean).join(" · ");
+        rows.push({
+          key: `autocomplete-session-${session.id}`,
+          text: `${index === state.index ? "❯" : " "} ${session.id.slice(0, 12)}  ${detail}`,
+          style: index === state.index ? "assistant" : "muted",
+          tone: index === state.index ? "running" : "default",
+        });
+      }
+      if (state.sessions.length > 8) {
+        rows.push({ key: "autocomplete-session-more", text: `Showing 8 / ${state.sessions.length}`, style: "muted", dim: true });
+      }
+    }
+    rows.push({
+      key: "autocomplete-session-hint",
+      text: state.sessionCommand === "resume"
+        ? "Tab fill /resume  ·  Enter resume selected  ↑↓ navigate  Esc close"
+        : "Tab fill /resume  ↑↓ navigate  Enter list  Esc close",
+      style: "muted",
+      dim: true,
+    });
+    return rows;
+  }
   const rows: RenderLine[] = [];
   const values = state.argumentCandidates && state.argumentPrefix
     ? state.argumentCandidates

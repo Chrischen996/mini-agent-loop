@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Reframed the public project and package metadata as an extensible AI agent
+  runtime instead of an educational loop; retained the old phase report as
+  historical context.
+- Unified CLI, server, and terminal session persistence behind the same
+  workspace-scoped session manager and atomic upsert path.
+
 ### Added
 
 - Per-model LLM timeout overrides: model catalog entries (`MINI_AGENT_MODELS`

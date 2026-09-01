@@ -1,6 +1,5 @@
 import process from "node:process";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { contentAsString } from "../content.ts";
 import { loadLlmConfigFromEnv, switchLlmModel } from "../llm/index.ts";
 import {
@@ -15,7 +14,6 @@ import { loadThinkingModeFromEnv } from "../thinking-policy.ts";
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import {
   createAgentHistory,
-  restoreAgentHistory,
   MaxTurnsExceededError,
   runAgentTurn,
   type AgentRuntimeRef,
@@ -56,44 +54,16 @@ import {
   parsePlanTurnOverride,
 } from "./plan-commands.ts";
 import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
-import { SessionStore, getDataRoot, type PersistedSession, type PersistedSessionMeta } from "../session-store.ts";
+import { getDataRoot, type PersistedSessionMeta } from "../session-store.ts";
+import { SessionManager } from "../session-manager.ts";
 import type { AgentMessage } from "../types.ts";
-import type { TodoItem } from "../todo.ts";
 import { MemoryStore } from "../orchestration/memory-store.ts";
 import { createAutoMemoryHook, isAutoMemoryEnabled } from "../memory/auto-memory.ts";
 import type { TuiAction } from "./state.ts";
 import { isTuiFeatureEnabled } from "./execution-policy.ts";
-
-function short(value: string, max = 160): string {
-  const oneLine = value.replace(/\s+/g, " ").trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max)}...` : oneLine;
-}
-
-function persistableTodos(items: TodoItem[] | undefined): PersistedSession["todos"] {
-  if (!items) return undefined;
-  return items.map((item) => ({
-    id: item.id,
-    content: item.content,
-    activeForm: item.activeForm,
-    // The HTTP/session wire format predates TUI-only failed/skipped states.
-    status: item.status === "completed"
-      ? "completed" as const
-      : item.status === "in_progress"
-        ? "in_progress" as const
-        : "pending" as const,
-  }));
-}
-
-function restoreableTodos(items: PersistedSession["todos"]): TodoItem[] | undefined {
-  if (!items) return undefined;
-  return items.map((item) => ({
-    id: item.id,
-    content: item.content,
-    activeForm: item.activeForm ?? item.content,
-    status: item.status,
-    source: "model" as const,
-  }));
-}
+import { formatAmbiguousSessionNotice, getStartupSessionRequest, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
+import { compactText } from "./text-utils.ts";
+import { TUI_BRAND_VERSION } from "./brand.ts";
 
 type TuiState = LegacyTuiState & {
   /** Stores the current pending permission request for keyboard resolution. */
@@ -148,7 +118,7 @@ function handleEvent(state: TuiState, event: LoopEvent): void {
       const current = state.tools.find((tool) => tool.id === event.call.id);
       if (current) {
         current.status = event.result.isError ? "error" : "done";
-        current.preview = short(contentAsString(event.result.content), 100);
+        current.preview = compactText(contentAsString(event.result.content), 100);
       }
       state.status = event.result.isError ? `${event.call.name} 执行失败` : `${event.call.name} 已完成`;
       break;
@@ -197,14 +167,17 @@ async function main(): Promise<void> {
 
   const cwd = process.cwd();
   let activeLlm = loadLlmConfigFromEnv();
+  let activeThinkingMode = loadThinkingModeFromEnv();
   const vision = loadVisionConfigFromEnv();
   const autoSubagent = loadAutoSubagentOptionsFromEnv();
   await discoverWorkspaceSkills(cwd);
   let activeSkillNames = loadSkillNamesFromEnv();
 
   // ── Session persistence + auto memory (Claude Code-style) ─────────────────
-  const sessionStore = new SessionStore(path.join(getDataRoot(), "sessions"), { workspaceId: cwd });
-  let activeSessionId: string = randomUUID();
+  const startup = getStartupSessionRequest();
+  const startupSessionId = startup.sessionId;
+  const sessionManager = new SessionManager({ workspaceId: cwd });
+  let activeSessionId = sessionManager.sessionId;
   const memoryStore = new MemoryStore(path.join(getDataRoot(), "memory", "records.json"));
   const buildTuiHistory = async (permissionMode: PermissionMode): Promise<AgentMessage[]> => {
     const base = createAgentHistory(undefined, permissionMode);
@@ -224,20 +197,17 @@ async function main(): Promise<void> {
   };
   const persistTurn = async (history: AgentMessage[]): Promise<void> => {
     try {
-      const existing = await sessionStore.load(activeSessionId);
-      const persisted = {
+      await sessionManager.save({
         id: activeSessionId,
-        createdAt: existing?.createdAt ?? Date.now(),
         modelId: activeLlm.model,
         thinkingLevel: activeLlm.thinkingLevel,
+        thinkingMode: activeThinkingMode,
         permissionMode: state.permissionMode,
         skillNames: activeSkillNames,
-        todos: persistableTodos(state.todoItems),
+        todos: toPersistedTodos(state.todoItems),
         todoVersion: state.todoRevision,
         messages: [...history],
-      };
-      if (existing) await sessionStore.save(persisted);
-      else await sessionStore.create(persisted);
+      });
     } catch {
       // Persistence is best-effort; never break the interactive loop.
     }
@@ -252,39 +222,60 @@ async function main(): Promise<void> {
     pendingUser: undefined,
     status: "就绪",
     permissionMode: "plan" as PermissionMode,
-    thinkingLevel: activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off"),
+        thinkingLevel: activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off"),
+        thinkingMode: activeThinkingMode,
     todoPlan: (await loadPlanDocument(cwd).catch(() => null)) ?? undefined,
     todoItems: undefined,
     todoRevision: 0,
     todoViewMode: "expanded",
+    cwd,
+    modelName: `${activeLlm.provider}/${activeLlm.model}`,
+    billingLabel: "API Usage Billing",
+    version: TUI_BRAND_VERSION,
+    showWelcome: true,
   };
 
-  // Resume the most recent session on startup (Claude Code `--continue`).
+  // A normal launch starts a new session. Explicit session IDs still support
+  // restoring a session for integrations and scripted launches.
   try {
-    const mostRecent = (await sessionStore.listSessions())[0];
-    if (mostRecent) {
-      const restored = await sessionStore.load(mostRecent.id);
-      if (restored && restored.messages.length > 0) {
-        const mode = restored.permissionMode ?? state.permissionMode;
+    const startupSelection = startup.resume
+      ? resolveSessionByPrefix(
+          await sessionManager.list(),
+          startupSessionId ?? "",
+        )
+      : { candidates: [] };
+    if (!startupSelection.session && startupSelection.candidates.length > 1) {
+      state.status = formatAmbiguousSessionNotice(startupSessionId ?? "", startupSelection.candidates);
+    }
+    const restored = startupSelection.session
+      ? await sessionManager.load(startupSelection.session.id)
+      : undefined;
+    let restoredSession = restored;
+    if (restoredSession && startup.fork) {
+      restoredSession = await sessionManager.fork(restoredSession.id);
+    }
+    if (restoredSession && restoredSession.messages.length > 0) {
+        const mode = restoredSession.permissionMode ?? state.permissionMode;
         state.permissionMode = mode;
-        if (restored.modelId && restored.modelId !== activeLlm.model) {
-          try {
-            activeLlm = switchLlmModel(activeLlm, restored.modelId);
-          } catch {
-            // Keep the current environment-backed model when it is unavailable.
-          }
-        }
-        if (restored.thinkingLevel) activeLlm = withThinkingLevel(activeLlm, restored.thinkingLevel);
+        activeLlm = restoreLlmConfig(activeLlm, restoredSession);
+        if (restoredSession.thinkingMode) activeThinkingMode = restoredSession.thinkingMode;
         state.thinkingLevel = activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off");
-        if (restored.skillNames) activeSkillNames = [...restored.skillNames];
+        state.modelName = activeLlm.provider + "/" + activeLlm.model;
+        if (restoredSession.skillNames) activeSkillNames = [...restoredSession.skillNames];
         const base = await buildTuiHistory(mode);
         const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
-        state.history = restoreAgentHistory(restored.messages, systemPrompt);
-        activeSessionId = restored.id;
-        state.todoItems = restoreableTodos(restored.todos);
-        state.todoRevision = restored.todoVersion ?? nextTodoRevision();
-        state.status = `已恢复会话 ${mostRecent.id.slice(0, 8)} (${restored.messages.length} 条消息)，/clear 可重新开始`;
-      }
+        const restoredState = restoreTuiSession(
+          restoredSession,
+          systemPrompt,
+          (session, prompt) => sessionManager.restoreHistory(session, prompt),
+        );
+        state.history = restoredState.history;
+      activeSessionId = restoredSession.id;
+      sessionManager.setSessionId(restoredSession.id);
+        state.todoItems = restoredState.todos;
+        state.todoRevision = restoredState.todoRevision;
+        state.showWelcome = false;
+      state.status = `已恢复会话 ${restoredSession.id.slice(0, 8)} (${restoredSession.messages.length} 条消息)，/clear 可重新开始`;
     }
   } catch {
     // Resume is best-effort.
@@ -340,7 +331,7 @@ async function main(): Promise<void> {
   let tools;
   const parentRuntime: AgentRuntimeRef = {};
   const runtimeContext: RuntimeExecutionContext = {
-    sessionId: "tui_session",
+    sessionId: activeSessionId,
     workspaceId: cwd,
   };
   const globalTokenBudget = loadGlobalTokenBudgetFromEnv();
@@ -435,16 +426,19 @@ async function main(): Promise<void> {
     if (!text || state.busy) return;
     if (text === "/exit" || text === "/quit") return quit();
     if (text === "/clear") {
+      activeSessionId = sessionManager.newSession();
+      runtimeContext.sessionId = activeSessionId;
       state.history = await buildTuiHistory(state.permissionMode);
       state.tools = [];
       state.status = "已清空会话";
       state.todoItems = undefined;
       state.todoRevision = nextTodoRevision();
+      state.showWelcome = true;
       render(state);
       return;
     }
     if (text === "/sessions") {
-      const metas: PersistedSessionMeta[] = await sessionStore.listSessions().catch(() => []);
+      const metas: PersistedSessionMeta[] = await sessionManager.list().catch(() => []);
       if (metas.length === 0) {
         state.status = "没有可恢复的会话";
       } else {
@@ -456,18 +450,23 @@ async function main(): Promise<void> {
       render(state);
       return;
     }
-    if (text.startsWith("/resume")) {
-      const arg = text.slice("/resume".length).trim();
-      const metas = await sessionStore.listSessions().catch(() => []);
-      const target =
-        (arg && metas.find((meta) => meta.id.startsWith(arg))) ??
-        (arg ? undefined : metas[0]);
+    const resumeCommand = parseResumeCommand(text);
+    if (resumeCommand) {
+      const arg = resumeCommand.prefix;
+      const metas = await sessionManager.list().catch(() => []);
+      const selection = resolveSessionByPrefix(metas, arg);
+      if (!selection.session && selection.candidates.length > 1) {
+        state.status = formatAmbiguousSessionNotice(arg, selection.candidates);
+        render(state);
+        return;
+      }
+      const target = selection.session;
       if (!target) {
         state.status = arg ? `未找到会话: ${arg}` : "没有可恢复的会话";
         render(state);
         return;
       }
-      const restoredSession = await sessionStore.load(target.id).catch(() => undefined);
+      const restoredSession = await sessionManager.load(target.id).catch(() => undefined);
       if (!restoredSession) {
         state.status = `未找到会话: ${target.id}`;
         render(state);
@@ -476,24 +475,27 @@ async function main(): Promise<void> {
       const mode = restoredSession.permissionMode ?? state.permissionMode;
       permissionManager.setMode(mode);
       state.permissionMode = mode;
-      if (restoredSession.modelId && restoredSession.modelId !== activeLlm.model) {
-        try {
-          activeLlm = switchLlmModel(activeLlm, restoredSession.modelId);
-        } catch {
-          // Keep the current environment-backed model when it is unavailable.
-        }
-      }
+      activeLlm = restoreLlmConfig(activeLlm, restoredSession);
+      if (restoredSession.thinkingMode) activeThinkingMode = restoredSession.thinkingMode;
       if (restoredSession.thinkingLevel) {
-        activeLlm = withThinkingLevel(activeLlm, restoredSession.thinkingLevel);
         state.thinkingLevel = activeLlm.thinkingLevel ?? state.thinkingLevel;
       }
       if (restoredSession.skillNames) activeSkillNames = [...restoredSession.skillNames];
+      state.modelName = activeLlm.provider + "/" + activeLlm.model;
       const base = await buildTuiHistory(mode);
       const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
-      state.history = restoreAgentHistory(restoredSession.messages, systemPrompt);
+      const restoredState = restoreTuiSession(
+        restoredSession,
+        systemPrompt,
+        (session, prompt) => sessionManager.restoreHistory(session, prompt),
+      );
+      state.history = restoredState.history;
       activeSessionId = restoredSession.id;
-      state.todoItems = restoreableTodos(restoredSession.todos);
-      state.todoRevision = restoredSession.todoVersion ?? nextTodoRevision();
+      sessionManager.setSessionId(restoredSession.id);
+      runtimeContext.sessionId = restoredSession.id;
+      state.todoItems = restoredState.todos;
+      state.todoRevision = restoredState.todoRevision;
+      state.showWelcome = false;
       state.tools = [];
       state.pendingUser = undefined;
       state.status = `已恢复会话 ${target.id.slice(0, 8)} (${restoredSession.messages.length} 条消息)`;
@@ -510,7 +512,7 @@ async function main(): Promise<void> {
       }
       const lines = records
         .slice(-8)
-        .map((record) => `${record.status === "forgotten" ? "−" : "+"} ${record.key}: ${short(record.content, 60)}`);
+        .map((record) => `${record.status === "forgotten" ? "−" : "+"} ${record.key}: ${compactText(record.content, 60)}`);
       state.memoryEvents = [
         ...(state.memoryEvents ?? []),
         { added: [], forgotten: [], at: Date.now(), previews: Object.fromEntries(records.slice(-8).map((r) => [r.key, r.content])) },
@@ -568,6 +570,7 @@ async function main(): Promise<void> {
     cursorCol = 0;
     cursorRow = 0;
     state.pendingUser = planTurnOverride?.displayText ?? text;
+    state.showWelcome = false;
     state.streamingText = "";
     state.busy = true;
     state.status = "请求模型中...";
@@ -586,10 +589,10 @@ async function main(): Promise<void> {
       : parseThinkingCommandMode(text) ?? loadThinkingModeFromEnv();
     render(state);
     const permissionTurn = permissionManager.beginTurn(
-      "tui_session",
+      activeSessionId,
       (request) => {
         state.pendingPermissionRequestId = request.id;
-        state.pendingPermissionSessionId = "tui_session";
+        state.pendingPermissionSessionId = activeSessionId;
         state.status = `等待权限确认: ${request.tool} (${request.risk}) [按 A 允许 / D 拒绝 / Enter 拒绝 / Esc 取消]`;
         render(state);
       },
@@ -603,7 +606,7 @@ async function main(): Promise<void> {
         { role: "user", content: planTurnOverride?.prompt ?? text },
       ]);
       state.history = await runAgentTurn(state.history, planTurnOverride?.prompt ?? text, {
-        llm: turnLlm,
+        llm: { ...turnLlm, sessionId: activeSessionId },
         tools,
         autoSubagent,
         preprocessors: vision ? [createVisionPreprocessor(vision)] : [],

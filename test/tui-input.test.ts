@@ -93,6 +93,7 @@ describe("TUI input utils", () => {
     assert.equal(shouldAcceptAutocompleteOnEnter("file"), true);
     assert.equal(shouldAcceptAutocompleteOnEnter("model"), true);
     assert.equal(shouldAcceptAutocompleteOnEnter("model-picker"), true);
+    assert.equal(shouldAcceptAutocompleteOnEnter("session-list"), true);
     assert.equal(shouldAcceptAutocompleteOnEnter(null), false);
     assert.equal(shouldAcceptAutocompleteOnEnter("model-setup"), false);
     assert.equal(shouldAcceptAutocompleteOnEnter("profile-list"), false);

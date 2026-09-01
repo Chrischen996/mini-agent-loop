@@ -1,15 +1,20 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { imagePart, textPart } from "./content.ts";
-import { loadLlmConfigFromEnv } from "./llm/index.ts";
+import { loadLlmConfigFromEnv, switchLlmModel } from "./llm/index.ts";
 import { MaxTurnsExceededError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
 import { loadInstructionBundle } from "./agents-md.ts";
-import { SessionStore, getDataRoot } from "./session-store.ts";
+import { getDataRoot, type PersistedSession } from "./session-store.ts";
+import {
+  formatSessionCandidates,
+  resolveSessionByPrefix,
+  SessionManager,
+} from "./session-manager.ts";
 import type { AgentMessage } from "./types.ts";
 import { MemoryStore } from "./orchestration/memory-store.ts";
 import { createAutoMemoryHook, isAutoMemoryEnabled } from "./memory/auto-memory.ts";
@@ -51,7 +56,7 @@ import {
 } from "./subagent/index.ts";
 import { resolveToolProvider, type Tool } from "./tools/types.ts";
 import type { ContentPart, MessageContent } from "./types.ts";
-import { buildIntenseLlm, parseThinkingCommandMode, parseThinkingIntensityPrompt } from "./think-intensity.ts";
+import { buildIntenseLlm, parseThinkingCommandMode, parseThinkingIntensityPrompt, withThinkingLevel } from "./think-intensity.ts";
 import { loadThinkingModeFromEnv } from "./thinking-policy.ts";
 import type { RuntimeExecutionContext } from "./runtime/policy-types.ts";
 import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "./runtime/limits.ts";
@@ -167,6 +172,7 @@ export function parseCliArgs(argv: string[]): {
   excludeTools?: ToolName[];
   allowMcpTools: boolean;
   mode: PermissionMode;
+  modeExplicit: boolean;
   planOnly: boolean;
   planExecute: boolean;
   planYes: boolean;
@@ -193,6 +199,7 @@ export function parseCliArgs(argv: string[]): {
   let excludeTools: ToolName[] | undefined;
   let allowMcpTools = false;
   let mode: PermissionMode = "plan";
+  let modeExplicit = false;
   let planOnly = false;
   let planExecute = false;
   let planYes = false;
@@ -319,6 +326,9 @@ export function parseCliArgs(argv: string[]): {
     }
     if (arg === "--fork-session") {
       forkSession = true;
+      // Claude Code's fork flag is a resume operation that writes to a new
+      // session. Make the flag useful on its own by selecting the latest one.
+      continueSession = true;
       continue;
     }
     if (arg === "--mode") {
@@ -330,6 +340,7 @@ export function parseCliArgs(argv: string[]): {
         throw new Error("Invalid mode: use 'plan', 'approval', or 'bypass'");
       }
       mode = next;
+      modeExplicit = true;
       i += 1;
       continue;
     }
@@ -339,6 +350,7 @@ export function parseCliArgs(argv: string[]): {
         throw new Error("Invalid mode: use 'plan', 'approval', or 'bypass'");
       }
       mode = value;
+      modeExplicit = true;
       continue;
     }
     if (arg.startsWith("--image=")) {
@@ -374,6 +386,7 @@ export function parseCliArgs(argv: string[]): {
     excludeTools,
     allowMcpTools,
     mode,
+    modeExplicit,
     planOnly,
     planExecute,
     planYes,
@@ -439,6 +452,7 @@ async function main(): Promise<void> {
     excludeTools,
     allowMcpTools,
     mode,
+    modeExplicit,
     planOnly,
     planExecute,
     planYes,
@@ -471,12 +485,12 @@ async function main(): Promise<void> {
   const prompt = thinking.prompt;
   const cwd = process.cwd();
   const discoveredSkills = await discoverWorkspaceSkills(cwd);
-  const skillNames = loadSkillNamesFromEnv();
+  let activeSkillNames = loadSkillNamesFromEnv();
   if (discoveredSkills.skills.length > 0) {
     console.error(`[skills] discovered=${discoveredSkills.skills.map((skill) => skill.name).join(",")}`);
   }
-  if (skillNames.length > 0) {
-    console.error(`[skills] active=${skillNames.join(",")}`);
+  if (activeSkillNames.length > 0) {
+    console.error(`[skills] active=${activeSkillNames.join(",")}`);
   }
 
   // Early plan commands that do not need the LLM
@@ -592,7 +606,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (!prompt && imagePaths.length === 0 && !planExecute && !planRetry) {
+  if (!prompt && imagePaths.length === 0 && !planExecute && !planRetry
+    && !continueSession && resumeSessionId === undefined && !forkSession) {
     console.error(
       'Usage: npx tsx src/cli.ts "<prompt>" [--image path.png]... [--continue] [--resume <id>] [--fork-session]',
     );
@@ -600,13 +615,17 @@ async function main(): Promise<void> {
   }
 
   // ── Session resume (Claude Code-style --continue / --resume) ───────────────
-  const sessionStore = new SessionStore(path.join(getDataRoot(), "sessions"), { workspaceId: cwd });
+  const sessionManager = new SessionManager({
+    workspaceId: cwd,
+    sessionId: process.env.MINI_AGENT_SESSION_ID?.trim() || undefined,
+  });
   let resumedSessionId: string | undefined;
   let resumedMessages: AgentMessage[] | undefined;
+  let restoredSession: PersistedSession | undefined;
   if (continueSession || resumeSessionId !== undefined) {
-    if (resumeSessionId === "") {
+    if (resumeSessionId === "" && !forkSession) {
       // `--resume` without an id lists resumable sessions.
-      const metas = await sessionStore.listSessions();
+      const metas = await sessionManager.list();
       if (metas.length === 0) {
         console.error("No resumable sessions found.");
         return;
@@ -618,34 +637,44 @@ async function main(): Promise<void> {
       }
       return;
     }
-    const targetId = continueSession && !resumeSessionId
-      ? (await sessionStore.listSessions())[0]?.id
-      : resumeSessionId;
+    const metas = await sessionManager.list();
+    const selection = continueSession && (!resumeSessionId || (resumeSessionId === "" && forkSession))
+      ? { session: metas[0], candidates: metas[0] ? [metas[0]] : [] }
+      : resolveSessionByPrefix(metas, resumeSessionId);
+    if (!selection.session && selection.candidates.length > 1) {
+      console.error(`Multiple sessions match prefix: ${resumeSessionId}`);
+      console.error(formatSessionCandidates(selection.candidates));
+      process.exit(1);
+    }
+    const target = selection.session;
+    const targetId = target?.id;
     if (!targetId) {
       console.error(continueSession ? "No previous session to continue." : `Session not found: ${resumeSessionId}`);
       process.exit(1);
     }
-    const restored = await sessionStore.load(targetId);
+    const restored = await sessionManager.load(targetId);
     if (!restored) {
       console.error(`Session not found: ${targetId}`);
       process.exit(1);
     }
     if (forkSession) {
-      // Fork: keep old messages under a fresh session id.
-      resumedSessionId = randomUUID();
-      restored.parentSessionId = restored.id;
-      const visibleMessages = restored.messages.filter((message) => message.role !== "system");
-      restored.forkedFromMessage = visibleMessages.length;
-      restored.forkedFromMessageId = visibleMessages.at(-1)?.id;
-      restored.id = resumedSessionId;
-      await sessionStore.create(restored);
+      const forked = await sessionManager.fork(restored.id);
+      if (!forked) {
+        console.error(`Unable to fork session: ${restored.id}`);
+        process.exit(1);
+      }
+      resumedSessionId = forked.id;
+      restoredSession = forked;
       console.error(`[session] forked from ${targetId} as ${resumedSessionId}`);
     } else {
       resumedSessionId = restored.id;
+      restoredSession = restored;
     }
-    resumedMessages = restored.messages;
-    console.error(`[session] resumed ${resumedSessionId} (${restored.messages.length} messages)`);
+    resumedMessages = restoredSession.messages;
+    console.error(`[session] resumed ${resumedSessionId} (${restoredSession.messages.length} messages)`);
   }
+
+  if (restoredSession?.skillNames) activeSkillNames = [...restoredSession.skillNames];
 
   const agentsMd = (await loadInstructionBundle(cwd)).content || undefined;
 
@@ -657,7 +686,13 @@ async function main(): Promise<void> {
 
   // --plan flag: force plan mode and append plan-only instruction
   const wantExecute = planExecute || planRetry;
-  const effectiveMode = planOnly ? "plan" : wantExecute ? "bypass" : mode;
+  const effectiveMode = planOnly
+    ? "plan"
+    : wantExecute
+      ? "bypass"
+      : modeExplicit
+        ? mode
+        : restoredSession?.permissionMode ?? mode;
   let planSuffix = planOnly ? PLAN_ONLY_SUFFIX : "";
   let trackingExecution = false;
 
@@ -678,12 +713,21 @@ async function main(): Promise<void> {
     }
   }
   const llm = loadLlmConfigFromEnv();
-  const requestLlm = thinking.intensity
-    ? buildIntenseLlm(llm, thinking.intensity)
-    : llm;
+  let requestLlm = llm;
+  if (restoredSession?.modelId && restoredSession.modelId !== requestLlm.model) {
+    try {
+      requestLlm = switchLlmModel(requestLlm, restoredSession.modelId);
+    } catch {
+      console.error(`[session] model ${restoredSession.modelId} unavailable; using ${requestLlm.model}`);
+    }
+  }
+  if (restoredSession?.thinkingLevel && !thinking.intensity) {
+    requestLlm = withThinkingLevel(requestLlm, restoredSession.thinkingLevel);
+  }
+  if (thinking.intensity) requestLlm = buildIntenseLlm(requestLlm, thinking.intensity);
   const thinkingMode = thinking.intensity
     ? "fixed"
-    : parseThinkingCommandMode(rawPrompt) ?? loadThinkingModeFromEnv();
+    : parseThinkingCommandMode(rawPrompt) ?? restoredSession?.thinkingMode ?? loadThinkingModeFromEnv();
   const vision = loadVisionConfigFromEnv();
   console.error(
     `[config] model=${requestLlm.model} thinking=${requestLlm.thinkingLevel ?? "off"} vision=${requestLlm.capabilities.input.includes("image")} policy=${requestLlm.imagePolicy} preprocessor=${vision?.model ?? "disabled"}`,
@@ -711,9 +755,10 @@ async function main(): Promise<void> {
   let sandboxCleanup: (() => Promise<void>) | undefined;
   const parentRuntime: AgentRuntimeRef = {};
   const runtimeContext: RuntimeExecutionContext = {
-    sessionId: "cli_session",
+    sessionId: resumedSessionId ?? sessionManager.sessionId,
     workspaceId: cwd,
   };
+  const persistenceSessionId = resumedSessionId ?? sessionManager.sessionId;
   const globalTokenBudget = loadGlobalTokenBudgetFromEnv();
   const globalConcurrencyLimit = loadGlobalConcurrencyLimitFromEnv();
   try {
@@ -749,7 +794,7 @@ async function main(): Promise<void> {
       );
       // The one-shot CLI has no approval UI. Approval mode therefore denies
       // pending requests instead of leaving the process blocked indefinitely.
-      permissionManager.resolve("cli_session", request.id, "deny");
+      permissionManager.resolve(persistenceSessionId, request.id, "deny");
   };
 
   // ── Add subagent tool if enabled ────────────────────────────────────────────
@@ -784,40 +829,43 @@ async function main(): Promise<void> {
     tools = () => enrichedTools;
   }
 
-  const persistenceSessionId = resumedSessionId ?? "cli_session";
+  sessionManager.setSessionId(persistenceSessionId);
+  runtimeContext.sessionId = persistenceSessionId;
+  const turnPrompt = prompt + planSuffix || (restoredSession ? "继续完成之前的工作" : "Please analyze the attached image(s).");
   const persistTurnStart = async (): Promise<void> => {
     try {
-      const existing = await sessionStore.load(persistenceSessionId);
-      const userMessage = userContent ?? (prompt + planSuffix || "Please analyze the attached image(s).");
-      const persisted = {
+      const userMessage = userContent ?? turnPrompt;
+      await sessionManager.saveTurnStart({
         id: persistenceSessionId,
-        createdAt: existing?.createdAt ?? Date.now(),
         modelId: requestLlm.model,
         thinkingLevel: requestLlm.thinkingLevel,
         thinkingMode,
         permissionMode: effectiveMode,
-        skillNames,
+        skillNames: activeSkillNames,
         messages: [
           ...(resumedMessages ?? []),
-          { role: "user" as const, content: userMessage },
         ],
-        parentSessionId: existing?.parentSessionId,
-        forkedFromMessage: existing?.forkedFromMessage,
-      };
-      if (existing) await sessionStore.save(persisted);
-      else await sessionStore.create(persisted);
+        phase: restoredSession?.phase,
+        currentPlan: restoredSession?.currentPlan,
+        todos: restoredSession?.todos,
+        todoVersion: restoredSession?.todoVersion,
+        parentSessionId: restoredSession?.parentSessionId,
+        forkedFromMessage: restoredSession?.forkedFromMessage,
+        forkedFromMessageId: restoredSession?.forkedFromMessageId,
+        content: userMessage,
+      });
     } catch (error) {
       console.error(`[session] turn-start save failed: ${error instanceof Error ? error.message : error}`);
     }
   };
   let messages;
   console.error(`[config] mode=${effectiveMode}`);
-  const activePermissionTurn = permissionManager.beginTurn("cli_session", onPermissionRequest);
+  const activePermissionTurn = permissionManager.beginTurn(persistenceSessionId, onPermissionRequest);
   permissionTurn = activePermissionTurn;
   try {
     await persistTurnStart();
-    messages = await runAgentLoop(prompt + planSuffix || "Please analyze the attached image(s).", {
-      llm: requestLlm,
+    messages = await runAgentLoop(turnPrompt, {
+      llm: { ...requestLlm, sessionId: persistenceSessionId },
       tools,
       autoSubagent: loadAutoSubagentOptionsFromEnv(),
       userContent,
@@ -833,7 +881,7 @@ async function main(): Promise<void> {
       onEvent: logEvent,
       agentsMd,
       memorySection,
-      skillNames,
+      skillNames: activeSkillNames,
       skillRegistry: defaultSkillRegistry,
       initialMessages: resumedMessages,
     });
@@ -881,23 +929,23 @@ async function main(): Promise<void> {
   // ── Persist the session and extract memories (Claude Code-style) ──────────
   if (messages.length > 0) {
     try {
-      const sessionId = persistenceSessionId;
-      const existing = await sessionStore.load(sessionId);
-      const persisted = {
-        id: sessionId,
-        createdAt: existing?.createdAt ?? Date.now(),
+      const persisted = await sessionManager.save({
+        id: persistenceSessionId,
         modelId: requestLlm.model,
         thinkingLevel: requestLlm.thinkingLevel,
         thinkingMode,
         permissionMode: effectiveMode,
-        skillNames,
+        skillNames: activeSkillNames,
+        phase: restoredSession?.phase,
+        currentPlan: restoredSession?.currentPlan,
+        todos: restoredSession?.todos,
+        todoVersion: restoredSession?.todoVersion,
+        parentSessionId: restoredSession?.parentSessionId,
+        forkedFromMessage: restoredSession?.forkedFromMessage,
+        forkedFromMessageId: restoredSession?.forkedFromMessageId,
         messages: [...messages],
-        parentSessionId: forkSession ? existing?.parentSessionId : undefined,
-        forkedFromMessage: forkSession ? existing?.forkedFromMessage : undefined,
-      };
-      if (existing) await sessionStore.save(persisted);
-      else await sessionStore.create(persisted);
-      console.error(`[session] saved ${sessionId} (${persisted.messages.length} messages)`);
+      });
+      console.error(`[session] saved ${persisted.id} (${persisted.messages.length} messages)`);
     } catch (error) {
       console.error(`[session] save failed: ${error instanceof Error ? error.message : error}`);
     }
@@ -963,10 +1011,9 @@ async function main(): Promise<void> {
 }
 
 // Only run when this module is the entry point (not when imported by tests)
-const isEntryPoint =
-  process.argv[1] &&
-  import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/")) ||
-  import.meta.url === `file://${process.argv[1]}`;
+const isEntryPoint = Boolean(
+  process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url)),
+);
 
 if (isEntryPoint) {
   main().catch((err) => {

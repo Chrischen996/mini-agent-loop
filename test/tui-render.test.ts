@@ -4,8 +4,51 @@ import { buildLegacyFrameLines, buildLegacyFrameOutput, buildLegacyFrameRowCount
 import { createPlanDocument } from "../src/plan/document.ts";
 import type { TodoItem } from "../src/todo.ts";
 import { getMessageFeedHeight, getPickerLayout, getTuiViewportHeight } from "../src/tui/layout.ts";
+import { TUI_BRAND_HEADER_HEIGHT, TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "../src/tui/brand.ts";
+import { buildWelcomePanelRows } from "../src/tui/welcome-panel.ts";
 
 describe("legacy TUI renderer", () => {
+  it("places the mini-agent mark in the top identity row", () => {
+    const lines = buildLegacyFrameLines({
+      history: [],
+      streamingText: "",
+      tools: [],
+      busy: false,
+      input: "",
+      status: "就绪",
+      permissionMode: "plan",
+      thinkingLevel: "off",
+    });
+
+    assert.ok(lines[0]?.includes(TUI_BRAND_SPARK));
+    assert.ok(lines[1]?.includes(TUI_BRAND_MARK));
+    assert.ok(lines[1]?.includes(TUI_BRAND_NAME));
+  });
+
+  it("renders the wide welcome panel in the legacy entrypoint", () => {
+    const width = 100;
+    const lines = buildLegacyFrameLines({
+      history: [],
+      streamingText: "",
+      tools: [],
+      busy: false,
+      input: "",
+      status: "就绪",
+      permissionMode: "plan",
+      thinkingLevel: "off",
+      showWelcome: true,
+      cwd: "/workspace/mini-agent",
+      modelName: "anthropic/claude-sonnet",
+    }, width);
+    const welcomeRows = lines.filter((line) => line.includes("header-welcome") === false);
+    const expected = buildWelcomePanelRows(width);
+    assert.match(lines[0] ?? "", /mini-agent v0\.1\.0/);
+    assert.match(lines.join("\n"), /Tips for getting started/);
+    assert.match(lines.join("\n"), /What's new/);
+    assert.equal(expected.length, 10);
+    assert.ok(welcomeRows.length >= 10);
+  });
+
   it("renders the persisted Todo plan and current step statuses", () => {
     const plan = createPlanDocument({
       prompt: "task",
@@ -149,6 +192,18 @@ describe("Ink TUI viewport", () => {
     const withoutTodo = getMessageFeedHeight({ termRows: 30 });
     const withTodo = getMessageFeedHeight({ termRows: 30, todoRows: 4 });
     assert.equal(withoutTodo - withTodo, 4);
+  });
+
+  it("reserves the full three-row welcome identity", () => {
+    const withHeader = getMessageFeedHeight({ termRows: 30 });
+    const withoutHeader = getMessageFeedHeight({ termRows: 30, hasHeader: false });
+    assert.equal(withoutHeader - withHeader, TUI_BRAND_HEADER_HEIGHT);
+  });
+
+  it("reserves the expanded welcome panel when requested", () => {
+    const compact = getMessageFeedHeight({ termRows: 30 });
+    const expanded = getMessageFeedHeight({ termRows: 30, headerRows: 10 });
+    assert.equal(compact - expanded, 7);
   });
 
   it("always leaves one terminal row available for Ink's cursor protocol", () => {

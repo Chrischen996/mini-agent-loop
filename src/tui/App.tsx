@@ -1,5 +1,4 @@
 import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from "react";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Box, Text, useApp, useStdout } from "ink";
 import { MessageFeed } from "./components/MessageFeed.tsx";
@@ -31,13 +30,12 @@ import { tuiReducer, createInitialState } from "./state.ts";
 import {
   createAgentHistory,
   MaxTurnsExceededError,
-  restoreAgentHistory,
   runAgentTurn,
   type AgentRuntimeRef,
   type LoopEvent,
 } from "../loop.ts";
 import { LlmTimeoutError } from "../llm/retry.ts";
-import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
+import { loadLlmConfigFromEnv, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
 import {
   buildIntenseLlm,
   cycleThinkingLevel,
@@ -117,7 +115,10 @@ import { PlanApprovalBar } from "./components/PlanApprovalBar.tsx";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
 import { isTuiFeatureEnabled } from "./execution-policy.ts";
-import { SessionStore, getDataRoot, type PersistedSession } from "../session-store.ts";
+import { SessionManager } from "../session-manager.ts";
+import { TUI_BRAND_VERSION } from "./brand.ts";
+import { getWelcomeHeaderHeight } from "./welcome-panel.ts";
+import { formatAmbiguousSessionNotice, getStartupSessionRequest, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
@@ -133,6 +134,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const llmRef = useRef(llm);
   llmRef.current = llm;
+  const startupSession = useMemo(() => getStartupSessionRequest(), []);
   const vision = loadVisionConfigFromEnv();
   const autoSubagent = useMemo(() => loadAutoSubagentOptionsFromEnv(), []);
   const globalTokenBudget = useMemo(() => loadGlobalTokenBudgetFromEnv(), []);
@@ -165,11 +167,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const stateRef = useRef(state);
   stateRef.current = state;
   // Generate a stable conversation session ID on startup
-  const [conversationId, setConversationId] = useState(() => process.env.MINI_AGENT_SESSION_ID ?? randomUUID());
-  const sessionStoreRef = useRef<SessionStore>();
-  if (!sessionStoreRef.current) {
-    sessionStoreRef.current = new SessionStore(path.join(getDataRoot(), "sessions"), { workspaceId: cwd });
+  // Startup --resume values can be prefixes. Allocate a safe fresh id until
+  // the selected persisted session is resolved and activated below.
+  const [conversationId, setConversationId] = useState<string>(() => randomUUID());
+  const sessionManagerRef = useRef<SessionManager>();
+  if (!sessionManagerRef.current) {
+    sessionManagerRef.current = new SessionManager({ workspaceId: cwd, sessionId: conversationId });
   }
+  const thinkingPolicyRef = useRef<"fixed" | "adaptive">(loadThinkingModeFromEnv());
   
   const pendingImagesRef = useRef<ImageAttachment[]>([]);
   pendingImagesRef.current = state.pendingImages;
@@ -180,6 +185,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   // after programmatic completions (Tab @file / slash commands).
   const [inputEpoch, setInputEpoch] = useState(0);
   const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "plan"));
+  const sessionRestoreCompletedRef = useRef(false);
   const abortRef = useRef<AbortController>(new AbortController());
   const permissionManagerRef = useRef<PermissionManager | null>(null);
   const permissionTurnRef = useRef<PermissionTurnContext | null>(null);
@@ -200,7 +206,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     });
   }
 
-  const permissionSessionId = "tui_session";
+  const permissionSessionId = conversationId;
 
   const getPermissionManager = useCallback(() => {
     return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("plan"));
@@ -232,6 +238,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const resetInputCursorToEnd = useCallback(() => {
     setInputEpoch((n) => n + 1);
   }, []);
+  const listSessions = useCallback(
+    () => sessionManagerRef.current!.list(),
+    [],
+  );
 
   const {
     acMode,
@@ -243,6 +253,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     modelCandidates,
     modelContextWindows,
     modelQuery,
+    sessionCandidates,
+    sessionCommand,
+    sessionLoading,
     modelSetup,
     setModelSetup,
     pendingProfileSetup,
@@ -261,6 +274,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     cwd,
     setInput,
     resetInputCursorToEnd,
+    listSessions,
   });
 
   const resolvePendingPermission = useCallback((decision: PermissionDecision) => {
@@ -280,33 +294,26 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   useEffect(() => {
     void loadPlanDocument(cwd)
-      .then((plan) => dispatch({ type: "SET_TODO_PLAN", plan: plan ?? undefined }))
+      .then((plan) => {
+        // A restored session's Todo snapshot wins over the workspace plan.
+        if (sessionRestoreCompletedRef.current && stateRef.current.todoItems?.length) return;
+        dispatch({ type: "SET_TODO_PLAN", plan: plan ?? undefined });
+      })
       .catch(() => { /* a missing or unreadable plan is non-fatal */ });
   }, [cwd]);
 
   const persistSession = useCallback(async (history: AgentMessage[], id = conversationId): Promise<void> => {
     try {
-      const sessionStore = sessionStoreRef.current!;
-      const existing = await sessionStore.load(id);
+      const sessionManager = sessionManagerRef.current!;
       const permissionMode = getPermissionManager().getMode();
       const currentState = stateRef.current;
-      const todos = (currentState.todoItems ?? currentState.todos).map((item) => ({
-        id: item.id,
-        content: item.content,
-        activeForm: item.activeForm,
-        // The HTTP/session wire format predates TUI-only failed/skipped states.
-        status: item.status === "completed"
-          ? "completed" as const
-          : item.status === "in_progress"
-            ? "in_progress" as const
-            : "pending" as const,
-      }));
-      const persisted: PersistedSession = {
+      const todos = toPersistedTodos(currentState.todoItems ?? currentState.todos);
+      await sessionManager.save({
         id,
-        createdAt: existing?.createdAt ?? Date.now(),
         workspaceId: cwd,
         modelId: llmRef.current.model,
         thinkingLevel: llmRef.current.thinkingLevel,
+        thinkingMode: thinkingPolicyRef.current,
         permissionMode,
         skillNames: skillNamesRef.current,
         phase: currentState.phase,
@@ -314,63 +321,68 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         messages: [...history],
         todos,
         todoVersion: currentState.todoRevision,
-      };
-      if (existing) await sessionStore.save(persisted);
-      else await sessionStore.create(persisted);
+      });
     } catch {
       // Persistence is best-effort; a disk error must not break chat.
     }
   }, [conversationId, cwd, getPermissionManager]);
 
+  const restoreSession = useCallback(async (
+    requestedId?: string,
+    fork = false,
+  ): Promise<import("../session-store.ts").PersistedSession | undefined> => {
+    const sessionManager = sessionManagerRef.current!;
+    const selection = requestedId
+      ? resolveSessionByPrefix(await sessionManager.list(), requestedId)
+      : resolveSessionByPrefix(await sessionManager.list(), "");
+    if (!selection.session) {
+      if (selection.candidates.length > 1) {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "恢复会话",
+          text: formatAmbiguousSessionNotice(requestedId ?? "", selection.candidates),
+        });
+      }
+      return undefined;
+    }
+    let restored = await sessionManager.load(selection.session.id);
+    if (restored && fork) restored = await sessionManager.fork(restored.id);
+    if (!restored || restored.messages.length === 0) return undefined;
+    sessionRestoreCompletedRef.current = true;
+    const mode = restored.permissionMode ?? getPermissionManager().getMode();
+    getPermissionManager().setMode(mode);
+    const restoredLlm = restoreLlmConfig(llmRef.current, restored);
+    llmRef.current = restoredLlm;
+    setLlm(restoredLlm);
+    thinkingPolicyRef.current = restored.thinkingMode ?? thinkingPolicyRef.current;
+    if (restored.skillNames) setSkillNames([...restored.skillNames]);
+    const base = createAgentHistory(undefined, mode);
+    const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
+    const restoredState = restoreTuiSession(
+      restored,
+      systemPrompt,
+      (session, prompt) => sessionManager.restoreHistory(session, prompt),
+    );
+    historyRef.current = restoredState.history;
+    sessionManager.setSessionId(restored.id);
+    setConversationId(restored.id);
+    dispatch({
+      type: "RESTORE_SESSION",
+      history: restoredState.history,
+      permissionMode: mode,
+      modelName: restoredLlm.model,
+      phase: restored.phase,
+      currentPlan: restored.currentPlan,
+      todos: restoredState.todos,
+      todoRevision: restoredState.todoRevision,
+    });
+    return restored;
+  }, [dispatch, getPermissionManager]);
+
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const sessionStore = sessionStoreRef.current!;
-      const requestedId = process.env.MINI_AGENT_SESSION_ID;
-      const targetId = requestedId ?? (await sessionStore.listSessions())[0]?.id;
-      if (!targetId) return;
-      const restored = await sessionStore.load(targetId);
-      if (!restored || cancelled || historyRef.current.length > 1) return;
-      const mode = restored.permissionMode ?? getPermissionManager().getMode();
-      getPermissionManager().setMode(mode);
-      let restoredLlm = llmRef.current;
-      if (restored.modelId && restored.modelId !== restoredLlm.model) {
-        try {
-          restoredLlm = switchLlmModel(restoredLlm, restored.modelId);
-        } catch {
-          // Keep the current environment-backed model when it is unavailable.
-        }
-      }
-      if (restored.thinkingLevel) restoredLlm = withThinkingLevel(restoredLlm, restored.thinkingLevel);
-      if (restoredLlm !== llmRef.current) {
-        llmRef.current = restoredLlm;
-        setLlm(restoredLlm);
-      }
-      if (restored.skillNames) setSkillNames([...restored.skillNames]);
-      const base = createAgentHistory(undefined, mode);
-      const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
-      const history = restoreAgentHistory(restored.messages, systemPrompt);
-      historyRef.current = history;
-      setConversationId(restored.id);
-      dispatch({
-        type: "RESTORE_SESSION",
-        history,
-        permissionMode: mode,
-        modelName: restoredLlm.model,
-        phase: restored.phase,
-        currentPlan: restored.currentPlan,
-        todos: restored.todos?.map((item) => ({
-          id: item.id,
-          content: item.content,
-          activeForm: item.activeForm ?? item.content,
-          status: item.status,
-          source: "model" as const,
-        })),
-        todoRevision: restored.todoVersion,
-      });
-    })().catch(() => { /* Session resume is best-effort. */ });
-    return () => { cancelled = true; };
-  }, [cwd, getPermissionManager]);
+    if (!startupSession.resume) return;
+    void restoreSession(startupSession.sessionId, startupSession.fork).catch(() => { /* Resume is best-effort. */ });
+  }, [restoreSession, startupSession]);
 
   // ── model switching ─────────────────────────────────────────────────────
 
@@ -406,11 +418,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     acMode === "command" ? Math.min(6, cmdCandidates.length)
       : acMode === "file" ? Math.min(8, fileCandidates.length)
         : acMode === "model" || acMode === "model-picker" ? Math.min(12, modelCandidates.length)
+          : acMode === "session-list" ? Math.max(1, Math.min(8, sessionCandidates.length))
           : acMode === "profile-list" ? Math.min(10, profileListState?.profiles.length ?? 0)
             : acMode ? 4 : 0;
-  // The reference client keeps the welcome identity above an empty feed only;
-  // after the first prompt the transcript owns the full vertical space.
-  const hasHeader = state.messages.length === 0 && !state.streamingText && !state.busy;
+  // Keep the product identity pinned above the transcript, including restored
+  // sessions and active turns.
+  const hasHeader = true;
+  const showWelcome = state.messages.length === 0 && !state.busy && !state.pendingPermission;
+  const headerRows = getWelcomeHeaderHeight(termWidth, showWelcome);
   const todoRows = getTodoPanelRows(
     { plan: state.todoPlan, todos: state.todoItems },
     state.todoViewMode,
@@ -427,6 +442,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const pickerLayout = getPickerLayout({
     termRows: stdout?.rows,
     hasHeader,
+    headerRows,
     requestedItems: requestedPickerItems,
     hasPendingImages: state.pendingImages.length > 0,
     todoRows,
@@ -437,6 +453,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const feedHeight = getMessageFeedHeight({
     termRows: stdout?.rows,
     hasHeader,
+    headerRows,
     hasPendingImages: state.pendingImages.length > 0,
     todoRows,
     pickerRows: pickerLayout.totalRows,
@@ -496,6 +513,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const hasPendingImages = pendingImagesRef.current.length > 0;
     if (!trimmed && !allowEmptyApiKey && !hasPendingImages) return;
     if (state.busy) {
+      if (/^(?:\/?resume)(?:\s|$)/i.test(trimmed)) {
+        dispatch({ type: "ADD_NOTICE", title: "正在执行", text: "当前 turn 完成后才能恢复会话。" });
+        setInput("");
+        return;
+      }
       if (trimmed) {
         promptQueueRef.current.push(trimmed);
         setQueuedCount(promptQueueRef.current.length);
@@ -567,7 +589,56 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       dispatch({ type: "RESET" });
       setInput("");
       // Generate new conversation ID for fresh session
-      setConversationId(randomUUID());
+      setConversationId(sessionManagerRef.current!.newSession());
+      return;
+    }
+    if (trimmed === "/sessions") {
+      const sessions = await sessionManagerRef.current!.list().catch(() => []);
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "会话列表",
+        text: sessions.length === 0
+          ? "没有可恢复的会话。"
+          : sessions.slice(0, 8)
+            .map((session) => session.id.slice(0, 8) + "  " + session.messageCount + " 条  " + session.preview)
+            .join("\n"),
+      });
+      setInput("");
+      return;
+    }
+    const resumeCommand = parseResumeCommand(trimmed);
+    if (resumeCommand) {
+      const prefix = resumeCommand.prefix;
+      const sessions = await sessionManagerRef.current!.list().catch(() => []);
+      const selection = resolveSessionByPrefix(sessions, prefix);
+      if (!selection.session && selection.candidates.length > 1) {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "恢复会话",
+          text: formatAmbiguousSessionNotice(prefix, selection.candidates),
+        });
+        setInput("");
+        return;
+      }
+      const target = selection.session;
+      if (!target) {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "恢复会话",
+          text: prefix ? "未找到会话: " + prefix : "没有可恢复的会话。",
+        });
+        setInput("");
+        return;
+      }
+      const restored = await restoreSession(target.id);
+      dispatch({
+        type: "ADD_NOTICE",
+        title: restored ? "会话已恢复" : "恢复会话失败",
+        text: restored
+          ? restored.id.slice(0, 8) + " · " + restored.messages.length + " 条消息"
+          : "无法读取会话: " + target.id,
+      });
+      setInput("");
       return;
     }
     if (trimmed === "/context") {
@@ -774,10 +845,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       ? prompt
       : prompt.replace(/@\S+/g, "").replace(/\s{2,}/g, " ").trim();
     const thinkingMode = planTurnOverride
-      ? loadThinkingModeFromEnv()
+      ? thinkingPolicyRef.current
       : parsedThinking.intensity
         ? "fixed"
-        : parseThinkingCommandMode(prompt) ?? loadThinkingModeFromEnv();
+        : parseThinkingCommandMode(prompt) ?? thinkingPolicyRef.current;
     let turnSucceeded = false;
     let turnErrorMessage: string | undefined;
 
@@ -943,7 +1014,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         dispatch,
       });
     }
-  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit, persistSession]);
+  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit, persistSession, restoreSession]);
 
   // Start the next queued prompt only after the current turn has emitted done/error/aborted.
   useEffect(() => {
@@ -970,7 +1041,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   // edge, but before that point it creates a large empty band above the prompt
   // (most noticeable while a restored session is still loading).
   const fixedChromeRows =
-    (hasHeader ? 1 : 0) +
+    (hasHeader ? headerRows : 0) +
     todoRows +
     pickerLayout.totalRows +
     permissionRows +
@@ -994,7 +1065,16 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   return (
     <Box flexDirection="column" width={termWidth} height={frameHeight} overflow="hidden">
-      {hasHeader && <Header modelName={state.modelName} cwd={cwd} width={termWidth} />}
+      {hasHeader && (
+        <Header
+          modelName={`${llm.provider}/${llm.model}`}
+          billingLabel="API Usage Billing"
+          version={TUI_BRAND_VERSION}
+          cwd={cwd}
+          width={termWidth}
+          showWelcome={showWelcome}
+        />
+      )}
 
       {(state.todoPlan || state.todoItems) && (
         <TodoPanel
@@ -1032,6 +1112,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           modelCandidates={modelCandidates}
           modelContextWindows={modelContextWindows}
           modelQuery={modelQuery}
+          sessionCandidates={sessionCandidates}
+          sessionCommand={sessionCommand}
+          sessionLoading={sessionLoading}
           currentModel={`${llm.provider}/${llm.model}`}
           modelSetup={modelSetup}
           pendingProfileSetup={pendingProfileSetup}
@@ -1081,6 +1164,15 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {
                 if (shouldAcceptAutocompleteOnEnter(acMode)) {
+                  if (acMode === "session-list") {
+                    const selectedSession = sessionCandidates[acIndex];
+                    if (selectedSession && sessionCommand === "resume") {
+                      void handleSubmit(`/resume ${selectedSession.id}`);
+                    } else {
+                      void handleSubmit(val);
+                    }
+                    return;
+                  }
                   if (acMode === "command") {
                     const selectedCommand = cmdCandidates[acIndex];
                     if (selectedCommand && isExactSlashCommand(val, selectedCommand.name)) {

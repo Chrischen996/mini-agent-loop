@@ -11,6 +11,7 @@ import { isTodoRevisionNewer, nextTodoRevision, TODO_WRITE_TOOL_NAME, type TodoI
 import { executionPlanToTodoItems } from "./todo-format.ts";
 import { toolArgumentSummary } from "./claude-style.ts";
 import { toolVisualName } from "./tool-lines.ts";
+import { compactText } from "./text-utils.ts";
 
 export type { PermissionMode } from "../permissions.ts";
 export type { SessionPhase } from "../plan-act/types.ts";
@@ -176,11 +177,6 @@ export type TuiAction =
   | { type: "SCROLL_TO"; offset: number }
   | { type: "SCROLL_TO_BOTTOM" };
 
-function shortPreview(s: string, max = 200): string {
-  const oneLine = s.replace(/\s+/g, " ").trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
-}
-
 function toolTarget(args: Record<string, unknown>): string | undefined {
   for (const key of ["path", "file", "pattern", "command", "cmd"]) {
     const value = args[key];
@@ -191,7 +187,7 @@ function toolTarget(args: Record<string, unknown>): string | undefined {
 
 function toolLabel(name: string, args: Record<string, unknown>): string {
   const target = toolTarget(args);
-  return shortPreview(target ? `${name} ${target}` : name, 48);
+  return compactText(target ? `${name} ${target}` : name, 48, "…");
 }
 
 function toolPaths(args: Record<string, unknown>): string[] {
@@ -221,7 +217,7 @@ function updateExecutionTodo(
 }
 
 function resultPreview(content: unknown): string {
-  if (typeof content === "string") return shortPreview(content, 180);
+  if (typeof content === "string") return compactText(content, 180, "…");
   if (Array.isArray(content)) {
     const text = content
       .filter((part): part is { type: "text"; text: string } =>
@@ -229,7 +225,7 @@ function resultPreview(content: unknown): string {
       )
       .map((part) => part.text)
       .join(" ");
-    return text ? shortPreview(text, 180) : "[binary]";
+    return text ? compactText(text, 180, "…") : "[binary]";
   }
   return "";
 }
@@ -723,7 +719,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             return { ...state, status: "更新任务列表..." };
           }
           const rawArgs = (event.call.arguments ?? {}) as Record<string, unknown>;
-          const args = shortPreview(JSON.stringify(rawArgs), 120);
+          const args = compactText(JSON.stringify(rawArgs), 120, "…");
           const startedAt = Date.now();
           const paths = toolPaths(rawArgs);
           const card: ChatMessage = {
@@ -1000,8 +996,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             : inner.type === "error" ? `✗ ${inner.message}`
             : inner.type;
           const detail =
-            inner.type === "tool_start" ? shortPreview(JSON.stringify(inner.call.arguments), 80)
-            : inner.type === "tool_end" ? shortPreview(typeof inner.result.content === "string" ? inner.result.content : "[complex]", 80)
+            inner.type === "tool_start" ? compactText(JSON.stringify(inner.call.arguments), 80, "…")
+            : inner.type === "tool_end" ? compactText(typeof inner.result.content === "string" ? inner.result.content : "[complex]", 80, "…")
             : undefined;
           const isToolEnd = inner.type === "tool_end";
           const lastToolInfo = inner.type === "tool_start"

@@ -1,6 +1,12 @@
-# Mini Tool Agent (Phases 1–3)
+# Mini Agent Runtime
 
-Educational rebuild of a Pi-style agent loop. Focus is control flow, not a full product.
+An extensible, production-oriented AI agent runtime for terminal, CLI, and HTTP
+workflows. Mini Agent combines multi-provider model access, tool execution,
+skills, MCP, sessions, subagents, Plan-Act workflows, Git operations, sandbox
+adapters, and vision/document processing behind reusable runtime APIs.
+
+The project is actively developed as a usable agent product. The loop below is
+the core execution cycle, not the complete product boundary:
 
 ```text
 user prompt
@@ -176,7 +182,7 @@ export OPENAI_API_KEY=sk-...
 # export OPENAI_MODEL=gpt-4o-mini
 ```
 
-#### DeepSeek (recommended for local teaching in CN)
+#### DeepSeek (recommended for local development in CN)
 
 DeepSeek’s chat API is OpenAI-compatible and supports tool calling via `deepseek-chat`.
 
@@ -364,6 +370,16 @@ npm start -- "读取 package.json 并总结项目名"
 npm start -- "描述图片并提取可见文字" --image ./shot.png
 npm start -- "比较两张图片" --image ./a.png --image ./b.png
 
+# resume the most recent session in the current workspace
+npm start -- --continue "继续完成之前的工作"
+
+# resume a specific session, or list sessions when no id is supplied
+npm start -- --resume <session-id> "继续这个会话"
+npm start -- --resume
+
+# resume into a new fork without changing the source session
+npm start -- --resume <session-id> --fork-session "从这里开始新的分支"
+
 # equivalent without npm script:
 npx tsx src/cli.ts "读取 package.json 并总结项目名"
 ```
@@ -398,8 +414,8 @@ The chat supports multi-turn sessions, workspace file-tree path references,
 up to five images per message, file selection or clipboard image paste, tool
 activity events, Markdown rendering, and new-session reset. Selecting a file in
 the sidebar only adds a path reference; the agent still uses the `read` tool to
-load contents. Sessions are kept in memory and are cleared when the server
-restarts.
+load contents. Sessions are persisted under `AGENT_DATA_DIR` (workspace-scoped,
+with a 30-day default TTL) and are restored when the server restarts.
 
 The tool registry follows Pi Agent's seven-tool vocabulary:
 
@@ -566,8 +582,13 @@ npm run tui:terminal
 The previous Ink/React implementation remains available as `npm run tui:ink`
 for compatibility and comparison.
 
-Use `/model`, `/profiles`, `/sessions`, `/resume`, `/clear`, `/quit`, or `Ctrl+C`
-inside the standalone terminal client. `/model` also accepts `--base-url`,
+Use `/model`, `/profiles`, `/sessions`, `/resume [id]` (or `resume [id]`), `/clear`, `/quit`, or `Ctrl+C`
+inside the standalone terminal client. Typing `/sessions` or `/resume` opens the
+saved-session picker with IDs, message counts, and prompt previews. Enter on
+`/resume` restores the selected session; `/resume <id-prefix>` selects a specific
+one directly. Startup flags mirror the
+CLI: `npm run tui -- --continue`, `npm run tui -- --resume <id>`, and
+`npm run tui -- --resume <id> --fork-session`. `/model` also accepts `--base-url`,
 `--api-key-env`, and temporary `--api-key` overrides. Sessions are persisted
 under the shared `AGENT_DATA_DIR` root and restore history, tool results,
 Todo/Plan state, permission mode, and model settings on the next start. It
@@ -701,7 +722,15 @@ with the partial message history attached. The TUI preserves that history and
 shows a controlled-stop status, while the CLI reports the limit and returns the
 latest partial assistant output instead of treating the stop as an API failure.
 
-## Non-goals (this teaching cut)
+## Current boundaries
 
-General extension loading, parallel tools, MCP resources/prompts/sampling,
-Streamable HTTP/OAuth, session tree, and sub-agent orchestration.
+Mini Agent is a product runtime, not a tutorial implementation. The repository
+includes CLI and terminal UIs, an HTTP/NDJSON server, multi-provider LLM
+adapters, workspace tools, MCP and Skills integration, persistent sessions,
+subagents, Plan-Act workflows, Git workflows, sandbox adapters, and
+vision/document support.
+
+Deployment still requires an explicit provider, persistence, observability, and
+security setup. In particular, sandbox availability, live provider behavior,
+network policy, and long-running job recovery must be validated for the target
+environment rather than inferred from offline tests alone.
