@@ -266,7 +266,7 @@ export async function runTerminalMain(): Promise<void> {
     let animationTimer: ReturnType<typeof setInterval> | undefined;
     const directAbortRef: { current?: AbortController } = {};
     const input = new TerminalInputController({
-      onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); }, onSessionRestore: () => { if (!fullscreen) scrollbackRenderer.forceNewSegment(); } }),
+      onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); }, persistSession: persistSessionSnapshot, onSessionRestore: () => { if (!fullscreen) scrollbackRenderer.forceNewSegment(); } }),
       getScrollPageSize: () => Math.max(1, (process.stdout.rows || 24) - 8),
     });
     autocomplete = new TerminalAutocompleteController({
@@ -426,6 +426,8 @@ export type InputDeps = {
   runtimeContext: RuntimeExecutionContext;
   directAbortRef: { current?: AbortController };
   setThinkingMode: (mode: "fixed" | "adaptive") => void;
+  /** Persist the transcript immediately after a model switch. */
+  persistSession?: (history: AgentMessage[]) => Promise<void>;
   /** Called when a session restore resets the transcript so the renderer can
    *  flush stale committed rows before the new content is rendered. */
   onSessionRestore?: () => void;
@@ -1004,6 +1006,9 @@ async function applyTerminalModel(
         sourceCapabilities: previous.capabilities,
       }));
     }
+    // Save immediately: a model switch can happen between turns, so waiting
+    // for the next prompt would lose the adapted history on restart.
+    await deps.persistSession?.(deps.service.getHistory());
     deps.store.dispatch({ type: "MODEL_CHANGED", modelName: next.model });
     deps.autocomplete.clear();
     deps.input.clear();

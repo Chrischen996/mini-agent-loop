@@ -18,6 +18,8 @@ export type ProfileManagerDeps = {
   setProfileListState: React.Dispatch<React.SetStateAction<any>>;
   dispatch: Dispatch<TuiAction>;
   historyRef: React.MutableRefObject<AgentMessage[]>;
+  /** Persist the adapted transcript immediately after a model switch. */
+  persistSession?: (history: AgentMessage[]) => Promise<void>;
 };
 
 /**
@@ -72,6 +74,7 @@ export async function commitModelSetup(
         sourceCapabilities: llm.capabilities,
       });
     }
+    await deps.persistSession?.(historyRef.current);
 
     setModelSetup(undefined);
     setAcMode(null);

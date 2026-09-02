@@ -396,12 +396,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       openModelPicker,
       commitModelSetup: (setup, apiKey) => commitModelSetup(setup, apiKey, {
         llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
+        persistSession,
       }),
       startModelSetup: (model, overrides) => startModelSetup(model, overrides, {
         llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
+        persistSession,
       }),
     });
-  }, [llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef]);
+  }, [llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef, persistSession]);
 
   const openProfileListRef = useCallback(async () => {
     return openProfileList({ llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef });
@@ -569,6 +571,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               sourceCapabilities: previousLlm.capabilities,
             });
           }
+          await persistSession(historyRef.current);
         } catch { /* non-fatal */ }
       }
       setInput("");
@@ -584,6 +587,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       } else {
         void commitModelSetup(modelSetup, trimmed, {
           llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
+          persistSession,
         });
       }
       return;
