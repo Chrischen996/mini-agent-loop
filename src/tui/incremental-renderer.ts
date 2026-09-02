@@ -141,6 +141,15 @@ export class ScrollbackTerminalRenderer {
     this.liveRows = nextLive;
   }
 
+  /**
+   * Force the next render to treat all committed content as new, without
+   * attempting incremental prefix-based diffing. Call after a session restore
+   * or other major content replacement to avoid stale row comparisons.
+   */
+  forceNewSegment(): void {
+    this.committedRows = [];
+  }
+
   /** Leave the committed transcript in scrollback and return control to the shell. */
   finish(): void {
     if (!this.started) return;

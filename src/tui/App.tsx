@@ -116,6 +116,7 @@ import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
 import { isTuiFeatureEnabled } from "./execution-policy.ts";
 import { SessionManager } from "../session-manager.ts";
+import type { PersistedSessionMeta } from "../session-store.ts";
 import { TUI_BRAND_VERSION } from "./brand.ts";
 import { getWelcomeHeaderHeight } from "./welcome-panel.ts";
 import { formatAmbiguousSessionNotice, getStartupSessionRequest, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
@@ -330,9 +331,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const restoreSession = useCallback(async (
     requestedId?: string,
     fork = false,
+    knownSession?: PersistedSessionMeta,
   ): Promise<import("../session-store.ts").PersistedSession | undefined> => {
     const sessionManager = sessionManagerRef.current!;
-    const selection = requestedId
+    const selection = knownSession
+      ? { session: knownSession, candidates: [knownSession] }
+      : requestedId
       ? resolveSessionByPrefix(await sessionManager.list(), requestedId)
       : resolveSessionByPrefix(await sessionManager.list(), "");
     if (!selection.session) {
@@ -371,6 +375,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       history: restoredState.history,
       permissionMode: mode,
       modelName: restoredLlm.model,
+      thinkingMode: restored.thinkingMode === "adaptive" ? "hidden" : "summary",
       phase: restored.phase,
       currentPlan: restored.currentPlan,
       todos: restoredState.todos,
@@ -507,7 +512,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   // ── submit handler ────────────────────────────────────────────────────────
 
-  const handleSubmit = useCallback(async (text: string) => {
+  const handleSubmit = useCallback(async (
+    text: string,
+    knownSession?: PersistedSessionMeta,
+    knownSessions?: PersistedSessionMeta[],
+  ) => {
     const trimmed = text.trim();
     const allowEmptyApiKey = acMode === "model-setup" && modelSetup?.field === "apiKey";
     const hasPendingImages = pendingImagesRef.current.length > 0;
@@ -593,7 +602,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
     if (trimmed === "/sessions") {
-      const sessions = await sessionManagerRef.current!.list().catch(() => []);
+      const sessions = knownSessions ?? await sessionManagerRef.current!.list().catch(() => []);
       dispatch({
         type: "ADD_NOTICE",
         title: "会话列表",
@@ -609,8 +618,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const resumeCommand = parseResumeCommand(trimmed);
     if (resumeCommand) {
       const prefix = resumeCommand.prefix;
-      const sessions = await sessionManagerRef.current!.list().catch(() => []);
-      const selection = resolveSessionByPrefix(sessions, prefix);
+      const sessions = knownSession
+        ? [knownSession]
+        : knownSessions ?? await sessionManagerRef.current!.list().catch(() => []);
+      const selection = knownSession
+        ? { session: knownSession, candidates: [knownSession] }
+        : resolveSessionByPrefix(sessions, prefix);
       if (!selection.session && selection.candidates.length > 1) {
         dispatch({
           type: "ADD_NOTICE",
@@ -630,7 +643,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         setInput("");
         return;
       }
-      const restored = await restoreSession(target.id);
+      const restored = await restoreSession(target.id, false, target);
       dispatch({
         type: "ADD_NOTICE",
         title: restored ? "会话已恢复" : "恢复会话失败",
@@ -1166,10 +1179,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                 if (shouldAcceptAutocompleteOnEnter(acMode)) {
                   if (acMode === "session-list") {
                     const selectedSession = sessionCandidates[acIndex];
-                    if (selectedSession && sessionCommand === "resume") {
-                      void handleSubmit(`/resume ${selectedSession.id}`);
+                    if (selectedSession) {
+                      void handleSubmit(`/resume ${selectedSession.id}`, selectedSession);
+                    } else if (!sessionLoading) {
+                      void handleSubmit(val, undefined, sessionCandidates);
                     } else {
-                      void handleSubmit(val);
+                      // The picker owns the list request. Wait for it to
+                      // settle instead of issuing a second scan on Enter.
                     }
                     return;
                   }

@@ -118,6 +118,7 @@ export async function runTerminalMain(): Promise<void> {
         history: initialHistory,
         permissionMode: mode,
         modelName: activeLlm.model,
+        thinkingMode: target.thinkingMode === "adaptive" ? "hidden" : "summary",
         phase: target.phase,
         currentPlan: target.currentPlan,
         todos: restoredState.todos,
@@ -255,9 +256,8 @@ export async function runTerminalMain(): Promise<void> {
 
     const displayMode = resolveTerminalDisplayMode();
     const fullscreen = displayMode === "fullscreen";
-    const fullscreenRenderer = new IncrementalTerminalRenderer(process.stdout);
     const scrollbackRenderer = new ScrollbackTerminalRenderer(process.stdout);
-    const renderer = fullscreen ? fullscreenRenderer : scrollbackRenderer;
+    const renderer = fullscreen ? new IncrementalTerminalRenderer(process.stdout) : scrollbackRenderer;
     // Existing scrollback rows cannot be reflowed after they have been handed
     // to the terminal, so keep the initial width for the append-only path.
     const scrollbackWidth = process.stdout.columns || 80;
@@ -266,7 +266,7 @@ export async function runTerminalMain(): Promise<void> {
     let animationTimer: ReturnType<typeof setInterval> | undefined;
     const directAbortRef: { current?: AbortController } = {};
     const input = new TerminalInputController({
-      onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); } }),
+      onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); }, onSessionRestore: () => { if (!fullscreen) scrollbackRenderer.forceNewSegment(); } }),
       getScrollPageSize: () => Math.max(1, (process.stdout.rows || 24) - 8),
     });
     autocomplete = new TerminalAutocompleteController({
@@ -426,6 +426,9 @@ export type InputDeps = {
   runtimeContext: RuntimeExecutionContext;
   directAbortRef: { current?: AbortController };
   setThinkingMode: (mode: "fixed" | "adaptive") => void;
+  /** Called when a session restore resets the transcript so the renderer can
+   *  flush stale committed rows before the new content is rendered. */
+  onSessionRestore?: () => void;
 };
 
 export type SessionAccess = {
@@ -540,11 +543,12 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
     }
     if (autocompleteState.mode === "session-list") {
       const selected = autocompleteState.sessions[autocompleteState.index];
-      const command = autocompleteState.sessionCommand === "resume" && selected
+      if (!selected && autocompleteState.sessionLoading) return;
+      const command = selected
         ? `/resume ${selected.id}`
         : action.value;
       deps.autocomplete.clear();
-      void submitInput(command, deps);
+      void submitInput(command, deps, selected, autocompleteState.sessions);
       return;
     }
     // Sticky overlays own Enter. Keep their state intact until the async
@@ -650,7 +654,12 @@ function handleShortcut(action: Extract<TerminalInputAction, { type: "shortcut" 
   }
 }
 
-async function submitInput(value: string, deps: InputDeps): Promise<void> {
+async function submitInput(
+  value: string,
+  deps: InputDeps,
+  knownSession?: PersistedSessionMeta,
+  knownSessions?: PersistedSessionMeta[],
+): Promise<void> {
   const text = value.trim();
   const { store, service, permissionManager, input } = deps;
   const sessionAccess = getSessionAccess(deps);
@@ -679,7 +688,7 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
     return;
   }
   if (text === "/sessions") {
-    const sessions = await sessionAccess.list().catch(() => []);
+    const sessions = knownSessions ?? await sessionAccess.list().catch(() => []);
     store.dispatch({
       type: "ADD_NOTICE",
       title: "会话列表",
@@ -832,8 +841,12 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
   const resumeCommand = parseResumeCommand(text);
   if (resumeCommand) {
     const prefix = resumeCommand.prefix;
-    const sessions = await sessionAccess.list().catch(() => []);
-    const selection = resolveSessionByPrefix(sessions, prefix);
+    const sessions = knownSession
+      ? [knownSession]
+      : knownSessions ?? await sessionAccess.list().catch(() => []);
+    const selection = knownSession
+      ? { session: knownSession, candidates: [knownSession] }
+      : resolveSessionByPrefix(sessions, prefix);
     if (!selection.session && selection.candidates.length > 1) {
       store.dispatch({
         type: "ADD_NOTICE",
@@ -881,11 +894,17 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
     sessionAccess.setSessionId(restored.id);
     service.setSessionId(restored.id);
     deps.runtimeContext.sessionId = restored.id;
+    // Force the scrollback renderer to treat the next render as a new visual
+    // segment so the entire restored transcript is written cleanly, rather than
+    // attempting an incremental prefix diff from the pre-resume committed rows
+    // which would leave stale content on screen.
+    deps.onSessionRestore?.();
     store.dispatch({
       type: "RESTORE_SESSION",
       history: restoredState.history,
       permissionMode: mode,
       modelName: service.getLlm().model,
+      thinkingMode: restored.thinkingMode === "adaptive" ? "hidden" : "summary",
       phase: restored.phase,
       currentPlan: restored.currentPlan,
       todos: restoredState.todos,

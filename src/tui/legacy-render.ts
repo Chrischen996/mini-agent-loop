@@ -18,6 +18,7 @@ import type { RenderLine } from "./render-lines.ts";
 import { formatRenderLine } from "./render-line-format.ts";
 import { TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "./brand.ts";
 import { buildWelcomePanelRows, WELCOME_PANEL_MIN_WIDTH } from "./welcome-panel.ts";
+import { SESSION_PICKER_HINT, type SessionPickerState } from "./session-serialization.ts";
 
 export type LegacyToolView = {
   id: string;
@@ -66,6 +67,7 @@ export type LegacyTuiState = {
   billingLabel?: string;
   version?: string;
   showWelcome?: boolean;
+  sessionPicker?: SessionPickerState;
 };
 
 const ANSI = {
@@ -108,6 +110,46 @@ function appendTextLines(
     ...options,
     prefix: index === 0 ? options.prefix : " ".repeat(terminalStringWidth(options.prefix ?? "")),
   }));
+}
+
+function appendSessionPicker(lines: RenderLine[], picker: SessionPickerState): void {
+  lines.push({
+    key: "legacy-session-picker-title",
+    text: picker.command === "resume" ? "Resume sessions" : "Saved sessions",
+    prefix: "⌘ ",
+    style: "muted",
+    bold: true,
+  });
+  if (picker.loading) {
+    lines.push({ key: "legacy-session-picker-loading", text: "Loading saved sessions...", prefix: "  ", style: "muted", dim: true });
+  } else if (picker.sessions.length === 0) {
+    lines.push({ key: "legacy-session-picker-empty", text: "No saved sessions", prefix: "  ", style: "muted", dim: true, tone: "running" });
+  } else {
+    const pageSize = 8;
+    const start = Math.max(0, Math.min(picker.selectedIndex - pageSize + 1, picker.sessions.length - pageSize));
+    for (const [offset, session] of picker.sessions.slice(start, start + pageSize).entries()) {
+      const index = start + offset;
+      const preview = compactText(session.preview.replace(/\s+/g, " ").trim(), 64);
+      lines.push({
+        key: `legacy-session-picker-${session.id}`,
+        text: `${index === picker.selectedIndex ? "❯" : " "} ${session.id.slice(0, 12)}  ${session.messageCount} msgs${preview ? `  ${preview}` : ""}`,
+        prefix: "  ",
+        style: index === picker.selectedIndex ? "assistant" : "muted",
+        tone: index === picker.selectedIndex ? "running" : undefined,
+        bold: index === picker.selectedIndex,
+      });
+    }
+    if (picker.sessions.length > pageSize) {
+      lines.push({ key: "legacy-session-picker-more", text: `Showing ${picker.selectedIndex + 1} / ${picker.sessions.length}`, prefix: "  ", style: "muted", dim: true });
+    }
+  }
+  lines.push({
+    key: "legacy-session-picker-hint",
+    text: SESSION_PICKER_HINT,
+    prefix: "  ",
+    style: "muted",
+    dim: true,
+  });
 }
 
 /** Build the legacy frame from the same row model consumed by the ANSI path. */
@@ -173,6 +215,8 @@ export function buildLegacyRenderLines(state: LegacyTuiState, width = 80): Rende
     noticeLines.slice(0, 8).forEach((line, index) => lines.push({ key: `legacy-notice-${index}`, text: line, prefix: "  ", style: "muted", dim: true }));
     if (noticeLines.length > 8) lines.push({ key: "legacy-notice-more", text: "...", prefix: "  ", style: "muted", dim: true });
   }
+
+  if (state.sessionPicker) appendSessionPicker(lines, state.sessionPicker);
 
   if (state.pendingUser) {
     appendTextLines(lines, "legacy-pending-user", state.pendingUser, { prefix: "❯ ", style: "user", background: "user", fillWidth: width });

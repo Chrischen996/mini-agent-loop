@@ -313,6 +313,60 @@ describe("SessionStore", () => {
     }
   });
 
+  it("excludes system-only sessions without spending a resume-list slot", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-list-filter-"));
+    try {
+      const store = new SessionStore(root, { maxSessions: 1 });
+      await store.create({
+        id: "system-only",
+        createdAt: Date.now(),
+        messages: [{ role: "system", content: "system prompt" }],
+      });
+      await store.create({
+        id: "older-user",
+        createdAt: Date.now(),
+        messages: [{ role: "user", content: "older prompt" }],
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await store.create({
+        id: "newer-user",
+        createdAt: Date.now(),
+        messages: [{ role: "system", content: "system prompt" }, { role: "user", content: "newer prompt" }],
+      });
+
+      assert.deepEqual((await store.listSessions()).map((session) => session.id), ["newer-user"]);
+      const loaded = await new SessionStore(root, { maxSessions: 1 }).loadAll();
+      assert.equal(loaded.has("newer-user"), true, "a system-only record must not evict a resumable session");
+      assert.equal(loaded.has("system-only"), true, "non-expired records remain loadable for compatibility");
+      assert.equal((await store.load("system-only"))?.messages.length, 1);
+      assert.equal(await store.load("older-user"), undefined);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans expired system-only sessions while listing resumable sessions", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-list-expired-system-"));
+    try {
+      const store = new SessionStore(root, { sessionTtlMs: 1_000 });
+      const stale = {
+        id: "expired-system-only",
+        createdAt: Date.now(),
+        messages: [{ role: "system" as const, content: "system prompt" }],
+      };
+      await store.create(stale);
+      await store.compact({ ...stale, lastActiveAt: Date.now() - 5_000 });
+
+      assert.deepEqual(await store.listSessions(), []);
+      await assert.rejects(
+        readFile(path.join(root, stale.id, "events.jsonl")),
+        /ENOENT/,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("round-trips lastActiveAt and evicts by recency over maxSessions", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-recency-"));
     try {
@@ -341,8 +395,8 @@ describe("SessionStore", () => {
     try {
       const first = new SessionStore(root, { workspaceId: "/workspace/one" });
       const second = new SessionStore(root, { workspaceId: "/workspace/two" });
-      await first.create({ id: "one", createdAt: Date.now(), messages: [] });
-      await second.create({ id: "two", createdAt: Date.now(), messages: [] });
+      await first.create({ id: "one", createdAt: Date.now(), messages: [{ role: "user", content: "one" }] });
+      await second.create({ id: "two", createdAt: Date.now(), messages: [{ role: "user", content: "two" }] });
 
       assert.equal((await first.listSessions()).map((item) => item.id).join(), "one");
       assert.equal((await second.listSessions()).map((item) => item.id).join(), "two");

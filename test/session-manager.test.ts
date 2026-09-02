@@ -278,8 +278,8 @@ describe("SessionManager", () => {
     try {
       const first = new SessionManager({ dataDir: root, workspaceId: "/workspace/one" });
       const second = new SessionManager({ dataDir: root, workspaceId: "/workspace/two" });
-      await first.save({ id: "one", messages: [] });
-      await second.save({ id: "two", messages: [] });
+      await first.save({ id: "one", messages: [{ role: "user", content: "one" }] });
+      await second.save({ id: "two", messages: [{ role: "user", content: "two" }] });
 
       assert.deepEqual((await first.list()).map((session) => session.id), ["one"]);
       assert.deepEqual((await second.list()).map((session) => session.id), ["two"]);

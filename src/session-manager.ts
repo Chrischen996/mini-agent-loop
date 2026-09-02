@@ -203,6 +203,9 @@ export class SessionManager {
 
   /** Rebuild only the base prompt, retaining compact summaries in the log. */
   restoreHistory(session: PersistedSession, systemPrompt: string): AgentMessage[] {
-    return restoreAgentHistory(sanitizeResumableMessages(session.messages), systemPrompt);
+    // `load()` already sanitizes the messages; avoid double-sanitization which
+    // could drop messages in edge cases (e.g. when an interrupted turn leaves
+    // the `discardUntilUser` flag active across the second pass).
+    return restoreAgentHistory(session.messages, systemPrompt);
   }
 }

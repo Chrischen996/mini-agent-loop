@@ -48,6 +48,7 @@ export function useAutocomplete({
   const fileTriggerRef = useRef<FileAcTrigger | null>(null);
   const acDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const acRequestRef = useRef(0);
+  const sessionListRequestRef = useRef<"resume" | "sessions" | null>(null);
 
   const clearAc = useCallback(() => {
     acRequestRef.current += 1;
@@ -66,14 +67,23 @@ export function useAutocomplete({
     setAcIndex(0);
     setPendingProfileSetup(null);
     setProfileListState(null);
+    sessionListRequestRef.current = null;
   }, []);
 
   useEffect(() => {
     if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
-    const requestId = ++acRequestRef.current;
-
     const requestedSessionCommand = sessionListCommand(input);
     if (requestedSessionCommand && listSessions) {
+      // Changing acMode to session-list causes this effect to run again. The
+      // input has not changed, so reuse the in-flight request instead of
+      // scanning the session directory a second time.
+      if (sessionListRequestRef.current === requestedSessionCommand && acMode === "session-list") {
+        return () => {
+          if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
+        };
+      }
+      const requestId = ++acRequestRef.current;
+      sessionListRequestRef.current = requestedSessionCommand;
       setCmdCandidates([]);
       setFileCandidates([]);
       setModelCandidates([]);
@@ -96,10 +106,19 @@ export function useAutocomplete({
         setSessionLoading(false);
       });
       return () => {
-        acRequestRef.current += 1;
+        // React runs this cleanup before the next effect. Keep the request
+        // alive while the same session command is still active; the next
+        // effect invalidates it when the input leaves the picker or changes
+        // to another session command. clearAc() can invalidate it earlier.
+        if (sessionListRequestRef.current !== requestedSessionCommand) {
+          acRequestRef.current += 1;
+        }
         if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
       };
     }
+
+    const requestId = ++acRequestRef.current;
+    sessionListRequestRef.current = null;
 
     const resolution = resolveAutocompleteInput(input, acMode);
 
@@ -297,6 +316,7 @@ export function useAutocomplete({
       cmdCandidates.length,
       fileCandidates.length,
       modelCandidates.length,
+      sessionCandidates,
       profileListState,
       acceptCommand,
       acceptFile,

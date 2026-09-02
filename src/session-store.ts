@@ -84,11 +84,21 @@ export type PersistedSessionMeta = {
   createdAt: number;
   lastActiveAt: number;
   modelId?: string;
+  /** Whether the transcript contains a user turn; optional for old meta files. */
+  hasUserMessage?: boolean;
   messageCount: number;
   parentSessionId?: string;
   forkedFromMessageId?: string;
   workspaceId?: string;
   preview: string;
+};
+
+type SessionRetentionRecord = {
+  id: string;
+  createdAt: number;
+  lastActiveAt?: number;
+  /** Whether this record should consume one of the retained session slots. */
+  capacityEligible?: boolean;
 };
 
 function isSessionEvent(value: unknown): value is SessionEvent {
@@ -181,7 +191,10 @@ export class SessionStore {
         sessions.set(parsed.id, parsed);
       }
     }
-    // Evict expired and excess sessions on load
+    // Evict expired sessions and enforce the cap without letting a
+    // system-only bootstrap record displace a conversation that can actually
+    // be resumed. Empty records remain counted for compatibility with the
+    // existing maxSessions contract.
     await this.evict(sessions);
     return sessions;
   }
@@ -212,25 +225,64 @@ export class SessionStore {
       return [];
     }
 
+    const listed = await Promise.all(
+      names
+        .filter((name) => isValidSessionId(name))
+        .map(async (name): Promise<{
+          meta?: PersistedSessionMeta;
+          record: SessionRetentionRecord;
+        } | undefined> => {
+          const meta = await this.readMetaFile(name);
+          if (meta && this.matchesWorkspace(meta)) {
+            const record: SessionRetentionRecord = {
+              id: meta.id,
+              createdAt: meta.createdAt,
+              lastActiveAt: meta.lastActiveAt,
+              capacityEligible: meta.hasUserMessage ?? Boolean(meta.preview.trim()),
+            };
+            // Older metadata has no role information. A non-empty preview is
+            // enough to identify a resumable record without reopening it;
+            // empty previews, including a system-only marker, fall through to
+            // the transcript check. The snapshot is written before meta.json,
+            // so this also recovers a user turn when the process stopped
+            // between those two writes.
+            if (meta.hasUserMessage !== false && (meta.hasUserMessage === true || meta.preview.trim())) {
+              return { meta, record };
+            }
+          }
+
+          // Legacy sessions have no workspace binding (and older metadata may
+          // also be unscoped). Read the transcript once so the first workspace
+          // that opens the record can claim it safely under the session lock.
+          if (!meta || meta.workspaceId === undefined || this.matchesWorkspace(meta)) {
+            let session = await this.parseEventsFile(name);
+            if (session && this.isLegacyUnscoped(session)) session = await this.claimLegacy(session);
+            if (session && this.matchesWorkspace(session)) {
+              const hasUserMessage = this.hasUserMessage(session);
+              return {
+                meta: hasUserMessage ? this.sessionMeta(session) : undefined,
+                record: {
+                  id: session.id,
+                  createdAt: session.createdAt,
+                  lastActiveAt: session.lastActiveAt,
+                  capacityEligible: hasUserMessage,
+                },
+              };
+            }
+          }
+          return undefined;
+        }),
+    );
+
     const metas: PersistedSessionMeta[] = [];
-    for (const name of names) {
-      if (!isValidSessionId(name)) continue;
-      const meta = await this.readMetaFile(name);
-      if (meta && this.matchesWorkspace(meta)) {
-        metas.push(meta);
-        continue;
-      }
-      // Legacy sessions have no workspace binding (and older metadata may
-      // also be unscoped). Read the transcript once so the first workspace
-      // that opens the record can claim it safely under the session lock.
-      if (!meta || meta.workspaceId === undefined) {
-        let session = await this.parseEventsFile(name);
-        if (session && this.isLegacyUnscoped(session)) session = await this.claimLegacy(session);
-        if (session && this.matchesWorkspace(session)) metas.push(this.sessionMeta(session));
-      }
+    const retentionRecords = new Map<string, SessionRetentionRecord>();
+    for (const entry of listed) {
+      if (!entry) continue;
+      retentionRecords.set(entry.record.id, entry.record);
+      if (entry.meta) metas.push(entry.meta);
     }
 
-    const retention = this.retainSessionIds(metas);
+    const retention = this.retainSessionIds(retentionRecords.values());
     await Promise.all(retention.evictedIds.map((id) => this.remove(id).catch(() => {})));
     return metas
       .filter((meta) => retention.retainedIds.has(meta.id))
@@ -242,7 +294,12 @@ export class SessionStore {
    * Deletes evicted sessions from disk and mutates the provided map.
    */
   async evict(sessions: Map<string, PersistedSession>): Promise<string[]> {
-    const retention = this.retainSessionIds(sessions.values());
+    const retention = this.retainSessionIds(
+      [...sessions.values()].map((session) => ({
+        ...session,
+        capacityEligible: session.messages.length === 0 || this.hasUserMessage(session),
+      })),
+    );
     for (const id of retention.evictedIds) sessions.delete(id);
     await Promise.all(retention.evictedIds.map((id) => this.remove(id).catch(() => {})));
     return retention.evictedIds;
@@ -525,7 +582,8 @@ export class SessionStore {
       createdAt: session.createdAt,
       lastActiveAt: session.lastActiveAt ?? session.createdAt,
       modelId: session.modelId,
-      messageCount: session.messages.length,
+      hasUserMessage: firstUser !== undefined,
+      messageCount: session.messages.filter((message) => message.role !== "system").length,
       parentSessionId: session.parentSessionId,
       forkedFromMessageId: session.forkedFromMessageId,
       workspaceId: session.workspaceId ?? this.workspaceId,
@@ -550,6 +608,7 @@ export class SessionStore {
         createdAt: value.createdAt,
         lastActiveAt: value.lastActiveAt,
         modelId: value.modelId,
+        hasUserMessage: typeof value.hasUserMessage === "boolean" ? value.hasUserMessage : undefined,
         messageCount: value.messageCount,
         parentSessionId: value.parentSessionId,
         forkedFromMessageId: value.forkedFromMessageId,
@@ -559,6 +618,10 @@ export class SessionStore {
     } catch {
       return undefined;
     }
+  }
+
+  private hasUserMessage(session: PersistedSession): boolean {
+    return session.messages.some((message) => message.role === "user");
   }
 
   private async writeMeta(meta: PersistedSessionMeta): Promise<void> {
@@ -596,11 +659,9 @@ export class SessionStore {
     }
   }
 
-  private retainSessionIds(records: Iterable<{
-    id: string;
-    createdAt: number;
-    lastActiveAt?: number;
-  }>): {
+  private retainSessionIds(
+    records: Iterable<SessionRetentionRecord>,
+  ): {
     retainedIds: Set<string>;
     evictedIds: string[];
   } {
@@ -613,14 +674,15 @@ export class SessionStore {
     const evictedIds = candidates
       .filter((record) => !activeIds.has(record.id))
       .map((record) => record.id);
-    if (active.length > this.maxSessions) {
-      const excess = [...active]
+    const capacityCandidates = active.filter((record) => record.capacityEligible !== false);
+    if (capacityCandidates.length > this.maxSessions) {
+      const excess = [...capacityCandidates]
         .sort((a, b) => {
           const aLastActiveAt = a.lastActiveAt ?? a.createdAt;
           const bLastActiveAt = b.lastActiveAt ?? b.createdAt;
           return aLastActiveAt - bLastActiveAt;
         })
-        .slice(0, active.length - this.maxSessions);
+        .slice(0, capacityCandidates.length - this.maxSessions);
       evictedIds.push(...excess.map((record) => record.id));
     }
     const evictedSet = new Set(evictedIds);

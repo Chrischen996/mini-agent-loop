@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import { TUI_COLORS as C } from "../theme.ts";
 import { TODO_COMMAND_USAGE } from "../todo-commands.ts";
 import type { PersistedSessionMeta } from "../../session-store.ts";
+import { SESSION_PICKER_HINT } from "../session-serialization.ts";
 
 // ─── Command palette ─────────────────────────────────────────────────────────
 
@@ -114,10 +115,12 @@ export function SessionPalette({ sessions, selectedIndex, command, loading, maxV
         );
       })}
       {!loading && sessions.length > visible.length && (
-        <Text dimColor wrap="truncate-end">Showing {visible.length} / {sessions.length}</Text>
+        <Text dimColor wrap="truncate-end">
+          Showing {start + 1}-{start + visible.length} / {sessions.length}
+        </Text>
       )}
       <Text dimColor wrap="truncate-end">
-        {command === "resume" ? "Tab fill /resume  ·  Enter resume selected" : "Tab fill /resume"}  ↑↓ navigate  Esc close
+        {SESSION_PICKER_HINT}
       </Text>
     </Box>
   );

@@ -17,6 +17,42 @@ export type StartupSessionRequest = {
   fork: boolean;
 };
 
+export type SessionPickerState = {
+  command: "resume" | "sessions";
+  sessions: PersistedSessionMeta[];
+  selectedIndex: number;
+  loading: boolean;
+};
+
+/** Keep the session picker contract identical across Ink and ANSI renderers. */
+export const SESSION_PICKER_HINT = "Tab fill /resume  ·  Enter resume selected  ↑↓ navigate  Esc close";
+
+export function createSessionPickerState(
+  command: SessionPickerState["command"],
+  sessions: PersistedSessionMeta[] = [],
+  loading = true,
+): SessionPickerState {
+  return { command, sessions, selectedIndex: 0, loading };
+}
+
+export function moveSessionPicker(
+  state: SessionPickerState,
+  delta: number,
+): SessionPickerState {
+  if (state.sessions.length === 0) return state;
+  const next = (state.selectedIndex + delta) % state.sessions.length;
+  return {
+    ...state,
+    selectedIndex: next < 0 ? next + state.sessions.length : next,
+  };
+}
+
+export function selectedSessionFromPicker(
+  state: SessionPickerState,
+): PersistedSessionMeta | undefined {
+  return state.sessions[state.selectedIndex];
+}
+
 export function parseResumeCommand(value: string): { prefix: string } | undefined {
   // Keep the slash form compatible with the command palette, while accepting
   // the bare spelling users commonly type when they call it a command.

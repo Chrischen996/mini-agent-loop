@@ -13,6 +13,8 @@ import {
   isPasteShortcut,
   PromptInput,
 } from "../src/tui/components/PromptInput.tsx";
+import { useAutocomplete } from "../src/tui/hooks/useAutocomplete.ts";
+import type { AutocompleteNavKey } from "../src/tui/autocomplete.ts";
 
 const nextFrame = () => new Promise((resolve) => setTimeout(resolve, 25));
 
@@ -218,6 +220,126 @@ describe("PromptInput", () => {
       terminalIn.write("x");
       await nextFrame();
       assert.equal(currentValue, "draft");
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("uses asynchronously loaded session candidates for picker navigation", async () => {
+    const { terminalIn, terminalOut } = createTerminal();
+    const sessions = [
+      { id: "session-one", createdAt: 1, lastActiveAt: 2, messageCount: 1, preview: "one" },
+      { id: "session-two", createdAt: 1, lastActiveAt: 1, messageCount: 1, preview: "two" },
+    ];
+    let listCalls = 0;
+    const listSessions = async () => {
+      listCalls += 1;
+      return sessions;
+    };
+    let currentValue = "";
+    let currentMode: string | null = null;
+    let currentIndex = -1;
+    let handleKey: ((key: AutocompleteNavKey) => boolean) | undefined;
+
+    function Harness(): React.ReactElement {
+      const [value, setValue] = useState("/resume");
+      const autocomplete = useAutocomplete({
+        input: value,
+        cwd: process.cwd(),
+        setInput: setValue,
+        resetInputCursorToEnd: () => {},
+        listSessions,
+      });
+      currentValue = value;
+      currentMode = autocomplete.acMode;
+      currentIndex = autocomplete.acIndex;
+      handleKey = autocomplete.handleAutocompleteKey;
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+      });
+    }
+
+    const app = render(React.createElement(Harness), {
+      stdin: terminalIn as unknown as NodeJS.ReadStream,
+      stdout: terminalOut as unknown as NodeJS.WriteStream,
+      stderr: terminalOut as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    try {
+      await nextFrame();
+      assert.equal(currentMode, "session-list");
+      assert.equal(currentIndex, 0);
+      assert.equal(listCalls, 1, "opening the picker should issue one session listing request");
+      assert.equal(handleKey?.({ downArrow: true }), true);
+      await nextFrame();
+      assert.equal(currentIndex, 1);
+      assert.equal(handleKey?.({ tab: true }), true);
+      await nextFrame();
+      assert.equal(currentValue, "/resume session-two");
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("reuses an in-flight session listing while the same picker command changes", async () => {
+    const { terminalIn, terminalOut } = createTerminal();
+    const sessions = [
+      { id: "session-one", createdAt: 1, lastActiveAt: 2, messageCount: 1, preview: "one" },
+    ];
+    let listCalls = 0;
+    let releaseSessions: ((value: typeof sessions) => void) | undefined;
+    const listSessions = () => {
+      listCalls += 1;
+      return new Promise<typeof sessions>((resolve) => {
+        releaseSessions = resolve;
+      });
+    };
+    let changeInput: ((value: string) => void) | undefined;
+    let currentMode: string | null = null;
+    let currentSessions: typeof sessions = [];
+
+    function Harness(): React.ReactElement {
+      const [value, setValue] = useState("/resume");
+      changeInput = setValue;
+      const autocomplete = useAutocomplete({
+        input: value,
+        cwd: process.cwd(),
+        setInput: setValue,
+        resetInputCursorToEnd: () => {},
+        listSessions,
+      });
+      currentMode = autocomplete.acMode;
+      currentSessions = autocomplete.sessionCandidates;
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+      });
+    }
+
+    const app = render(React.createElement(Harness), {
+      stdin: terminalIn as unknown as NodeJS.ReadStream,
+      stdout: terminalOut as unknown as NodeJS.WriteStream,
+      stderr: terminalOut as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    try {
+      await nextFrame();
+      assert.equal(currentMode, "session-list");
+      assert.equal(listCalls, 1);
+
+      changeInput?.("/resume ");
+      await nextFrame();
+      assert.equal(currentMode, "session-list");
+      assert.equal(listCalls, 1, "editing the same picker command must reuse its in-flight request");
+
+      releaseSessions?.(sessions);
+      await nextFrame();
+      assert.deepEqual(currentSessions.map((session) => session.id), ["session-one"]);
     } finally {
       app.unmount();
     }

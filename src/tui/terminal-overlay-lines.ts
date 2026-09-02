@@ -6,6 +6,7 @@ import { permissionRiskLabel, toolArgumentSummary } from "./claude-style.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { toolVisualName } from "./tool-lines.ts";
 import { executionStepStatusToTodoStatus, todoIcon } from "./todo-format.ts";
+import { SESSION_PICKER_HINT } from "./session-serialization.ts";
 
 type PanelTone = RenderLine["tone"];
 
@@ -142,7 +143,13 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState): Rend
     } else if (state.sessions.length === 0) {
       rows.push({ key: "autocomplete-session-empty", text: "No saved sessions", style: "muted", tone: "running", dim: true });
     } else {
-      for (const [index, session] of state.sessions.slice(0, 8).entries()) {
+      const pageSize = 8;
+      const start = Math.max(0, Math.min(
+        state.index - pageSize + 1,
+        state.sessions.length - pageSize,
+      ));
+      for (const [offset, session] of state.sessions.slice(start, start + pageSize).entries()) {
+        const index = start + offset;
         const preview = session.preview.replace(/\s+/g, " ").trim();
         const detail = [
           `${session.messageCount} msgs`,
@@ -155,15 +162,14 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState): Rend
           tone: index === state.index ? "running" : "default",
         });
       }
-      if (state.sessions.length > 8) {
-        rows.push({ key: "autocomplete-session-more", text: `Showing 8 / ${state.sessions.length}`, style: "muted", dim: true });
+      if (state.sessions.length > pageSize) {
+        const end = Math.min(start + pageSize, state.sessions.length);
+        rows.push({ key: "autocomplete-session-more", text: `Showing ${start + 1}-${end} / ${state.sessions.length}`, style: "muted", dim: true });
       }
     }
     rows.push({
       key: "autocomplete-session-hint",
-      text: state.sessionCommand === "resume"
-        ? "Tab fill /resume  ·  Enter resume selected  ↑↓ navigate  Esc close"
-        : "Tab fill /resume  ↑↓ navigate  Enter list  Esc close",
+      text: SESSION_PICKER_HINT,
       style: "muted",
       dim: true,
     });

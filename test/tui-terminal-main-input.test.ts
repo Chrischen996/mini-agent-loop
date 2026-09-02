@@ -229,8 +229,12 @@ describe("terminal main input routing", () => {
         { role: "user", content: "picked prompt" },
       ],
     };
+    let listCalls = 0;
     deps.sessionAccess = {
-      list: async () => [{ id: session.id, createdAt: 1, lastActiveAt: 2, messageCount: 2, preview: "picked prompt" }],
+      list: async () => {
+        listCalls += 1;
+        return [{ id: session.id, createdAt: 1, lastActiveAt: 2, messageCount: 2, preview: "picked prompt" }];
+      },
       load: async () => session,
       newSession: () => "new-session",
       setSessionId: () => undefined,
@@ -251,5 +255,71 @@ describe("terminal main input routing", () => {
 
     assert.equal(deps.store.getState().messages.find((message) => message.kind === "user")?.text, "picked prompt");
     assert.equal(deps.autocomplete.getState().mode, null);
+    assert.equal(listCalls, 1, "resuming the selected metadata must not list sessions a second time");
+  });
+
+  it("resumes the selected session when the picker was opened with /sessions", async () => {
+    const deps = dependencies();
+    const session: PersistedSession = {
+      id: "sessions-picker",
+      createdAt: 1,
+      messages: [
+        { role: "system", content: "system" },
+        { role: "user", content: "picked from sessions" },
+      ],
+    };
+    deps.sessionAccess = {
+      list: async () => [{ id: session.id, createdAt: 1, lastActiveAt: 2, messageCount: 1, preview: "picked from sessions" }],
+      load: async () => session,
+      newSession: () => "new-session",
+      setSessionId: () => undefined,
+      restoreHistory: (value, prompt) => [{ role: "system", content: prompt }, ...value.messages.slice(1)],
+    };
+    deps.autocomplete = new TerminalAutocompleteController({
+      cwd: process.cwd(),
+      getInput: () => deps.input.getValue(),
+      setInput: (value) => deps.input.setValue(value),
+      listSessions: () => deps.sessionAccess!.list(),
+    });
+    deps.input.setValue("/sessions");
+    deps.autocomplete.update();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    handleInputAction({ type: "submit", value: "/sessions" }, deps);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    assert.equal(deps.store.getState().messages.find((message) => message.kind === "user")?.text, "picked from sessions");
+    assert.equal(deps.autocomplete.getState().mode, null);
+  });
+
+  it("does not relist after Enter on an empty settled session picker", async () => {
+    const deps = dependencies();
+    let listCalls = 0;
+    deps.sessionAccess = {
+      list: async () => {
+        listCalls += 1;
+        return [];
+      },
+      load: async () => undefined,
+      newSession: () => "new-session",
+      setSessionId: () => undefined,
+      restoreHistory: () => [],
+    };
+    deps.autocomplete = new TerminalAutocompleteController({
+      cwd: process.cwd(),
+      getInput: () => deps.input.getValue(),
+      setInput: (value) => deps.input.setValue(value),
+      listSessions: () => deps.sessionAccess!.list(),
+    });
+    deps.input.setValue("/resume");
+    deps.autocomplete.update();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    handleInputAction({ type: "submit", value: "/resume" }, deps);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    assert.equal(listCalls, 1);
+    const notice = deps.store.getState().messages.at(-1);
+    assert.match(notice?.kind === "notice" ? notice.text : "", /没有可恢复的会话/);
   });
 });
