@@ -277,7 +277,9 @@ export function createInitialState(modelName: string): TuiState {
     todoPlan: undefined,
     todoItems: undefined,
     todoRevision: 0,
-    todoViewMode: "expanded",
+    // Match Claude Code: keep the task list compact during normal work;
+    // users can expand it with Ctrl+T or /tasks expanded.
+    todoViewMode: "compact",
     spinnerMessage: undefined,
   };
 }

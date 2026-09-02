@@ -85,6 +85,22 @@ describe("message viewport", () => {
     assert.ok(scrolled.items.some((item) => item.kind === "history_hint"));
   });
 
+  it("bounds streaming text height to the live tail", () => {
+    const streamingText = Array.from({ length: 30 }, (_, index) => `partial-${index}`).join("\n");
+    const viewport = selectMessageViewport({
+      messages: [],
+      streamingText,
+      streamingReasoning: "",
+      busy: true,
+      thinkingMode: "hidden",
+      expandedThinking: [],
+      scrollOffset: 0,
+      availableHeight: 40,
+      width: 80,
+    });
+    assert.equal(viewport.totalHeight, 12);
+  });
+
   it("keeps partially visible streaming rows while scrolling by terminal row", () => {
     const messages = [user("hello"), assistant("world")];
     const streamingText = Array.from({ length: 30 }, (_, index) => `partial-${index}`).join("\n");

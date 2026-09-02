@@ -227,7 +227,7 @@ async function main(): Promise<void> {
     todoPlan: (await loadPlanDocument(cwd).catch(() => null)) ?? undefined,
     todoItems: undefined,
     todoRevision: 0,
-    todoViewMode: "expanded",
+    todoViewMode: "compact",
     cwd,
     modelName: `${activeLlm.provider}/${activeLlm.model}`,
     billingLabel: "API Usage Billing",

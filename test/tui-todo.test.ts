@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { getTodoPanelRows, planToTodoItems, todoProgressMeter } from "../src/tui/todo-format.ts";
+import { todoPanelRenderLines } from "../src/tui/todo-lines.ts";
 import { TodoPanel } from "../src/tui/components/TodoPanel.tsx";
 import { createInitialState, tuiReducer } from "../src/tui/state.ts";
 import { getMessageFeedHeight, getPickerLayout } from "../src/tui/layout.ts";
@@ -72,6 +73,25 @@ describe("TodoPanel formatting", () => {
   it("shows a compact progress meter without adding a panel row", () => {
     assert.equal(todoProgressMeter(2, 4), "▰▰▰▱▱▱");
     assert.equal(todoProgressMeter(0, 0), "······");
+  });
+
+  it("renders compact mode as one current-task progress row", () => {
+    const lines = todoPanelRenderLines({ todos: [
+      { id: "done", content: "Read config", activeForm: "Reading config", status: "completed", source: "model" as const },
+      { id: "active", content: "Run tests", activeForm: "Running tests", status: "in_progress", source: "model" as const },
+      { id: "next", content: "Review output", activeForm: "Reviewing output", status: "pending", source: "model" as const },
+    ], viewMode: "compact" });
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!.text, /1\/3 completed/);
+    assert.match(lines[0]!.text, /Running tests/);
+    assert.doesNotMatch(lines[0]!.text, /Read config/);
+  });
+
+  it("renders completed compact lists without a stale active task", () => {
+    const lines = todoPanelRenderLines({ todos: [
+      { id: "done", content: "Read config", activeForm: "Reading config", status: "completed", source: "model" as const },
+    ], viewMode: "compact" });
+    assert.match(lines[0]!.text, /All tasks completed/);
   });
 
   it("renders status symbols and active form text via the unified panel", () => {

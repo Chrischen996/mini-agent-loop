@@ -12,11 +12,18 @@ export function todoPanelRenderLines(options: { plan?: PlanDocument; todos?: rea
   const status = plan ? ` [${TODO_PLAN_STATUS_LABELS[plan.status]}]` : "";
   const meter = todoProgressMeter(summary.completed, summary.total);
   const header = `Todos  ${meter}  ${summary.completed}/${summary.total} completed${summary.inProgress ? `  ${summary.inProgress} in progress` : ""}${summary.failed ? `  ${summary.failed} failed` : ""}${status ? `  ${status}` : ""}`;
-  const lines: RenderLine[] = [{ key: "todo-header", text: header, prefix: "☷ ", style: "todo", bold: true }];
   if (viewMode === "compact") {
-    lines.push({ key: "todo-compact", text: items.find((item) => item.status === "in_progress")?.activeForm ?? (items.length ? "Todo list collapsed" : "No todos"), style: "muted", dim: true });
-    return lines;
+    const active = items.find((item) => item.status === "in_progress");
+    const activeLabel = active?.activeForm ?? (summary.total > 0 && summary.completed === summary.total ? "All tasks completed" : "No active task");
+    return [{
+      key: "todo-compact",
+      text: `${header}  ·  ${todoText(activeLabel, 72)}`,
+      prefix: "☷ ",
+      style: "todo",
+      dim: !active,
+    }];
   }
+  const lines: RenderLine[] = [{ key: "todo-header", text: header, prefix: "☷ ", style: "todo", bold: true }];
   const visible = items.slice(0, maxVisibleItems);
   if (!visible.length) lines.push({ key: "todo-empty", text: "No todos", style: "muted", dim: true });
   for (const [index, item] of visible.entries()) lines.push({ key: `todo-${item.id}`, text: `${todoIcon(item.status)} ${item.source === "plan" ? `${index + 1}. ` : ""}${todoText(item.content)}`, style: "todo", tone: todoTone(item.status), strikethrough: item.status === "completed", dim: item.status === "skipped" });

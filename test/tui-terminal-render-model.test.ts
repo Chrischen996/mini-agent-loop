@@ -187,7 +187,7 @@ describe("standalone terminal render model", () => {
     state = tuiReducer(state, { type: "USER_MESSAGE", text: "history" });
     state = tuiReducer(state, { type: "SCROLL_BY", delta: 3 });
     const lines = buildTerminalRenderLines(state, { height: 5, input: "" });
-    assert.equal(lines[0]?.key, "panel-todo-header");
+    assert.equal(lines[0]?.key, "panel-todo-compact");
   });
 
   it("masks API keys while the model setup overlay owns the input", () => {
