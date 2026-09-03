@@ -763,7 +763,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
  * Note: effort "max" is available on all adaptive-thinking Claude models, while native
  * "xhigh" is only available on Opus 4.7/4.8, Sonnet 5, and Fable 5.
  */
-function mapThinkingLevelToEffort(
+export function mapThinkingLevelToEffort(
 	model: Model<"anthropic-messages">,
 	level: SimpleStreamOptions["reasoning"],
 ): AnthropicEffort {
@@ -778,6 +778,11 @@ function mapThinkingLevelToEffort(
 			return "medium";
 		case "high":
 			return "high";
+		case "xhigh":
+			return "high";
+		case "max":
+		case "ultra":
+			return "max";
 		default:
 			return "high";
 	}

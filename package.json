@@ -27,7 +27,7 @@
   },
   "scripts": {
     "start": "tsx src/cli.ts",
-    "tui": "tsx src/tui/terminal-main.ts",
+    "tui": "node --import tsx/esm src/tui/terminal-main.ts",
     "tui:terminal": "tsx src/tui/terminal-main.ts",
     "tui:legacy": "tsx src/tui/main.ts",
     "tui:ink": "tsx src/tui/ink-main.tsx",

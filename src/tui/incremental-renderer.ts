@@ -6,25 +6,30 @@ const ANSI_ERASE_LINE = "\x1b[2K";
 const ANSI_CLEAR_TERMINAL = "\x1b[2J";
 const ANSI_CURSOR_SHOW = "\x1b[?25h";
 
-export type TerminalDisplayMode = "scrollback" | "fullscreen";
+export type TerminalDisplayMode = "pi" | "scrollback" | "fullscreen";
 
 /**
  * Resolve the standalone terminal presentation mode.
  *
- * Main-screen scrollback is the Claude Code-compatible default. Fullscreen is
- * opt-in for users who prefer the previous fixed viewport, and the explicit
- * legacy boolean remains supported for scripts that already set it.
+ * pi-tui alternate-screen rendering is the default because it can reflow
+ * already-rendered history when a reasoning block is expanded. Scrollback and
+ * the previous fixed viewport remain explicit compatibility modes.
  */
 export function resolveTerminalDisplayMode(env: NodeJS.ProcessEnv = process.env): TerminalDisplayMode {
   const mode = env.MINI_AGENT_TUI_MODE?.trim().toLowerCase();
-  if (mode === "fullscreen" || mode === "full" || mode === "alternate") return "fullscreen";
+  if (mode === "pi" || mode === "component" || mode === "alternate") return "pi";
+  if (mode === "fullscreen" || mode === "full") return "fullscreen";
   if (mode === "scrollback" || mode === "main" || mode === "main-screen") return "scrollback";
 
   const fullscreen = env.MINI_AGENT_TUI_FULLSCREEN?.trim().toLowerCase();
   if (fullscreen === "1" || fullscreen === "true" || fullscreen === "yes") return "fullscreen";
   const scrollback = env.MINI_AGENT_TUI_SCROLLBACK?.trim().toLowerCase();
+  if (scrollback === "1" || scrollback === "true" || scrollback === "yes") return "scrollback";
   if (scrollback === "0" || scrollback === "false" || scrollback === "no") return "fullscreen";
-  return "scrollback";
+  // In VS Code sandbox / non-interactive terminals, default to scrollback
+  // to avoid pi-tui alternate-screen redraw overhead.
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return "scrollback";
+  return "pi";
 }
 
 /**

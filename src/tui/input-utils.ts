@@ -29,9 +29,8 @@ export function extractFileAcTrigger(input: string): FileAcTrigger | null {
     };
   }
 
-  const bareTrigger = extractBareFileAcTrigger(input);
-  if (bareTrigger) return bareTrigger;
-
+  // Ordinary bare words are prompt text, not file paths. File completion is
+  // intentionally opt-in through an explicit @ reference or slash command.
   return null;
 }
 

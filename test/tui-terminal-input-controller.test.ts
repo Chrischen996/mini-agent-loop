@@ -44,6 +44,54 @@ describe("terminal input controller", () => {
     ]);
   });
 
+  it("accepts Kitty printable keys and modified shortcuts", () => {
+    const actions: TerminalInputAction[] = [];
+    const controller = new TerminalInputController({ onAction: (action) => actions.push(action) });
+    controller.handle("\x1b[20320u");
+    controller.handle("\x1b[116;3u");
+
+    assert.equal(controller.getValue(), "你");
+    assert.deepEqual(actions, [
+      { type: "insert", value: "你" },
+      { type: "shortcut", name: "thinking-message" },
+    ]);
+  });
+
+  it("maps Kitty special keys so prompts can submit", () => {
+    const actions: TerminalInputAction[] = [];
+    const controller = new TerminalInputController({ onAction: (action) => actions.push(action) });
+    controller.handle("\x1b[97u\x1b[98u");
+    controller.handle("\x1b[127u");
+    controller.handle("\x1b[9u\x1b[9;2u\x1b[27u");
+    controller.handle("\x1b[13u");
+    controller.handle("\x1b[99;5u");
+
+    assert.deepEqual(actions, [
+      { type: "insert", value: "a" },
+      { type: "insert", value: "ab" },
+      { type: "backspace" },
+      { type: "tab" },
+      { type: "shortcut", name: "permission" },
+      { type: "cancel" },
+      { type: "submit", value: "a" },
+      { type: "exit" },
+    ]);
+    assert.equal(controller.getValue(), "");
+  });
+
+  it("maps modifyOtherKeys control shortcuts", () => {
+    const actions: TerminalInputAction[] = [];
+    const controller = new TerminalInputController({ onAction: (action) => actions.push(action) });
+    controller.handle("\x1b[97u\x1b[27;5;127~\x1b[27;5;99~");
+
+    assert.deepEqual(actions, [
+      { type: "insert", value: "a" },
+      { type: "backspace" },
+      { type: "exit" },
+    ]);
+    assert.equal(controller.getValue(), "");
+  });
+
   it("keeps split escape sequences out of the prompt", () => {
     const actions: TerminalInputAction[] = [];
     const controller = new TerminalInputController({ onAction: (action) => actions.push(action) });

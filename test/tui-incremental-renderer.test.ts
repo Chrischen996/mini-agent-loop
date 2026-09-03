@@ -6,6 +6,7 @@ import {
   resolveTerminalDisplayMode,
   ScrollbackTerminalRenderer,
 } from "../src/tui/incremental-renderer.ts";
+import { PiTuiFrame } from "../src/tui/pi-tui-frame.ts";
 
 function sink(): { writes: string[]; target: { write(value: string): boolean } } {
   const writes: string[] = [];
@@ -13,12 +14,32 @@ function sink(): { writes: string[]; target: { write(value: string): boolean } }
 }
 
 describe("incremental terminal renderer", () => {
-  it("defaults to main-screen scrollback with fullscreen as an explicit opt-in", () => {
-    assert.equal(resolveTerminalDisplayMode({}), "scrollback");
+  it("defaults to pi-tui alternate screen with older modes as explicit opt-ins", () => {
+    assert.equal(resolveTerminalDisplayMode({}), "pi");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "pi" }), "pi");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "alternate" }), "pi");
     assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "fullscreen" }), "fullscreen");
     assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "main-screen" }), "scrollback");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_SCROLLBACK: "1" }), "scrollback");
     assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_FULLSCREEN: "1" }), "fullscreen");
     assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_SCROLLBACK: "0" }), "fullscreen");
+  });
+
+  it("adapts shared RenderLine rows to pi-tui's width and height contract", () => {
+    const input: string[] = [];
+    const frame = new PiTuiFrame(
+      { rows: 5 },
+      () => [
+        { key: "one", text: "one", style: "assistant" },
+        { key: "long", text: "0123456789", style: "assistant" },
+      ],
+      (data) => input.push(data),
+    );
+
+    assert.equal(frame.render(5).length, 2);
+    assert.ok(frame.render(5).every((line) => line.replace(/\x1b\[[0-9;]*m/g, "").length <= 5));
+    frame.handleInput("x");
+    assert.deepEqual(input, ["x"]);
   });
 
   it("appends committed transcript rows and redraws only the live tail", () => {

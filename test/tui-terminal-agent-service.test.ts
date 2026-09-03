@@ -80,6 +80,40 @@ describe("terminal agent service", () => {
     assert.deepEqual(phases, ["user", "model"]);
   });
 
+  it("waits for an aborted turn to finish persistence hooks", async () => {
+    const store = createTuiStore(createInitialState("test-model"));
+    let releaseChat!: () => void;
+    const chatStarted = new Promise<void>((resolve) => {
+      releaseChat = resolve;
+    });
+    let finalized = false;
+    const service = new TerminalAgentService({
+      store,
+      llm: testLlm(),
+      tools: [],
+      permissionManager: new PermissionManager("bypass"),
+      permissionSessionId: "shutdown-session",
+      chat: async () => {
+        await chatStarted;
+        throw new Error("cancelled");
+      },
+      onTurnFinished: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        finalized = true;
+      },
+    });
+
+    const turn = service.submit("hello");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    service.abort();
+    const idle = service.waitForIdle();
+    releaseChat();
+    await idle;
+
+    assert.equal(finalized, true);
+    await turn;
+  });
+
   it("keeps one loop history while projecting events into the store", async () => {
     const store = createTuiStore(createInitialState("test-model"));
     const service = new TerminalAgentService({

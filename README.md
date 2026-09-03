@@ -648,7 +648,7 @@ the status bar shows the new level immediately. Use `Shift+Up` / `Shift+Down`
 responsible for changing the model, while these shortcuts only change the
 current session configuration and never rewrite the user prompt. The setting
 is provider-neutral: it does not automatically switch providers or models.
-The default is `medium` for reasoning-capable models and `off` otherwise;
+The cycle only includes mapped provider levels, so `xhigh` appears for models that declare it (for example GPT-5.2+ and Claude Opus 4.7+) and is omitted otherwise. The default is `medium` for reasoning-capable models and `off` otherwise;
 `DEFAULT_THINKING_INTENSITY=low|med|high|xhigh|ultra` overrides the startup default.
 Profiles may persist an optional `thinkingLevel` plus optional per-model
 timeout overrides (`timeoutMs`, `firstResponseTimeoutMs`,

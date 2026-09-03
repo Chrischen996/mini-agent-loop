@@ -44,6 +44,7 @@ import { parseModelCommand, shouldSubmitTypedModelCommand } from "./model-comman
 import { isExactSlashCommand } from "./autocomplete.ts";
 import { TUI_BRAND_NAME, TUI_BRAND_VERSION } from "./brand.ts";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
+import { createPiTuiRuntime, type PiTuiRuntime } from "./pi-tui-runtime.ts";
 
 const ALTERNATE_SCREEN = "\x1b[?1049h";
 const MAIN_SCREEN = "\x1b[?1049l";
@@ -255,9 +256,14 @@ export async function runTerminalMain(): Promise<void> {
     }
 
     const displayMode = resolveTerminalDisplayMode();
-    const fullscreen = displayMode === "fullscreen";
+    let usePiTui = displayMode === "pi";
+    let scrollback = displayMode === "scrollback";
+    let fullscreen = displayMode === "fullscreen";
     const scrollbackRenderer = new ScrollbackTerminalRenderer(process.stdout);
-    const renderer = fullscreen ? new IncrementalTerminalRenderer(process.stdout) : scrollbackRenderer;
+    let renderer: IncrementalTerminalRenderer | ScrollbackTerminalRenderer = fullscreen
+      ? new IncrementalTerminalRenderer(process.stdout)
+      : scrollbackRenderer;
+    let piRuntime: PiTuiRuntime | undefined;
     // Existing scrollback rows cannot be reflowed after they have been handed
     // to the terminal, so keep the initial width for the append-only path.
     const scrollbackWidth = process.stdout.columns || 80;
@@ -266,7 +272,7 @@ export async function runTerminalMain(): Promise<void> {
     let animationTimer: ReturnType<typeof setInterval> | undefined;
     const directAbortRef: { current?: AbortController } = {};
     const input = new TerminalInputController({
-      onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); }, persistSession: persistSessionSnapshot, onSessionRestore: () => { if (!fullscreen) scrollbackRenderer.forceNewSegment(); } }),
+      onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); }, persistSession: persistSessionSnapshot, onSessionRestore: () => { if (scrollback) scrollbackRenderer.forceNewSegment(); } }),
       getScrollPageSize: () => Math.max(1, (process.stdout.rows || 24) - 8),
     });
     autocomplete = new TerminalAutocompleteController({
@@ -281,11 +287,14 @@ export async function runTerminalMain(): Promise<void> {
       listSessions: () => sessionManager.list(),
       onChange: () => render(),
     });
-    render = () => {
+    // Cache last rendered result to avoid double-buildTerminalRenderLines on every
+    // scroll frame, and to skip re-renders when the state hasn't changed.
+    let frameCache: { stateVersion: number; naturalLines: readonly import("./render-lines.ts").RenderLine[]; scrollOffset: number; lines: readonly import("./render-lines.ts").RenderLine[] } | undefined;
+    const buildFrameLines = (width: number, height: number): ReturnType<typeof buildTerminalRenderLines> => {
       const state = store.getState();
       const renderOptions = {
-        width: fullscreen ? process.stdout.columns || 80 : scrollbackWidth,
-        ...(fullscreen ? {
+        width,
+        ...(fullscreen || usePiTui ? {
           scrollOffset: state.scrollOffset,
         } : {
           scrollback: true,
@@ -299,8 +308,9 @@ export async function runTerminalMain(): Promise<void> {
           model: `${service.getLlm().provider}/${service.getLlm().model}`,
           billing: "API Usage Billing",
           // Scrollback keeps the welcome frame as the first committed
-          // transcript segment; fullscreen condenses it after the first turn.
-          showWelcome: !fullscreen || (state.messages.length === 0 && !state.busy && !state.pendingPermission),
+          // transcript segment; alternate-screen views condense it after the
+          // first turn.
+          showWelcome: scrollback || (state.messages.length === 0 && !state.busy && !state.pendingPermission),
         },
         promptRule: true,
         input: input.getValue(),
@@ -312,20 +322,66 @@ export async function runTerminalMain(): Promise<void> {
         queuedCount: service.getQueuedCount(),
         thinkingLevel: service.getLlm().thinkingLevel,
       };
-      if (!fullscreen) {
-        renderer.renderLines(buildTerminalRenderLines(state, renderOptions));
-        return;
+      // Scrollback mode: no frame height cap, no double-build.
+      if (scrollback) {
+        frameCache = undefined;
+        return buildTerminalRenderLines(state, renderOptions);
       }
 
-      // Keep short fullscreen sessions compact. Once the natural frame is
-      // taller than the terminal, switch to the fixed viewport so scrolling
-      // and the prompt remain stable without manufacturing a wall of blank
-      // rows during the first few subagent updates.
-      const naturalLines = buildTerminalRenderLines(state, renderOptions);
-      const frameHeight = Math.max(1, (process.stdout.rows || 24) - 1);
-      renderer.renderLines(naturalLines.length > frameHeight
-        ? buildTerminalRenderLines(state, { ...renderOptions, height: frameHeight })
-        : naturalLines);
+      const frameHeight = usePiTui ? Math.max(1, height) : Math.max(1, height - 1);
+      const scrollOffset = state.scrollOffset;
+
+      // Reuse cached naturalLines unless state or viewport changed.
+      if (
+        !frameCache
+        || frameCache.stateVersion !== state.revision
+        || frameCache.scrollOffset !== scrollOffset
+        || frameCache.lines.length !== frameHeight
+      ) {
+        const naturalLines = buildTerminalRenderLines(state, renderOptions);
+        const lines = naturalLines.length > frameHeight
+          ? naturalLines.slice(scrollOffset, scrollOffset + frameHeight)
+          : naturalLines;
+        frameCache = { stateVersion: state.revision, naturalLines, scrollOffset, lines };
+      }
+      return frameCache.lines;
+    };
+    if (usePiTui) {
+      try {
+        piRuntime = await createPiTuiRuntime(buildFrameLines, (data) => input.handle(data));
+      } catch {
+        // pi-tui uses newer runtime syntax than the historical TUI path. Keep
+        // the app usable on older Node versions with the stable fullscreen
+        // renderer rather than failing during module evaluation.
+        piRuntime = undefined;
+        usePiTui = false;
+        scrollback = false;
+        fullscreen = true;
+        renderer = new IncrementalTerminalRenderer(process.stdout);
+      }
+    }
+    // Throttle render() to once per animation frame to avoid stacking
+    // intermediate frames during fast scroll or streaming updates.
+    let renderQueued = false;
+    render = () => {
+      if (renderQueued) return;
+      renderQueued = true;
+      const flush = () => {
+        renderQueued = false;
+        if (!screenActive || quitting) return;
+        if (piRuntime) {
+          piRuntime.tui.requestRender();
+          return;
+        }
+        const width = fullscreen ? process.stdout.columns || 80 : scrollbackWidth;
+        renderer.renderLines(buildFrameLines(width, process.stdout.rows || 24));
+      };
+      // requestAnimationFrame exists in browsers; in Node, schedule via setImmediate(0)
+      // which yields to I/O and avoids blocking the event loop.
+      const raf = typeof globalThis.requestAnimationFrame === "function"
+        ? globalThis.requestAnimationFrame.bind(globalThis)
+        : (cb: () => void) => setImmediate(cb);
+      raf(flush);
     };
     const syncAnimation = () => {
       const shouldAnimate = store.getState().busy || Boolean(store.getState().pendingPermission);
@@ -350,13 +406,18 @@ export async function runTerminalMain(): Promise<void> {
       screenActive = false;
       if (animationTimer) clearInterval(animationTimer);
       animationTimer = undefined;
-      process.stdin.removeAllListeners("data");
-      process.stdout.removeListener("resize", render);
-      if (process.stdin.isRaw) process.stdin.setRawMode(false);
-      process.stdin.pause();
+      if (piRuntime) {
+        piRuntime.tui.stop();
+        process.stdout.write(MAIN_SCREEN);
+      } else {
+        process.stdin.removeAllListeners("data");
+        process.stdout.removeListener("resize", render);
+        if (process.stdin.isRaw) process.stdin.setRawMode(false);
+        process.stdin.pause();
+      }
       if (fullscreen) {
         process.stdout.write(`\x1b[?25h${MAIN_SCREEN}`);
-      } else {
+      } else if (scrollback) {
         // Scrollback mode never entered the alternate buffer. The renderer
         // already left the cursor after the live tail; just restore it.
         scrollbackRenderer.finish();
@@ -364,14 +425,15 @@ export async function runTerminalMain(): Promise<void> {
       unsubscribe();
       finishLoop();
     };
-    const quit = () => {
+    const quit = async () => {
       if (quitting) return;
       quitting = true;
       service.abort();
+      await service.waitForIdle();
       cleanup();
     };
 
-    if (fullscreen) {
+    if (piRuntime || fullscreen) {
       process.stdout.write(`${ALTERNATE_SCREEN}\x1b[?25l\x1b[H`);
     } else {
       // Start a clean transcript row in the user's main screen. Do not clear
@@ -379,20 +441,24 @@ export async function runTerminalMain(): Promise<void> {
       process.stdout.write("\x1b[2K\r\x1b[?25l");
     }
     screenActive = true;
-    syncAnimation();
-    process.stdin.setRawMode(true);
-    process.stdin.setEncoding("utf8");
-    process.stdin.resume();
     process.once("SIGINT", quit);
     process.once("exit", cleanup);
-    process.stdin.on("data", (chunk: string) => {
-      input.handle(chunk);
-      // An action such as /exit can synchronously tear down the screen while
-      // handling the same input chunk. Do not render a fresh scrollback
-      // segment after cleanup has already returned control to the shell.
-      if (screenActive && !quitting) render();
-    });
-    process.stdout.on("resize", render);
+    syncAnimation();
+    if (piRuntime) {
+      piRuntime.tui.start();
+    } else {
+      process.stdin.setRawMode(true);
+      process.stdin.setEncoding("utf8");
+      process.stdin.resume();
+      process.stdin.on("data", (chunk: string) => {
+        input.handle(chunk);
+        // An action such as /exit can synchronously tear down the screen while
+        // handling the same input chunk. Do not render a fresh scrollback
+        // segment after cleanup has already returned control to the shell.
+        if (screenActive && !quitting) render();
+      });
+      process.stdout.on("resize", render);
+    }
     render();
 
     // Keep the promise alive until the user exits. `stdin` is paused by
@@ -401,7 +467,7 @@ export async function runTerminalMain(): Promise<void> {
       finishLoop = resolve;
       process.stdin.once("close", resolve);
     });
-    quit();
+    await quit();
   } finally {
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close(), sandboxRunner?.cleanup() ?? Promise.resolve()]);
   }

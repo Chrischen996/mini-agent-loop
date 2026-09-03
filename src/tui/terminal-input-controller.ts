@@ -104,6 +104,18 @@ export class TerminalInputController {
     let index = 0;
     while (index < input.length) {
       const rest = input.slice(index);
+      const protocolLength = protocolKeyLength(rest);
+      if (protocolLength > 0) {
+        const protocolKey = parseProtocolKey(rest.slice(0, protocolLength));
+        if (protocolKey) {
+          if (protocolKey.type === "insert") this.insert(protocolKey.value);
+          else if (protocolKey.action.type === "submit") this.submit();
+          else if (protocolKey.action.type === "backspace") this.backspace();
+          else this.emit(protocolKey.action);
+          index += protocolLength;
+          continue;
+        }
+      }
       const sequence = this.handleEscape(rest);
       if (sequence === -1) {
         this.pendingEscape = rest;
@@ -226,6 +238,92 @@ function graphemes(value: string): string[] {
     return [...segmenter.segment(value)].map((part) => part.segment);
   }
   return [...value];
+}
+
+type ProtocolShortcut = Omit<Extract<TerminalInputAction, { type: "shortcut" }>, "type">;
+type ProtocolAction = { type: "submit" } | Exclude<TerminalInputAction, { type: "insert" | "submit" }>;
+type ProtocolKey =
+  | { type: "insert"; value: string }
+  | { type: "action"; action: ProtocolAction };
+
+/** Parse printable and Alt shortcuts without loading the pi-tui runtime. */
+function parseProtocolKey(data: string): ProtocolKey | undefined {
+  const kitty = /^\x1b\[(\d+)(?::(\d*))?(?::(\d+))?(?:;(\d+))?(?::(\d+))?u$/.exec(data);
+  if (kitty) {
+    const codepoint = Number.parseInt(kitty[1] ?? "", 10);
+    const shiftedCodepoint = kitty[2] ? Number.parseInt(kitty[2], 10) : undefined;
+    const modifier = (Number.parseInt(kitty[4] ?? "1", 10) || 1) - 1;
+    const effectiveCodepoint = modifier & 1 ? (shiftedCodepoint ?? codepoint) : codepoint;
+    const special = kittySpecialKey(effectiveCodepoint, modifier);
+    if (special) return special;
+    const shortcut = altShortcut(effectiveCodepoint, modifier);
+    if (shortcut) return { type: "action", action: { type: "shortcut", ...shortcut } };
+    if ((modifier & ~1) === 0 && isPrintableCodepoint(effectiveCodepoint)) {
+      return { type: "insert", value: sanitizeInput(String.fromCodePoint(effectiveCodepoint)) };
+    }
+    return undefined;
+  }
+
+  // xterm modifyOtherKeys encodes modified printable keys as CSI 27;...~.
+  const modified = /^\x1b\[27;(\d+);(\d+)~$/.exec(data);
+  if (!modified) return undefined;
+  const modifier = (Number.parseInt(modified[1] ?? "1", 10) || 1) - 1;
+  const codepoint = Number.parseInt(modified[2] ?? "", 10);
+  const special = kittySpecialKey(codepoint, modifier);
+  if (special) return special;
+  const shortcut = altShortcut(codepoint, modifier);
+  return shortcut ? { type: "action", action: { type: "shortcut", ...shortcut } } : undefined;
+}
+
+function protocolKeyLength(data: string): number {
+  const kitty = /^\x1b\[\d+(?::\d*)?(?::\d+)?(?:;\d+)?(?::\d+)?u/.exec(data);
+  if (kitty) return kitty[0].length;
+  const modified = /^\x1b\[27;\d+;\d+~/.exec(data);
+  return modified?.[0].length ?? 0;
+}
+
+function kittySpecialKey(codepoint: number, modifier: number): ProtocolKey | undefined {
+  if (modifier === 0) {
+    if (codepoint === 3) return { type: "action", action: { type: "exit" } };
+    if (codepoint === 9) return { type: "action", action: { type: "tab" } };
+    if (codepoint === 13) return { type: "action", action: { type: "submit" } };
+    if (codepoint === 27) return { type: "action", action: { type: "cancel" } };
+    if (codepoint === 127 || codepoint === 8) return { type: "action", action: { type: "backspace" } };
+  }
+  if (modifier === 1 && codepoint === 9) {
+    return { type: "action", action: { type: "shortcut", name: "permission" } };
+  }
+  if (modifier === 1 && codepoint === 13) {
+    return { type: "insert", value: "\n" };
+  }
+
+  // Kitty reports Ctrl+<key> as the printable key codepoint plus modifier 4.
+  // Keep these mappings aligned with the legacy control-byte shortcuts above.
+  if (modifier === 4 && isPrintableCodepoint(codepoint)) {
+    const character = String.fromCodePoint(codepoint).toLowerCase();
+    if (character === "c") return { type: "action", action: { type: "exit" } };
+    if (character === "v") return { type: "action", action: { type: "shortcut", name: "paste-image" } };
+    if (character === "r") return { type: "action", action: { type: "shortcut", name: "thinking-level" } };
+    if (character === "t") return { type: "action", action: { type: "shortcut", name: "thinking-mode" } };
+    if (character === "y") return { type: "action", action: { type: "shortcut", name: "copy" } };
+    if (character === "g") return { type: "action", action: { type: "shortcut", name: "bottom" } };
+  }
+  if (modifier === 4 && codepoint === 127) return { type: "action", action: { type: "backspace" } };
+  return undefined;
+}
+
+function altShortcut(codepoint: number, modifier: number): ProtocolShortcut | undefined {
+  if ((modifier & 2) === 0 || (modifier & 4) !== 0) return undefined;
+  if (!isPrintableCodepoint(codepoint)) return undefined;
+  const character = String.fromCodePoint(codepoint).toLowerCase();
+  if (character === "t") return { name: "thinking-message" };
+  if (character === ".") return { name: "thinking-level", direction: "increase" };
+  if (character === ",") return { name: "thinking-level", direction: "decrease" };
+  return undefined;
+}
+
+function isPrintableCodepoint(codepoint: number): boolean {
+  return Number.isInteger(codepoint) && codepoint >= 32 && codepoint !== 127 && codepoint <= 0x10ffff;
 }
 
 function lineBounds(parts: string[], cursor: number): { start: number; end: number } {

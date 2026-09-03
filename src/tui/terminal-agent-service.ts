@@ -165,6 +165,16 @@ export class TerminalAgentService {
     return this.activeTurn !== undefined;
   }
 
+  /**
+   * Wait until the active turn has run its finalization hooks. This lets a
+   * terminal shutdown preserve the last history snapshot after cancellation.
+   */
+  async waitForIdle(): Promise<void> {
+    const activeTurn = this.activeTurn;
+    if (!activeTurn) return;
+    await activeTurn.catch(() => undefined);
+  }
+
   getQueuedCount(): number {
     return this.queuedSubmissions.length;
   }

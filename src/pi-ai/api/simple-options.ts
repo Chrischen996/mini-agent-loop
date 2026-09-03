@@ -50,6 +50,17 @@ export function clampReasoning(effort: ThinkingLevel | undefined): BaseEffortLev
 	return effort === undefined ? undefined : toBaseEffortLevel(effort);
 }
 
+/** Default token budgets for token-based thinking providers. */
+export const DEFAULT_THINKING_BUDGETS: ThinkingBudgets = {
+	minimal: 1024,
+	low: 2048,
+	medium: 8192,
+	high: 16384,
+	xhigh: 24576,
+	max: 32768,
+	ultra: 32768,
+};
+
 export function adjustMaxTokensForThinking(
 	// Undefined means no explicit caller cap. Use the model cap and fit thinking inside it.
 	baseMaxTokens: number | undefined,
@@ -57,14 +68,7 @@ export function adjustMaxTokensForThinking(
 	reasoningLevel: ThinkingLevel,
 	customBudgets?: ThinkingBudgets,
 ): { maxTokens: number; thinkingBudget: number } {
-	const defaultBudgets: ThinkingBudgets = {
-		minimal: 1024,
-		low: 2048,
-		medium: 8192,
-		high: 16384,
-		ultra: 32768,
-	};
-	const budgets = { ...defaultBudgets, ...customBudgets };
+	const budgets = { ...DEFAULT_THINKING_BUDGETS, ...customBudgets };
 
 	const minOutputTokens = 1024;
 	const level = clampReasoning(reasoningLevel)!;
