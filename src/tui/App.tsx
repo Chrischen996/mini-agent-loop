@@ -119,7 +119,7 @@ import { SessionManager } from "../session-manager.ts";
 import type { PersistedSessionMeta } from "../session-store.ts";
 import { TUI_BRAND_VERSION } from "./brand.ts";
 import { getWelcomeHeaderHeight } from "./welcome-panel.ts";
-import { formatAmbiguousSessionNotice, getStartupSessionRequest, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
+import { formatAmbiguousSessionNotice, getResumeMessageCandidates, getStartupSessionRequest, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
@@ -187,6 +187,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const [inputEpoch, setInputEpoch] = useState(0);
   const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "plan"));
   const sessionRestoreCompletedRef = useRef(false);
+  const resumePickerSessionRef = useRef<import("../session-store.ts").PersistedSession | null>(null);
+  const resumePickerCandidatesRef = useRef<import("./session-serialization.ts").ResumeMessageCandidate[]>([]);
   const abortRef = useRef<AbortController>(new AbortController());
   const permissionManagerRef = useRef<PermissionManager | null>(null);
   const permissionTurnRef = useRef<PermissionTurnContext | null>(null);
@@ -255,6 +257,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     modelContextWindows,
     modelQuery,
     sessionCandidates,
+    resumeMessageCandidates,
     sessionCommand,
     sessionLoading,
     modelSetup,
@@ -269,6 +272,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     acceptFile,
     handleTabAt,
     handleAutocompleteKey,
+    openResumeMessages,
     openModelPicker,
   } = useAutocomplete({
     input,
@@ -332,6 +336,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     requestedId?: string,
     fork = false,
     knownSession?: PersistedSessionMeta,
+    openMessagePicker = false,
   ): Promise<import("../session-store.ts").PersistedSession | undefined> => {
     const sessionManager = sessionManagerRef.current!;
     const selection = knownSession
@@ -381,8 +386,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       todos: restoredState.todos,
       todoRevision: restoredState.todoRevision,
     });
+    if (openMessagePicker) {
+      resumePickerSessionRef.current = restored;
+      const candidates = getResumeMessageCandidates(restored.messages);
+      resumePickerCandidatesRef.current = candidates;
+      openResumeMessages(candidates);
+    }
     return restored;
-  }, [dispatch, getPermissionManager]);
+  }, [dispatch, getPermissionManager, openResumeMessages]);
 
   useEffect(() => {
     if (!startupSession.resume) return;
@@ -426,6 +437,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       : acMode === "file" ? Math.min(8, fileCandidates.length)
         : acMode === "model" || acMode === "model-picker" ? Math.min(12, modelCandidates.length)
           : acMode === "session-list" ? Math.max(1, Math.min(8, sessionCandidates.length))
+            : acMode === "resume-messages" ? Math.max(1, Math.min(8, resumeMessageCandidates.length))
           : acMode === "profile-list" ? Math.min(10, profileListState?.profiles.length ?? 0)
             : acMode ? 4 : 0;
   // Keep the product identity pinned above the transcript, including restored
@@ -523,6 +535,28 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const allowEmptyApiKey = acMode === "model-setup" && modelSetup?.field === "apiKey";
     const hasPendingImages = pendingImagesRef.current.length > 0;
     if (!trimmed && !allowEmptyApiKey && !hasPendingImages) return;
+    if (acMode === "resume-messages") {
+      const selected = resumePickerCandidatesRef.current[acIndex] ?? resumeMessageCandidates[acIndex];
+      const session = resumePickerSessionRef.current;
+      const boundary = selected?.boundary;
+      if (session && boundary !== undefined) {
+        const rewound = await sessionManagerRef.current!.rewind(session.id, boundary);
+        if (rewound) {
+          const mode = rewound.permissionMode ?? getPermissionManager().getMode();
+          const base = createAgentHistory(undefined, mode);
+          const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
+          const history = sessionManagerRef.current!.restoreHistory(rewound, systemPrompt);
+          historyRef.current = history;
+          dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: llmRef.current.model, thinkingMode: rewound.thinkingMode === "adaptive" ? "hidden" : "summary", phase: rewound.phase, currentPlan: rewound.currentPlan, todos: restoreTuiSession(rewound, systemPrompt).todos, todoRevision: rewound.todoVersion });
+          dispatch({ type: "ADD_NOTICE", title: "已回退会话", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} 条消息` });
+        }
+      }
+      resumePickerSessionRef.current = null;
+      setInput("");
+      clearAc();
+      return;
+    }
+
     if (state.busy) {
       if (/^(?:\/?resume)(?:\s|$)/i.test(trimmed)) {
         dispatch({ type: "ADD_NOTICE", title: "正在执行", text: "当前 turn 完成后才能恢复会话。" });
@@ -647,7 +681,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         setInput("");
         return;
       }
-      const restored = await restoreSession(target.id, false, target);
+      const restored = await restoreSession(target.id, false, target, true);
       dispatch({
         type: "ADD_NOTICE",
         title: restored ? "会话已恢复" : "恢复会话失败",
@@ -1130,6 +1164,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           modelContextWindows={modelContextWindows}
           modelQuery={modelQuery}
           sessionCandidates={sessionCandidates}
+          resumeMessageCandidates={resumeMessageCandidates}
           sessionCommand={sessionCommand}
           sessionLoading={sessionLoading}
           currentModel={`${llm.provider}/${llm.model}`}

@@ -173,6 +173,22 @@ export class SessionManager {
     return persisted;
   }
 
+  /** Rewind a persisted session in place, retaining the first visible messages. */
+  async rewind(
+    sessionId = this.activeSessionId,
+    visibleCount: number,
+  ): Promise<PersistedSession | undefined> {
+    if (!Number.isInteger(visibleCount) || visibleCount < 0) {
+      throw new Error("visibleCount must be a non-negative integer");
+    }
+    const session = await this.load(sessionId);
+    if (!session) return undefined;
+    session.messages = sanitizeResumableMessages(session.messages, visibleCount);
+    const persisted = await this.save(session);
+    if (this.activeSessionId === sessionId) this.activeSessionId = persisted.id;
+    return persisted;
+  }
+
   async remove(sessionId: string): Promise<void> {
     await this.store.remove(sessionId);
     if (this.activeSessionId === sessionId) this.newSession();

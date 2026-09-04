@@ -4,8 +4,30 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { sanitizeResumableMessages, SessionManager } from "../src/session-manager.ts";
+import type { AgentMessage } from "../src/types.ts";
 
 describe("SessionManager", () => {
+  it("rewinds in place through the selected visible message", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-manager-rewind-"));
+    try {
+      const manager = new SessionManager({ dataDir: root });
+      const messages: AgentMessage[] = [
+        { role: "system", content: "system" },
+        { role: "user", content: "first", id: "u1" },
+        { role: "assistant", content: "answer", id: "a1" },
+        { role: "user", content: "second", id: "u2" },
+      ];
+      await manager.save({ id: "rewind-session", messages });
+
+      const rewound = await manager.rewind("rewind-session", 2);
+
+      assert.equal(rewound?.id, "rewind-session");
+      assert.deepEqual(rewound?.messages.map((message) => message.content), ["system", "first", "answer"]);
+      assert.deepEqual((await manager.load("rewind-session"))?.messages.map((message) => message.content), ["system", "first", "answer"]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it("sanitizes interrupted and orphaned tool history before resume", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-manager-sanitize-"));
     try {

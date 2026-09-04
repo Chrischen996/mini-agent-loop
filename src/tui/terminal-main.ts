@@ -18,7 +18,7 @@ import { nextPermissionMode, switchPermissionMode } from "./permission-utils.ts"
 import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
 import { parseSlashCommand } from "./slash-commands.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
-import { createInitialState, createTuiStore } from "./state.ts";
+import { createInitialState, createTuiStore, type TuiState } from "./state.ts";
 import { buildTerminalRenderLines } from "./terminal-render-model.ts";
 import { IncrementalTerminalRenderer, resolveTerminalDisplayMode, ScrollbackTerminalRenderer } from "./incremental-renderer.ts";
 import { TerminalInputController, type TerminalInputAction } from "./terminal-input-controller.ts";
@@ -37,7 +37,7 @@ import { finalizeExecCapture, finalizePlanCapture, parsePlanTurnOverride } from 
 import { SessionStore, type PersistedSession, type PersistedSessionMeta } from "../session-store.ts";
 import { SessionManager } from "../session-manager.ts";
 import type { AgentMessage } from "../types.ts";
-import { formatAmbiguousSessionNotice, getStartupSessionRequest, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
+import { formatAmbiguousSessionNotice, getResumeMessageCandidates, getStartupSessionRequest, messageBoundaryForSelection, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos, type ResumeMessageCandidate } from "./session-serialization.ts";
 import { adaptHistoryForModel } from "../message-adapter.ts";
 import { activateProfile, listProfiles, loadProfileStore, removeProfile, saveProfile } from "../profile-store.ts";
 import { parseModelCommand, shouldSubmitTypedModelCommand } from "./model-command.ts";
@@ -289,9 +289,26 @@ export async function runTerminalMain(): Promise<void> {
     });
     // Cache last rendered result to avoid double-buildTerminalRenderLines on every
     // scroll frame, and to skip re-renders when the state hasn't changed.
-    let frameCache: { stateVersion: number; naturalLines: readonly import("./render-lines.ts").RenderLine[]; scrollOffset: number; lines: readonly import("./render-lines.ts").RenderLine[] } | undefined;
+    let frameCache: {
+      state: TuiState;
+      dynamicKey: string;
+      width: number;
+      scrollOffset: number;
+      naturalLines: import("./render-lines.ts").RenderLine[];
+    } | undefined;
     const buildFrameLines = (width: number, height: number): ReturnType<typeof buildTerminalRenderLines> => {
       const state = store.getState();
+      const autocompleteState = autocomplete.getState();
+      // Scrolling only changes which rows are visible. Keep the expensive
+      // message projection cached while still invalidating input, overlays,
+      // and time-based activity updates.
+      const dynamicKey = JSON.stringify([
+        input.getValue(),
+        input.getCursor(),
+        autocompleteState,
+        state.spinnerMessage,
+        state.busy ? Math.floor(Date.now() / 120) : 0,
+      ]);
       const renderOptions = {
         width,
         ...(fullscreen || usePiTui ? {
@@ -315,8 +332,8 @@ export async function runTerminalMain(): Promise<void> {
         promptRule: true,
         input: input.getValue(),
         cursor: input.getCursor(),
-        autocomplete: autocomplete.getState(),
-        maskInput: autocomplete.getState().mode === "model-setup" && autocomplete.getState().modelSetup?.field === "apiKey",
+        autocomplete: autocompleteState,
+        maskInput: autocompleteState.mode === "model-setup" && autocompleteState.modelSetup?.field === "apiKey",
         now: Date.now(),
         contextWindow: service.getLlm().contextWindow,
         queuedCount: service.getQueuedCount(),
@@ -334,17 +351,20 @@ export async function runTerminalMain(): Promise<void> {
       // Reuse cached naturalLines unless state or viewport changed.
       if (
         !frameCache
-        || frameCache.stateVersion !== state.revision
+        || !sameRenderState(frameCache.state, state)
+        || frameCache.dynamicKey !== dynamicKey
+        || frameCache.width !== width
         || frameCache.scrollOffset !== scrollOffset
-        || frameCache.lines.length !== frameHeight
       ) {
-        const naturalLines = buildTerminalRenderLines(state, renderOptions);
-        const lines = naturalLines.length > frameHeight
-          ? naturalLines.slice(scrollOffset, scrollOffset + frameHeight)
-          : naturalLines;
-        frameCache = { stateVersion: state.revision, naturalLines, scrollOffset, lines };
+        const naturalLines = buildTerminalRenderLines(state, {
+          ...renderOptions,
+          // The height-aware renderer keeps the prompt/status footer fixed and
+          // clamps scrollOffset to the actual message viewport range.
+          height: frameHeight,
+        });
+        frameCache = { state, dynamicKey, width, scrollOffset, naturalLines };
       }
-      return frameCache.lines;
+      return frameCache.naturalLines;
     };
     if (usePiTui) {
       try {
@@ -378,8 +398,11 @@ export async function runTerminalMain(): Promise<void> {
       };
       // requestAnimationFrame exists in browsers; in Node, schedule via setImmediate(0)
       // which yields to I/O and avoids blocking the event loop.
-      const raf = typeof globalThis.requestAnimationFrame === "function"
-        ? globalThis.requestAnimationFrame.bind(globalThis)
+      const requestAnimationFrame = (globalThis as typeof globalThis & {
+        requestAnimationFrame?: (callback: () => void) => number;
+      }).requestAnimationFrame;
+      const raf = typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame.bind(globalThis)
         : (cb: () => void) => setImmediate(cb);
       raf(flush);
     };
@@ -473,6 +496,13 @@ export async function runTerminalMain(): Promise<void> {
   }
 }
 
+function sameRenderState(left: TuiState, right: TuiState): boolean {
+  for (const key of Object.keys(left) as Array<keyof TuiState>) {
+    if (key !== "scrollOffset" && left[key] !== right[key]) return false;
+  }
+  return true;
+}
+
 export type InputDeps = {
   store: ReturnType<typeof createTuiStore>;
   service: TerminalAgentService;
@@ -497,6 +527,7 @@ export type InputDeps = {
   /** Called when a session restore resets the transcript so the renderer can
    *  flush stale committed rows before the new content is rendered. */
   onSessionRestore?: () => void;
+  resumePickerRef?: { current: { session: PersistedSession; candidates: ResumeMessageCandidate[] } | undefined };
 };
 
 export type SessionAccess = {
@@ -505,6 +536,7 @@ export type SessionAccess = {
   newSession(): string;
   setSessionId(sessionId: string): void;
   restoreHistory(session: PersistedSession, systemPrompt: string): AgentMessage[];
+  rewind?(sessionId: string, visibleCount: number): Promise<PersistedSession | undefined>;
 };
 
 function getSessionAccess(deps: InputDeps): SessionAccess {
@@ -522,6 +554,7 @@ function getSessionAccess(deps: InputDeps): SessionAccess {
 
 export function handleInputAction(action: TerminalInputAction, deps: InputDeps): void {
   const { store, service, permissionManager, input, cwd } = deps;
+  const sessionAccess = getSessionAccess(deps);
   const state = store.getState();
   if (action.type === "exit") {
     service.abort();
@@ -607,6 +640,29 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
       input.clear();
       deps.autocomplete.clear();
       store.dispatch({ type: "ADD_NOTICE", title: "正在执行", text: "当前 turn 完成后再切换模型或配置文件。普通消息仍会排队。" });
+      return;
+    }
+    if (autocompleteState.mode === "resume-messages") {
+      const picker = deps.resumePickerRef?.current;
+      const selected = autocompleteState.resumeMessages?.[autocompleteState.index];
+      if (!picker) return;
+      if (picker && selected && sessionAccess.rewind) {
+        void sessionAccess.rewind(picker.session.id, selected.boundary).then((rewound) => {
+          if (!rewound) return;
+          const mode = rewound.permissionMode ?? permissionManager.getMode();
+          const base = createAgentHistory(undefined, mode);
+          const prompt = typeof base[0]?.content === "string" ? base[0].content : "";
+          const history = sessionAccess.restoreHistory(rewound, prompt);
+          service.replaceHistory(history);
+          deps.sessionRef.current = rewound.id;
+          sessionAccess.setSessionId(rewound.id);
+          service.setSessionId(rewound.id);
+          store.dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: service.getLlm().model });
+          store.dispatch({ type: "ADD_NOTICE", title: "已回退会话", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} 条消息` });
+        }).catch((error) => store.dispatch({ type: "ADD_NOTICE", title: "回退失败", text: error instanceof Error ? error.message : String(error) }));
+      }
+      deps.autocomplete.clear();
+      input.clear();
       return;
     }
     if (autocompleteState.mode === "session-list") {
@@ -732,6 +788,32 @@ async function submitInput(
   const { store, service, permissionManager, input } = deps;
   const sessionAccess = getSessionAccess(deps);
   const autocompleteState = deps.autocomplete.getState();
+  if (autocompleteState.mode === "resume-messages") {
+    const selected = autocompleteState.resumeMessages?.[autocompleteState.index];
+    const picker = deps.resumePickerRef?.current;
+    const boundary = picker && selected ? selected.boundary : undefined;
+    if (boundary === undefined || !picker || !sessionAccess.rewind) {
+      input.clear();
+      deps.autocomplete.clear();
+      return;
+    }
+    void sessionAccess.rewind(picker.session.id, boundary).then((rewound) => {
+      if (!rewound) return;
+      const mode = rewound.permissionMode ?? permissionManager.getMode();
+      const base = createAgentHistory(undefined, mode);
+      const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
+      const history = sessionAccess.restoreHistory(rewound, systemPrompt);
+      service.replaceHistory(history);
+      deps.sessionRef.current = rewound.id;
+      sessionAccess.setSessionId(rewound.id);
+      service.setSessionId(rewound.id);
+      store.dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: service.getLlm().model, thinkingMode: rewound.thinkingMode === "adaptive" ? "hidden" : "summary", phase: rewound.phase, currentPlan: rewound.currentPlan });
+      store.dispatch({ type: "ADD_NOTICE", title: "已回退会话", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} 条消息` });
+    }).catch((error) => store.dispatch({ type: "ADD_NOTICE", title: "回退失败", text: error instanceof Error ? error.message : String(error) }));
+    input.clear();
+    deps.autocomplete.clear();
+    return;
+  }
   const allowEmptyApiKey = autocompleteState.mode === "model-setup" && autocompleteState.modelSetup?.field === "apiKey";
   const allowEmptyProfileSelection = autocompleteState.mode === "profile-list";
   if (!text && !allowEmptyApiKey && !allowEmptyProfileSelection) return;
@@ -979,6 +1061,11 @@ async function submitInput(
       todoRevision: restoredState.todoRevision,
     });
     store.dispatch({ type: "ADD_NOTICE", title: "会话已恢复", text: `${restored.id.slice(0, 8)} · ${restored.messages.length} 条消息` });
+    if (sessionAccess.rewind) {
+      const picker = { session: restored, candidates: getResumeMessageCandidates(restored.messages) };
+      if (deps.resumePickerRef) deps.resumePickerRef.current = picker;
+      deps.autocomplete.openResumeMessages(picker.candidates);
+    }
     input.clear();
     return;
   }

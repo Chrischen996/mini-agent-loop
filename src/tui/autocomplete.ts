@@ -3,7 +3,7 @@ import { extractFileAcTrigger, type AcMode, type FileAcTrigger } from "./input-u
 import { modelSearchQuery, parseModelCommand } from "./model-command.ts";
 
 export const STICKY_AC_MODES = new Set<AcMode>(["model-setup", "profile-name", "profile-list"]);
-export const PICKER_AC_MODES = new Set<AcMode>(["file", "command", "model", "model-picker", "session-list"]);
+export const PICKER_AC_MODES = new Set<AcMode>(["file", "command", "model", "model-picker", "session-list", "resume-messages"]);
 
 export function isStickyAcMode(mode: AcMode): boolean {
   return STICKY_AC_MODES.has(mode);
@@ -189,6 +189,13 @@ export function resolveAutocompleteNav(
     if (key.tab && !key.shift) return { type: "accept-model" };
     if (key.escape) return { type: "cancel", clearInput: true };
     return { type: "none" };
+  }
+
+  if (acMode === "resume-messages") {
+    if (key.upArrow) return { type: "move", index: nextClampedIndex(acIndex, -1, lengths.sessions ?? 0) };
+    if (key.downArrow) return { type: "move", index: nextClampedIndex(acIndex, 1, lengths.sessions ?? 0) };
+    if (key.escape) return { type: "cancel" };
+    return { type: "ignore" };
   }
 
   if (acMode === "session-list") {

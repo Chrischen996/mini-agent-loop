@@ -13,6 +13,8 @@ import {
   restoreTuiSession,
   selectedSessionFromPicker,
   toPersistedTodos,
+  getResumeMessageCandidates,
+  messageBoundaryForSelection,
 } from "../src/tui/session-serialization.ts";
 import type { AgentMessage } from "../src/types.ts";
 
@@ -98,6 +100,24 @@ describe("TUI session serialization", () => {
     ]), [
       { id: "restored", content: "Restore", activeForm: "Restore", status: "pending", source: "model" },
     ]);
+  });
+
+  it("maps selectable resume messages to safe visible boundaries", () => {
+    const messages: AgentMessage[] = [
+      { role: "system", content: "system" },
+      { role: "user", content: "inspect", id: "u1" },
+      { role: "assistant", content: "", id: "a1", toolCalls: [{ id: "call", name: "read", arguments: {} }] },
+      { role: "tool", toolCallId: "call", name: "read", content: "contents" },
+      { role: "assistant", content: "done", id: "a2" },
+    ];
+    const candidates = getResumeMessageCandidates(messages);
+    assert.deepEqual(candidates.map((candidate) => ({ role: candidate.role, text: candidate.text, boundary: candidate.boundary })), [
+      { role: "user", text: "inspect", boundary: 1 },
+      { role: "assistant", text: "", boundary: 3 },
+      { role: "assistant", text: "done", boundary: 4 },
+    ]);
+    assert.equal(messageBoundaryForSelection(candidates, 1), 3);
+    assert.equal(messageBoundaryForSelection(candidates, 99), undefined);
   });
 
   it("restores history through the supplied session boundary", () => {

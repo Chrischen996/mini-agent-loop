@@ -339,6 +339,7 @@ export class TerminalAgentService {
       this.streamBuffer.finish(runId);
       permissionTurn.close();
       this.options.onPermissionTurnChange?.(undefined);
+      this.abortController?.abort();
       this.abortController = undefined;
       const result = { succeeded, history: this.history, ...(errorMessage ? { errorMessage } : {}) } satisfies TerminalTurnResult;
       try {

@@ -128,6 +128,21 @@ export function planApprovalRenderLines(plan?: ExecutionPlan, width?: number): R
 /** Terminal rows for command, session, file, and model candidates. */
 export function autocompleteRenderLines(state?: TerminalAutocompleteState): RenderLine[] {
   if (!state?.mode) return [];
+  if (state.mode === "resume-messages") {
+    const rows: RenderLine[] = [{ key: "autocomplete-resume-title", text: "Choose history point", prefix: "⌘ ", style: "muted", bold: true }];
+    const candidates = state.resumeMessages ?? [];
+    for (const [index, candidate] of candidates.entries()) {
+      rows.push({
+        key: `autocomplete-resume-${index}`,
+        text: `${index === state.index ? "❯" : " "} ${candidate.role}  ${(candidate.text || "(tool call)").replace(/\s+/g, " ").slice(0, 72)}`,
+        style: index === state.index ? "assistant" : "muted",
+        tone: index === state.index ? "running" : "default",
+      });
+    }
+    rows.push({ key: "autocomplete-resume-hint", text: "Enter rewind here  ↑↓ navigate  Esc cancel", style: "muted", dim: true });
+    return rows;
+  }
+
   if (state.mode === "session-list") {
     const rows: RenderLine[] = [
       {

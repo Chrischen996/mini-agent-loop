@@ -5,6 +5,7 @@ import { modelChoices } from "./model-command.ts";
 import type { ModelRef } from "../models.ts";
 import type { PersistedSessionMeta } from "../session-store.ts";
 import type { ModelSetupState, PendingProfileSetup, ProfileListState } from "./types.ts";
+import type { ResumeMessageCandidate } from "./session-serialization.ts";
 import { type AcMode, type FileAcTrigger } from "./input-utils.ts";
 import {
   currentAutocompleteNavIndex,
@@ -22,6 +23,7 @@ export type TerminalAutocompleteState = {
   files: string[];
   models: string[];
   sessions: PersistedSessionMeta[];
+  resumeMessages?: ResumeMessageCandidate[];
   modelContextWindows: Record<string, number>;
   modelQuery: string;
   fileFragment: string;
@@ -52,6 +54,7 @@ const EMPTY_STATE: TerminalAutocompleteState = {
   files: [],
   models: [],
   sessions: [],
+  resumeMessages: [],
   modelContextWindows: {},
   modelQuery: "",
   fileFragment: "",
@@ -191,6 +194,10 @@ export class TerminalAutocompleteController {
     this.setState({ ...EMPTY_STATE });
   }
 
+  openResumeMessages(messages: ResumeMessageCandidate[]): void {
+    this.setState({ ...EMPTY_STATE, mode: "resume-messages", resumeMessages: [...messages] });
+  }
+
   openModelPicker(query = "", models?: ModelRef[]): void {
     const choices = modelChoices(query, models);
     this.options.setInput(`/model ${query}`.trimEnd());
@@ -225,7 +232,7 @@ export class TerminalAutocompleteController {
       files: state.files.length,
       models: state.models.length,
       profiles: state.profileListState?.profiles.length ?? 0,
-      sessions: state.sessions.length,
+      sessions: state.mode === "resume-messages" ? (state.resumeMessages?.length ?? 0) : state.sessions.length,
     });
     switch (action.type) {
       case "none": return false;

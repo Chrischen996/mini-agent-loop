@@ -568,41 +568,32 @@ the local `/model` selector. Permission modes are cycled with `Shift+Tab`:
 npm run tui
 ```
 
-The default `npm run tui` entry uses the standalone ANSI renderer and the Claude
-Code-style conversation layout. It uses main-screen scrollback: completed
-messages are appended to the terminal's normal history, while only the active
-stream, status, overlays, and prompt are redrawn as a live tail. Streamed
-responses never issue full-screen `ESC[2J` clears. The same renderer is also
-available under the explicit `tui:terminal` alias:
+The default `npm run tui` entry uses the React + Ink renderer. It renders the
+same shared Agent Core, reducer state, streaming events, permission flow,
+autocomplete, and session persistence as the rest of the TUI components. The
+previous standalone ANSI renderer remains available under the explicit
+`tui:terminal` alias:
 
 ```bash
 npm run tui:terminal
 ```
 
-The previous Ink/React implementation remains available as `npm run tui:ink`
-for compatibility and comparison.
+`npm run tui:ink` remains available as an explicit alias for the same Ink
+implementation.
 
 Use `/model`, `/profiles`, `/sessions`, `/resume [id]` (or `resume [id]`), `/clear`, `/quit`, or `Ctrl+C`
-inside the standalone terminal client. Typing `/sessions` or `/resume` opens the
-saved-session picker with IDs, message counts, and prompt previews. Enter on
-`/resume` restores the selected session; `/resume <id-prefix>` selects a specific
-one directly. Startup flags mirror the
-CLI: `npm run tui -- --continue`, `npm run tui -- --resume <id>`, and
-`npm run tui -- --resume <id> --fork-session`. `/model` also accepts `--base-url`,
-`--api-key-env`, and temporary `--api-key` overrides. Sessions are persisted
-under the shared `AGENT_DATA_DIR` root and restore history, tool results,
-Todo/Plan state, permission mode, and model settings on the next start. It
-consumes the same reducer, Agent history, permission manager, autocomplete,
-and direct-tool contracts as the Ink entrypoint. The previous dependency-free
-compatibility client remains available as `npm run tui:legacy`.
-The standalone frame follows the Claude Code conversation layout: a compact
-session header, `❯` user prompts, `⏺` assistant responses, `⎿` tool output, and
-a dim `∴ Thinking` block. Todo, permission, plan, attachment, spinner, and
-status rows carry their own visual icons. In the default scrollback mode, the
-prompt follows the live tail instead of constraining the conversation to a
-fixed-height window. To keep the previous fixed viewport, set
-`MINI_AGENT_TUI_MODE=fullscreen` (or `MINI_AGENT_TUI_FULLSCREEN=1`).
-`MINI_AGENT_TUI_MODE=scrollback` explicitly selects the default behavior.
+inside the Ink client. Typing `/sessions` or `/resume` opens the saved-session
+picker with IDs, message counts, and prompt previews. Enter on `/resume` restores
+the selected session; `/resume <id-prefix>` selects a specific one directly.
+Startup flags mirror the CLI: `npm run tui -- --continue`,
+`npm run tui -- --resume <id>`, and `npm run tui -- --resume <id> --fork-session`.
+`/model` also accepts `--base-url`, `--api-key-env`, and temporary `--api-key`
+overrides. Sessions are persisted under the shared `AGENT_DATA_DIR` root and
+restore history, tool results, Todo/Plan state, permission mode, and model
+settings on the next start. The standalone frame follows the Claude Code
+conversation layout and remains available through `npm run tui:terminal`; the
+previous dependency-free compatibility client remains available as
+`npm run tui:legacy`.
 TUI supports plan workflow slash commands: `/plan`, `/plan-show`, `/plan-approve`,
 `/plan-reject`, `/plan-run`, `/plan-retry`, `/plan-history`, `/plan-archive`.
 Terminal input follows the Claude Code-style priority order: `Tab`/`↑↓` first

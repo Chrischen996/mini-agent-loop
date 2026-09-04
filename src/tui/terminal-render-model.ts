@@ -85,6 +85,7 @@ export function buildTerminalRenderLines(
     plan: state.todoPlan,
     todos: state.todoItems,
     viewMode: state.todoViewMode,
+    maxVisibleItems: Math.max(3, Math.min(8, (options.height ?? 24) - 4)),
   }).map((line) => ({ ...line, key: `panel-${line.key}` }));
   const panelLinesAboveBody = scrollback ? [] : panelLines;
   const panelLinesInLiveTail = scrollback ? panelLines.map(markEphemeral) : [];

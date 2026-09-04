@@ -6,6 +6,7 @@ import { modelChoices } from "../model-command.ts";
 import { type AcMode, type FileAcTrigger } from "../input-utils.ts";
 import type { ModelRef } from "../../models.ts";
 import type { PersistedSessionMeta } from "../../session-store.ts";
+import type { ResumeMessageCandidate } from "../session-serialization.ts";
 import type { ModelSetupState, PendingProfileSetup, ProfileListState } from "../types.ts";
 import {
   currentAutocompleteNavIndex,
@@ -39,6 +40,7 @@ export function useAutocomplete({
   const [sessionCandidates, setSessionCandidates] = useState<PersistedSessionMeta[]>([]);
   const [sessionCommand, setSessionCommand] = useState<"resume" | "sessions" | undefined>();
   const [sessionLoading, setSessionLoading] = useState(false);
+  const [resumeMessageCandidates, setResumeMessageCandidates] = useState<ResumeMessageCandidate[]>([]);
   const [modelContextWindows, setModelContextWindows] = useState<Record<string, number>>({});
   const [modelQuery, setModelQuery] = useState("");
   const [modelSetup, setModelSetup] = useState<ModelSetupState | undefined>();
@@ -59,6 +61,7 @@ export function useAutocomplete({
     setSessionCandidates([]);
     setSessionCommand(undefined);
     setSessionLoading(false);
+    setResumeMessageCandidates([]);
     setModelContextWindows({});
     setModelQuery("");
     setModelSetup(undefined);
@@ -132,6 +135,7 @@ export function useAutocomplete({
     }
 
     if (resolution.kind === "sticky") return;
+    if (acMode === "resume-messages") return;
 
     if (resolution.kind === "command") {
       setCmdCandidates(resolution.candidates);
@@ -247,6 +251,13 @@ export function useAutocomplete({
     [acMode, cwd],
   );
 
+  const openResumeMessages = useCallback((candidates: ResumeMessageCandidate[]) => {
+    setResumeMessageCandidates([...candidates]);
+    setAcIndex(0);
+    setInput("");
+    setAcMode("resume-messages");
+  }, [setInput]);
+
   const openModelPicker = useCallback(
     (query = "", models?: ModelRef[]) => {
       const choices = modelChoices(query, models);
@@ -272,7 +283,7 @@ export function useAutocomplete({
         files: fileCandidates.length,
         models: modelCandidates.length,
         profiles: profileListState?.profiles.length ?? 0,
-        sessions: sessionCandidates.length,
+        sessions: acMode === "resume-messages" ? resumeMessageCandidates.length : sessionCandidates.length,
       });
 
       switch (action.type) {
@@ -317,6 +328,7 @@ export function useAutocomplete({
       fileCandidates.length,
       modelCandidates.length,
       sessionCandidates,
+      resumeMessageCandidates,
       profileListState,
       acceptCommand,
       acceptFile,
@@ -335,6 +347,7 @@ export function useAutocomplete({
     fileCandidates,
     modelCandidates,
     sessionCandidates,
+    resumeMessageCandidates,
     sessionCommand,
     sessionLoading,
     modelContextWindows,
@@ -352,6 +365,7 @@ export function useAutocomplete({
     acceptModel,
     handleTabAt,
     handleAutocompleteKey,
+    openResumeMessages,
     openModelPicker,
   };
 }
