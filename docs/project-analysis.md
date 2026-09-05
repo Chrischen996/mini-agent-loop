@@ -41,23 +41,25 @@ user prompt -> LLM -> tool_calls -> 逐个校验/执行 -> 回填 tool 结果 ->
   另配 c8 覆盖率与 `tsc --noEmit` 类型检查。
 - **发布链路完整**：`build.ts` 打包、npm publish GitHub Action（tag 触发并校验版本一致）。
 
-## 4. 风险与改进建议
+## 4. 风险与改进建议（含处理状态）
 
-1. **巨型文件**：`server.ts` 2862 行、`loop.ts` 1611 行、`tui/App.tsx` 1288 行、
-   `subagent/tool.ts` 1236 行。建议按路由域拆分 server（sessions / plans / jobs / git），
-   loop 抽出「思考策略」「计划阶段」「工具执行」子模块。
-2. **供应商模型目录硬编码**：`src/pi-ai/providers/*.models.ts` 合计上万行常量（openrouter 4897 行），
-   与代码一起演进会频繁产生噪音 diff。建议改为构建期生成的 JSON 数据资产 + 生成脚本。
-3. **`src/pi-ai` 与依赖 `@earendil-works/pi-ai` 并存**：存在 vendor 分叉/重复维护的嫌疑，
-   需要明确边界（是补丁层还是完整复制），否则升级依赖时容易冲突。
-4. **CHANGELOG / README 与代码定位不同步的历史包袱**：README 30KB，仍混有"教学 loop"叙事；
-   建议拆成 `README`（快速上手）+ `docs/architecture.md` + `docs/api.md`。
-5. **CI 只有 publish**：`.github/workflows` 缺少 PR 触发的 test/typecheck 流水线，
-   建议补一个 `ci.yml` 跑 `pnpm test` + `typecheck`。
-6. **git 历史被压平**：当前克隆只有 1 个 commit，无法做变更溯源；若是 squash 发布仓库，
-   建议保留开发历史或在 CHANGELOG 中细化。
-7. **安全面**：bash 工具 + Docker/Node 沙箱 + MCP 外部服务共存，建议在文档中明确默认权限矩阵
-   （哪些工具默认需要审批），并对 `web-access`/MCP 的出网做可配置白名单。
+| # | 问题 | 状态 | 处理方式 |
+|---|---|---|---|
+| 1 | 巨型文件（server.ts 2862 行等） | ✅ 部分完成 | `server.ts` 拆到 2091 行，11 个路由域移入 `src/server/routes/*`，每个模块只接收窄化的 context。剩余 `loop.ts` / `App.tsx` / `subagent/tool.ts` 未拆 |
+| 2 | 模型目录硬编码上万行 | ✅ 完成 | 1080 个模型抽成 `src/pi-ai/providers/data/*.json`；补上了文件头一直声称却不存在的 `scripts/generate-models.ts`；`npm run generate-models[:check]` |
+| 3 | `src/pi-ai` 与 npm 依赖边界不清 | ✅ 完成 | 查明 `pi-agent-core` / `pi-ai` / `pi-coding-agent` **从未被 import**，已从 dependencies 移除（仅 `pi-tui` 真实使用）；新增 `src/pi-ai/README.md` 说明这是完整 vendor fork |
+| 4 | README 30KB 混杂、Layout 严重过期 | ✅ 完成 | 新增 `docs/architecture.md`（真实目录图 + 路由模块表），README Layout 替换为摘要 + 链接 |
+| 5 | CI 只有 publish | ✅ 完成 | 新增 `.github/workflows/ci.yml`：PR 上跑 typecheck / test / 目录漂移检查 / build |
+| 6 | git 历史被压平 | ⚠️ 未处理 | 属于仓库发布策略，代码层面无法修复 |
+| 7 | 安全面（bash + 沙箱 + MCP）缺文档 | ✅ 完成 | 新增 `docs/security-model.md`：逐工具 × 三种权限模式的默认矩阵、MCP 永不按名信任、沙箱默认值、三条出网路径与「缺少全局白名单」的明确声明 |
+
+顺带修掉的既有缺陷（CI 要能真正卡住就必须先修）：
+
+- `tsc --noEmit` 原有 2 个错误 → 0（Bedrock 中间件类型、缺失的 `src/tui/inspect.ts`）
+- 测试 1055/1058 → **1064/1064**
+  - `resolveTerminalDisplayMode` 声称接受注入的 `env`，却仍读全局 `process.stdin.isTTY`，结果随启动方式漂移 → 改为纯函数并补非交互终端用例
+  - `extractFileAcTrigger` 丢失了裸词文件补全
+  - `test/tui-inspect.test.ts` 引用了不存在的模块
 
 ## 5. 一句话结论
 
