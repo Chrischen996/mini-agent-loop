@@ -25,6 +25,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   historical context.
 - Unified CLI, server, and terminal session persistence behind the same
   workspace-scoped session manager and atomic upsert path.
+- Both terminal clients (Ink `npm run tui` and ANSI `npm run tui:terminal`)
+  now render the status row, `/help`, command palette, model picker,
+  markdown, spinner, and permission card from shared modules
+  (`status-line.ts`, `slash-commands.ts`, `markdown-lines.ts`, `loading.ts`,
+  `welcome-panel.ts`) instead of composing them per client.
+- TUI notices, status strings, and model-facing prompts are English at the
+  source; `noticeTitle` / `noticeText` / `statusLabel` remain only as a
+  compatibility layer for sessions persisted with Chinese text.
+- The ANSI renderer draws tool calls as compact Claude-style rows
+  (`✓ Name(args)` plus a nested `⎿` result gutter); its full-width tool
+  boxes are gone.
+- Fenced code renders behind a `▌` gutter instead of literal ``` markers, and
+  Markdown tables are column-aligned with the delimiter row drawn as a rule.
+- `/help` adapts to the terminal width and lists each command once: aliases
+  (`/todo`, `/skill`, `/exit`) stay valid but are no longer advertised twice.
+- `AGENTS.md` documents the Ink client as the default TUI, matching
+  `package.json` and `README.md`.
+- Picker overlays (command, file, model, session, history, profile) share one
+  windowing policy in `picker-window.ts`: the same page sizes, the same
+  tail-anchored scroll, and the same heading, `Showing 1-6 / 20` footer, and
+  hint text in both clients.
 
 ### Added
 
@@ -41,6 +62,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `timeoutMs` / `firstResponseTimeoutMs` / `streamIdleTimeoutMs`; resolution is
   explicit config → model catalog → env var → default, and `/model` switching
   adopts the target model's catalog timeouts
+- `src/tui/status-line.ts`: shared status-row segments, decimal context
+  formatting, and the idle-status dedupe used by both clients.
+- `src/tui/slash-commands.ts`: the single slash-command catalog, the `/help`
+  body, and unknown-command detection.
+- `src/tui/picker-window.ts`: shared picker page sizes, scroll windowing,
+  clipped-range text, headings, hints, and the model/profile/session row text.
+- `test/tui-consistency.test.ts`: cross-client presentation regressions
+  (status widths, palette alignment, help layout, markdown row budget,
+  welcome padding, permission-card rows, single spinner row).
 
 ### Fixed
 
@@ -48,6 +78,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the client's own service types.
 - Restored bare-word file completion in `extractFileAcTrigger`.
 - `test/tui-inspect.test.ts` no longer imports a missing module.
+- Notice bodies are never blanked: untranslated legacy lines pass through
+  instead of being dropped by the translation fallback.
+- The status row no longer repeats the permission mode or a stale
+  "Thinking…" after `Shift+Tab` / `Ctrl+R`, and it fits narrow terminals
+  instead of wrapping the prompt off-screen.
+- Context windows use decimal units (`128000` → `128k`, previously `125K`).
+- An unknown `/command` reports `Unknown command` instead of spending a model
+  turn on a typo; prompts that start with an absolute path still submit.
+- One spinner row per turn: the duplicate loading row is gone, the Todo tip
+  folds into it, and it stays hidden while the Todo panel names the same step.
+- The permission card matches the Ink six-row layout and no longer names
+  another product; subagent rows dropped the doubled `└─ ⎿` marker;
+  collapsed-row hints pluralize; welcome-panel cells keep their border
+  padding; `truncateTerminalPath` truncates on segment boundaries.
+- `TUI_BRAND_VERSION` tracks `package.json` (0.1.1) and a test fails when the
+  two drift apart.
+- Clearing a permission request reports `Running <tool>…` instead of
+  repeating "Waiting for permission".
+- The ANSI palette stopped scrolling after its twelfth row: arrowing further
+  moved the selection off screen behind a `Showing 12 / 29` footer.
+- On a short terminal the ANSI renderer kept the full picker and clipped the
+  welcome panel instead, leaving a borderless box above the prompt. The picker
+  now shrinks to the frame (and is dropped when no rows are left) the way the
+  Ink client does.
+- The ANSI model picker listed bare references with no mark for the model in
+  use, and its context column did not line up with Ink's.
+- `/todo` advertised itself with the `/tasks` usage string, so the palette
+  showed the same row twice.
+- `Ctrl+R` on a model without reasoning levels reported `Thinking level: off`,
+  which read as a change; it now says the model has no levels to cycle, and the
+  idle status row no longer suppresses that message as activity.
+- Ink's history picker listed every candidate, which could push the prompt past
+  the last terminal row; the ANSI profile palette dropped the base URL and the
+  `/profiles delete <name>` hint that Ink shows.
 
 ## [0.1.0] - 2026-08-15
 

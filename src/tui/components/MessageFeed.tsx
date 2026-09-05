@@ -150,6 +150,10 @@ type MessageFeedProps = {
   pendingPermission?: PendingPermissionState;
   turnStartedAt?: number;
   lastStreamAt?: number;
+  /** Active Todo tip rendered inside the single loading row. */
+  spinnerMessage?: string;
+  /** True while TodoPanel is on screen and already names the active step. */
+  todoPanelVisible?: boolean;
   maxMessages?: number;
   /** Rows available for the feed after chrome (header/input/status). */
   availableHeight?: number;
@@ -190,6 +194,8 @@ function ActivityRow({
   pendingPermission,
   turnStartedAt,
   lastStreamAt,
+  spinnerMessage,
+  todoPanelVisible,
 }: {
   status: string;
   streamingText: string;
@@ -198,6 +204,8 @@ function ActivityRow({
   pendingPermission?: PendingPermissionState;
   turnStartedAt?: number;
   lastStreamAt?: number;
+  spinnerMessage?: string;
+  todoPanelVisible?: boolean;
 }): React.ReactElement {
   const [now, setNow] = React.useState(() => Date.now());
   React.useEffect(() => {
@@ -213,6 +221,8 @@ function ActivityRow({
     pendingPermission,
     turnStartedAt,
     lastStreamAt,
+    spinnerMessage,
+    todoPanelVisible,
   }, { now });
 
   return (
@@ -240,6 +250,8 @@ export function MessageFeed({
   pendingPermission,
   turnStartedAt,
   lastStreamAt,
+  spinnerMessage,
+  todoPanelVisible = false,
   maxMessages = 200,
   availableHeight = 20,
   width = 80,
@@ -301,6 +313,8 @@ export function MessageFeed({
                 pendingPermission={pendingPermission}
                 turnStartedAt={turnStartedAt}
                 lastStreamAt={lastStreamAt}
+                spinnerMessage={spinnerMessage}
+                todoPanelVisible={todoPanelVisible}
               />
             </ViewportSlice>
           );

@@ -1,4 +1,4 @@
-import { SLASH_COMMANDS, type CommandDef } from "./components/FileAutocomplete.tsx";
+import { SLASH_COMMANDS, type CommandDef } from "./slash-commands.ts";
 import { extractFileAcTrigger, type AcMode, type FileAcTrigger } from "./input-utils.ts";
 import { modelSearchQuery, parseModelCommand } from "./model-command.ts";
 

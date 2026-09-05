@@ -18,10 +18,11 @@ import { nextPermissionMode, switchPermissionMode } from "./permission-utils.ts"
 import { applyTodoCommand, parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
 import { createTodoEditorState, reduceTodoEditor, type TodoEditorAction, type TodoEditorState } from "./todo-editor.ts";
 import type { TodoItem } from "../todo.ts";
-import { parseSlashCommand } from "./slash-commands.ts";
+import { formatHelpNotice, parseSlashCommand, parseUnknownSlashCommand, SLASH_COMMANDS } from "./slash-commands.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
 import { createInitialState, createTuiStore, type TuiState } from "./state.ts";
 import { buildTerminalRenderLines } from "./terminal-render-model.ts";
+import { thinkingLevelStatusText } from "./status-line.ts";
 import { IncrementalTerminalRenderer, resolveTerminalDisplayMode, ScrollbackTerminalRenderer } from "./incremental-renderer.ts";
 import { TerminalInputController, type TerminalInputAction } from "./terminal-input-controller.ts";
 import { TerminalAgentService } from "./terminal-agent-service.ts";
@@ -90,7 +91,7 @@ export async function runTerminalMain(): Promise<void> {
     if (!startupSelection.session && startupSelection.candidates.length > 1) {
       store.dispatch({
         type: "ADD_NOTICE",
-        title: "恢复会话",
+        title: "Resume session",
         text: formatAmbiguousSessionNotice(startupSessionId ?? "", startupSelection.candidates),
       });
     }
@@ -254,7 +255,7 @@ export async function runTerminalMain(): Promise<void> {
         .catch(() => undefined);
     }
     if (restoredSession) {
-      store.dispatch({ type: "ADD_NOTICE", title: "会话已恢复", text: `${activeSessionId.slice(0, 8)} · ${restoredSession.messages.length} 条消息` });
+      store.dispatch({ type: "ADD_NOTICE", title: "Session resumed", text: `${activeSessionId.slice(0, 8)} · ${restoredSession.messages.length} messages` });
     }
 
     const displayMode = resolveTerminalDisplayMode();
@@ -335,6 +336,7 @@ export async function runTerminalMain(): Promise<void> {
         input: input.getValue(),
         cursor: input.getCursor(),
         autocomplete: autocompleteState,
+        currentModel: `${service.getLlm().provider}/${service.getLlm().model}`,
         maskInput: autocompleteState.mode === "model-setup" && autocompleteState.modelSetup?.field === "apiKey",
         now: Date.now(),
         contextWindow: service.getLlm().contextWindow,
@@ -609,7 +611,8 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
         if (key === "a") dispatchEditor({ type: "BEGIN_ADD" });
         else if (key === "e") dispatchEditor({ type: "BEGIN_EDIT" });
         else if (key === "d") dispatchEditor({ type: "DELETE" });
-        else if (key === " ") dispatchEditor({ type: "CYCLE_STATUS" });
+        // Both clients accept `space` and `s` so the shared hint is truthful.
+        else if (key === " " || key === "s") dispatchEditor({ type: "CYCLE_STATUS" });
         return;
       }
       default:
@@ -693,7 +696,7 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
     if (state.busy && autocompleteState.mode && autocompleteState.mode !== "file") {
       input.clear();
       deps.autocomplete.clear();
-      store.dispatch({ type: "ADD_NOTICE", title: "正在执行", text: "当前 turn 完成后再切换模型或配置文件。普通消息仍会排队。" });
+      store.dispatch({ type: "ADD_NOTICE", title: "Turn in progress", text: "The current turn is still running. Model and profile switches apply once it finishes; normal messages are queued." });
       return;
     }
     if (autocompleteState.mode === "resume-messages") {
@@ -712,8 +715,8 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
           sessionAccess.setSessionId(rewound.id);
           service.setSessionId(rewound.id);
           store.dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: service.getLlm().model });
-          store.dispatch({ type: "ADD_NOTICE", title: "已回退会话", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} 条消息` });
-        }).catch((error) => store.dispatch({ type: "ADD_NOTICE", title: "回退失败", text: error instanceof Error ? error.message : String(error) }));
+          store.dispatch({ type: "ADD_NOTICE", title: "Session rewound", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} messages` });
+        }).catch((error) => store.dispatch({ type: "ADD_NOTICE", title: "Rewind failed", text: error instanceof Error ? error.message : String(error) }));
       }
       deps.autocomplete.clear();
       input.clear();
@@ -774,14 +777,14 @@ async function copyTerminalText(
     target,
   });
   if (!selection) {
-    deps.store.dispatch({ type: "ADD_NOTICE", title: "复制", text: "没有可复制的原文。可用 /copy last、/copy tool 或先聚焦一条消息。" });
+    deps.store.dispatch({ type: "ADD_NOTICE", title: "Clipboard", text: "Nothing to copy yet. Use /copy last, /copy tool, or focus a message first." });
     return;
   }
   const result = await writeClipboardText(selection.text);
   deps.store.dispatch({
     type: "ADD_NOTICE",
-    title: result.ok ? "已复制到剪贴板" : "复制失败",
-    text: result.ok ? formatCopyResultNotice(selection, result.method) : (result.error ?? "无法写入系统剪贴板"),
+    title: result.ok ? "Copied to clipboard" : "Copy failed",
+    text: result.ok ? formatCopyResultNotice(selection, result.method) : (result.error ?? "Unable to write to the system clipboard"),
   });
 }
 
@@ -801,7 +804,7 @@ function handleShortcut(action: Extract<TerminalInputAction, { type: "shortcut" 
         const direction = action.direction ?? "increase";
         const next = withThinkingLevel(service.getLlm(), cycleThinkingLevel(service.getLlm(), direction, { wrap: action.direction === undefined }));
         service.setLlm(next);
-        store.dispatch({ type: "SET_STATUS", status: `思考强度: ${thinkingLevelToDisplay(next.thinkingLevel ?? "off")}` });
+        store.dispatch({ type: "SET_STATUS", status: thinkingLevelStatusText(next, next.thinkingLevel ?? "off") });
       }
       return;
     case "thinking-mode":
@@ -872,8 +875,8 @@ async function submitInput(
       sessionAccess.setSessionId(rewound.id);
       service.setSessionId(rewound.id);
       store.dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: service.getLlm().model, thinkingMode: rewound.thinkingMode === "adaptive" ? "hidden" : "summary", phase: rewound.phase, currentPlan: rewound.currentPlan });
-      store.dispatch({ type: "ADD_NOTICE", title: "已回退会话", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} 条消息` });
-    }).catch((error) => store.dispatch({ type: "ADD_NOTICE", title: "回退失败", text: error instanceof Error ? error.message : String(error) }));
+      store.dispatch({ type: "ADD_NOTICE", title: "Session rewound", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} messages` });
+    }).catch((error) => store.dispatch({ type: "ADD_NOTICE", title: "Rewind failed", text: error instanceof Error ? error.message : String(error) }));
     input.clear();
     deps.autocomplete.clear();
     return;
@@ -882,7 +885,7 @@ async function submitInput(
   const allowEmptyProfileSelection = autocompleteState.mode === "profile-list";
   if (!text && !allowEmptyApiKey && !allowEmptyProfileSelection) return;
   if (store.getState().busy && /^(?:resume|\/(?:clear|resume|model|profiles?|plan(?:-|\s|$)))/i.test(text)) {
-    store.dispatch({ type: "ADD_NOTICE", title: "正在执行", text: "当前 turn 完成后才能执行该控制命令。普通消息会排队。" });
+    store.dispatch({ type: "ADD_NOTICE", title: "Turn in progress", text: "The current turn is still running. This control command runs once it finishes; normal messages are queued." });
     input.clear();
     return;
   }
@@ -905,10 +908,10 @@ async function submitInput(
     const sessions = knownSessions ?? await sessionAccess.list().catch(() => []);
     store.dispatch({
       type: "ADD_NOTICE",
-      title: "会话列表",
+      title: "Saved sessions",
       text: sessions.length === 0
-        ? "没有可恢复的会话。"
-        : sessions.slice(0, 8).map((session) => `${session.id.slice(0, 8)}  ${session.messageCount} 条  ${session.preview}`).join("\n"),
+        ? "No saved sessions."
+        : sessions.slice(0, 8).map((session) => `${session.id.slice(0, 8)}  ${session.messageCount} msgs  ${session.preview}`).join("\n"),
     });
     input.clear();
     return;
@@ -927,9 +930,9 @@ async function submitInput(
         apiKey: setup.apiKey,
         thinkingLevel: deps.service.getLlm().thinkingLevel,
       });
-      store.dispatch({ type: "ADD_NOTICE", title: "配置文件已保存", text: profileName });
+      store.dispatch({ type: "ADD_NOTICE", title: "Profile saved", text: profileName });
     } catch (error) {
-      store.dispatch({ type: "ADD_NOTICE", title: "配置文件", text: error instanceof Error ? error.message : String(error) });
+      store.dispatch({ type: "ADD_NOTICE", title: "Model profiles", text: error instanceof Error ? error.message : String(error) });
       return;
     }
     deps.autocomplete.clear();
@@ -944,9 +947,9 @@ async function submitInput(
     const name = text.replace(/^\/profiles?\s+delete\s+/i, "").trim();
     try {
       await removeProfile(name);
-      store.dispatch({ type: "ADD_NOTICE", title: "配置文件", text: `已删除配置文件: ${name}` });
+      store.dispatch({ type: "ADD_NOTICE", title: "Model profiles", text: `Deleted profile: ${name}` });
     } catch (error) {
-      store.dispatch({ type: "ADD_NOTICE", title: "配置文件", text: error instanceof Error ? error.message : String(error) });
+      store.dispatch({ type: "ADD_NOTICE", title: "Model profiles", text: error instanceof Error ? error.message : String(error) });
     }
     input.clear();
     return;
@@ -968,7 +971,7 @@ async function submitInput(
   }
   if (text === "/context") {
     const current = store.getState();
-    store.dispatch({ type: "ADD_NOTICE", title: "上下文统计", text: `上下文: ${current.contextTokens} tokens · 本轮输出: ${current.usedTokens} tokens` });
+    store.dispatch({ type: "ADD_NOTICE", title: "Context usage", text: `Context: ${current.contextTokens} tokens · This turn: ${current.usedTokens} tokens` });
     input.clear();
     return;
   }
@@ -1007,7 +1010,7 @@ async function submitInput(
         cwd: deps.cwd,
       });
     } catch (error) {
-      store.dispatch({ type: "ATTACHMENT_ERROR", message: `无法添加图片: ${error instanceof Error ? error.message : String(error)}` });
+      store.dispatch({ type: "ATTACHMENT_ERROR", message: `Unable to attach image: ${error instanceof Error ? error.message : String(error)}` });
     }
     return;
   }
@@ -1019,7 +1022,7 @@ async function submitInput(
     return;
   }
   if (text === "/help" || text === "/?") {
-    store.dispatch({ type: "ADD_NOTICE", title: "Available commands", text: "Type / for the command palette; Tab/↑↓ select; Shift+Tab changes permission mode.\n/model, /profiles, /sessions, /resume, /clear, /tasks, /plan*" });
+    store.dispatch({ type: "ADD_NOTICE", title: "Available commands", text: formatHelpNotice(SLASH_COMMANDS, process.stdout.columns || 80) });
     input.clear();
     return;
   }
@@ -1076,7 +1079,7 @@ async function submitInput(
     if (!selection.session && selection.candidates.length > 1) {
       store.dispatch({
         type: "ADD_NOTICE",
-        title: "恢复会话",
+        title: "Resume session",
         text: formatAmbiguousSessionNotice(prefix, selection.candidates),
       });
       input.clear();
@@ -1084,13 +1087,13 @@ async function submitInput(
     }
     const target = selection.session;
     if (!target) {
-      store.dispatch({ type: "ADD_NOTICE", title: "恢复会话", text: prefix ? `未找到会话: ${prefix}` : "没有可恢复的会话。" });
+      store.dispatch({ type: "ADD_NOTICE", title: "Resume session", text: prefix ? `No session found: ${prefix}` : "No saved sessions." });
       input.clear();
       return;
     }
     const restored = await sessionAccess.load(target.id);
     if (!restored) {
-      store.dispatch({ type: "ADD_NOTICE", title: "恢复会话", text: `无法读取会话: ${target.id}` });
+      store.dispatch({ type: "ADD_NOTICE", title: "Resume session", text: `Unable to read session: ${target.id}` });
       input.clear();
       return;
     }
@@ -1136,7 +1139,7 @@ async function submitInput(
       todos: restoredState.todos,
       todoRevision: restoredState.todoRevision,
     });
-    store.dispatch({ type: "ADD_NOTICE", title: "会话已恢复", text: `${restored.id.slice(0, 8)} · ${restored.messages.length} 条消息` });
+    store.dispatch({ type: "ADD_NOTICE", title: "Session resumed", text: `${restored.id.slice(0, 8)} · ${restored.messages.length} messages` });
     if (sessionAccess.rewind) {
       const picker = { session: restored, candidates: getResumeMessageCandidates(restored.messages) };
       if (deps.resumePickerRef) deps.resumePickerRef.current = picker;
@@ -1165,6 +1168,19 @@ async function submitInput(
   if (todo) {
     if (todo === "clear") store.dispatch({ type: "CLEAR_TODO_ITEMS" });
     else store.dispatch({ type: "SET_TODO_VIEW_MODE", mode: todoViewModeForCommand(todo, store.getState().todoViewMode) });
+    input.clear();
+    return;
+  }
+  // A leading "/" that is not a known command is a typo, not a prompt.
+  // Sending it to the model wasted a turn and produced a confusing answer.
+  const unknownCommand = planOverride ? undefined : parseUnknownSlashCommand(text);
+  if (unknownCommand) {
+    store.dispatch({
+      type: "ADD_NOTICE",
+      title: "Unknown command",
+      text: `${unknownCommand} is not a command. Use /help to list the available commands.`,
+    });
+    input.recordSubmission(text);
     input.clear();
     return;
   }
@@ -1241,10 +1257,10 @@ async function applyTerminalModel(
     deps.store.dispatch({ type: "MODEL_CHANGED", modelName: next.model });
     deps.autocomplete.clear();
     deps.input.clear();
-    deps.store.dispatch({ type: "ADD_NOTICE", title: "模型已切换", text: `${next.provider}/${next.model}` });
+    deps.store.dispatch({ type: "ADD_NOTICE", title: "Model switched", text: `${next.provider}/${next.model}` });
     return true;
   } catch (error) {
-    deps.store.dispatch({ type: "ADD_NOTICE", title: "模型切换失败", text: error instanceof Error ? error.message : String(error) });
+    deps.store.dispatch({ type: "ADD_NOTICE", title: "Model switch failed", text: error instanceof Error ? error.message : String(error) });
     return false;
   }
 }
@@ -1262,7 +1278,7 @@ async function submitModelSetup(value: string, deps: InputDeps): Promise<void> {
   try {
     const applied = await applyTerminalModel(setup.model, { baseUrl: setup.baseUrl, apiKey: value }, deps);
     if (!applied) {
-      deps.autocomplete.setModelSetup({ ...setup, apiKey: value, error: "模型配置未能应用" });
+      deps.autocomplete.setModelSetup({ ...setup, apiKey: value, error: "Model setup could not be applied" });
       deps.input.setValue(value);
       return;
     }
@@ -1289,7 +1305,7 @@ async function openTerminalProfileList(deps: InputDeps): Promise<void> {
     deps.autocomplete.openProfileList({ profiles, selectedIndex: 0 });
     deps.input.clear();
   } catch (error) {
-    deps.store.dispatch({ type: "ADD_NOTICE", title: "配置文件", text: error instanceof Error ? error.message : String(error) });
+    deps.store.dispatch({ type: "ADD_NOTICE", title: "Model profiles", text: error instanceof Error ? error.message : String(error) });
   }
 }
 
@@ -1313,9 +1329,9 @@ async function activateTerminalProfile(index: number, deps: InputDeps): Promise<
       }));
     }
     deps.store.dispatch({ type: "MODEL_CHANGED", modelName: next.model });
-    deps.store.dispatch({ type: "ADD_NOTICE", title: "配置文件已激活", text: `${selected.name} · ${next.provider}/${next.model}` });
+    deps.store.dispatch({ type: "ADD_NOTICE", title: "Profile activated", text: `${selected.name} · ${next.provider}/${next.model}` });
   } catch (error) {
-    deps.store.dispatch({ type: "ADD_NOTICE", title: "配置文件", text: error instanceof Error ? error.message : String(error) });
+    deps.store.dispatch({ type: "ADD_NOTICE", title: "Model profiles", text: error instanceof Error ? error.message : String(error) });
   }
   deps.autocomplete.clear();
   deps.input.clear();

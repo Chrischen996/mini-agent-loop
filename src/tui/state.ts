@@ -9,7 +9,7 @@ import type { SessionPhase, ExecutionPlan, PlanActEvent } from "../plan-act/type
 import type { PlanDocument } from "../plan/document.ts";
 import { isTodoRevisionNewer, nextTodoRevision, TODO_WRITE_TOOL_NAME, type TodoItem, type TodoViewMode } from "../todo.ts";
 import { executionPlanToTodoItems } from "./todo-format.ts";
-import { toolArgumentSummary } from "./claude-style.ts";
+import { permissionModeLabel, toolArgumentSummary } from "./claude-style.ts";
 import { toolVisualName } from "./tool-lines.ts";
 import { compactText } from "./text-utils.ts";
 
@@ -260,7 +260,7 @@ export function createInitialState(modelName: string): TuiState {
     turnStartedAt: undefined,
     lastStreamAt: undefined,
     busy: false,
-    status: "就绪",
+    status: "Ready",
     modelName,
     usedTokens: 0,
     contextTokens: 0,
@@ -403,7 +403,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         }],
         goal: state.goal || action.text,
         busy: true,
-        status: "思考中...",
+        status: "Thinking…",
         streamingText: "",
         streamingReasoning: "",
         turnStartedAt: Date.now(),
@@ -426,7 +426,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         todoPlan: state.todoPlan,
         todoItems: action.todos && action.todos.length > 0 ? action.todos : undefined,
         todoRevision: action.todoRevision ?? nextTodoRevision(),
-        status: "会话已恢复",
+        status: "Session resumed",
       };
     }
 
@@ -468,7 +468,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     case "CLEAR_SPINNER_MESSAGE":
       return { ...state, spinnerMessage: undefined };
     case "MODEL_CHANGED":
-      return { ...state, modelName: action.modelName, status: "就绪", usedTokens: 0, contextTokens: 0 };
+      return { ...state, modelName: action.modelName, status: "Ready", usedTokens: 0, contextTokens: 0 };
 
     case "SET_STATUS":
       return { ...state, status: action.status };
@@ -499,14 +499,16 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         streamingText: "",
         streamingReasoning: "",
         lastStreamAt: undefined,
-        status: `自动续跑 (${action.count}/${action.max})...`,
+        status: `Continuing… (${action.count}/${action.max})`,
       };
 
     case "CLEAR_PENDING_PERMISSION":
       return {
         ...state,
         pendingPermission: undefined,
-        status: state.pendingPermission ? `正在执行 ${state.pendingPermission.tool}...` : state.status,
+        // The request is resolved (allowed or denied), so the status moves on
+        // to the tool itself instead of repeating "Waiting for permission".
+        status: state.pendingPermission ? `Running ${state.pendingPermission.tool}…` : state.status,
       };
 
     case "TOGGLE_THINKING_MODE": {
@@ -517,30 +519,30 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         thinkingMode: next,
         expandedThinking: [],
         status:
-          next === "hidden" ? "思考过程: 隐藏"
-            : next === "summary" ? "思考过程: 摘要"
-              : "思考过程: 完整",
+          next === "hidden" ? "Thinking display: hidden"
+            : next === "summary" ? "Thinking display: summary"
+              : "Thinking display: full",
       };
     }
 
     case "TOGGLE_PERMISSION_MODE": {
       const current = PERMISSION_MODES.indexOf(state.permissionMode);
       const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
-      const modeLabel = next === "plan" ? "计划" : next === "approval" ? "审批" : "绕过";
+      const modeLabel = permissionModeLabel(next);
       return {
         ...state,
         permissionMode: next,
-        status: `权限模式: ${modeLabel}`,
+        status: `Permission mode: ${modeLabel}`,
       };
     }
 
     case "SET_PERMISSION_MODE": {
-      const modeLabel = action.mode === "plan" ? "计划" : action.mode === "approval" ? "审批" : "绕过";
+      const modeLabel = permissionModeLabel(action.mode);
       return {
         ...state,
         permissionMode: action.mode,
         pendingPermission: undefined,
-        status: `权限模式: ${modeLabel}`,
+        status: `Permission mode: ${modeLabel}`,
       };
     }
 
@@ -590,7 +592,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             todoItems: event.todos,
             todoRevision: event.revision,
-            status: "任务列表已更新",
+            status: "Todos updated",
             spinnerMessage: nextTodoTask ? `▶ ${nextTodoTask.activeForm}` : undefined,
           };
 
@@ -604,7 +606,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               ? state.streamingReasoning + event.text
               : state.streamingReasoning,
             lastStreamAt: Date.now(),
-            status: "输出中...",
+            status: "Responding…",
           };
 
         case "assistant": {
@@ -629,7 +631,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             messages: newMessages,
             streamingText: "",
             streamingReasoning: "",
-            status: hasTools ? "执行工具..." : "整理回复...",
+            status: hasTools ? "Running tool…" : "Finalizing response…",
             usedTokens,
             contextTokens,
             cacheReadTokens,
@@ -652,7 +654,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
-            status: "请求失败",
+            status: "Request failed",
             scrollOffset: preserveScrollOnAppend(
               state.scrollOffset,
               state.messages.length,
@@ -668,8 +670,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: "",
             lastStreamAt: undefined,
             status: event.reason === "stream_truncated"
-              ? `连接中断，正在重试 (${event.attempt})...`
-              : `思考结果不完整，正在重试 (${event.attempt})...`,
+              ? `Connection lost, retrying (${event.attempt})…`
+              : `Incomplete reasoning, retrying (${event.attempt})…`,
           };
 
         case "retry_attempt":
@@ -679,8 +681,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: "",
             lastStreamAt: undefined,
             status: event.errorType === "timeout"
-              ? `请求超时，正在重试 (${event.attempt}/${event.maxRetries})...`
-              : `请求失败，正在重试 (${event.attempt}/${event.maxRetries})...`,
+              ? `Request timed out, retrying (${event.attempt}/${event.maxRetries})…`
+              : `Request failed, retrying (${event.attempt}/${event.maxRetries})…`,
           };
 
         case "max_turns":
@@ -688,14 +690,14 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             streamingText: "",
             streamingReasoning: "",
-            status: `已达到最大执行轮数 (${event.maxTurns})，准备续跑...`,
+            status: `Turn limit reached (${event.maxTurns}), continuing…`,
           };
 
         case "context_compacted":
           return {
             ...state,
             contextTokens: event.afterTokens,
-            status: `上下文已压缩 ${event.beforeTokens} → ${event.afterTokens} tokens`,
+            status: `Context compacted ${event.beforeTokens} → ${event.afterTokens} tokens`,
           };
 
         case "plan_act_event":
@@ -707,29 +709,29 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           return {
             ...state,
             status: event.executed
-              ? `自动子 agent 已启动 (${event.profile}, score=${event.score})`
+              ? `Auto subagent started (${event.profile}, score=${event.score})`
               : event.shouldDelegate
-                ? `建议委托子 agent (${event.profile}, score=${event.score})`
-                : `不自动委托 (score=${event.score})`,
+                ? `Subagent delegation suggested (${event.profile}, score=${event.score})`
+                : `No auto delegation (score=${event.score})`,
           };
 
         case "coordinator_mode":
           return {
             ...state,
             status: event.active
-              ? `编排模式: ${event.profile} (探索 ${event.directExplorationUsed}/${event.maxDirectExploration})`
-              : "编排模式已关闭",
+              ? `Orchestration: ${event.profile} (exploration ${event.directExplorationUsed}/${event.maxDirectExploration})`
+              : "Orchestration disabled",
           };
 
         case "thinking_policy":
           return {
             ...state,
-            status: `自适应思考: ${event.level} (${event.reasons.join(", ")})`,
+            status: `Adaptive thinking: ${event.level} (${event.reasons.join(", ")})`,
           };
 
         case "tool_start": {
           if (event.call.name === TODO_WRITE_TOOL_NAME) {
-            return { ...state, status: "更新任务列表..." };
+            return { ...state, status: "Updating todos…" };
           }
           const rawArgs = (event.call.arguments ?? {}) as Record<string, unknown>;
           const args = compactText(JSON.stringify(rawArgs), 120, "…");
@@ -777,13 +779,13 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           if (event.call.name === TODO_WRITE_TOOL_NAME) {
             return {
               ...state,
-              status: event.result.isError ? "任务列表更新失败" : "任务列表已更新",
+              status: event.result.isError ? "Todo update failed" : "Todos updated",
             };
           }
           if (event.call.name === "validate_workspace") {
             return {
               ...state,
-              status: event.result.isError ? "修改后验证失败，准备修复" : "修改后验证通过",
+              status: event.result.isError ? "Post-edit verification failed, repairing" : "Post-edit verification passed",
               spinnerMessage: undefined,
             };
           }
@@ -820,7 +822,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             messages: updatedMessages,
             steps: updatedSteps,
             toolCards: updatedCards,
-            status: event.result.isError ? `${event.call.name} 失败` : `${event.call.name} 完成`,
+            status: event.result.isError ? `${event.call.name} failed` : `${event.call.name} completed`,
             spinnerMessage: undefined,
           };
         }
@@ -835,7 +837,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               arguments: event.request.arguments,
               risk: event.request.risk,
             },
-            status: `等待权限确认: ${event.request.tool} (${event.request.risk}) [A 允许 / D 拒绝 / Enter 拒绝 / Esc 取消]`,
+            status: `Waiting for permission: ${event.request.tool} (${event.request.risk}) [A allow / D deny / Enter deny / Esc cancel]`,
           };
 
         case "aborted":
@@ -847,7 +849,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
-            status: "已中止",
+            status: "Aborted",
           };
 
         case "done":
@@ -859,7 +861,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
-            status: "就绪",
+            status: "Ready",
           };
 
         default:
@@ -871,7 +873,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       const event = action.event;
       switch (event.type) {
         case "planning_started":
-          return { ...state, phase: "planning", status: "规划中..." };
+          return { ...state, phase: "planning", status: "Planning…" };
         case "plan_generated":
           return {
             ...state,
@@ -879,7 +881,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             currentPlan: event.plan,
             todoItems: executionPlanToTodoItems(event.plan),
             todoRevision: nextTodoRevision(),
-            status: "计划已生成，等待审批 (A=批准 / R=拒绝)",
+            status: "Plan ready for review (A approve / R reject)",
           };
         case "plan_approved":
           return {
@@ -890,38 +892,38 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               : state.currentPlan
                 ? { ...state.currentPlan, status: "approved" as const }
                 : undefined,
-            status: "执行中...",
+            status: "Executing…",
           };
         case "plan_rejected":
           return {
             ...state,
             phase: "cancelled",
             currentPlan: undefined,
-            status: "计划已拒绝",
+            status: "Plan rejected",
           };
         case "plan_modified":
           return {
             ...state,
             phase: "review",
             currentPlan: event.plan,
-            status: "计划已修改，等待审批 (A=批准 / R=拒绝)",
+            status: "Plan revised, waiting for review (A approve / R reject)",
           };
         case "acting_started":
-          return { ...state, phase: "acting", status: "执行计划..." };
+          return { ...state, phase: "acting", status: "Executing plan…" };
         case "step_started":
           return {
             ...updateExecutionTodo(state, event.stepId, "in_progress"),
-            status: `执行: ${event.step.description.slice(0, 30)}...`,
+            status: `Running: ${event.step.description.slice(0, 30)}…`,
           };
         case "step_completed":
           return {
             ...updateExecutionTodo(state, event.stepId, "completed"),
-            status: "步骤完成",
+            status: "Step completed",
           };
         case "step_failed":
           return {
             ...updateExecutionTodo(state, event.stepId, "failed", event.error),
-            status: `步骤失败: ${event.error.slice(0, 50)}`,
+            status: `Step failed: ${event.error.slice(0, 50)}`,
           };
         case "all_steps_completed":
           return {
@@ -932,7 +934,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               : undefined,
             todoItems: state.todoItems?.map((item) => ({ ...item, status: "completed" })),
             todoRevision: nextTodoRevision(),
-            status: "计划执行完成",
+            status: "Plan execution completed",
           };
         case "execution_failed":
           return {
@@ -943,7 +945,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               : undefined,
             todoItems: state.todoItems?.map((item) => item.status === "completed" ? item : { ...item, status: "failed" }),
             todoRevision: nextTodoRevision(),
-            status: "执行失败",
+            status: "Execution failed",
           };
         default:
           return state;
@@ -957,7 +959,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         ...state,
         currentPlan: { ...plan, status: "approved" as const },
         phase: "acting",
-        status: "计划已批准，开始执行...",
+        status: "Plan approved, executing…",
       };
     }
     
@@ -968,7 +970,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         ...state,
         currentPlan: { ...plan, status: "rejected" as const },
         phase: "cancelled",
-        status: "计划已拒绝",
+        status: "Plan rejected",
       };
     }
 
@@ -992,7 +994,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           return {
             ...state,
             messages: newMessages,
-            status: `子代理 (depth ${evt.depth})...`,
+            status: `Delegating (depth ${evt.depth})…`,
             scrollOffset: preserveScrollOnAppend(
               state.scrollOffset,
               state.messages.length,
@@ -1037,7 +1039,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         case "budget_warning": {
           return {
             ...state,
-            status: `预算警告 ${evt.percentage}%`,
+            status: `Budget warning ${evt.percentage}%`,
             messages: state.messages.map((m) => {
               if (m.kind === "subagent_call" && m.id === evt.id) {
                 return {
@@ -1074,7 +1076,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               }
               return m;
             }),
-            status: evt.success ? "子代理完成" : "子代理失败",
+            status: evt.success ? "Subagent done" : "Subagent failed",
           };
         }
         default:
@@ -1100,7 +1102,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...state,
         pendingImages: [...state.pendingImages, action.image],
-        status: `已添加图片: ${action.image.path.split("/").pop() ?? action.image.path}`,
+        status: `Attached image: ${action.image.path.split("/").pop() ?? action.image.path}`,
       };
     }
 
@@ -1112,7 +1114,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...state,
         messages: newMessages,
-        status: "图片添加失败",
+        status: "Unable to attach image",
         scrollOffset: preserveScrollOnAppend(
           state.scrollOffset,
           state.messages.length,
@@ -1126,7 +1128,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         ...state.messages,
         { kind: "notice", text: action.text, ...(action.title ? { title: action.title } : {}) },
       ];
-      return { ...state, messages, status: "就绪", scrollOffset: 0 };
+      return { ...state, messages, status: "Ready", scrollOffset: 0 };
     }
 
     case "SCROLL_BY": {

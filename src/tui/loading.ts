@@ -19,6 +19,19 @@ export function getSpinnerFrame(index: number): string {
   return CLAUDE_SPINNER_FRAMES[normalized] ?? CLAUDE_SPINNER_FRAMES[0];
 }
 
+/**
+ * Normalize the Todo-driven spinner tip into a single user-facing label.
+ *
+ * The reducer stores the active Todo as `▶ <active form>`; the marker is
+ * internal bookkeeping and must not reach the transcript next to the spinner
+ * glyph.
+ */
+export function spinnerTipLabel(message?: string): string | undefined {
+  const tip = message?.replace(/^\s*▶\s*/, "").trim();
+  if (!tip) return undefined;
+  return /[.!?…]$/.test(tip) ? tip : `${tip}…`;
+}
+
 /** Convert internal lifecycle text into the one user-facing loading label. */
 export function loadingLabel(status: string, spinnerMessage?: string): string {
   const tip = spinnerMessage?.replace(/^\s*▶\s*/, "").trim();

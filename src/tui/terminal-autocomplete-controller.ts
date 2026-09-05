@@ -14,7 +14,7 @@ import {
   resolveAutocompleteNav,
   type AutocompleteNavKey,
 } from "./autocomplete.ts";
-import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
+import { SLASH_COMMANDS } from "./slash-commands.ts";
 
 export type TerminalAutocompleteState = {
   mode: AcMode;

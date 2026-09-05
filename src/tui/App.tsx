@@ -6,8 +6,7 @@ import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { TodoPanel } from "./components/TodoPanel.tsx";
 import { getTodoPanelRows } from "./todo-format.ts";
-import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
-import { parseSlashCommand } from "./slash-commands.ts";
+import { formatHelpNotice, parseSlashCommand, parseUnknownSlashCommand, SLASH_COMMANDS } from "./slash-commands.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
 
 /** Human-readable message for an LlmTimeoutError, with partial-response preview. */
@@ -74,6 +73,9 @@ import {
 } from "../permissions.ts";
 import { TurnEventBuffer } from "./stream-buffer.ts";
 import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./layout.ts";
+import { pickerChromeRows, pickerRequestedItems } from "./picker-window.ts";
+import { thinkingLevelStatusText } from "./status-line.ts";
+import type { AcMode } from "./input-utils.ts";
 import { estimateViewportContentHeight } from "./message-viewport.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
@@ -123,7 +125,7 @@ import { getWelcomeHeaderHeight } from "./welcome-panel.ts";
 import { formatAmbiguousSessionNotice, getResumeMessageCandidates, getStartupSessionRequest, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
-const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
+const DEFAULT_IMAGE_PROMPT = "Analyze the attached image.";
 
 export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement {
   const { exit } = useApp();
@@ -350,7 +352,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       if (selection.candidates.length > 1) {
         dispatch({
           type: "ADD_NOTICE",
-          title: "恢复会话",
+          title: "Resume session",
           text: formatAmbiguousSessionNotice(requestedId ?? "", selection.candidates),
         });
       }
@@ -431,17 +433,21 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const next = withThinkingLevel(current, nextLevel);
     llmRef.current = next;
     setLlm(next);
-    dispatch({ type: "SET_STATUS", status: `思考强度: ${thinkingLevelToDisplay(nextLevel)}` });
+    dispatch({ type: "SET_STATUS", status: thinkingLevelStatusText(next, nextLevel) });
   }, [state.busy, state.pendingPermission]);
 
-  const requestedPickerItems =
-    acMode === "command" ? Math.min(6, cmdCandidates.length)
-      : acMode === "file" ? Math.min(8, fileCandidates.length)
-        : acMode === "model" || acMode === "model-picker" ? Math.min(12, modelCandidates.length)
-          : acMode === "session-list" ? Math.max(1, Math.min(8, sessionCandidates.length))
-            : acMode === "resume-messages" ? Math.max(1, Math.min(8, resumeMessageCandidates.length))
-          : acMode === "profile-list" ? Math.min(10, profileListState?.profiles.length ?? 0)
-            : acMode ? 4 : 0;
+  // Row caps live in `picker-window` so the ANSI renderer asks for the same
+  // page sizes and clips its lists at the same row.
+  const pickerCandidateCounts: Partial<Record<NonNullable<AcMode>, number>> = {
+    command: cmdCandidates.length,
+    file: fileCandidates.length,
+    model: modelCandidates.length,
+    "model-picker": modelCandidates.length,
+    "session-list": sessionCandidates.length,
+    "resume-messages": resumeMessageCandidates.length,
+    "profile-list": profileListState?.profiles.length ?? 0,
+  };
+  const requestedPickerItems = pickerRequestedItems(acMode ?? undefined, acMode ? pickerCandidateCounts[acMode] : 0);
   // Keep the product identity pinned above the transcript, including restored
   // sessions and active turns.
   const hasHeader = true;
@@ -467,7 +473,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     requestedItems: requestedPickerItems,
     hasPendingImages: state.pendingImages.length > 0,
     todoRows,
-    extraRows: acMode === "model" || acMode === "model-picker" || acMode === "file" ? 3 : 2,
+    extraRows: pickerChromeRows(acMode ?? undefined),
     permissionRows,
     planApprovalRows,
   });
@@ -492,16 +498,16 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       target,
     });
     if (!selection) {
-      dispatch({ type: "ADD_NOTICE", title: "复制", text: "没有可复制的原文。可用 /copy last、/copy tool 或先聚焦一条消息。" });
+      dispatch({ type: "ADD_NOTICE", title: "Clipboard", text: "Nothing to copy yet. Use /copy last, /copy tool, or focus a message first." });
       return;
     }
     const result = await writeClipboardText(selection.text);
     dispatch({
       type: "ADD_NOTICE",
-      title: result.ok ? "已复制到剪贴板" : "复制失败",
+      title: result.ok ? "Copied to clipboard" : "Copy failed",
       text: result.ok
         ? formatCopyResultNotice(selection, result.method)
-        : (result.error ?? "无法写入系统剪贴板"),
+        : (result.error ?? "Unable to write to the system clipboard"),
     });
   }, [input, state.focusedMessageIndex, state.messages, state.streamingReasoning, state.streamingText]);
 
@@ -569,7 +575,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           const history = sessionManagerRef.current!.restoreHistory(rewound, systemPrompt);
           historyRef.current = history;
           dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: llmRef.current.model, thinkingMode: rewound.thinkingMode === "adaptive" ? "hidden" : "summary", phase: rewound.phase, currentPlan: rewound.currentPlan, todos: restoreTuiSession(rewound, systemPrompt).todos, todoRevision: rewound.todoVersion });
-          dispatch({ type: "ADD_NOTICE", title: "已回退会话", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} 条消息` });
+          dispatch({ type: "ADD_NOTICE", title: "Session rewound", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} messages` });
         }
       }
       resumePickerSessionRef.current = null;
@@ -580,7 +586,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
     if (state.busy) {
       if (/^(?:\/?resume)(?:\s|$)/i.test(trimmed)) {
-        dispatch({ type: "ADD_NOTICE", title: "正在执行", text: "当前 turn 完成后才能恢复会话。" });
+        dispatch({ type: "ADD_NOTICE", title: "Turn in progress", text: "The current turn is still running. Sessions can be resumed once it finishes." });
         setInput("");
         return;
       }
@@ -664,11 +670,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       const sessions = knownSessions ?? await sessionManagerRef.current!.list().catch(() => []);
       dispatch({
         type: "ADD_NOTICE",
-        title: "会话列表",
+        title: "Saved sessions",
         text: sessions.length === 0
-          ? "没有可恢复的会话。"
+          ? "No saved sessions."
           : sessions.slice(0, 8)
-            .map((session) => session.id.slice(0, 8) + "  " + session.messageCount + " 条  " + session.preview)
+            .map((session) => session.id.slice(0, 8) + "  " + session.messageCount + " msgs  " + session.preview)
             .join("\n"),
       });
       setInput("");
@@ -686,7 +692,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       if (!selection.session && selection.candidates.length > 1) {
         dispatch({
           type: "ADD_NOTICE",
-          title: "恢复会话",
+          title: "Resume session",
           text: formatAmbiguousSessionNotice(prefix, selection.candidates),
         });
         setInput("");
@@ -696,8 +702,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       if (!target) {
         dispatch({
           type: "ADD_NOTICE",
-          title: "恢复会话",
-          text: prefix ? "未找到会话: " + prefix : "没有可恢复的会话。",
+          title: "Resume session",
+          text: prefix ? "No session found: " + prefix : "No saved sessions.",
         });
         setInput("");
         return;
@@ -705,10 +711,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       const restored = await restoreSession(target.id, false, target, true);
       dispatch({
         type: "ADD_NOTICE",
-        title: restored ? "会话已恢复" : "恢复会话失败",
+        title: restored ? "Session resumed" : "Resume failed",
         text: restored
-          ? restored.id.slice(0, 8) + " · " + restored.messages.length + " 条消息"
-          : "无法读取会话: " + target.id,
+          ? restored.id.slice(0, 8) + " · " + restored.messages.length + " messages"
+          : "Unable to read session: " + target.id,
       });
       setInput("");
       return;
@@ -719,18 +725,18 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       const ctxWindow = modelContextWindows[state.modelName] ?? llm.contextWindow ?? 128000;
       const pct = ctxWindow > 0 ? Math.round(tokenEst / ctxWindow * 100) : 0;
       const lines = [
-        `上下文统计: ${tokenEst} / ${ctxWindow} tokens (${pct}%)`,
+        `Context: ${tokenEst} / ${ctxWindow} tokens (${pct}%)`,
         '',
       ];
       if (compactions.length === 0) {
-        lines.push('尚无压缩记录（上下文未超过阈值）');
+        lines.push('No compaction yet (context is below the threshold).');
       } else {
-        lines.push(`已压缩 ${compactions.length} 次:`);
+        lines.push(`Compacted ${compactions.length} ${compactions.length === 1 ? "time" : "times"}:`);
         for (const c of compactions.slice(-5)) {
           lines.push(`  turn${c.turn}: ${c.before} → ${c.after} (${c.reason})`);
         }
       }
-      dispatch({ type: "ADD_NOTICE", title: "上下文统计", text: lines.join("\n") });
+      dispatch({ type: "ADD_NOTICE", title: "Context usage", text: lines.join("\n") });
       setInput("");
       return;
     }
@@ -775,7 +781,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         addPendingImageRef(await loadImageAttachment(imagePath, cwd));
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        dispatch({ type: "ATTACHMENT_ERROR", message: `无法添加图片: ${detail}` });
+        dispatch({ type: "ATTACHMENT_ERROR", message: `Unable to attach image: ${detail}` });
       }
       setInput("");
       return;
@@ -790,8 +796,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     if (trimmed === "/help" || trimmed === "/?") {
       dispatch({
         type: "ADD_NOTICE",
-        title: "可用命令",
-        text: SLASH_COMMANDS.map((command) => `${command.usage.padEnd(28)} ${command.description}`).join("\n"),
+        title: "Available commands",
+        text: formatHelpNotice(SLASH_COMMANDS, termWidth),
       });
       setInput("");
       return;
@@ -871,6 +877,19 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
 
+    // A leading "/" that is not a known command is a typo, not a prompt.
+    // Sending it to the model wasted a turn and produced a confusing answer.
+    const unknownCommand = parseUnknownSlashCommand(trimmed);
+    if (unknownCommand && !planTurnOverride) {
+      setInput("");
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "Unknown command",
+        text: `${unknownCommand} is not a command. Use /help to list the available commands.`,
+      });
+      return;
+    }
+
     const pendingImgs = planTurnOverride ? [] : [...pendingImagesRef.current];
     if (!planTurnOverride && !trimmed && pendingImgs.length === 0) {
       setInput("");
@@ -889,7 +908,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       imageParts = await Promise.all(pendingImgs.map(imageAttachmentToPart));
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      dispatch({ type: "ATTACHMENT_ERROR", message: `无法读取待发送图片: ${detail}` });
+      dispatch({ type: "ATTACHMENT_ERROR", message: `Unable to read the pending image: ${detail}` });
       return;
     }
 
@@ -936,17 +955,17 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         setLlm(turnLlm);
       } else if (event.type === "auto_subagent") {
         const status = event.executed
-          ? `自动子 agent 已启动 (${event.profile}, score=${event.score})`
+          ? `Auto subagent started (${event.profile}, score=${event.score})`
           : event.shouldDelegate
-            ? `建议委托子 agent (${event.profile}, score=${event.score})`
-            : `不自动委托 (score=${event.score})`;
+            ? `Subagent delegation suggested (${event.profile}, score=${event.score})`
+            : `No auto delegation (score=${event.score})`;
         dispatch({ type: "SET_STATUS", status });
       } else if (event.type === "coordinator_mode") {
         dispatch({
           type: "SET_STATUS",
           status: event.active
-            ? `编排模式: ${event.profile} (探索 ${event.directExplorationUsed}/${event.maxDirectExploration})`
-            : "编排模式已关闭",
+            ? `Orchestration: ${event.profile} (exploration ${event.directExplorationUsed}/${event.maxDirectExploration})`
+            : "Orchestration disabled",
         });
       }
       streamBuffer.handle(runId, event);
@@ -1004,7 +1023,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               streamBuffer.finish(runId);
               turnErrorMessage = permissionTurn.signal.aborted
                 ? "aborted"
-                : `已达到自动续跑上限 (${MAX_AUTO_CONTINUES} 次)`;
+                : `Auto-continue limit reached (${MAX_AUTO_CONTINUES} turns)`;
               if (permissionTurn.signal.aborted) {
                 const reason = permissionTurn.signal.reason;
                 dispatch({
@@ -1024,7 +1043,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               }
               break;
             }
-            currentUserText = "继续完成之前的工作";
+            currentUserText = "Continue the remaining work.";
             currentUserContent = currentUserText;
             dispatch({ type: "AUTO_CONTINUE", count: autoContinueCount, max: MAX_AUTO_CONTINUES });
             continue;
@@ -1125,7 +1144,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     permissionRows +
     planApprovalRows +
     (state.pendingImages.length > 0 ? 1 : 0) +
-    (state.spinnerMessage ? 1 : 0) +
     2; // prompt + stable status row
   const naturalFrameHeight = Math.max(
     1,
@@ -1176,6 +1194,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           pendingPermission={state.pendingPermission}
           turnStartedAt={state.turnStartedAt}
           lastStreamAt={state.lastStreamAt}
+          spinnerMessage={state.spinnerMessage}
+          todoPanelVisible={todoRows > 0}
           availableHeight={feedHeight}
           width={termWidth}
           scrollOffset={state.scrollOffset}
@@ -1224,11 +1244,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             ))}
           </Box>
         )}
-        {state.spinnerMessage && (
-          <Box paddingX={1} paddingY={0}>
-            <Text dimColor>{state.spinnerMessage}</Text>
-          </Box>
-        )}
+        {/* The Todo tip renders inside the feed's single loading row. */}
         <Box
           paddingX={1}
           gap={1}
@@ -1296,7 +1312,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                             : "Message, /command, or @file reference"
               }
             />
-            {state.busy && queuedCount > 0 && <Text color={C.running}>Queued {queuedCount}</Text>}
           </Box>
         </Box>
         <StatusBar

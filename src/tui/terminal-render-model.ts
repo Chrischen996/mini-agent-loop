@@ -1,15 +1,17 @@
 import type { ChatMessage, TuiState } from "./state.ts";
-import { parseMarkdownLines, stripInlineMarkdown } from "./markdown-lines.ts";
+import { markdownRowText, markdownRuleText, parseMarkdownLines, stripInlineMarkdown } from "./markdown-lines.ts";
 import { toMessageRenderModel } from "./render-model.ts";
 import type { RenderLine } from "./render-lines.ts";
 import { thinkingRenderLines } from "./thinking-lines.ts";
 import { todoPanelRenderLines } from "./todo-lines.ts";
 import { toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
-import { terminalStringWidth, truncateTerminalPath } from "./terminal-width.ts";
-import { autocompleteRenderLines, panelBottomLine, panelContentLine, panelTopLine, permissionPanelRenderLines, planApprovalRenderLines, todoEditorRenderLines } from "./terminal-overlay-lines.ts";
+import { terminalStringWidth } from "./terminal-width.ts";
+import { autocompleteRenderLines, permissionPanelRenderLines, planApprovalRenderLines, todoEditorRenderLines } from "./terminal-overlay-lines.ts";
+import { pickerChromeRows } from "./picker-window.ts";
 import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
 import type { TodoEditorState } from "./todo-editor.ts";
-import { noticeText, noticeTitle, permissionModeLabel, statusLabel, thinkingLevelLabel, toolArgumentSummary } from "./claude-style.ts";
+import { noticeText, noticeTitle, toolArgumentSummary } from "./claude-style.ts";
+import { buildStatusSegments } from "./status-line.ts";
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import { isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from "./subagent-lines.ts";
 import { activityPresentation, formatActivity, loadingGlyph } from "./activity.ts";
@@ -48,6 +50,8 @@ export type TerminalRenderOptions = {
   input?: string;
   cursor?: number;
   autocomplete?: TerminalAutocompleteState;
+  /** Active `provider/model` reference; the model picker marks it with a ✓. */
+  currentModel?: string;
   maskInput?: boolean;
   /** Current clock sample for deterministic activity rendering and tests. */
   now?: number;
@@ -148,7 +152,7 @@ export function buildTerminalRenderLines(
         })));
       }
       if (message.text) {
-        const textLines = markdownLines(message.text, `message-${index}-text`);
+        const textLines = markdownLines(message.text, `message-${index}-text`, width);
         textLines.forEach((line, lineIndex) => {
           line.prefix = lineIndex === 0 ? `${focused ? "◆" : "⏺"} ` : "  ";
           line.tone = focused ? "running" : line.tone;
@@ -207,8 +211,13 @@ export function buildTerminalRenderLines(
   const wrappedHeader = width === undefined ? header : header.flatMap((line) => wrapRenderLine(line, width));
   const footer: RenderLine[] = [];
   footer.push(...panelLinesInLiveTail);
+  // Slot reserved for the picker or the Todo editor. The picker is filled in
+  // once the rest of the frame is known: fullscreen modes reserve the welcome
+  // panel and the prompt chrome first and hand the overlay what is left, so a
+  // short terminal shrinks (or drops) the picker instead of cutting the panel
+  // mid-border. That mirrors what `getPickerLayout` does for the Ink client.
+  const overlaySlot = footer.length;
   if (options.todoEditor) footer.push(...todoEditorRenderLines(options.todoEditor, width));
-  else footer.push(...autocompleteRenderLines(options.autocomplete));
   footer.push(...permissionPanelRenderLines(state.pendingPermission, width));
   footer.push(...planApprovalRenderLines(state.phase === "review" ? state.currentPlan : undefined, width));
   for (const [index, image] of state.pendingImages.entries()) {
@@ -220,9 +229,10 @@ export function buildTerminalRenderLines(
       dim: true,
     });
   }
-  if (state.spinnerMessage) footer.push({ key: "spinner", text: state.spinnerMessage, prefix: "✻ ", style: "muted", dim: true });
+  // The Todo tip is folded into the single activity row below; a second
+  // spinner row above the prompt duplicated the same live state.
   const now = options.now ?? Date.now();
-  const activity = activityPresentation(state, { now, queuedCount: options.queuedCount });
+  const activity = activityPresentation({ ...state, todoPanelVisible: panelLines.length > 0 }, { now });
   if (activity) {
     const activityPrefix = `${loadingGlyph(now, state.turnStartedAt)} `;
     const activityWidth = width === undefined ? undefined : Math.max(1, width - terminalStringWidth(activityPrefix));
@@ -236,28 +246,29 @@ export function buildTerminalRenderLines(
     });
   }
   if (options.includeStatus !== false) {
-    const cwd = options.header?.cwd?.trim();
-    const mode = permissionModeLabel(state.permissionMode);
-    const visibleStatus = statusLabel(state.status, state.busy);
-    const thinking = options.thinkingLevel ? thinkingLevelLabel(options.thinkingLevel) : undefined;
-    const showThinking = Boolean(thinking && (width === undefined || width >= 68));
-    const contextUsage = options.contextWindow
-      ? `Context ${formatCompactNumber(state.contextTokens)}/${formatCompactNumber(options.contextWindow)}`
-      : state.contextTokens > 0
-        ? `Context ${formatCompactNumber(state.contextTokens)}`
-        : undefined;
-    const idleStatus = !state.busy && visibleStatus !== "Ready" ? visibleStatus : undefined;
-    const fixedContext = [state.modelName, mode, ...(showThinking ? [thinking] : []), contextUsage, idleStatus].filter(Boolean).join(" · ");
-    const pathBudget = width === undefined || !cwd
-      ? undefined
-      : Math.max(8, width - terminalStringWidth(fixedContext) - 6);
-    const visibleCwd = cwd && pathBudget !== undefined ? truncateTerminalPath(cwd, pathBudget) : cwd;
-    const context = [state.modelName, ...(visibleCwd ? [visibleCwd] : []), mode, ...(showThinking ? [thinking] : []), contextUsage, idleStatus].filter(Boolean).join(" · ");
-    const statusPrefix = "· ";
-    const stableContext = width === undefined
-      ? context
-      : truncateTail(context, Math.max(1, width - terminalStringWidth(statusPrefix)));
-    footer.push({ key: "status", text: stableContext, prefix: statusPrefix, prefixTone: "success", style: "muted", dim: true });
+    // Shared with the Ink StatusBar: one segment list owns order, separators,
+    // truncation, and colors so the two clients cannot drift apart again.
+    const segments = buildStatusSegments({
+      modelName: state.modelName,
+      cwd: options.header?.cwd?.trim() || undefined,
+      permissionMode: state.permissionMode,
+      thinkingLevel: options.thinkingLevel,
+      contextTokens: state.contextTokens,
+      contextWindow: options.contextWindow,
+      busy: state.busy,
+      status: state.status,
+      queuedCount: options.queuedCount,
+      cacheReadTokens: state.cacheReadTokens,
+      promptTokens: state.contextTokens,
+      width,
+    });
+    footer.push({
+      key: "status",
+      text: segments.map((segment) => segment.text).join(""),
+      segments,
+      style: "muted",
+      dim: true,
+    });
   }
   if (options.promptRule && width !== undefined) {
     footer.push({ key: "prompt-rule", text: "─".repeat(Math.max(1, width)), style: "border", dim: true });
@@ -265,6 +276,20 @@ export function buildTerminalRenderLines(
   if (options.input !== undefined) {
     const inputLines = inputRenderLines(options.input, options.cursor, options.maskInput);
     footer.push(...(width === undefined ? inputLines : inputLines.flatMap((line) => wrapRenderLine(line, width))));
+  }
+  if (!options.todoEditor) {
+    const reserved = wrappedHeader.length + wrappedPanel.length + footer.length;
+    // The same budget the Ink client computes in `getPickerLayout`: keep the
+    // last terminal row free, reserve the panel and the prompt chrome, and hold
+    // three spare rows back before the picker claims them.
+    const budget = options.height === undefined
+      ? undefined
+      : Math.max(1, options.height) - 1 - reserved - 3 - pickerChromeRows(options.autocomplete?.mode ?? undefined);
+    footer.splice(overlaySlot, 0, ...autocompleteRenderLines(options.autocomplete, {
+      input: options.input,
+      currentModel: options.currentModel ?? options.header?.model,
+      maxItems: budget,
+    }));
   }
   const visibleFooter = scrollback ? footer.map(markEphemeral) : footer;
 
@@ -308,20 +333,6 @@ export function buildTerminalRenderLines(
   return [...visibleHeader, ...visiblePanel, ...clipped, ...clippedFooter];
 }
 
-function truncateTail(value: string, maxWidth: number): string {
-  if (terminalStringWidth(value) <= maxWidth) return value;
-  const suffixWidth = Math.max(1, maxWidth - 1);
-  let suffix = "";
-  let used = 0;
-  for (const grapheme of [...value].reverse()) {
-    const glyphWidth = Math.max(1, terminalStringWidth(grapheme));
-    if (used + glyphWidth > suffixWidth) break;
-    suffix = grapheme + suffix;
-    used += glyphWidth;
-  }
-  return `…${suffix}`;
-}
-
 function truncateEnd(value: string, maxWidth: number): string {
   if (terminalStringWidth(value) <= maxWidth) return value;
   if (maxWidth <= 1) return "…";
@@ -336,12 +347,6 @@ function truncateEnd(value: string, maxWidth: number): string {
   return `${visible}…`;
 }
 
-function formatCompactNumber(value: number): string {
-  if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1))}m`;
-  if (value >= 1_000) return `${Number((value / 1_000).toFixed(value >= 100_000 ? 0 : 1))}k`;
-  return String(Math.max(0, Math.round(value)));
-}
-
 function addMessageGap(lines: RenderLine[], messageIndex: number | string): void {
   if (lines.length === 0 || lines.at(-1)?.text === "") return;
   lines.push({ key: `message-gap-${messageIndex}`, text: "", style: "muted" });
@@ -354,47 +359,36 @@ function markEphemeral(line: RenderLine): RenderLine {
 function toolCardRenderLines(
   message: Extract<ChatMessage, { kind: "tool_call" }>,
   index: number,
-  width?: number,
+  _width?: number,
 ): RenderLine[] {
-  // Claude Code renders the shell command itself inside the tool title rather
-  // than adding a second `$` prompt inside the parentheses.
+  // One compact tool-use row plus a single nested result gutter, matching the
+  // Ink feed and Claude Code's AssistantToolUseMessage/MessageResponse pair.
+  // The fullscreen path used to draw a full-width three-row box for every tool
+  // call, so the same run looked completely different between the two clients
+  // (and buried the transcript under borders).
   const summary = toolArgumentSummary(message.name, message.rawArgs, message.args).replace(/^\$\s*/, "");
   const tone = message.status === "error" ? "error" : undefined;
   const prefixTone = message.status === "error" ? "error" : message.status === "running" ? "running" : "success";
   const label = `${toolVisualName(message.name)}${summary ? `(${summary})` : ""}`;
-  const title = `${toolVisualStatusIcon(message.status)} ${label}`;
-  if (width === undefined) {
-    const marker = message.status === "error" ? "✗ " : "⏺ ";
-    const rows: RenderLine[] = [{
-      key: `message-${index}-tool`,
-      text: label,
-      prefix: marker,
-      style: "tool",
-      tone,
-      prefixTone,
-      bold: true,
-    }];
-    if (message.result) {
-      rows.push(...plainPreviewLines(message.result, `message-${index}-result`).map((line, lineIndex) => ({
-        ...line,
-        // Claude Code's MessageResponse uses one nested result marker and
-        // plain continuation indentation instead of a box-drawing column.
-        prefix: lineIndex === 0 ? "  ⎿ " : "     ",
-      })));
-    } else if (message.status === "running") {
-      rows.push({ key: `message-${index}-result-running`, text: "Working…", prefix: "  ⎿ ", style: "muted", tone: "running", dim: true });
-    }
-    return rows;
-  }
-  const rows: RenderLine[] = [panelTopLine(`message-${index}-tool`, title, width, tone)];
+  const rows: RenderLine[] = [{
+    key: `message-${index}-tool`,
+    text: label,
+    prefix: `${toolVisualStatusIcon(message.status)} `,
+    style: "tool",
+    tone,
+    prefixTone,
+    bold: true,
+  }];
   if (message.result) {
-    rows.push(...plainPreviewLines(message.result, `message-${index}-result`).map((line) => panelContentLine(line.key, line.text, "muted", { width, dim: true })));
+    rows.push(...plainPreviewLines(message.result, `message-${index}-result`).map((line, lineIndex) => ({
+      ...line,
+      // One nested result marker, then plain continuation indentation instead
+      // of a box-drawing column.
+      prefix: lineIndex === 0 ? "  ⎿ " : "     ",
+    })));
   } else if (message.status === "running") {
-    rows.push(panelContentLine(`message-${index}-result-running`, "Working…", "tool", { width, tone: "running", dim: true }));
-  } else {
-    rows.push(panelContentLine(`message-${index}-result-empty`, "No output", "muted", { width, dim: true }));
+    rows.push({ key: `message-${index}-result-running`, text: "Working…", prefix: "  ⎿ ", style: "muted", tone: "running", dim: true });
   }
-  rows.push(panelBottomLine(`message-${index}-tool-bottom`, width));
   return rows;
 }
 
@@ -461,12 +455,19 @@ function wrapRenderLine(line: RenderLine, width: number): RenderLine[] {
   // incremental renderer reuse unchanged rows while still giving continuation
   // rows deterministic identities of their own.
   const continuationPrefix = " ".repeat(terminalStringWidth(line.prefix ?? ""));
-  return rows.map((text, index) => ({
-    ...line,
-    key: index === 0 ? line.key : `${line.key}-w${index}`,
-    prefix: index === 0 ? line.prefix : continuationPrefix,
-    text,
-  }));
+  return rows.map((text, index) => {
+    const wrapped: RenderLine = {
+      ...line,
+      key: index === 0 ? line.key : `${line.key}-w${index}`,
+      prefix: index === 0 ? line.prefix : continuationPrefix,
+      text,
+    };
+    // Inline color runs only describe the unwrapped row. Once a row is split
+    // the segment boundaries no longer line up with the text, so fall back to
+    // the single-color projection instead of repeating stale segments.
+    if (rows.length > 1) delete wrapped.segments;
+    return wrapped;
+  });
 }
 
 function inputRenderLines(value: string, cursor?: number, mask = false): RenderLine[] {
@@ -492,26 +493,30 @@ function splitGraphemes(value: string): string[] {
   return [...value];
 }
 
-function markdownLines(text: string, prefix: string): RenderLine[] {
+/**
+ * Project Markdown onto terminal rows.
+ *
+ * Row text comes from `markdownRowText` so the ANSI client and the Ink
+ * `MarkdownText` component cannot drift: fenced code renders behind a `▌`
+ * gutter instead of literal ``` markers, headings keep their `▸`/`·` bullet,
+ * and tables arrive column-aligned instead of showing raw `| --- | --- |`.
+ */
+function markdownLines(text: string, prefix: string, width?: number): RenderLine[] {
   return parseMarkdownLines(text).map((line, index) => ({
     key: `${prefix}-${index}`,
-    text: line.kind === "rule" ? "─".repeat(48)
-      : line.kind === "heading" ? stripInlineMarkdown(line.text)
-        : line.kind === "list" ? `${line.ordered ? line.marker : "•"} ${stripInlineMarkdown(line.text)}`
-          : line.kind === "quote" ? `│ ${stripInlineMarkdown(line.text)}`
-            : line.kind === "code" || line.kind === "code-fence" ? line.text
-              : stripInlineMarkdown(line.text),
-    style: line.kind === "code" || line.kind === "code-fence" ? "thinking" : line.kind === "heading" ? "assistant" : "assistant",
+    text: line.kind === "rule" ? markdownRuleText(width) : markdownRowText(line),
+    style: line.kind === "code" || line.kind === "code-fence" ? "thinking" : line.kind === "rule" ? "border" : "assistant",
     indent: line.kind === "list" ? line.indent * 2 : undefined,
-    bold: line.kind === "heading",
-    dim: line.kind === "code" || line.kind === "code-fence",
+    bold: line.kind === "heading" || (line.kind === "table" && line.role === "header"),
+    dim: line.kind === "code" || line.kind === "code-fence" || (line.kind === "table" && line.role === "rule"),
   }));
 }
 
 function plainPreviewLines(text: string, prefix: string): RenderLine[] {
   const source = text.split("\n");
   const visible = source.slice(0, 15).map((line, index) => ({ key: `${prefix}-${index}`, text: line, style: "muted" as const, dim: true }));
-  if (source.length > visible.length) visible.push({ key: `${prefix}-more`, text: `… ${source.length - visible.length} more lines`, style: "muted" as const, dim: true });
+  const hidden = source.length - visible.length;
+  if (hidden > 0) visible.push({ key: `${prefix}-more`, text: `… ${hidden} more ${hidden === 1 ? "line" : "lines"}`, style: "muted" as const, dim: true });
   return visible;
 }
 

@@ -41,7 +41,7 @@ export async function writeClipboardText(
   text: string,
   io: ClipboardIo = {},
 ): Promise<ClipboardWriteResult> {
-  if (!text) return { ok: false, method: "none", error: "没有可复制的内容" };
+  if (!text) return { ok: false, method: "none", error: "Nothing to copy" };
 
   const platform = io.platform ?? process.platform;
   const env = io.env ?? process.env;
@@ -52,26 +52,26 @@ export async function writeClipboardText(
   }));
   const writeStdout = io.writeStdout ?? ((data: string) => process.stdout.write(data));
 
-  // ── 第一路径：OSC 52（首选，~0ms，终端原生支持）──────────────────────────
-  // 生成 OSC 52 序列并输出，让终端自行处理复制
+  // ── Path 1: OSC 52 (preferred, ~0ms, handled by the terminal itself) ─────
+  // Emit the OSC 52 sequence and let the terminal perform the copy.
   try {
     const osc52 = encodeOsc52(text);
     writeStdout(osc52);
-    // OSC 52 成功后，fire-and-forget 原生工具作为安全网
-    // 这样即使终端不支持 OSC 52，原生工具仍能写入剪贴板
+    // After OSC 52 succeeds, fire-and-forget a native tool as a safety net so
+    // the clipboard is still filled when the terminal ignores OSC 52.
     if (platform !== "win32") {
       const candidates = nativeCandidates(platform, env);
       for (const candidate of candidates) {
         run(candidate.command, candidate.args, text).catch(() => {}); // fire-and-forget
-        break; // 只试第一个可用的
+        break; // only try the first available backend
       }
     }
     return { ok: true, method: "osc52" };
   } catch (error) {
-    // OSC 52 失败，回退到原生工具
+    // OSC 52 failed; fall back to the native tools.
   }
 
-  // ── 第二路径：原生工具（安全网）────────────────────────────────────────────
+  // ── Path 2: native clipboard tools (safety net) ───────────────────────────
   for (const candidate of nativeCandidates(platform, env)) {
     try {
       await run(candidate.command, candidate.args, text);
@@ -84,7 +84,7 @@ export async function writeClipboardText(
   return {
     ok: false,
     method: "none",
-    error: "所有复制方式均失败",
+    error: "Every clipboard method failed",
   };
 }
 

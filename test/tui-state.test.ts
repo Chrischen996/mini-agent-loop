@@ -99,7 +99,7 @@ describe("TUI sidebar state", () => {
     state = tuiReducer(state, { type: "ATTACHMENT_ERROR", message: "Clipboard has no image" });
 
     assert.equal(state.busy, true);
-    assert.equal(state.status, "图片添加失败");
+    assert.equal(state.status, "Unable to attach image");
     assert.deepEqual(state.messages.at(-1), { kind: "error", text: "Clipboard has no image" });
   });
 
@@ -156,17 +156,17 @@ describe("TUI sidebar state", () => {
     // plan -> approval
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "approval");
-    assert.equal(state.status, "权限模式: 审批");
+    assert.equal(state.status, "Permission mode: Default permissions");
 
     // approval -> bypass
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "bypass");
-    assert.equal(state.status, "权限模式: 绕过");
+    assert.equal(state.status, "Permission mode: Bypass permissions");
 
     // bypass -> plan
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "plan");
-    assert.equal(state.status, "权限模式: 计划");
+    assert.equal(state.status, "Permission mode: Plan mode");
   });
 
   it("preserves permission mode on RESET", () => {
@@ -204,11 +204,11 @@ describe("TUI sidebar state", () => {
       arguments: { path: "src/app.tsx" },
       risk: "high",
     });
-    assert.match(state.status, /等待权限确认: write \(high\).*A 允许.*D 拒绝/);
+    assert.match(state.status, /Waiting for permission: write \(high\).*A allow.*D deny/);
 
     state = tuiReducer(state, { type: "CLEAR_PENDING_PERMISSION" });
     assert.equal(state.pendingPermission, undefined);
-    assert.equal(state.status, "正在执行 write...");
+    assert.equal(state.status, "Running write…");
   });
 
   it("resets busy state when an error occurs", () => {
@@ -225,7 +225,7 @@ describe("TUI sidebar state", () => {
 
     // After error, busy should be reset to false so input is enabled again
     assert.equal(state.busy, false);
-    assert.equal(state.status, "请求失败");
+    assert.equal(state.status, "Request failed");
     assert.equal(state.messages[state.messages.length - 1]?.kind, "error");
   });
 
@@ -238,7 +238,7 @@ describe("TUI sidebar state", () => {
     });
 
     assert.equal(state.busy, true);
-    assert.match(state.status, /准备续跑/);
+    assert.match(state.status, /Turn limit reached \(30\), continuing…/);
 
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
@@ -262,7 +262,7 @@ describe("TUI sidebar state", () => {
 
     assert.equal(state.streamingText, "");
     assert.equal(state.streamingReasoning, "");
-    assert.equal(state.status, "思考结果不完整，正在重试 (1)...");
+    assert.equal(state.status, "Incomplete reasoning, retrying (1)…");
     assert.equal(state.busy, true);
   });
 
@@ -287,7 +287,7 @@ describe("TUI sidebar state", () => {
 
     assert.equal(state.streamingText, "");
     assert.equal(state.streamingReasoning, "");
-    assert.equal(state.status, "请求超时，正在重试 (1/1)...");
+    assert.equal(state.status, "Request timed out, retrying (1/1)…");
     assert.equal(state.busy, true);
   });
 
@@ -298,7 +298,7 @@ describe("TUI sidebar state", () => {
     assert.equal(state.busy, true);
     assert.equal(state.usedTokens, 42_000);
     assert.equal(state.contextTokens, 40_000);
-    assert.equal(state.status, "自动续跑 (1/5)...");
+    assert.equal(state.status, "Continuing… (1/5)");
   });
 
   it("scrolls history and re-pins on new user messages", () => {

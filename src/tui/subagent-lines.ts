@@ -214,7 +214,8 @@ export function subagentRenderLines(
       lines.push({
         key: `message-${key}-subagent-event-${eventIndex}`,
         text: toolEventText(event),
-        prefix: `  ${isLast ? "└─" : "├─"} ⎿ `,
+        // One tree marker per row: the previous `└─ ⎿ ` stacked two gutters.
+        prefix: `  ${isLast ? "└─" : "├─"} `,
         style: event.type === "error" ? "error" : "muted",
         tone: event.type === "error" ? "error" : undefined,
         dim: event.type !== "error",
