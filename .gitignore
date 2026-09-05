@@ -7,3 +7,5 @@ dist/
 .history/
 coverage/
 *.tgz
+package-lock.json
+yarn.lock

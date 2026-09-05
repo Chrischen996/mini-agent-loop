@@ -21,9 +21,11 @@ import {
 	type ToolConfiguration,
 	type ToolResultContentBlock,
 	ToolResultStatus,
+	type ServiceInputTypes as BedrockServiceInputTypes,
+	type ServiceOutputTypes as BedrockServiceOutputTypes,
 } from "@aws-sdk/client-bedrock-runtime";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
-import type { BuildMiddleware, DocumentType, MetadataBearer } from "@smithy/types";
+import type { BuildMiddleware, DocumentType } from "@smithy/types";
 import { HttpProxyAgent } from "http-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { calculateCost } from "../models.ts";
@@ -375,7 +377,12 @@ function isReservedHeader(key: string): boolean {
  * all other caller headers override any existing same-named header on the request.
  */
 function addCustomHeadersMiddleware(client: BedrockRuntimeClient, headers: Record<string, string>): void {
-	const middleware: BuildMiddleware<object, MetadataBearer> = (next) => async (args) => {
+	// Typed against the client's own middleware stack: the AWS SDK resolves
+	// `@smithy/types` from its nested copy, so annotating with the top-level
+	// `BuildMiddleware` makes the overload fall through to the deserialize
+	// signature and fail to compile.
+	type BedrockBuildMiddleware = BuildMiddleware<BedrockServiceInputTypes, BedrockServiceOutputTypes>;
+	const middleware: BedrockBuildMiddleware = (next) => async (args) => {
 		const request = args.request;
 		if (request && typeof request === "object" && "headers" in request) {
 			const requestHeaders = (request as { headers: Record<string, string> }).headers;
@@ -387,7 +394,10 @@ function addCustomHeadersMiddleware(client: BedrockRuntimeClient, headers: Recor
 		}
 		return next(args);
 	};
-	client.middlewareStack.add(middleware, { step: "build", name: "pi-ai-custom-headers", priority: "low" });
+	const buildStep = client.middlewareStack as unknown as {
+		add(middleware: BedrockBuildMiddleware, options: { step: "build"; name: string; priority: "low" }): void;
+	};
+	buildStep.add(middleware, { step: "build", name: "pi-ai-custom-headers", priority: "low" });
 }
 
 export const streamSimple: StreamFunction<"bedrock-converse-stream", SimpleStreamOptions> = (

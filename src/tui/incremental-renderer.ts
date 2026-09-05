@@ -8,14 +8,32 @@ const ANSI_CURSOR_SHOW = "\x1b[?25h";
 
 export type TerminalDisplayMode = "pi" | "scrollback" | "fullscreen";
 
+/** Terminal capabilities that influence the default presentation mode. */
+export type TerminalDisplayCapabilities = {
+  /** True when both stdin and stdout are attached to an interactive TTY. */
+  interactive: boolean;
+};
+
+function currentTerminalCapabilities(): TerminalDisplayCapabilities {
+  return { interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY) };
+}
+
 /**
  * Resolve the standalone terminal presentation mode.
  *
  * pi-tui alternate-screen rendering is the default because it can reflow
  * already-rendered history when a reasoning block is expanded. Scrollback and
  * the previous fixed viewport remain explicit compatibility modes.
+ *
+ * `capabilities` is injectable so the resolution stays a pure function of its
+ * inputs: passing an explicit `env` previously still read ambient
+ * `process.stdin.isTTY`, which made the result depend on how the process was
+ * launched.
  */
-export function resolveTerminalDisplayMode(env: NodeJS.ProcessEnv = process.env): TerminalDisplayMode {
+export function resolveTerminalDisplayMode(
+  env: NodeJS.ProcessEnv = process.env,
+  capabilities: TerminalDisplayCapabilities = currentTerminalCapabilities(),
+): TerminalDisplayMode {
   const mode = env.MINI_AGENT_TUI_MODE?.trim().toLowerCase();
   if (mode === "pi" || mode === "component" || mode === "alternate") return "pi";
   if (mode === "fullscreen" || mode === "full") return "fullscreen";
@@ -28,7 +46,7 @@ export function resolveTerminalDisplayMode(env: NodeJS.ProcessEnv = process.env)
   if (scrollback === "0" || scrollback === "false" || scrollback === "no") return "fullscreen";
   // In VS Code sandbox / non-interactive terminals, default to scrollback
   // to avoid pi-tui alternate-screen redraw overhead.
-  if (!process.stdin.isTTY || !process.stdout.isTTY) return "scrollback";
+  if (!capabilities.interactive) return "scrollback";
   return "pi";
 }
 

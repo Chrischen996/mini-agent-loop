@@ -35,6 +35,8 @@
     "dev:server": "tsx watch src/server.ts",
     "serve": "tsx src/server.ts",
     "build": "tsx build.ts",
+    "generate-models": "tsx scripts/generate-models.ts",
+    "generate-models:check": "tsx scripts/generate-models.ts --check",
     "build:package": "tsx build.ts && node -e \"const fs=require('node:fs'); fs.chmodSync('dist/cli.js', 0o755); fs.chmodSync('dist/tui.js', 0o755)\"",
     "prepack": "npm run build:package",
     "dev:inspect": "node --inspect=0.0.0.0:8888 --import tsx src/tui/ink-main.tsx",

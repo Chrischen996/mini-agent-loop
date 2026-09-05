@@ -29,9 +29,10 @@ export function extractFileAcTrigger(input: string): FileAcTrigger | null {
     };
   }
 
-  // Ordinary bare words are prompt text, not file paths. File completion is
-  // intentionally opt-in through an explicit @ reference or slash command.
-  return null;
+  // Single bare words stay eligible for direct completion: the async candidate
+  // lookup decides whether a matching file exists, so ordinary prose (which is
+  // rejected below because it contains whitespace) never opens a picker.
+  return extractBareFileAcTrigger(input);
 }
 
 export function extractBareFileAcTrigger(input: string): FileAcTrigger | null {
