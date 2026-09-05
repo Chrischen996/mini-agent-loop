@@ -73,9 +73,6 @@
   "dependencies": {
     "@anthropic-ai/sdk": "0.91.1",
     "@aws-sdk/client-bedrock-runtime": "3.1048.0",
-    "@earendil-works/pi-agent-core": "0.80.6",
-    "@earendil-works/pi-ai": "0.80.6",
-    "@earendil-works/pi-coding-agent": "0.80.6",
     "@earendil-works/pi-tui": "0.80.6",
     "@google/genai": "1.52.0",
     "@mistralai/mistralai": "2.2.6",
