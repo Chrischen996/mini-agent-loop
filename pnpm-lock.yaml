@@ -19,15 +19,6 @@ importers:
       '@aws-sdk/client-bedrock-runtime':
         specifier: 3.1048.0
         version: 3.1048.0
-      '@earendil-works/pi-agent-core':
-        specifier: 0.80.6
-        version: 0.80.6(@modelcontextprotocol/sdk@1.25.2(hono@4.13.0)(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(ws@8.21.1)(zod@4.4.3)
-      '@earendil-works/pi-ai':
-        specifier: 0.80.6
-        version: 0.80.6(@modelcontextprotocol/sdk@1.25.2(hono@4.13.0)(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(ws@8.21.1)(zod@4.4.3)
-      '@earendil-works/pi-coding-agent':
-        specifier: 0.80.6
-        version: 0.80.6(@modelcontextprotocol/sdk@1.25.2(hono@4.13.0)(supports-color@7.2.0)(zod@4.4.3))(supports-color@7.2.0)(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-tui':
         specifier: 0.80.6
         version: 0.80.6
@@ -1038,6 +1029,7 @@ packages:
   '@xmldom/xmldom@0.8.13':
     resolution: {integrity: sha512-KRYzxepc14G/CEpEGc3Yn+JKaAeT63smlDr+vjB8jRfgTBBI9wRj/nkQEO+ucV8p8I9bfKLWp37uHgFrbntPvw==}
     engines: {node: '>=10.0.0'}
+    deprecated: this version has critical issues, please update to the latest version
 
   accepts@2.0.0:
     resolution: {integrity: sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==}
