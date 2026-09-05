@@ -14,15 +14,35 @@ export function formatRenderLine(line: RenderLine): string {
   const strike = line.strikethrough ? "\x1b[9m" : "";
   const color = renderLineColor(line);
   codes.push(hexToAnsi(color));
-  if (line.background) {
-    const background = line.background === "user" ? "48;5;236" : line.background === "selection" ? "48;5;24" : "48;5;178";
-    codes.push(...background.split(";").map(Number));
-  }
+  if (line.background) codes.push(...backgroundCodes(line.background));
   const prefix = line.prefix ?? "";
-  const visible = `${prefix}${line.text}`;
+  const body = line.segments?.length
+    ? line.segments.map((segment) => segment.text).join("")
+    : line.text;
+  const visible = `${prefix}${body}`;
   const fill = line.fillWidth === undefined
     ? ""
     : " ".repeat(Math.max(0, line.fillWidth - terminalStringWidth(indent + visible)));
+
+  // Chrome rows carry several colors on one physical row (the status line is
+  // the main case). Each segment resets only the attributes it owns so the
+  // row-level background and strike-through survive.
+  if (line.segments?.length) {
+    const base = `\x1b[${codes.join(";")}m`;
+    const pointerColor = hexToAnsi(line.prefixTone === undefined ? C.muted : renderLineColor({ ...line, tone: line.prefixTone }));
+    let out = `${indent}${strike}${base}`;
+    if (prefix) out += `\x1b[${pointerColor}m${prefix}`;
+    for (const segment of line.segments) {
+      const segmentCodes: Array<number | string> = [];
+      if (segment.bold) segmentCodes.push(1);
+      if (segment.italic) segmentCodes.push(3);
+      if (segment.dim) segmentCodes.push(2);
+      segmentCodes.push(hexToAnsi(segment.color ?? color));
+      if (line.background) segmentCodes.push(...backgroundCodes(line.background));
+      out += `\x1b[${segmentCodes.join(";")}m${segment.text}`;
+    }
+    return `${out}${fill}\x1b[0m`;
+  }
 
   // Keep the activity marker independent from the body. Claude Code uses a
   // quiet gutter/pointer even when a live operation is highlighted in amber.
@@ -32,6 +52,11 @@ export function formatRenderLine(line: RenderLine): string {
     return `${indent}${strike}\x1b[${codes.join(";")}m\x1b[${pointerColor}m${prefix}\x1b[${bodyColor}m${line.text}${fill}\x1b[0m`;
   }
   return `${indent}${strike}\x1b[${codes.join(";")}m${visible}${fill}\x1b[0m`;
+}
+
+function backgroundCodes(background: NonNullable<RenderLine["background"]>): number[] {
+  const value = background === "user" ? "48;5;236" : background === "selection" ? "48;5;24" : "48;5;178";
+  return value.split(";").map(Number);
 }
 
 function renderLineColor(line: Pick<RenderLine, "style" | "tone">): string {

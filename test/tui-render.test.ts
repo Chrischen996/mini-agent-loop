@@ -43,7 +43,7 @@ describe("legacy TUI renderer", () => {
     }, width);
     const welcomeRows = lines.filter((line) => line.includes("header-welcome") === false);
     const expected = buildWelcomePanelRows(width);
-    assert.match(lines[0] ?? "", /mini-agent v0\.1\.0/);
+    assert.match(lines[0] ?? "", /mini-agent v/);
     assert.match(lines.join("\n"), /Tips for getting started/);
     assert.match(lines.join("\n"), /What's new/);
     assert.equal(expected.length, 10);

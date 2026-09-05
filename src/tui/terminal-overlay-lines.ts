@@ -3,11 +3,13 @@ import type { PendingPermissionState } from "./state.ts";
 import type { RenderLine } from "./render-lines.ts";
 import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
 import type { TodoEditorState } from "./todo-editor.ts";
-import { permissionRiskLabel, toolArgumentSummary } from "./claude-style.ts";
+import { PICKER_SELECTED_MARKER, PICKER_UNSELECTED_MARKER, TODO_EDITOR_DRAFT_HINT, TODO_EDITOR_SELECT_HINT, permissionRiskLabel, toolArgumentSummary } from "./claude-style.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { toolVisualName } from "./tool-lines.ts";
 import { executionStepStatusToTodoStatus, todoIcon } from "./todo-format.ts";
 import { SESSION_PICKER_HINT } from "./session-serialization.ts";
+import { commandUsageColumn } from "./slash-commands.ts";
+import { formatContextWindow } from "./status-line.ts";
 
 type PanelTone = RenderLine["tone"];
 
@@ -73,19 +75,27 @@ export function panelBottomLine(key: string, width?: number): RenderLine {
   return { key, text: `╰${"─".repeat(safeWidth - 2)}╯`, style: "border", dim: true };
 }
 
-/** Terminal row model for the same permission card rendered by Ink. */
+/**
+ * Terminal row model for the same permission card rendered by Ink.
+ *
+ * Row-for-row identical to `PermissionPanel.tsx`: the caption lives in the
+ * border, then the tool, the risk, the question, and one options row carrying
+ * the key hints. The previous seven-row variant repeated "Permission required"
+ * inside the card and split the choices from their keys, so the two clients
+ * reserved a different number of rows for the same overlay.
+ */
 export function permissionPanelRenderLines(request?: PendingPermissionState, width?: number): RenderLine[] {
   if (!request) return [];
   const argument = toolArgumentSummary(request.tool, request.arguments ?? {});
   const target = argument ? ` (${argument})` : "";
   const risk = permissionRiskLabel(request.risk);
+  const tone: PanelTone = request.risk === "high" ? "error" : "running";
   return [
-    panelTopLine("permission-top", "Permission required", width, request.risk === "high" ? "error" : "running"),
-    panelContentLine("permission-title", `Claude needs permission to use ${toolVisualName(request.tool)}${target}`, "error", { width, tone: request.risk === "high" ? "error" : "running", bold: true }),
+    panelTopLine("permission-top", `⚠ Permission required`, width, tone),
+    panelContentLine("permission-title", `${toolVisualName(request.tool)}${target}`, "assistant", { width, tone, bold: true }),
     panelContentLine("permission-risk", `Risk: ${risk}`, "muted", { width, dim: true }),
     panelContentLine("permission-question", "Do you want to proceed?", "assistant", { width }),
-    panelContentLine("permission-options", "❯ Allow    Deny", "assistant", { width, tone: "running", bold: true }),
-    panelContentLine("permission-keys", "A allow  ·  D/Enter deny  ·  Esc cancel", "muted", { width, dim: true }),
+    panelContentLine("permission-options", `❯ A Allow  ·  D/Enter Deny  ·  Esc cancel`, "assistant", { width, tone: "running", bold: true }),
     panelBottomLine("permission-bottom", width),
   ];
 }
@@ -101,9 +111,8 @@ export function planApprovalRenderLines(plan?: ExecutionPlan, width?: number): R
   }
   const risks = [`${plan.steps.length} steps`, ...(high ? [`${high} high risk`] : []), ...(medium ? [`${medium} medium risk`] : [])];
   const rows: RenderLine[] = [
-    panelTopLine("plan-top", "Plan approval", width, "running"),
+    panelTopLine("plan-top", "▣ Plan approval", width, "running"),
     panelContentLine("plan-title", plan.summary, "tool", { width, tone: "running", bold: true }),
-    panelContentLine("plan-risks", risks.join("  ·  "), "muted", { width, dim: true }),
   ];
   for (const [index, step] of plan.steps.slice(0, 4).entries()) {
     rows.push(panelContentLine(
@@ -119,7 +128,9 @@ export function planApprovalRenderLines(plan?: ExecutionPlan, width?: number): R
   }
   if (plan.steps.length > 4) rows.push(panelContentLine("plan-more", `… ${plan.steps.length - 4} more steps`, "muted", { width, dim: true }));
   rows.push(
-    panelContentLine("plan-options", "❯ Approve    Reject", "assistant", { width, tone: "running", bold: true }),
+    // Same order as the Ink approval bar: steps first, then the risk tally.
+    panelContentLine("plan-risks", risks.join("  ·  "), "muted", { width, dim: true }),
+    panelContentLine("plan-options", "❯ Approve  ·  Reject", "assistant", { width, tone: "running", bold: true }),
     panelContentLine("plan-keys", "A approve  ·  R reject", "muted", { width, dim: true }),
     panelBottomLine("plan-bottom", width),
   );
@@ -144,7 +155,7 @@ export function todoEditorRenderLines(state?: TodoEditorState, width?: number): 
       const selected = index === state.selectedIndex;
       rows.push(panelContentLine(
         `todo-editor-item-${todo.id}`,
-        `${selected ? "❯" : " "} ${todoIcon(todo.status)} ${todo.content}`,
+        `${selected ? PICKER_SELECTED_MARKER : PICKER_UNSELECTED_MARKER} ${todoIcon(todo.status)} ${todo.content}`,
         selected ? "assistant" : "muted",
         {
           width,
@@ -172,9 +183,7 @@ export function todoEditorRenderLines(state?: TodoEditorState, width?: number): 
   rows.push(
     panelContentLine(
       "todo-editor-keys",
-      state.mode === "select"
-        ? "↑↓ move  ·  space status  ·  a add  ·  e edit  ·  d delete  ·  esc close"
-        : "enter confirm  ·  esc cancel",
+      state.mode === "select" ? TODO_EDITOR_SELECT_HINT : TODO_EDITOR_DRAFT_HINT,
       "muted",
       { width, dim: true },
     ),
@@ -249,11 +258,29 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState): Rend
     return rows;
   }
   const rows: RenderLine[] = [];
-  const values = state.argumentCandidates && state.argumentPrefix
-    ? state.argumentCandidates
-    : state.mode === "command" ? state.commands.map((item) => `/${item.name}`)
+  const argumentPalette = Boolean(state.argumentCandidates && state.argumentPrefix);
+  // The command palette shows the same `usage  description` columns as the Ink
+  // FileAutocomplete overlay; it used to list bare names, so the two clients
+  // advertised the catalog differently.
+  const values = argumentPalette
+    ? state.argumentCandidates!
+    : state.mode === "command" ? state.commands.map((item) => item.usage)
     : state.mode === "file" ? state.files
       : state.models;
+  // Second column: command descriptions and model context sizes, matching the
+  // Ink FileAutocomplete/ModelPicker overlays.
+  const details = argumentPalette
+    ? []
+    : state.mode === "command"
+      ? state.commands.map((item) => item.description)
+      : state.mode === "model" || state.mode === "model-picker"
+        ? values.map((model) => `${formatContextWindow(state.modelContextWindows[model] ?? 0)} context`)
+        : [];
+  const detailColumn = details.length === 0
+    ? 0
+    : state.mode === "command"
+      ? commandUsageColumn(state.commands)
+      : Math.min(40, Math.max(0, ...values.slice(0, 12).map((value) => value.length)) + 2);
   const title = state.argumentCandidates && state.argumentPrefix
     ? `${state.argumentPrefix.trim()} arguments`
     : state.mode === "command" ? "Commands" : state.mode === "file" ? `Files ${state.fileFragment}` : "Models";
@@ -301,9 +328,10 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState): Rend
     rows.push({ key: "autocomplete-empty", text: state.mode === "model" || state.mode === "model-picker" ? "No matching models" : "No matches", style: "muted", tone: "running", dim: true });
   }
   for (const [index, value] of visibleValues.entries()) {
+    const detail = details[index];
     rows.push({
       key: `autocomplete-${index}-${value}`,
-      text: `${index === state.index ? "❯" : " "} ${value}`,
+      text: `${index === state.index ? "❯" : " "} ${detailColumn > 0 && detail ? `${value.padEnd(Math.max(detailColumn, value.length + 2))}${detail}` : value}`,
       style: index === state.index ? "assistant" : "muted",
       tone: index === state.index ? "running" : "default",
     });

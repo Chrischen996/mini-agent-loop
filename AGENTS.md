@@ -25,8 +25,9 @@ npm test                                      # offline full suite
 npx tsx --test test/loop.test.ts              # focused test example
 npm run typecheck                             # strict TypeScript check
 npm run build                                 # Vite/Node22 bundle to dist/
-npm run tui                                   # default standalone ANSI terminal UI
-npm run tui:ink                               # legacy Ink/React UI
+npm run tui                                   # default Ink/React terminal UI
+npm run tui:terminal                          # standalone ANSI scrollback renderer
+npm run tui:legacy                            # dependency-free compatibility client
 npm run dev                                   # watch Express server
 ```
 
@@ -38,5 +39,8 @@ There is no configured lint script. Tests do not require an API key; live CLI/TU
 - Validate tool arguments before execution. Tool failures must become `isError` tool-result messages, not crash the loop; every tool call gets a result before the next LLM call; `maxTurns` remains a hard stop.
 - Treat workspace boundaries and symlink protection as security constraints. Do not weaken permission checks, sandboxing, MCP opt-in, or path validation to make a test pass.
 - Permission modes are `plan` (default, analysis/read-only), `approval`, and `bypass`; keep behavior consistent across CLI, server, and both TUIs.
-- The default terminal UI is the standalone ANSI scrollback renderer. Preserve its live-tail behavior and avoid full-screen `ESC[2J` clears during streamed output. Keep reducer, agent-service, autocomplete, permission, and session behavior shared with the Ink client.
+- The default terminal UI is the Ink/React client (`npm run tui`); the standalone ANSI scrollback renderer stays available as `npm run tui:terminal`. Preserve the ANSI renderer's live-tail behavior and avoid full-screen `ESC[2J` clears during streamed output.
+- Keep reducer, agent-service, autocomplete, permission, and session behavior shared between both TUI clients. Presentation is shared too: `status-line.ts` (status segments), `slash-commands.ts` (command catalog + `/help`), `markdown-lines.ts` (markdown rows), `loading.ts` (spinner frames/cadence), `claude-style.ts` (labels), and `welcome-panel.ts`. Render chrome through those modules instead of composing it per client, or the two UIs drift apart.
+- TUI notices and status strings are English at the source. `noticeTitle`/`noticeText`/`statusLabel` only translate legacy Chinese strings recovered from persisted sessions; never add new user-facing Chinese text, and never let a translation fallback blank a message body.
+- Tool calls render as compact Claude-style rows (`✓ Name(args)` plus a nested `⎿` result gutter) in both clients — no full-width boxes. Live work shows exactly one spinner row; fold transient tips into it rather than stacking another.
 - Run focused tests for touched modules, then `npm test`, `npm run typecheck`, and `npm run build` when changes affect runtime or packaging.

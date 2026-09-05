@@ -48,7 +48,8 @@ export function routeTodoEditorKey(input: {
   if (key.return) return "confirm";
   if (ch === "a" || ch === "A") return "add";
   if (ch === "e" || ch === "E") return "edit";
-  if (ch === "s" || ch === "S") return "status";
+  // Both clients accept `space` and `s` so the shared hint is truthful.
+  if (ch === "s" || ch === "S" || ch === " ") return "status";
   if (ch === "d" || ch === "D") return "delete";
   return "prompt";
 }

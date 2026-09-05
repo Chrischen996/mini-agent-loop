@@ -2,6 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { CommandPalette, FileAutocomplete, ModelPicker, SessionPalette } from "./FileAutocomplete.tsx";
 import { TUI_COLORS as C } from "../theme.ts";
+import { PICKER_SELECTED_MARKER, PICKER_UNSELECTED_MARKER } from "../claude-style.ts";
 import type { ModelSetupState, PendingProfileSetup, ProfileListState } from "../types.ts";
 import type { CommandDef } from "./FileAutocomplete.tsx";
 import type { AcMode } from "../input-utils.ts";
@@ -89,7 +90,7 @@ export function Overlays({
         {resumeMessageCandidates.length === 0 && <Text color={C.running}>No selectable messages</Text>}
         {resumeMessageCandidates.map((candidate, index) => (
           <Box key={`${candidate.id ?? candidate.boundary}-${index}`} gap={1} minWidth={0}>
-            <Text color={index === acIndex ? C.running : undefined} bold={index === acIndex}>{index === acIndex ? "▶" : " "}</Text>
+            <Text color={index === acIndex ? C.running : undefined} bold={index === acIndex}>{index === acIndex ? PICKER_SELECTED_MARKER : PICKER_UNSELECTED_MARKER}</Text>
             <Text color={index === acIndex ? C.assistant : C.muted} bold={index === acIndex} wrap="truncate-end">
               {candidate.role}  {candidate.text || "(tool call)"}
             </Text>
@@ -177,7 +178,7 @@ export function Overlays({
           const index = start + visibleIndex;
           return (
             <Text key={profile.name} color={index === profileListState.selectedIndex ? C.assistant : C.muted} wrap="truncate-end">
-              {index === profileListState.selectedIndex ? "▶ " : "  "}
+              {index === profileListState.selectedIndex ? `${PICKER_SELECTED_MARKER} ` : "  "}
               {profile.active ? "✓ " : "  "}
               {profile.name} ({profile.model}) — {profile.baseUrl}
             </Text>

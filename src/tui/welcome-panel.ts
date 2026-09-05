@@ -36,6 +36,9 @@ const BRAND_ART = [
   "  ▘▘ ▝▝  ",
 ] as const;
 
+/** Blank columns kept between panel text and its `│` borders. */
+const CELL_PADDING = 1;
+
 /** The wide welcome panel is intentionally unavailable below this width. */
 export const WELCOME_PANEL_MIN_WIDTH = 70;
 
@@ -97,17 +100,25 @@ function frameBody(left: string, rightColumn: string, leftWidth: number): string
   return `│${fit(left, leftWidth)}│${rightColumn}│`;
 }
 
+/**
+ * Center a value inside a panel cell while always keeping one space of
+ * padding on each side. The previous version let a long model name or path
+ * fill the cell exactly, so the text touched both `│` borders.
+ */
 function center(value: string, width: number): string {
-  const visible = fit(value, width);
+  const available = Math.max(1, width - CELL_PADDING * 2);
+  const visible = fit(value, available);
   const padding = Math.max(0, width - terminalStringWidth(visible));
   const left = Math.floor(padding / 2);
   return `${" ".repeat(left)}${visible}${" ".repeat(padding - left)}`;
 }
 
+/** Left-align a value inside a panel cell with the same guaranteed padding. */
 function right(value: string, width: number): string {
-  const available = Math.max(1, width - 1);
+  const available = Math.max(1, width - CELL_PADDING * 2);
   const visible = fit(value, available);
-  return ` ${visible}${" ".repeat(Math.max(0, available - terminalStringWidth(visible)))}`;
+  const trailing = Math.max(CELL_PADDING, width - CELL_PADDING - terminalStringWidth(visible));
+  return `${" ".repeat(CELL_PADDING)}${visible}${" ".repeat(trailing)}`;
 }
 
 function fit(value: string, width: number): string {

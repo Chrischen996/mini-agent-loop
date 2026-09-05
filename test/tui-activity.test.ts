@@ -5,9 +5,12 @@ import {
   formatActivity,
   loadingGlyph,
   LOADING_FRAME_MS,
+  LOADING_GLYPHS,
   STREAM_STALL_NOTICE_MS,
   STREAM_STALL_WARNING_MS,
 } from "../src/tui/activity.ts";
+import { CLAUDE_SPINNER_FRAMES, SPINNER_INTERVAL_MS } from "../src/tui/loading.ts";
+import { terminalStringWidth } from "../src/tui/terminal-width.ts";
 import { createInitialState } from "../src/tui/state.ts";
 
 describe("TUI activity presentation", () => {
@@ -50,8 +53,25 @@ describe("TUI activity presentation", () => {
   });
 
   it("uses stable one-column spinner glyphs", () => {
-    assert.equal(loadingGlyph(0, 0), "·");
-    assert.equal(loadingGlyph(LOADING_FRAME_MS, 0), "✢");
-    assert.equal([...loadingGlyph(LOADING_FRAME_MS * 5, 0)].length, 1);
+    // Both clients share one frame set: `activity.ts` must not keep a private
+    // glyph list whose `·` frame collided with the `·` status separators.
+    assert.deepEqual(LOADING_GLYPHS, CLAUDE_SPINNER_FRAMES);
+    assert.equal(LOADING_FRAME_MS, SPINNER_INTERVAL_MS);
+    assert.equal(loadingGlyph(0, 0), CLAUDE_SPINNER_FRAMES[0]);
+    assert.equal(loadingGlyph(LOADING_FRAME_MS, 0), CLAUDE_SPINNER_FRAMES[1]);
+    assert.equal(loadingGlyph(LOADING_FRAME_MS * (CLAUDE_SPINNER_FRAMES.length + 2), 0), CLAUDE_SPINNER_FRAMES[2]);
+    for (const glyph of LOADING_GLYPHS) assert.equal(terminalStringWidth(glyph), 1);
+    assert.ok(!(LOADING_GLYPHS as readonly string[]).includes("·"));
+  });
+
+  it("folds the Todo tip into the single activity row", () => {
+    const state = { ...createInitialState("test-model"), busy: true, status: "", spinnerMessage: "▶ Inspecting files" };
+    const activity = activityPresentation(state, { now: 0 });
+    assert.equal(activity?.phase, "working");
+    assert.equal(formatActivity(activity!), "Inspecting files…");
+    // A more specific phase still wins over the tip.
+    const streaming = activityPresentation({ ...state, streamingText: "answer" }, { now: 0 });
+    assert.equal(streaming?.phase, "responding");
+    assert.equal(streaming?.label, "Responding…");
   });
 });

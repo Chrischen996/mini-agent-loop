@@ -165,7 +165,7 @@ export function formatAmbiguousSessionNotice(
   prefix: string,
   candidates: readonly PersistedSessionMeta[],
 ): string {
-  return `前缀 ${prefix || "(最近会话)"} 匹配多个会话，请使用更长前缀或完整 ID:\n${formatSessionCandidates(candidates)}`;
+  return `Prefix ${prefix || "(latest)"} matches multiple sessions. Use a longer prefix or the full ID:\n${formatSessionCandidates(candidates)}`;
 }
 
 export type ResumeMessageCandidate = {

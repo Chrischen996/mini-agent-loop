@@ -5,7 +5,8 @@ import { permissionPanelRenderLines, planApprovalRenderLines } from "../src/tui/
 import { createInitialState, tuiReducer } from "../src/tui/state.ts";
 import { terminalStringWidth, truncateTerminalPath } from "../src/tui/terminal-width.ts";
 import { displaySubagentTask, isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from "../src/tui/subagent-lines.ts";
-import { stripInlineMarkdown } from "../src/tui/markdown-lines.ts";
+import { markdownRowText, parseMarkdownLines, stripInlineMarkdown } from "../src/tui/markdown-lines.ts";
+import { LOADING_GLYPHS } from "../src/tui/activity.ts";
 import { TUI_BRAND_HEADER_HEIGHT, TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "../src/tui/brand.ts";
 import { buildWelcomePanelRows } from "../src/tui/welcome-panel.ts";
 import type { TerminalAutocompleteState } from "../src/tui/terminal-autocomplete-controller.ts";
@@ -30,7 +31,7 @@ describe("standalone terminal render model", () => {
     });
     assert.equal(rows.length, 10);
     for (const row of rows) assert.equal(terminalStringWidth(row.text), width);
-    assert.match(rows[0]?.text ?? "", /╭─ mini-agent v0\.1\.0/);
+    assert.match(rows[0]?.text ?? "", /╭─ mini-agent v/);
     assert.match(rows[1]?.text ?? "", /Welcome back!/);
     assert.match(rows[1]?.text ?? "", /Tips for getting started/);
     assert.match(rows[5]?.text ?? "", /What's new/);
@@ -236,10 +237,18 @@ describe("standalone terminal render model", () => {
     assert.equal(lines.find((line) => line.key.startsWith("message-1"))?.prefix, "⏺ ");
     assert.ok(lines.some((line) => line.key.startsWith("message-gap-")));
     assert.equal(lines.find((line) => line.key === "prompt-rule")?.text.length, 100);
-    assert.equal(lines.find((line) => line.key === "activity")?.prefix, "· ");
+    // The activity row animates with the single shared spinner, so assert the
+    // glyph comes from that set instead of pinning one time-dependent frame.
+    const activityPrefix = lines.find((line) => line.key === "activity")?.prefix ?? "";
+    assert.equal(activityPrefix.endsWith(" "), true);
+    assert.ok((LOADING_GLYPHS as readonly string[]).includes(activityPrefix.trim()));
     assert.match(lines.find((line) => line.key === "activity")?.text ?? "", /Finalizing response/);
-    assert.equal(lines.find((line) => line.key === "status")?.prefix, "· ");
-    assert.match(lines.find((line) => line.key === "status")?.text ?? "", /claude-sonnet · \/workspace · Plan mode/);
+    // The status row carries its own colored segments (marker included), which
+    // is what lets the ANSI footer match the Ink StatusBar segment for segment.
+    const status = lines.find((line) => line.key === "status");
+    assert.equal(status?.prefix, undefined);
+    assert.equal(status?.segments?.[0]?.role, "marker");
+    assert.match(status?.text ?? "", /claude-sonnet · \/workspace · Plan mode/);
   });
 
   it("keeps the three-row brand header above restored conversation messages", () => {
@@ -281,7 +290,7 @@ describe("standalone terminal render model", () => {
     const lines = buildTerminalRenderLines(state);
     const tool = lines.find((line) => line.key.endsWith("-tool"));
     assert.match(tool?.text ?? "", /Read\(src\/app\.tsx\)/);
-    assert.equal(tool?.prefix, "⏺ ");
+    assert.equal(tool?.prefix, "✓ ");
     assert.equal(lines.find((line) => line.key.endsWith("-result-0"))?.prefix, "  ⎿ ");
   });
 
@@ -295,17 +304,20 @@ describe("standalone terminal render model", () => {
     assert.equal(error?.tone, undefined);
   });
 
-  it("renders completed tools as full-width cards when terminal width is known", () => {
+  it("renders completed tools as compact status rows instead of full-width cards", () => {
     let state = createInitialState("test-model");
     state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "tool_start", call: { id: "tool-1", name: "read", arguments: { path: "src/app.tsx" } } } });
     state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "tool_end", call: { id: "tool-1", name: "read", arguments: { path: "src/app.tsx" } }, result: { content: "line one\nline two", isError: false } } });
     const width = 36;
     const lines = buildTerminalRenderLines(state, { width });
-    const card = lines.filter((line) => line.key.includes("message-0-tool") || line.key.includes("message-0-result"));
-    assert.ok(card.length >= 4);
-    for (const line of card) assert.equal(terminalStringWidth(`${line.prefix ?? ""}${line.text}`), width);
-    assert.equal(card[0]?.text.at(0), "╭");
-    assert.equal(card.at(-1)?.text.at(-1), "╯");
+    const rows = lines.filter((line) => line.key.includes("message-0-tool") || line.key.includes("message-0-result"));
+    // One status row plus a nested `⎿` gutter for the result: no box chrome, so
+    // the ANSI projection matches the Ink tool row at any terminal width.
+    assert.equal(rows[0]?.prefix, "✓ ");
+    assert.match(rows[0]?.text ?? "", /^Read\(src\/app\.tsx\)/);
+    assert.equal(rows[1]?.prefix, "  ⎿ ");
+    assert.equal(rows.some((line) => /[╭╰]/.test(line.text)), false);
+    for (const line of rows) assert.ok(terminalStringWidth(`${line.prefix ?? ""}${line.text}`) <= width);
   });
 
   it("uses append-only transcript rows and a live tail in scrollback mode", () => {
@@ -323,7 +335,7 @@ describe("standalone terminal render model", () => {
     const firstLive = lines.findIndex((line) => line.ephemeral);
     assert.ok(firstLive > 0);
     assert.equal(lines.slice(0, firstLive).some((line) => line.text.at(0) === "╭"), false);
-    assert.equal(lines.find((line) => line.key === "message-1-tool")?.prefix, "⏺ ");
+    assert.equal(lines.find((line) => line.key === "message-1-tool")?.prefix, "⟳ ");
     assert.ok(lines.slice(firstLive).every((line) => line.ephemeral));
   });
 
@@ -552,8 +564,8 @@ describe("standalone terminal render model", () => {
     };
     const rows = subagentRenderLines(message, "x");
     assert.match(rows[0]?.text ?? "", /3\.2k tokens/);
-    assert.equal(rows[1]?.prefix, "  ├─ ⎿ ");
-    assert.equal(rows[2]?.prefix, "  └─ ⎿ ");
+    assert.equal(rows[1]?.prefix, "  ├─ ");
+    assert.equal(rows[2]?.prefix, "  └─ ");
 
     const completedRows = subagentRenderLines({ ...message, expanded: false, result: "review complete" }, "done");
     assert.match(completedRows[1]?.text ?? "", /Done \(1 tool use · 3\.2k tokens · 1\.3s\)/);
