@@ -26,7 +26,7 @@ function model(): ModelRef {
   };
 }
 
-function dependencies(): InputDeps {
+function dependencies(): InputDeps & { [key: string]: unknown } {
   const store = createTuiStore(createInitialState("model"));
   const permissionManager = new PermissionManager("plan");
   const service = new TerminalAgentService({
@@ -184,7 +184,7 @@ describe("terminal main input routing", () => {
     const editorRef: { current: TodoEditorState | null } = { current: null };
     deps.todoEditor = {
       getState: () => editorRef.current,
-      setState: (next) => { editorRef.current = next; },
+      setState: (next: TodoEditorState) => { editorRef.current = next; },
     };
     deps.commitTodoEditor = () => {
       if (!editorRef.current) return;

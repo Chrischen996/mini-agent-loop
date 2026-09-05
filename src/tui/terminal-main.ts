@@ -965,13 +965,16 @@ async function submitInput(
     input.clear();
     store.dispatch({ type: "USER_MESSAGE", text });
     const abortController = new AbortController();
-    const args = slashCommand.cmd === "read" || slashCommand.cmd === "ls"
-      ? { path: slashCommand.path }
-      : slashCommand.cmd === "bash"
-        ? { command: slashCommand.command }
-        : slashCommand.cmd === "find"
-          ? { pattern: slashCommand.pattern, path: slashCommand.path }
-          : { pattern: slashCommand.pattern, path: slashCommand.path };
+    let args: { path: string } | { command: string } | { pattern: string; path: string };
+    if (slashCommand.cmd === "read" || slashCommand.cmd === "ls") {
+      args = { path: slashCommand.path };
+    } else if (slashCommand.cmd === "bash") {
+      args = { command: slashCommand.command };
+    } else if (slashCommand.cmd === "find" || slashCommand.cmd === "grep") {
+      args = { pattern: slashCommand.pattern, path: slashCommand.path };
+    } else {
+      args = { pattern: "", path: "." };
+    }
     deps.directAbortRef.current = abortController;
     try {
       const directResult = await runDirectTool(slashCommand.cmd, args, {
