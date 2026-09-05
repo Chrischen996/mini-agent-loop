@@ -1,5 +1,7 @@
 import type { PermissionMode } from "../permissions.ts";
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
+import type { LlmConfig } from "../llm/config.ts";
+import { getThinkingLevelChoices } from "../think-intensity.ts";
 import { permissionModeLabel, statusLabel, thinkingLevelLabel } from "./claude-style.ts";
 import { TUI_COLORS as C } from "./theme.ts";
 import { terminalStringWidth, truncateTerminalPath } from "./terminal-width.ts";
@@ -257,4 +259,22 @@ export function buildStatusSegments(input: StatusLineInput): StatusSegment[] {
 /** Flatten segments into the plain row text used by tests and narrow frames. */
 export function formatStatusLine(input: StatusLineInput): string {
   return buildStatusSegments(input).map((segment) => segment.text).join("");
+}
+
+/**
+ * What the status row reports after a reasoning-level keypress.
+ *
+ * `Ctrl+R` cycles the effort levels the active model supports. A model without
+ * reasoning has a single level, so the cycle clamps to `off` and the previous
+ * `Thinking level: off` read as though the keypress had changed something.
+ * Both clients now say plainly that the model has no levels to cycle.
+ */
+export function thinkingLevelStatusText(
+  config: Pick<LlmConfig, "reasoning" | "piModel"> & { model?: string },
+  nextLevel: ModelThinkingLevel,
+): string {
+  if (getThinkingLevelChoices(config).length <= 1) {
+    return `Thinking levels are not supported by ${config.model ?? "this model"}`;
+  }
+  return `Thinking level: ${nextLevel}`;
 }

@@ -7,6 +7,7 @@ import { todoPanelRenderLines } from "./todo-lines.ts";
 import { toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { autocompleteRenderLines, permissionPanelRenderLines, planApprovalRenderLines, todoEditorRenderLines } from "./terminal-overlay-lines.ts";
+import { pickerChromeRows } from "./picker-window.ts";
 import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
 import type { TodoEditorState } from "./todo-editor.ts";
 import { noticeText, noticeTitle, toolArgumentSummary } from "./claude-style.ts";
@@ -49,6 +50,8 @@ export type TerminalRenderOptions = {
   input?: string;
   cursor?: number;
   autocomplete?: TerminalAutocompleteState;
+  /** Active `provider/model` reference; the model picker marks it with a ✓. */
+  currentModel?: string;
   maskInput?: boolean;
   /** Current clock sample for deterministic activity rendering and tests. */
   now?: number;
@@ -208,8 +211,13 @@ export function buildTerminalRenderLines(
   const wrappedHeader = width === undefined ? header : header.flatMap((line) => wrapRenderLine(line, width));
   const footer: RenderLine[] = [];
   footer.push(...panelLinesInLiveTail);
+  // Slot reserved for the picker or the Todo editor. The picker is filled in
+  // once the rest of the frame is known: fullscreen modes reserve the welcome
+  // panel and the prompt chrome first and hand the overlay what is left, so a
+  // short terminal shrinks (or drops) the picker instead of cutting the panel
+  // mid-border. That mirrors what `getPickerLayout` does for the Ink client.
+  const overlaySlot = footer.length;
   if (options.todoEditor) footer.push(...todoEditorRenderLines(options.todoEditor, width));
-  else footer.push(...autocompleteRenderLines(options.autocomplete));
   footer.push(...permissionPanelRenderLines(state.pendingPermission, width));
   footer.push(...planApprovalRenderLines(state.phase === "review" ? state.currentPlan : undefined, width));
   for (const [index, image] of state.pendingImages.entries()) {
@@ -268,6 +276,20 @@ export function buildTerminalRenderLines(
   if (options.input !== undefined) {
     const inputLines = inputRenderLines(options.input, options.cursor, options.maskInput);
     footer.push(...(width === undefined ? inputLines : inputLines.flatMap((line) => wrapRenderLine(line, width))));
+  }
+  if (!options.todoEditor) {
+    const reserved = wrappedHeader.length + wrappedPanel.length + footer.length;
+    // The same budget the Ink client computes in `getPickerLayout`: keep the
+    // last terminal row free, reserve the panel and the prompt chrome, and hold
+    // three spare rows back before the picker claims them.
+    const budget = options.height === undefined
+      ? undefined
+      : Math.max(1, options.height) - 1 - reserved - 3 - pickerChromeRows(options.autocomplete?.mode ?? undefined);
+    footer.splice(overlaySlot, 0, ...autocompleteRenderLines(options.autocomplete, {
+      input: options.input,
+      currentModel: options.currentModel ?? options.header?.model,
+      maxItems: budget,
+    }));
   }
   const visibleFooter = scrollback ? footer.map(markEphemeral) : footer;
 

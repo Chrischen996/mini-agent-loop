@@ -54,6 +54,7 @@ import {
   parsePlanTurnOverride,
 } from "./plan-commands.ts";
 import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
+import { thinkingLevelStatusText } from "./status-line.ts";
 import { getDataRoot, type PersistedSessionMeta } from "../session-store.ts";
 import { SessionManager } from "../session-manager.ts";
 import type { AgentMessage } from "../types.ts";
@@ -409,7 +410,7 @@ async function main(): Promise<void> {
     if (state.busy) return;
     activeLlm = withThinkingLevel(activeLlm, cycleThinkingLevel(activeLlm, direction, { wrap }));
     state.thinkingLevel = activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off");
-    state.status = `Thinking level: ${state.thinkingLevel}`;
+    state.status = thinkingLevelStatusText(activeLlm, state.thinkingLevel);
     render(state);
   };
 

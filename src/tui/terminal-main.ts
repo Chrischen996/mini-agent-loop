@@ -22,6 +22,7 @@ import { formatHelpNotice, parseSlashCommand, parseUnknownSlashCommand, SLASH_CO
 import { runDirectTool } from "./direct-tool-runner.ts";
 import { createInitialState, createTuiStore, type TuiState } from "./state.ts";
 import { buildTerminalRenderLines } from "./terminal-render-model.ts";
+import { thinkingLevelStatusText } from "./status-line.ts";
 import { IncrementalTerminalRenderer, resolveTerminalDisplayMode, ScrollbackTerminalRenderer } from "./incremental-renderer.ts";
 import { TerminalInputController, type TerminalInputAction } from "./terminal-input-controller.ts";
 import { TerminalAgentService } from "./terminal-agent-service.ts";
@@ -335,6 +336,7 @@ export async function runTerminalMain(): Promise<void> {
         input: input.getValue(),
         cursor: input.getCursor(),
         autocomplete: autocompleteState,
+        currentModel: `${service.getLlm().provider}/${service.getLlm().model}`,
         maskInput: autocompleteState.mode === "model-setup" && autocompleteState.modelSetup?.field === "apiKey",
         now: Date.now(),
         contextWindow: service.getLlm().contextWindow,
@@ -802,7 +804,7 @@ function handleShortcut(action: Extract<TerminalInputAction, { type: "shortcut" 
         const direction = action.direction ?? "increase";
         const next = withThinkingLevel(service.getLlm(), cycleThinkingLevel(service.getLlm(), direction, { wrap: action.direction === undefined }));
         service.setLlm(next);
-        store.dispatch({ type: "SET_STATUS", status: `Thinking level: ${next.thinkingLevel ?? "off"}` });
+        store.dispatch({ type: "SET_STATUS", status: thinkingLevelStatusText(next, next.thinkingLevel ?? "off") });
       }
       return;
     case "thinking-mode":

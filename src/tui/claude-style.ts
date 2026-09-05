@@ -66,6 +66,11 @@ export function statusLabel(status: string, busy = false): string {
   const thinkingLevelStatus = /^thinking level:\s*(.+)$/i.exec(value);
   if (thinkingLevelStatus) return thinkingLevelLabel(thinkingLevelStatus[1]!.trim());
   if (/^thinking display:/i.test(value)) return value;
+  // A model without reasoning cannot cycle levels. Keep the explanation: the
+  // generic "thinking" rule below would collapse it into "Thinking…", which the
+  // idle status row then suppresses as activity that is not happening, so the
+  // keypress would look like it did nothing at all.
+  if (/^thinking levels are not supported/i.test(value)) return value;
   if (/计划.*审批|待审批|plan.*review|pending.*approval/i.test(value)) return "Plan ready for review";
   if (/权限模式/i.test(value)) {
     if (/计划/.test(value)) return "Plan mode";

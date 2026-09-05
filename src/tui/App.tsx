@@ -73,6 +73,9 @@ import {
 } from "../permissions.ts";
 import { TurnEventBuffer } from "./stream-buffer.ts";
 import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./layout.ts";
+import { pickerChromeRows, pickerRequestedItems } from "./picker-window.ts";
+import { thinkingLevelStatusText } from "./status-line.ts";
+import type { AcMode } from "./input-utils.ts";
 import { estimateViewportContentHeight } from "./message-viewport.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
@@ -430,17 +433,21 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const next = withThinkingLevel(current, nextLevel);
     llmRef.current = next;
     setLlm(next);
-    dispatch({ type: "SET_STATUS", status: `Thinking level: ${nextLevel}` });
+    dispatch({ type: "SET_STATUS", status: thinkingLevelStatusText(next, nextLevel) });
   }, [state.busy, state.pendingPermission]);
 
-  const requestedPickerItems =
-    acMode === "command" ? Math.min(6, cmdCandidates.length)
-      : acMode === "file" ? Math.min(8, fileCandidates.length)
-        : acMode === "model" || acMode === "model-picker" ? Math.min(12, modelCandidates.length)
-          : acMode === "session-list" ? Math.max(1, Math.min(8, sessionCandidates.length))
-            : acMode === "resume-messages" ? Math.max(1, Math.min(8, resumeMessageCandidates.length))
-          : acMode === "profile-list" ? Math.min(10, profileListState?.profiles.length ?? 0)
-            : acMode ? 4 : 0;
+  // Row caps live in `picker-window` so the ANSI renderer asks for the same
+  // page sizes and clips its lists at the same row.
+  const pickerCandidateCounts: Partial<Record<NonNullable<AcMode>, number>> = {
+    command: cmdCandidates.length,
+    file: fileCandidates.length,
+    model: modelCandidates.length,
+    "model-picker": modelCandidates.length,
+    "session-list": sessionCandidates.length,
+    "resume-messages": resumeMessageCandidates.length,
+    "profile-list": profileListState?.profiles.length ?? 0,
+  };
+  const requestedPickerItems = pickerRequestedItems(acMode ?? undefined, acMode ? pickerCandidateCounts[acMode] : 0);
   // Keep the product identity pinned above the transcript, including restored
   // sessions and active turns.
   const hasHeader = true;
@@ -466,7 +473,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     requestedItems: requestedPickerItems,
     hasPendingImages: state.pendingImages.length > 0,
     todoRows,
-    extraRows: acMode === "model" || acMode === "model-picker" || acMode === "file" ? 3 : 2,
+    extraRows: pickerChromeRows(acMode ?? undefined),
     permissionRows,
     planApprovalRows,
   });

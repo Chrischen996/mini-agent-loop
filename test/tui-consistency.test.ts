@@ -9,8 +9,20 @@ import {
   formatStatusLine,
   idleStatusTail,
   STATUS_SEPARATOR,
+  thinkingLevelStatusText,
   type StatusLineInput,
 } from "../src/tui/status-line.ts";
+import {
+  modelNameColumn,
+  modelNameLabel,
+  pickerHintText,
+  pickerMaxVisibleItems,
+  pickerRangeText,
+  pickerTitleText,
+  profileRowText,
+  SESSION_PREVIEW_MAX,
+  sessionRowContent,
+} from "../src/tui/picker-window.ts";
 import {
   commandUsageColumn,
   formatHelpNotice,
@@ -192,8 +204,11 @@ describe("shared TUI presentation", () => {
       commands: candidates,
       files: [],
       models: [],
-    } as never);
-    assert.equal(rows[0]?.text, "Commands");
+    } as never, { input: "/mo" });
+    // Ink's CommandPalette heading is `── Commands /mo`; the ANSI palette used
+    // to drop the filter, so the same keystrokes produced different headings.
+    assert.equal(rows[0]?.text, pickerTitleText("command", { filter: "mo" }));
+    assert.equal(rows[0]?.text, "Commands /mo");
 
     // Every description starts in the shared usage column, so the ANSI overlay
     // and the Ink CommandPalette line up row for row.
@@ -220,10 +235,196 @@ describe("shared TUI presentation", () => {
       modelQuery: "",
       fileFragment: "",
       sessionLoading: false,
+    } as never, { currentModel: "anthropic/claude-sonnet-4-5" });
+    assert.equal(rows[0]?.text, pickerTitleText("model", { query: "" }));
+    assert.equal(rows[0]?.text, "Models all");
+    // Ink marks the model in use with a ✓; the ANSI picker listed bare
+    // references, so neither the mark nor the context column lined up.
+    const column = modelNameColumn(models);
+    const cell = (model: string) => modelNameLabel(model, model === "anthropic/claude-sonnet-4-5").padEnd(Math.max(column, model.length + 4));
+    assert.equal(rows[1]?.text, `❯ ${cell("openai/gpt-4o-mini")}128k context`);
+    assert.equal(rows[2]?.text, `  ${cell("anthropic/claude-sonnet-4-5")}200k context`);
+    assert.match(rows[2]?.text ?? "", /✓ anthropic\/claude-sonnet-4-5/);
+    assert.equal(rows.at(-1)?.text, pickerHintText("model"));
+  });
+
+  it("gives every palette row its own spelling", () => {
+    const usages = SLASH_COMMANDS.map((command) => command.usage);
+    assert.equal(new Set(usages).size, usages.length, "two commands advertise identical usage text");
+    const alias = SLASH_COMMANDS.find((command) => command.name === "todo");
+    assert.match(alias?.usage ?? "", /^\/todo \[/, "alias row does not show the alias");
+  });
+
+  it("clips the ANSI palette at the shared page size and keeps the selection on screen", () => {
+    const commands = Array.from({ length: 20 }, (_, index) => ({
+      name: `cmd${index}`,
+      usage: `/cmd${index}`,
+      description: `Command ${index}`,
+    }));
+    const rows = autocompleteRenderLines({
+      mode: "command",
+      index: 15,
+      commands,
+      files: [],
+      models: [],
+      sessions: [],
+      modelContextWindows: {},
+      modelQuery: "",
+      fileFragment: "",
+      sessionLoading: false,
+    } as never, { input: "/cmd" });
+    // The ANSI overlay used to hardcode twelve rows without scrolling: past row
+    // twelve the marker moved off screen behind a `Showing 12 / 20` footer.
+    const pageSize = pickerMaxVisibleItems("command");
+    assert.equal(pageSize, 6);
+    const candidateRows = rows.slice(1, 1 + pageSize);
+    assert.equal(candidateRows.length, pageSize);
+    assert.equal(rows.length, 1 + pageSize + 2); // title, rows, range, hint
+    assert.ok(candidateRows.some((row) => row.text.startsWith("❯ /cmd15")), "selection scrolled off screen");
+    assert.deepEqual(candidateRows.map((row) => row.text.slice(2, 8)), ["/cmd10", "/cmd11", "/cmd12", "/cmd13", "/cmd14", "/cmd15"]);
+    assert.equal(rows.at(-2)?.text, pickerRangeText(10, pageSize, commands.length));
+    assert.equal(rows.at(-2)?.text, "Showing 11-16 / 20");
+    assert.equal(rows.at(-1)?.text, pickerHintText("command"));
+  });
+
+  it("shrinks the ANSI picker to the frame instead of cutting the welcome panel", () => {
+    const state = createInitialState("gpt-4o-mini");
+    const models = Array.from({ length: 40 }, (_, index) => `openai/model-${String(index).padStart(2, "0")}`);
+    const frame = (height: number) => buildTerminalRenderLines(state, {
+      height,
+      width: 100,
+      header: { title: "mini-agent", version: packageVersion, model: "openai/gpt-4o-mini", cwd: "/home/user/mini-agent-loop", show: true, showWelcome: true },
+      promptRule: true,
+      input: "/model",
+      cursor: 6,
+      includeStatus: true,
+      currentModel: "openai/gpt-4o-mini",
+      autocomplete: {
+        mode: "model-picker",
+        index: 3,
+        commands: [],
+        files: [],
+        models,
+        sessions: [],
+        modelContextWindows: {},
+        modelQuery: "",
+        fileFragment: "",
+        sessionLoading: false,
+      } as never,
+    }).map((row) => `${row.prefix ?? ""}${row.text}`);
+
+    // A 24-row terminal used to keep the full twelve-row picker and clip the
+    // welcome panel instead, leaving a borderless box above the prompt.
+    const short = frame(24);
+    assert.ok(short.length <= 24, `frame overflows: ${short.length} rows`);
+    assert.ok(short.some((line) => line.startsWith("╭")), "welcome panel lost its top border");
+    assert.ok(short.some((line) => line.startsWith("╰")), "welcome panel lost its bottom border");
+    assert.equal(short.filter((line) => line.includes("context")).length, 4);
+    assert.ok(short.includes("Showing 1-4 / 40"));
+    assert.ok(short.some((line) => line.startsWith("❯ /model")), "prompt disappeared");
+
+    // A tall terminal still gets the shared cap, and a very short one drops the
+    // picker entirely, mirroring Ink's overlay guard.
+    assert.equal(frame(40).filter((line) => line.includes("context")).length, pickerMaxVisibleItems("model-picker"));
+    const tiny = frame(16);
+    assert.equal(tiny.filter((line) => line.includes("context")).length, 0);
+    assert.ok(tiny.some((line) => line.startsWith("╰")), "welcome panel lost its bottom border");
+    assert.ok(tiny.some((line) => line.startsWith("❯ /model")), "prompt disappeared");
+  });
+
+  it("drops a candidate list when the frame has no spare rows", () => {
+    const palette = {
+      mode: "command",
+      index: 0,
+      commands: SLASH_COMMANDS.slice(0, 4),
+      files: [],
+      models: [],
+      sessions: [],
+      modelContextWindows: {},
+      modelQuery: "",
+      fileFragment: "",
+      sessionLoading: false,
+    } as never;
+    assert.deepEqual(autocompleteRenderLines(palette, { maxItems: 0 }), []);
+    // Title, two candidates, clipped-range row, hint.
+    assert.equal(autocompleteRenderLines(palette, { maxItems: 2 }).length, 5);
+  });
+
+  it("shares the saved-session row between clients", () => {
+    const sessions = [{ id: "0123456789abcdef", messageCount: 12, preview: `first ${"x".repeat(80)} last` }];
+    const rows = autocompleteRenderLines({
+      mode: "session-list",
+      index: 0,
+      commands: [],
+      files: [],
+      models: [],
+      sessions,
+      sessionCommand: "sessions",
+      modelContextWindows: {},
+      modelQuery: "",
+      fileFragment: "",
+      sessionLoading: false,
     } as never);
-    assert.equal(rows[0]?.text, "Models");
-    assert.equal(rows[1]?.text, "❯ openai/gpt-4o-mini           128k context");
-    assert.equal(rows[2]?.text, "  anthropic/claude-sonnet-4-5  200k context");
+    assert.equal(rows[0]?.text, "Saved sessions");
+    // Ink's SessionPalette prints this exact string after its marker column.
+    const content = sessionRowContent(sessions[0]);
+    assert.equal(rows[1]?.text, `❯ ${content}`);
+    // Ink wrapped the full preview to the terminal width while the ANSI
+    // renderer clipped it; both now print the same bounded string.
+    assert.ok(!content.includes("last"), "preview is not bounded");
+    assert.equal(content.length, 12 + 2 + "12 msgs".length + 2 + SESSION_PREVIEW_MAX);
+  });
+
+  it("shares the model-profile row, clipped range, and hint", () => {
+    const profiles = Array.from({ length: 12 }, (_, index) => ({
+      name: `profile-${index}`,
+      model: "openai/gpt-4o-mini",
+      baseUrl: "https://api.openai.com/v1",
+      active: index === 0,
+    }));
+    const rows = autocompleteRenderLines({
+      mode: "profile-list",
+      index: 11,
+      commands: [],
+      files: [],
+      models: [],
+      sessions: [],
+      modelContextWindows: {},
+      modelQuery: "",
+      fileFragment: "",
+      sessionLoading: false,
+      profileListState: { profiles, selectedIndex: 11 },
+    } as never);
+    const pageSize = pickerMaxVisibleItems("profile-list");
+    assert.equal(rows[0]?.text, "Model profiles");
+    const candidateRows = rows.slice(1, 1 + pageSize);
+    assert.equal(candidateRows.length, pageSize);
+    // The ANSI row used to drop the base URL and the delete hint that Ink shows.
+    assert.equal(candidateRows.at(-1)?.text, profileRowText(profiles[11], true));
+    assert.match(candidateRows.at(-1)?.text ?? "", /^❯   profile-11 \(openai\/gpt-4o-mini\) — https:\/\/api\.openai\.com\/v1$/);
+    assert.equal(rows.at(-2)?.text, pickerRangeText(2, pageSize, profiles.length));
+    assert.equal(rows.at(-1)?.text, pickerHintText("profile-list"));
+    assert.match(rows.at(-1)?.text ?? "", /\/profiles delete <name>/);
+  });
+
+  it("reports models that have no reasoning levels to cycle", () => {
+    // Ctrl+R clamps to `off` for a non-reasoning model; the old
+    // `Thinking level: off` looked like the keypress had changed something.
+    assert.equal(
+      thinkingLevelStatusText({ reasoning: false, model: "gpt-4o-mini" }, "off"),
+      "Thinking levels are not supported by gpt-4o-mini",
+    );
+    assert.equal(
+      thinkingLevelStatusText({ reasoning: true, piModel: undefined, model: "gpt-5" }, "high"),
+      "Thinking level: high",
+    );
+    // The idle status row must actually show it: `statusLabel` maps generic
+    // "thinking" text to "Thinking…", which is suppressed as fake activity.
+    const unsupported = thinkingLevelStatusText({ reasoning: false, model: "gpt-4o-mini" }, "off");
+    assert.equal(statusLabel(unsupported), unsupported);
+    assert.equal(idleStatusTail(unsupported, false, ["Plan mode", "off"]), unsupported);
+    // A supported model still dedupes against the pinned reasoning segment.
+    assert.equal(idleStatusTail("Thinking level: high", false, ["Plan mode", "high"]), undefined);
   });
 
   it("renders the permission card with Ink's rows and no foreign branding", () => {

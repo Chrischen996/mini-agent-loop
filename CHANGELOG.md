@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`/todo`, `/skill`, `/exit`) stay valid but are no longer advertised twice.
 - `AGENTS.md` documents the Ink client as the default TUI, matching
   `package.json` and `README.md`.
+- Picker overlays (command, file, model, session, history, profile) share one
+  windowing policy in `picker-window.ts`: the same page sizes, the same
+  tail-anchored scroll, and the same heading, `Showing 1-6 / 20` footer, and
+  hint text in both clients.
 
 ### Added
 
@@ -62,6 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   formatting, and the idle-status dedupe used by both clients.
 - `src/tui/slash-commands.ts`: the single slash-command catalog, the `/help`
   body, and unknown-command detection.
+- `src/tui/picker-window.ts`: shared picker page sizes, scroll windowing,
+  clipped-range text, headings, hints, and the model/profile/session row text.
 - `test/tui-consistency.test.ts`: cross-client presentation regressions
   (status widths, palette alignment, help layout, markdown row budget,
   welcome padding, permission-card rows, single spinner row).
@@ -90,6 +96,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two drift apart.
 - Clearing a permission request reports `Running <tool>…` instead of
   repeating "Waiting for permission".
+- The ANSI palette stopped scrolling after its twelfth row: arrowing further
+  moved the selection off screen behind a `Showing 12 / 29` footer.
+- On a short terminal the ANSI renderer kept the full picker and clipped the
+  welcome panel instead, leaving a borderless box above the prompt. The picker
+  now shrinks to the frame (and is dropped when no rows are left) the way the
+  Ink client does.
+- The ANSI model picker listed bare references with no mark for the model in
+  use, and its context column did not line up with Ink's.
+- `/todo` advertised itself with the `/tasks` usage string, so the palette
+  showed the same row twice.
+- `Ctrl+R` on a model without reasoning levels reported `Thinking level: off`,
+  which read as a change; it now says the model has no levels to cycle, and the
+  idle status row no longer suppresses that message as activity.
+- Ink's history picker listed every candidate, which could push the prompt past
+  the last terminal row; the ANSI profile palette dropped the base URL and the
+  `/profiles delete <name>` hint that Ink shows.
 
 ## [0.1.0] - 2026-08-15
 
