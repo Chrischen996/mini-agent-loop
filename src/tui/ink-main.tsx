@@ -6,6 +6,7 @@ import { createSandboxRunner } from "../sandbox/index.ts";
 import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
 import { createIncrementalStdout } from "./incremental-renderer.ts";
+import { openInspectorFromArgs } from "./inspect.ts";
 
 const cwd = process.cwd();
 
@@ -17,8 +18,6 @@ const MAIN_SCREEN = "\x1b[?1049l";
 
 // Parse command line arguments for debugging/inspection
 const args = process.argv.slice(2);
-const inspectArg = args.find(arg => arg.startsWith("--inspect"));
-const inspectPort = inspectArg?.includes("=") ? inspectArg.split("=")[1] : "9222";
 
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
   process.stderr.write("Hermes TUI requires an interactive terminal\n");
@@ -27,10 +26,9 @@ if (!process.stdin.isTTY || !process.stdout.isTTY) {
 
 async function main(): Promise<void> {
   // Start Node.js inspector if requested
-  if (inspectArg) {
-    const inspector = await import("node:inspector");
-    inspector.open(Number(inspectPort), "127.0.0.1", false);
-    console.error(`[inspector] started on port ${inspectPort}`);
+  const inspectOptions = await openInspectorFromArgs(args);
+  if (inspectOptions) {
+    console.error(`[inspector] started on port ${inspectOptions.port}`);
   }
 
   const codebaseRuntime = createCodebaseRuntimeFromEnv();

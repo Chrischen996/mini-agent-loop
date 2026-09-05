@@ -15,14 +15,23 @@ function sink(): { writes: string[]; target: { write(value: string): boolean } }
 
 describe("incremental terminal renderer", () => {
   it("defaults to pi-tui alternate screen with older modes as explicit opt-ins", () => {
-    assert.equal(resolveTerminalDisplayMode({}), "pi");
-    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "pi" }), "pi");
-    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "alternate" }), "pi");
-    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "fullscreen" }), "fullscreen");
-    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "main-screen" }), "scrollback");
-    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_SCROLLBACK: "1" }), "scrollback");
-    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_FULLSCREEN: "1" }), "fullscreen");
-    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_SCROLLBACK: "0" }), "fullscreen");
+    const tty = { interactive: true };
+    assert.equal(resolveTerminalDisplayMode({}, tty), "pi");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "pi" }, tty), "pi");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "alternate" }, tty), "pi");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "fullscreen" }, tty), "fullscreen");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "main-screen" }, tty), "scrollback");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_SCROLLBACK: "1" }, tty), "scrollback");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_FULLSCREEN: "1" }, tty), "fullscreen");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_SCROLLBACK: "0" }, tty), "fullscreen");
+  });
+
+  it("falls back to scrollback on non-interactive terminals", () => {
+    const piped = { interactive: false };
+    assert.equal(resolveTerminalDisplayMode({}, piped), "scrollback");
+    // Explicit opt-ins still win over the non-interactive default.
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "pi" }, piped), "pi");
+    assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_FULLSCREEN: "1" }, piped), "fullscreen");
   });
 
   it("adapts shared RenderLine rows to pi-tui's width and height contract", () => {

@@ -6,7 +6,7 @@ import { thinkingRenderLines } from "./thinking-lines.ts";
 import { todoPanelRenderLines } from "./todo-lines.ts";
 import { toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
 import { terminalStringWidth, truncateTerminalPath } from "./terminal-width.ts";
-import { autocompleteRenderLines, panelBottomLine, panelContentLine, panelTopLine, permissionPanelRenderLines, planApprovalRenderLines } from "./terminal-overlay-lines.ts";
+import { autocompleteRenderLines, panelBottomLine, panelContentLine, panelTopLine, permissionPanelRenderLines, planApprovalRenderLines, todoEditorRenderLines } from "./terminal-overlay-lines.ts";
 import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
 import type { TodoEditorState } from "./todo-editor.ts";
 import { noticeText, noticeTitle, permissionModeLabel, statusLabel, thinkingLevelLabel, toolArgumentSummary } from "./claude-style.ts";
@@ -207,7 +207,7 @@ export function buildTerminalRenderLines(
   const wrappedHeader = width === undefined ? header : header.flatMap((line) => wrapRenderLine(line, width));
   const footer: RenderLine[] = [];
   footer.push(...panelLinesInLiveTail);
-  if (options.todoEditor) footer.push({ key: "todo-editor", text: "[todo editor]", style: "muted" });
+  if (options.todoEditor) footer.push(...todoEditorRenderLines(options.todoEditor, width));
   else footer.push(...autocompleteRenderLines(options.autocomplete));
   footer.push(...permissionPanelRenderLines(state.pendingPermission, width));
   footer.push(...planApprovalRenderLines(state.phase === "review" ? state.currentPlan : undefined, width));

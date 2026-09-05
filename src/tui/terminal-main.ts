@@ -15,7 +15,9 @@ import { PermissionManager } from "../permissions.ts";
 import { applyPermissionModePrompt, createAgentHistory, type AgentRuntimeRef } from "../loop.ts";
 import { cycleThinkingLevel, thinkingLevelToDisplay, withThinkingLevel } from "../think-intensity.ts";
 import { nextPermissionMode, switchPermissionMode } from "./permission-utils.ts";
-import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
+import { applyTodoCommand, parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
+import { createTodoEditorState, reduceTodoEditor, type TodoEditorAction, type TodoEditorState } from "./todo-editor.ts";
+import type { TodoItem } from "../todo.ts";
 import { parseSlashCommand } from "./slash-commands.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
 import { createInitialState, createTuiStore, type TuiState } from "./state.ts";
@@ -528,6 +530,15 @@ export type InputDeps = {
    *  flush stale committed rows before the new content is rendered. */
   onSessionRestore?: () => void;
   resumePickerRef?: { current: { session: PersistedSession; candidates: ResumeMessageCandidate[] } | undefined };
+  /** Persist the Todo snapshot after a local `/todo` mutation. */
+  persistTodoState?: (todos: TodoItem[]) => void | Promise<void>;
+  /** Interactive Todo editor overlay state, when the terminal hosts one. */
+  todoEditor?: {
+    getState(): TodoEditorState | null;
+    setState(next: TodoEditorState | null): void;
+  };
+  /** Commit the current Todo editor draft (Enter in add/edit mode). */
+  commitTodoEditor?: () => void;
 };
 
 export type SessionAccess = {
@@ -561,6 +572,49 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
     deps.directAbortRef.current?.abort();
     process.emit("SIGINT");
     return;
+  }
+  const todoEditorState = deps.todoEditor?.getState();
+  if (deps.todoEditor && todoEditorState) {
+    // The overlay owns the keyboard while open: keys drive the editor reducer
+    // and must never leak into the prompt buffer or start an Agent turn.
+    const editor = deps.todoEditor;
+    const dispatchEditor = (editorAction: TodoEditorAction): void => {
+      editor.setState(reduceTodoEditor(editor.getState() ?? todoEditorState, editorAction));
+    };
+    switch (action.type) {
+      case "cancel":
+        if (todoEditorState.mode === "select") editor.setState(null);
+        else dispatchEditor({ type: "CANCEL" });
+        return;
+      case "submit":
+        deps.commitTodoEditor?.();
+        return;
+      case "backspace":
+        if (todoEditorState.mode !== "select") {
+          dispatchEditor({ type: "INPUT", value: todoEditorState.draft.slice(0, -1) });
+        }
+        return;
+      case "cursor":
+        if (todoEditorState.mode === "select" && (action.direction === "up" || action.direction === "down")) {
+          dispatchEditor({ type: "MOVE", delta: action.direction === "up" ? -1 : 1 });
+        }
+        return;
+      case "insert": {
+        if (todoEditorState.mode !== "select") {
+          // `insert` carries the whole prompt buffer, so it replaces the draft.
+          dispatchEditor({ type: "INPUT", value: action.value });
+          return;
+        }
+        const key = action.value.slice(-1).toLowerCase();
+        if (key === "a") dispatchEditor({ type: "BEGIN_ADD" });
+        else if (key === "e") dispatchEditor({ type: "BEGIN_EDIT" });
+        else if (key === "d") dispatchEditor({ type: "DELETE" });
+        else if (key === " ") dispatchEditor({ type: "CYCLE_STATUS" });
+        return;
+      }
+      default:
+        break;
+    }
   }
   if (action.type === "cancel") {
     if (deps.autocomplete.getState().mode || deps.autocomplete.getState().argumentPrefix) {
@@ -767,6 +821,16 @@ function handleShortcut(action: Extract<TerminalInputAction, { type: "shortcut" 
     case "copy":
       void copyTerminalText("auto", deps);
       return;
+    case "todo":
+      if (deps.todoEditor) {
+        // Toggle: a second press closes the overlay without touching state.
+        deps.todoEditor.setState(
+          deps.todoEditor.getState()
+            ? null
+            : createTodoEditorState(state.todoItems ?? []),
+        );
+      }
+      return;
     case "paste-image":
       void handlePasteImage({
         pendingImages: state.pendingImages,
@@ -960,21 +1024,30 @@ async function submitInput(
     return;
   }
   const slashCommand = parseSlashCommand(text);
+  if (slashCommand?.cmd === "todo") {
+    // Manual Todo edits are local session state: apply them directly instead
+    // of spending an Agent turn or routing through the direct-tool runner.
+    input.recordSubmission(text);
+    input.clear();
+    const result = applyTodoCommand(store.getState().todoItems ?? [], slashCommand.todo);
+    if (result.ok) {
+      store.dispatch({ type: "SET_TODOS", todos: result.todos });
+      void deps.persistTodoState?.(result.todos);
+    } else {
+      store.dispatch({ type: "ADD_NOTICE", title: "Todo", text: result.error });
+    }
+    return;
+  }
   if (slashCommand) {
     input.recordSubmission(text);
     input.clear();
     store.dispatch({ type: "USER_MESSAGE", text });
     const abortController = new AbortController();
-    let args: { path: string } | { command: string } | { pattern: string; path: string };
-    if (slashCommand.cmd === "read" || slashCommand.cmd === "ls") {
-      args = { path: slashCommand.path };
-    } else if (slashCommand.cmd === "bash") {
-      args = { command: slashCommand.command };
-    } else if (slashCommand.cmd === "find" || slashCommand.cmd === "grep") {
-      args = { pattern: slashCommand.pattern, path: slashCommand.path };
-    } else {
-      args = { pattern: "", path: "." };
-    }
+    const args = slashCommand.cmd === "read" || slashCommand.cmd === "ls"
+      ? { path: slashCommand.path }
+      : slashCommand.cmd === "bash"
+        ? { command: slashCommand.command }
+        : { pattern: slashCommand.pattern, path: slashCommand.path };
     deps.directAbortRef.current = abortController;
     try {
       const directResult = await runDirectTool(slashCommand.cmd, args, {

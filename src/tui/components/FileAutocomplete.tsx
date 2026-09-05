@@ -27,6 +27,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "sessions", usage: "/sessions",           description: "List saved sessions" },
   { name: "resume", usage: "/resume [id]",          description: "Resume a saved session" },
   { name: "tasks", usage: TODO_COMMAND_USAGE, description: "Show or manage todos" },
+  { name: "todo", usage: TODO_COMMAND_USAGE, description: "Show or manage todos" },
   { name: "context", usage: "/context",             description: "Show context and token usage" },
   { name: "plan", usage: "/plan [task]",            description: "Generate an execution plan (plan mode)" },
   { name: "plan-show", usage: "/plan-show",         description: "Show the current plan" },

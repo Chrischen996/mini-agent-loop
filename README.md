@@ -19,6 +19,10 @@ user prompt
   -> stop when assistant has no tool_calls
 ```
 
+**Documentation:** [Architecture](docs/architecture.md) ·
+[Security model & permission matrix](docs/security-model.md) ·
+[Codebase analysis](docs/project-analysis.md)
+
 ## Requirements
 
 - Node.js 22.19+
@@ -671,33 +675,25 @@ Coverage includes:
 
 ## Layout
 
+See [`docs/architecture.md`](docs/architecture.md) for the full directory map,
+the front-end/runtime boundary, and the HTTP route-module breakdown.
+
 ```text
-mini-agent/
-  package.json
-  tsconfig.json
+mini-agent-loop/
+  scripts/generate-models.ts   # generates the provider model catalogs
   src/
-    types.ts
-    llm.ts
-    content.ts
-    models.ts
-    preprocessors/
-      types.ts
-      vision.ts
-      index.ts
-    validate.ts
-    loop.ts
-    cli.ts
-    server.ts
-    tools/
-      types.ts
-      read.ts
-      index.ts
-  test/
-    faux-model.ts
-    loop.test.ts
-    vision.test.ts
-    server.test.ts
-  README.md
+    loop.ts                    # core agent turn/loop
+    cli.ts  server.ts          # CLI and HTTP entry points
+    server/routes/             # HTTP routes split by domain
+    tui/                       # Ink / pi-tui terminal client
+    llm/  pi-ai/               # model calls and the vendored provider layer
+    tools/  runtime/           # built-in tools and the execution broker
+    permissions.ts             # permission modes and approval requests
+    skills/  mcp/  subagent/   # extension surfaces
+    plan/  plan-act/           # plan document kernel and phase state machine
+    orchestration/  sandbox/   # background jobs and shell isolation
+  test/                        # ~100 node:test suites
+  docs/                        # architecture, security model, design notes
 ```
 
 ## Invariants

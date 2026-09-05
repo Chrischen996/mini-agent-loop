@@ -98,6 +98,17 @@ import {
 import type { PauseGate } from "./orchestration/pause-gate.ts";
 import type { SessionExecutionLease } from "./orchestration/session-gate.ts";
 import { createAutoMemoryHook, isAutoMemoryEnabled } from "./memory/auto-memory.ts";
+import { registerWorkspaceRoutes } from "./server/routes/workspace.ts";
+import { registerMemoryRoutes } from "./server/routes/memory.ts";
+import { registerJobRoutes } from "./server/routes/jobs.ts";
+import { registerGitRoutes } from "./server/routes/git.ts";
+import { registerModelRoutes } from "./server/routes/models.ts";
+import { registerSubagentProfileRoutes } from "./server/routes/subagent-profiles.ts";
+import { registerPlanActRoutes } from "./server/routes/plan-act.ts";
+import { registerPermissionRoutes } from "./server/routes/permissions.ts";
+import { registerSkillRoutes } from "./server/routes/skills.ts";
+import { registerFileRoutes } from "./server/routes/files.ts";
+import { registerPlanDocumentRoutes, planHttpError } from "./server/routes/plan-document.ts";
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 5;
@@ -129,17 +140,6 @@ function planSummaryPayload(plan: PlanDocument): Record<string, unknown> {
     unplannedFiles: plan.execution?.unplannedFiles,
     auditReport: plan.execution?.auditReport,
   };
-}
-
-function planHttpError(error: unknown): { status: number; message: string } {
-  const message = error instanceof Error ? error.message : String(error);
-  if (/no (saved )?plan/i.test(message) || /no plan found/i.test(message)) {
-    return { status: 404, message };
-  }
-  if (/not approved|rejected|cannot execute/i.test(message)) {
-    return { status: 400, message };
-  }
-  return { status: 500, message };
 }
 
 type Session = {
@@ -1138,146 +1138,16 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
   };
 
-  app.get("/api/health", (_request, response) => response.json({ ok: true }));
-
-  app.get("/api/memory", async (request, response) => {
-    const scope = typeof request.query.scope === "string"
-      ? request.query.scope as import("./orchestration/index.ts").MemoryScope
-      : undefined;
-    const query = typeof request.query.query === "string" ? request.query.query : "";
-    const records = query
-      ? await memoryStore.search(query, { scope })
-      : await memoryStore.list({ scope });
-    response.json({ records });
+  registerWorkspaceRoutes(app, { workspace });
+  registerMemoryRoutes(app, { memoryStore });
+  registerJobRoutes(app, {
+    jobManager,
+    getSession: (id) => sessions.get(id),
+    reserveSession,
+    releaseSession,
+    startSessionJob,
   });
 
-  app.post("/api/memory", async (request, response) => {
-    const scope = request.body?.scope;
-    const key = typeof request.body?.key === "string" ? request.body.key.trim() : "";
-    const content = typeof request.body?.content === "string" ? request.body.content.trim() : "";
-    if (!["user", "project", "directory", "task"].includes(scope) || !key || !content) {
-      response.status(400).json({ error: "scope, key, and content are required" });
-      return;
-    }
-    const record = await memoryStore.add({
-      scope,
-      key,
-      content,
-      source: typeof request.body?.source === "string" ? request.body.source : undefined,
-    });
-    response.status(201).json({ record });
-  });
-
-  app.post("/api/memory/:id/confirm", async (request, response) => {
-    const record = await memoryStore.confirm(request.params.id);
-    if (!record) {
-      response.status(404).json({ error: "Memory record not found" });
-      return;
-    }
-    response.json({ record });
-  });
-
-  app.delete("/api/memory/:id", async (request, response) => {
-    const record = await memoryStore.forget(request.params.id);
-    if (!record) {
-      response.status(404).json({ error: "Memory record not found" });
-      return;
-    }
-    response.json({ record });
-  });
-
-  app.get("/api/jobs/:id", (request, response) => {
-    const job = jobManager.get(request.params.id);
-    if (!job) {
-      response.status(404).json({ error: "Job not found" });
-      return;
-    }
-    response.json({ job });
-  });
-
-  app.get("/api/sessions/:id/jobs", (request, response) => {
-    if (!sessions.has(request.params.id)) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    response.json({ jobs: jobManager.list(request.params.id) });
-  });
-
-  app.post("/api/sessions/:id/jobs", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const task = typeof request.body?.prompt === "string" ? request.body.prompt.trim() : "";
-    const requestedKind = request.body?.kind;
-    if (requestedKind !== undefined && requestedKind !== "agent_turn" && requestedKind !== "planner_worker_reviewer") {
-      response.status(400).json({ error: "kind must be agent_turn or planner_worker_reviewer" });
-      return;
-    }
-    if (!task) {
-      response.status(400).json({ error: "prompt is required" });
-      return;
-    }
-    const lease = reserveSession(session, "job:create");
-    if (!lease) {
-      response.status(409).json({ error: "Session already has an active job", jobId: session.activeJobId ?? null });
-      return;
-    }
-    try {
-      const job = await jobManager.create({
-        sessionId: session.id,
-        task,
-        kind: requestedKind ?? "agent_turn",
-      });
-      session.activeJobId = job.id;
-      await startSessionJob(session, job.id, lease);
-      response.status(202).json({ job });
-    } catch (error) {
-      releaseSession(session, lease);
-      session.activeJobId = undefined;
-      response.status(500).json({ error: error instanceof Error ? error.message : String(error) });
-    }
-  });
-
-  for (const action of ["pause", "resume", "cancel"] as const) {
-    app.post(`/api/jobs/:id/${action}`, async (request, response) => {
-      try {
-        const job = await jobManager[action](request.params.id);
-        response.json({ job });
-      } catch (error) {
-        response.status(404).json({ error: error instanceof Error ? error.message : String(error) });
-      }
-    });
-  }
-  app.post("/api/jobs/:id/retry", async (request, response) => {
-    const existing = jobManager.get(request.params.id);
-    if (!existing) {
-      response.status(404).json({ error: "Job not found" });
-      return;
-    }
-    const session = sessions.get(existing.sessionId);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const lease = reserveSession(session, "job:retry");
-    if (!lease) {
-      response.status(409).json({ error: "Session already has an active job", jobId: session.activeJobId ?? null });
-      return;
-    }
-    try {
-      const job = await jobManager.retry(existing.id);
-      session.activeJobId = job.id;
-      await startSessionJob(session, job.id, lease);
-      response.status(202).json({ job });
-    } catch (error) {
-      releaseSession(session, lease);
-      session.activeJobId = undefined;
-      const message = error instanceof Error ? error.message : String(error);
-      response.status(/Invalid orchestration job transition/i.test(message) ? 409 : 500).json({ error: message });
-    }
-  });
   app.get("/api/config", async (_request, response) => {
     const mcpStatuses = typeof options.mcpStatuses === "function"
       ? options.mcpStatuses()
@@ -1325,89 +1195,11 @@ export function createAgentServer(options: AgentServerOptions): Express {
     });
   });
 
-  app.get("/api/workspace/list", async (request, response) => {
-    const relativePath = String(request.query.path ?? "");
-    try {
-      const result = await listWorkspaceDirectory(workspace, relativePath);
-      response.json(result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const status =
-        err && typeof err === "object" && "status" in err
-          ? Number((err as { status: unknown }).status) || 400
-          : 400;
-      response.status(status).json({ error: message });
-    }
-  });
-
-  app.get("/api/git/status", async (_request, response) => {
-    try { response.json(await gitWorkflow.status()); }
-    catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-  });
-
-  app.get("/api/git/diff", async (request, response) => {
-    try {
-      response.type("text/plain").send(await gitWorkflow.diff({
-        staged: String(request.query.staged ?? "") === "true",
-        path: request.query.path ? String(request.query.path) : undefined,
-      }));
-    } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-  });
-
-  app.get("/api/git/checkpoints", async (_request, response) => {
-    try { response.json({ checkpoints: await gitWorkflow.listCheckpoints() }); }
-    catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-  });
-
-  app.post("/api/git/checkpoints", async (request, response) => {
-    try {
-      const checkpoint = await gitWorkflow.createCheckpoint(String(request.body?.label ?? "agent-change"));
-      response.status(201).json(checkpoint);
-    } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-  });
-
-  app.post("/api/git/undo", async (request, response) => {
-    const checkpointId = String(request.body?.checkpointId ?? "");
-    if (!checkpointId) { response.status(400).json({ error: "checkpointId is required" }); return; }
-    try { response.json(await gitWorkflow.undo(checkpointId)); }
-    catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-  });
-
-  app.post("/api/git/branches", async (request, response) => {
-    try { response.status(201).json(await gitWorkflow.createIsolatedBranch(String(request.body?.label ?? "task"))); }
-    catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-  });
-
-  app.post("/api/validation", async (request, response) => {
-    const requested = Array.isArray(request.body?.steps) ? request.body.steps : undefined;
-    const steps = requested?.filter((value: unknown): value is ValidationStepName =>
-      value === "test" || value === "typecheck" || value === "build");
-    try {
-      const report = await runValidation({ workspace, steps, timeoutMs: typeof request.body?.timeoutMs === "number" ? request.body.timeoutMs : undefined });
-      response.status(report.ok ? 200 : 422).json({ ...report, summary: formatValidationReport(report) });
-    } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-  });
+  registerGitRoutes(app, { gitWorkflow, workspace });
 
   // ── Model discovery & per-session switching ─────────────────────────────────
 
-  app.get("/api/models", (request, response) => {
-    const query = String(request.query.q ?? "").trim();
-    const available = getAvailableModels();
-    const models = query ? searchModels(query, available) : available;
-    response.json({
-      models: models.map((model) => ({
-        id: model.id,
-        name: model.name,
-        provider: model.provider,
-        qualifiedId: `${model.provider}/${model.id}`,
-        capabilities: model.capabilities,
-        contextWindow: model.contextWindow,
-        maxTokens: model.maxTokens,
-        reasoning: model.reasoning,
-      })),
-      defaultModel: options.llm.model,
-    });
-  });
+  registerModelRoutes(app, { defaultModel: options.llm.model });
 
   app.put("/api/sessions/:id/model", async (request, response) => {
     const session = sessions.get(request.params.id);
@@ -1464,63 +1256,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
 
   // ── Subagent profile hot-update API ────────────────────────────────────────
 
-  app.get("/api/subagent/profiles", (_request, response) => {
-    const profiles = options.subagentProfiles ?? defaultProfiles;
-    response.json({
-      profiles: profiles.map((p) => ({
-        name: p.name,
-        description: p.description,
-        allowedTools: p.allowedTools,
-        maxTurns: p.maxTurns,
-        timeout: p.timeout,
-        hasCustomLlm: Boolean(p.llm),
-      })),
-    });
-  });
-
-  app.put("/api/subagent/profiles/:name", (request, response) => {
-    const name = request.params.name;
-    const body = request.body as Partial<SubagentProfile> | undefined;
-    if (!body || typeof body.description !== "string" || typeof body.systemPrompt !== "string") {
-      response.status(400).json({ error: "description and systemPrompt are required" });
-      return;
-    }
-    const profiles = options.subagentProfiles ?? defaultProfiles;
-    const existing = profiles.findIndex((p) => p.name === name);
-    const newProfile: SubagentProfile = {
-      name,
-      description: body.description,
-      systemPrompt: body.systemPrompt,
-      allowedTools: Array.isArray(body.allowedTools) ? body.allowedTools : undefined,
-      maxTurns: typeof body.maxTurns === "number" ? body.maxTurns : undefined,
-      timeout: typeof body.timeout === "number" ? body.timeout : undefined,
-    };
-    if (existing >= 0) {
-      profiles[existing] = newProfile;
-    } else {
-      profiles.push(newProfile);
-    }
-    // Update the options reference so new sessions pick up the change
-    options.subagentProfiles = profiles;
-    response.json({
-      name: newProfile.name,
-      description: newProfile.description,
-      allowedTools: newProfile.allowedTools,
-      maxTurns: newProfile.maxTurns,
-    });
-  });
-
-  app.delete("/api/subagent/profiles/:name", (_request, response) => {
-    const name = _request.params.name;
-    const profiles = options.subagentProfiles ?? defaultProfiles;
-    const index = profiles.findIndex((p) => p.name === name);
-    if (index < 0) {
-      response.status(404).json({ error: `Profile "${name}" not found` });
-      return;
-    }
-    profiles.splice(index, 1);
-    options.subagentProfiles = profiles;
-    response.status(204).end();
+  registerSubagentProfileRoutes(app, {
+    getProfiles: () => options.subagentProfiles ?? defaultProfiles,
+    setProfiles: (profiles) => { options.subagentProfiles = profiles; },
   });
 
   // ── Sessions ────────────────────────────────────────────────────────────────
@@ -1694,458 +1432,24 @@ export function createAgentServer(options: AgentServerOptions): Express {
     response.json({ sessions: nodes, roots });
   });
 
-  app.get("/api/sessions/:id/permission-mode", (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    response.json({ mode: session.permissionManager.getMode() });
-  });
-
-  app.put("/api/sessions/:id/permission-mode", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const mode = request.body?.mode;
-    if (!isPermissionMode(mode)) {
-      response.status(400).json({ error: "mode must be plan, approval, or bypass" });
-      return;
-    }
-    const change = session.permissionManager.setMode(mode);
-    await saveSession(session);
-    response.json({
-      mode: change.mode,
-      previousMode: change.previousMode,
-      changed: change.changed,
-      interrupted: change.interrupted,
-    });
-  });
-
-  app.post("/api/sessions/:id/permissions/:requestId", (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const decision = request.body?.decision;
-    if (decision !== "allow" && decision !== "deny") {
-      response.status(400).json({ error: "decision must be allow or deny" });
-      return;
-    }
-    const resolved = session.permissionManager.resolve(
-      session.id,
-      request.params.requestId,
-      decision as PermissionDecision,
-    );
-    if (!resolved) {
-      response.status(404).json({ error: "Permission request not found" });
-      return;
-    }
-    response.json({ resolved: true, decision });
-  });
+  registerPermissionRoutes(app, { getSession: (id) => sessions.get(id), saveSession });
 
   // ─── Plan-Act Workflow API ──────────────────────────────────────────────────
 
-  /** GET /api/sessions/:id/phase - Get current phase */
-  app.get("/api/sessions/:id/phase", (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    response.json({ phase: session.phase });
-  });
-
-  /** PUT /api/sessions/:id/phase - Transition phase */
-  app.put("/api/sessions/:id/phase", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const targetPhase = request.body?.phase as SessionPhase | undefined;
-    if (!targetPhase) {
-      response.status(400).json({ error: "phase is required" });
-      return;
-    }
-    const result = validatePhaseTransition(session.phase ?? "planning", targetPhase, request.body);
-    if (!result.allowed) {
-      response.status(400).json({ error: result.reason });
-      return;
-    }
-    const lease = reserveSession(session, "phase");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const previousPhase = session.phase;
-      session.phase = targetPhase;
-      await saveSession(session);
-      response.json({ from: previousPhase, to: targetPhase, reason: result.reason });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  /** POST /api/sessions/:id/plans - Generate new plan */
-  app.post("/api/sessions/:id/plans", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const output = request.body?.output as string | undefined;
-    const summary = request.body?.summary as string | undefined;
-    if (!output) {
-      response.status(400).json({ error: "output is required" });
-      return;
-    }
-    const lease = reserveSession(session, "plan-act:generate");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const plan = planGenerator.generateAndStore(output, session.id, summary);
-      if (!plan) {
-        response.status(400).json({ error: "Failed to parse plan from output" });
-        return;
-      }
-      session.currentPlan = plan;
-      session.planHistory = session.planHistory ?? []; session.planHistory.push(plan);
-      session.phase = "review";
-      await saveSession(session);
-      response.status(201).json(plan);
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  /** GET /api/sessions/:id/plans - List plans for session */
-  app.get("/api/sessions/:id/plans", (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plans = planManager.getSessionPlans(session.id);
-    response.json(plans);
-  });
-
-  /** GET /api/sessions/:id/plans/:planId - Get plan details */
-  app.get("/api/sessions/:id/plans/:planId", (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plan = planManager.getPlan(request.params.planId);
-    if (!plan) {
-      response.status(404).json({ error: "Plan not found" });
-      return;
-    }
-    if (plan.sessionId !== session.id) {
-      response.status(403).json({ error: "Plan does not belong to this session" });
-      return;
-    }
-    response.json(plan);
-  });
-
-  /** POST /api/sessions/:id/plans/:planId/approve - Approve plan */
-  app.post("/api/sessions/:id/plans/:planId/approve", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plan = planManager.getPlan(request.params.planId);
-    if (!plan) {
-      response.status(404).json({ error: "Plan not found" });
-      return;
-    }
-    if (plan.sessionId !== session.id) {
-      response.status(403).json({ error: "Plan does not belong to this session" });
-      return;
-    }
-    const lease = reserveSession(session, "plan-act:approve");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const approved = planManager.approvePlan(plan.id, request.body);
-      if (!approved) {
-        response.status(400).json({ error: "Failed to approve plan" });
-        return;
-      }
-      session.currentPlan = approved;
-      session.phase = "acting";
-      await saveSession(session);
-      response.json(approved);
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  /** POST /api/sessions/:id/plans/:planId/reject - Reject plan */
-  app.post("/api/sessions/:id/plans/:planId/reject", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plan = planManager.getPlan(request.params.planId);
-    if (!plan) {
-      response.status(404).json({ error: "Plan not found" });
-      return;
-    }
-    if (plan.sessionId !== session.id) {
-      response.status(403).json({ error: "Plan does not belong to this session" });
-      return;
-    }
-    const reason = request.body?.reason as string | undefined;
-    const lease = reserveSession(session, "plan-act:reject");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const rejected = planManager.rejectPlan(plan.id, reason);
-      if (!rejected) {
-        response.status(400).json({ error: "Failed to reject plan" });
-        return;
-      }
-      session.currentPlan = undefined;
-      session.phase = "cancelled";
-      await saveSession(session);
-      response.json(rejected);
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  /** POST /api/sessions/:id/plans/:planId/modify - Request modifications */
-  app.post("/api/sessions/:id/plans/:planId/modify", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plan = planManager.getPlan(request.params.planId);
-    if (!plan) {
-      response.status(404).json({ error: "Plan not found" });
-      return;
-    }
-    if (plan.sessionId !== session.id) {
-      response.status(403).json({ error: "Plan does not belong to this session" });
-      return;
-    }
-    const lease = reserveSession(session, "plan-act:modify");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const modified = planManager.updatePlanStatus(plan.id, "modified");
-      if (!modified) {
-        response.status(400).json({ error: "Failed to modify plan" });
-        return;
-      }
-      session.currentPlan = modified;
-      session.phase = "planning";
-      await saveSession(session);
-      response.json(modified);
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  /** DELETE /api/sessions/:id/plans/:planId - Delete plan */
-  app.delete("/api/sessions/:id/plans/:planId", (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plan = planManager.getPlan(request.params.planId);
-    if (!plan) {
-      response.status(404).json({ error: "Plan not found" });
-      return;
-    }
-    if (plan.sessionId !== session.id) {
-      response.status(403).json({ error: "Plan does not belong to this session" });
-      return;
-    }
-    const lease = reserveSession(session, "plan-act:delete");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      planManager.deletePlan(plan.id);
-      if (session.currentPlan?.id === plan.id) {
-        session.currentPlan = undefined;
-      }
-      response.status(204).end();
-    } finally {
-      releaseSession(session, lease);
-    }
+  registerPlanActRoutes(app, {
+    getSession: (id) => sessions.get(id),
+    reserveSession,
+    releaseSession,
+    saveSession,
   });
 
   // ── Session plan API (per-session plan kernel root) ─────────────────────────
 
-  app.get("/api/sessions/:id/plan", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plan = await loadPlanDocument(sessionPlanRoot(dataRoot, session.id));
-    response.json({ plan });
-  });
-
-  app.post("/api/sessions/:id/plan", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const prompt = typeof request.body?.prompt === "string" ? request.body.prompt.trim() : "";
-    const planMarkdown = typeof request.body?.plan === "string" ? request.body.plan : "";
-    if (!prompt) {
-      response.status(400).json({ error: "prompt is required" });
-      return;
-    }
-    if (!planMarkdown.trim()) {
-      response.status(400).json({ error: "plan is required" });
-      return;
-    }
-    const autoApprove = Boolean(request.body?.autoApprove);
-    const lease = reserveSession(session, "plan:create");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const planRoot = sessionPlanRoot(dataRoot, session.id);
-      const plan = await createAndSavePlan(planRoot, prompt, planMarkdown, {
-        autoApprove,
-        approvedBy: autoApprove ? "api" : undefined,
-      });
-      response.status(201).json({ plan });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  app.post("/api/sessions/:id/plan/approve", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const by = typeof request.body?.by === "string" && request.body.by.trim()
-      ? request.body.by.trim()
-      : "api";
-    const lease = reserveSession(session, "plan:approve");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const plan = await approveCurrentPlan(sessionPlanRoot(dataRoot, session.id), by);
-      response.json({ plan });
-    } catch (error) {
-      const { status, message } = planHttpError(error);
-      response.status(status).json({ error: message });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  app.post("/api/sessions/:id/plan/reject", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const lease = reserveSession(session, "plan:reject");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const plan = await rejectCurrentPlan(sessionPlanRoot(dataRoot, session.id));
-      response.json({ plan });
-    } catch (error) {
-      const { status, message } = planHttpError(error);
-      response.status(status).json({ error: message });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  app.post("/api/sessions/:id/plan/edit", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const planMarkdown = typeof request.body?.plan === "string" ? request.body.plan : "";
-    if (!planMarkdown.trim()) {
-      response.status(400).json({ error: "plan is required" });
-      return;
-    }
-    const lease = reserveSession(session, "plan:edit");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const plan = await editCurrentPlan(sessionPlanRoot(dataRoot, session.id), planMarkdown);
-      response.json({ plan });
-    } catch (error) {
-      const { status, message } = planHttpError(error);
-      response.status(status).json({ error: message });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  app.post("/api/sessions/:id/plan/archive", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const lease = reserveSession(session, "plan:archive");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const result = await archiveCurrentPlan(sessionPlanRoot(dataRoot, session.id));
-      response.json({ plan: result.document, archivedPath: result.archivedPath });
-    } catch (error) {
-      const { status, message } = planHttpError(error);
-      response.status(status).json({ error: message });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  app.get("/api/sessions/:id/plan/history", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plans = await listPlanHistory(sessionPlanRoot(dataRoot, session.id));
-    response.json({ plans });
+  registerPlanDocumentRoutes(app, {
+    getSession: (id) => sessions.get(id),
+    reserveSession,
+    releaseSession,
+    sessionPlanRoot: (sessionId) => sessionPlanRoot(dataRoot, sessionId),
   });
 
   app.post("/api/sessions/:id/plan/generate", async (request, response) => {
@@ -2491,66 +1795,12 @@ export function createAgentServer(options: AgentServerOptions): Express {
     });
   });
 
-  app.get("/api/sessions/:id/skills", (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const activation = activateSkillNames(session.skillNames ?? [], skillRegistry);
-    response.json({
-      available: activation.available.map((skill) => ({
-        name: skill.name,
-        description: skill.description,
-      })),
-      active: activation.activeNames,
-      missing: activation.missingNames,
-    });
-  });
-
-  app.put("/api/sessions/:id/skills", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const body = (request.body ?? {}) as {
-      skillNames?: unknown;
-      add?: unknown;
-      remove?: unknown;
-    };
-    const requested = Array.isArray(body.skillNames)
-      ? body.skillNames.filter((name): name is string => typeof name === "string")
-      : (session.skillNames ?? []);
-    const add = Array.isArray(body.add)
-      ? body.add.filter((name): name is string => typeof name === "string")
-      : [];
-    const remove = new Set(
-      Array.isArray(body.remove)
-        ? body.remove.filter((name): name is string => typeof name === "string")
-        : [],
-    );
-    const merged = uniqueSkillNames([...requested, ...add]).filter((name) => !remove.has(name));
-    const lease = reserveSession(session, "skills");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    const activation = activateSkillNames(merged, skillRegistry);
-    try {
-      session.skillNames = activation.activeNames;
-      await saveSession(session);
-      response.json({
-        available: activation.available.map((skill) => ({
-          name: skill.name,
-          description: skill.description,
-        })),
-        active: activation.activeNames,
-        missing: activation.missingNames,
-      });
-    } finally {
-      releaseSession(session, lease);
-    }
+  registerSkillRoutes(app, {
+    getSession: (id) => sessions.get(id),
+    reserveSession,
+    releaseSession,
+    saveSession,
+    skillRegistry,
   });
 
   app.delete("/api/sessions/:id", async (request, response) => {
@@ -2574,28 +1824,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
   });
 
-  app.get("/api/sessions/:id/files/:fileId", async (request, response) => {
-    if (!sessions.has(request.params.id)) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    try {
-      const output = documentStore.getOutput(request.params.id, request.params.fileId);
-      if (!existsSync(output.path)) {
-        response.status(404).json({ error: "File not found" });
-        return;
-      }
-      response.setHeader("Content-Type", output.artifact.mimeType);
-      response.setHeader("Content-Length", String(output.artifact.size));
-      response.setHeader("Content-Disposition", `attachment; filename="${output.artifact.name}"`);
-      createReadStream(output.path).on("error", (error) => {
-        if (!response.headersSent) response.status(404).json({ error: error.message });
-        else response.destroy(error);
-      }).pipe(response);
-    } catch (error) {
-      response.status(404).json({ error: error instanceof Error ? error.message : String(error) });
-    }
-  });
+  registerFileRoutes(app, { hasSession: (id) => sessions.has(id), documentStore });
 
   app.post(
     "/api/sessions/:id/messages",
