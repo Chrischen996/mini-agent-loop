@@ -2,6 +2,7 @@ import type { ExecutionPlan } from "../plan-act/types.ts";
 import type { PendingPermissionState } from "./state.ts";
 import type { RenderLine } from "./render-lines.ts";
 import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
+import type { TodoEditorState } from "./todo-editor.ts";
 import { permissionRiskLabel, toolArgumentSummary } from "./claude-style.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { toolVisualName } from "./tool-lines.ts";
@@ -121,6 +122,63 @@ export function planApprovalRenderLines(plan?: ExecutionPlan, width?: number): R
     panelContentLine("plan-options", "❯ Approve    Reject", "assistant", { width, tone: "running", bold: true }),
     panelContentLine("plan-keys", "A approve  ·  R reject", "muted", { width, dim: true }),
     panelBottomLine("plan-bottom", width),
+  );
+  return rows;
+}
+
+/**
+ * Terminal rows for the interactive Todo editor overlay.
+ *
+ * Mirrors the permission/plan cards: a bordered panel listing each todo with
+ * its status glyph, the selected row marked with `❯`, followed by the draft
+ * line while adding or editing and a key hint footer.
+ */
+export function todoEditorRenderLines(state?: TodoEditorState, width?: number): RenderLine[] {
+  if (!state) return [];
+  const rows: RenderLine[] = [panelTopLine("todo-editor-top", "Todo editor", width, "running")];
+
+  if (state.todos.length === 0) {
+    rows.push(panelContentLine("todo-editor-empty", "No todos yet — press a to add one.", "muted", { width, dim: true }));
+  } else {
+    for (const [index, todo] of state.todos.entries()) {
+      const selected = index === state.selectedIndex;
+      rows.push(panelContentLine(
+        `todo-editor-item-${todo.id}`,
+        `${selected ? "❯" : " "} ${todoIcon(todo.status)} ${todo.content}`,
+        selected ? "assistant" : "muted",
+        {
+          width,
+          tone: selected ? "running" : undefined,
+          bold: selected,
+          dim: !selected && todo.status === "completed",
+          strikethrough: todo.status === "completed",
+        },
+      ));
+    }
+  }
+
+  if (state.mode !== "select") {
+    rows.push(panelContentLine(
+      "todo-editor-draft",
+      `${state.mode === "add" ? "New" : "Edit"}: ${state.draft}`,
+      "assistant",
+      { width, tone: "running", bold: true },
+    ));
+  }
+  if (state.error) {
+    rows.push(panelContentLine("todo-editor-error", state.error, "error", { width, tone: "error" }));
+  }
+
+  rows.push(
+    panelContentLine(
+      "todo-editor-keys",
+      state.mode === "select"
+        ? "↑↓ move  ·  space status  ·  a add  ·  e edit  ·  d delete  ·  esc close"
+        : "enter confirm  ·  esc cancel",
+      "muted",
+      { width, dim: true },
+    ),
+    panelBottomLine("todo-editor-bottom", width),
   );
   return rows;
 }
