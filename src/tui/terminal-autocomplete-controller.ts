@@ -30,7 +30,7 @@ export type TerminalAutocompleteState = {
   modelSetup?: ModelSetupState;
   pendingProfileSetup?: PendingProfileSetup;
   profileListState?: ProfileListState;
-  /** Candidate arguments for commands such as /tasks, /copy, and /resume. */
+  /** Candidate arguments for commands such as /tasks, /todo, /copy, and /resume. */
   argumentCandidates?: string[];
   argumentPrefix?: string;
   sessionCommand?: "resume" | "sessions";
@@ -302,13 +302,14 @@ export class TerminalAutocompleteController {
 const STATIC_ARGUMENTS: Record<string, readonly string[]> = {
   copy: ["last", "assistant", "input", "tool", "thinking", "user", "all"],
   tasks: ["show", "hide", "compact", "expanded", "clear"],
+  todo: ["list", "add", "start", "pending", "done", "edit", "delete", "clear"],
   skill: ["list", "status", "ls", "on", "off", "clear", "only", "set"],
   skills: ["list", "status", "ls", "on", "off", "clear", "only", "set"],
   resume: [],
 };
 
 function resolveArgumentInput(input: string): { command: string; query: string; prefix: string } | undefined {
-  const match = input.match(/^\/(copy|tasks|skill|skills|resume)\s+([^\s]*)$/i);
+  const match = input.match(/^\/(copy|tasks|todo|skill|skills|resume)\s+([^\s]*)$/i);
   if (!match) return undefined;
   const command = match[1]!.toLowerCase();
   return { command, query: match[2] ?? "", prefix: `/${command} ` };

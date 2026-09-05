@@ -10,7 +10,7 @@ export type TerminalInputAction =
   | { type: "scroll"; delta: number }
   | { type: "cancel" }
   | { type: "exit" }
-  | { type: "shortcut"; name: "copy" | "paste-image" | "permission" | "thinking-level" | "thinking-mode" | "thinking-message" | "focus-message" | "bottom"; direction?: "increase" | "decrease" };
+  | { type: "shortcut"; name: "copy" | "paste-image" | "permission" | "thinking-level" | "thinking-mode" | "thinking-message" | "focus-message" | "bottom" | "todo"; direction?: "increase" | "decrease" };
 
 export type TerminalInputControllerOptions = {
   onAction: (action: TerminalInputAction) => void;
@@ -169,6 +169,12 @@ export class TerminalInputController {
     const final = match[2];
     if (final === "D") this.move(-1);
     else if (final === "C") this.move(1);
+    // Kitty keyboard protocol preserves the Shift modifier for Ctrl+Shift+T
+    // as CSI 116;6u. A few xterm-compatible terminals use modifyOtherKeys
+    // instead, so accept that encoding and the common CSI 1;6T variant too.
+    else if (final === "u" && params === "116;6") this.emit({ type: "shortcut", name: "todo" });
+    else if (final === "~" && params === "27;6;116") this.emit({ type: "shortcut", name: "todo" });
+    else if (final === "T" && params === "1;6") this.emit({ type: "shortcut", name: "todo" });
     // xterm/modern terminals encode Alt+Arrow as CSI 1;3A/B. Kitty-style
     // keyboard protocols may use 1;9A/B, so accept both forms.
     else if ((params === "1;3" || params === "1;9") && final === "A") this.emit({ type: "shortcut", name: "focus-message", direction: "decrease" });

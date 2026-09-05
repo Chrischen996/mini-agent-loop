@@ -12,6 +12,7 @@ const DEFAULT_FILE_BYTES = 256 * 1024;
 const DEFAULT_RESULT_BYTES = 100 * 1024;
 const DEFAULT_CACHE_BYTES = 1024 * 1024 * 1024;
 const DEFAULT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const GIT_CONFIG_NULL = process.platform === "win32" ? "NUL" : os.devNull;
 
 export type RepositoryStoreOptions = {
   rootDir?: string;
@@ -98,7 +99,6 @@ export class RepositoryStore {
     try {
       const gitArgs = [
         "-c", "credential.helper=",
-        "-c", `core.hooksPath=${os.devNull}`,
         "-c", "filter.lfs.smudge=",
         "-c", "filter.lfs.required=false",
         ...args,
@@ -112,7 +112,7 @@ export class RepositoryStore {
           ...process.env,
           GIT_TERMINAL_PROMPT: "0",
           GIT_LFS_SKIP_SMUDGE: "1",
-          GIT_CONFIG_GLOBAL: os.devNull,
+          GIT_CONFIG_GLOBAL: GIT_CONFIG_NULL,
           GIT_CONFIG_NOSYSTEM: "1",
         },
       });

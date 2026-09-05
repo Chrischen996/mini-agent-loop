@@ -21,6 +21,7 @@ describe("GitWorkflow", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-git-"));
     try {
       await git(root, "init", "-q");
+      await git(root, "config", "core.autocrlf", "false");
       await writeFile(path.join(root, "tracked.txt"), "one\n", "utf8");
       await git(root, "add", "tracked.txt");
       await git(root, "commit", "-qm", "initial");
@@ -53,6 +54,7 @@ describe("GitWorkflow", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-git-status-"));
     try {
       await git(root, "init", "-q");
+      await git(root, "config", "core.autocrlf", "false");
       await writeFile(path.join(root, "tracked.txt"), "one\n", "utf8");
       await git(root, "add", "tracked.txt");
       await git(root, "commit", "-qm", "initial");

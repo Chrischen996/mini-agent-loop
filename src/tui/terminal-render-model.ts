@@ -6,8 +6,9 @@ import { thinkingRenderLines } from "./thinking-lines.ts";
 import { todoPanelRenderLines } from "./todo-lines.ts";
 import { toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
 import { terminalStringWidth, truncateTerminalPath } from "./terminal-width.ts";
-import { autocompleteRenderLines, panelBottomLine, panelContentLine, panelTopLine, permissionPanelRenderLines, planApprovalRenderLines } from "./terminal-overlay-lines.ts";
+import { autocompleteRenderLines, panelBottomLine, panelContentLine, panelTopLine, permissionPanelRenderLines, planApprovalRenderLines, todoEditorRenderLines } from "./terminal-overlay-lines.ts";
 import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
+import type { TodoEditorState } from "./todo-editor.ts";
 import { noticeText, noticeTitle, permissionModeLabel, statusLabel, thinkingLevelLabel, toolArgumentSummary } from "./claude-style.ts";
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import { isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from "./subagent-lines.ts";
@@ -55,6 +56,8 @@ export type TerminalRenderOptions = {
   queuedCount?: number;
   /** Active reasoning level shown in the wide status row. */
   thinkingLevel?: ModelThinkingLevel;
+  /** Optional Todo editor overlay owned by the standalone terminal entrypoint. */
+  todoEditor?: TodoEditorState;
 };
 
 /**
@@ -204,7 +207,8 @@ export function buildTerminalRenderLines(
   const wrappedHeader = width === undefined ? header : header.flatMap((line) => wrapRenderLine(line, width));
   const footer: RenderLine[] = [];
   footer.push(...panelLinesInLiveTail);
-  footer.push(...autocompleteRenderLines(options.autocomplete));
+  if (options.todoEditor) footer.push(...todoEditorRenderLines(options.todoEditor, width));
+  else footer.push(...autocompleteRenderLines(options.autocomplete));
   footer.push(...permissionPanelRenderLines(state.pendingPermission, width));
   footer.push(...planApprovalRenderLines(state.phase === "review" ? state.currentPlan : undefined, width));
   for (const [index, image] of state.pendingImages.entries()) {

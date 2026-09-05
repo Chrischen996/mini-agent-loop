@@ -5,6 +5,53 @@ import { applyPermissionModePrompt } from "../../loop.ts";
 import type { Dispatch } from "react";
 import type { TuiAction } from "../state.ts";
 import type { PermissionDecision, PermissionManager, PermissionTurnContext } from "../../permissions.ts";
+import type { AcMode } from "../input-utils.ts";
+
+export type TodoEditorKeyRoute =
+  | "none"
+  | "permission"
+  | "open"
+  | "close"
+  | "prompt"
+  | "move-up"
+  | "move-down"
+  | "add"
+  | "edit"
+  | "status"
+  | "delete"
+  | "confirm"
+  | "thinking";
+
+/** Resolve Todo editor keys before the normal prompt or autocomplete routes. */
+export function routeTodoEditorKey(input: {
+  editorOpen: boolean;
+  mode: "select" | "add" | "edit";
+  acMode: AcMode;
+  busy: boolean;
+  pendingPermission: boolean;
+  ch: string;
+  key: Key;
+}): TodoEditorKeyRoute {
+  const { editorOpen, mode, acMode, busy, pendingPermission, ch, key } = input;
+  if (pendingPermission) return "permission";
+
+  if (!editorOpen) {
+    if (!acMode && !busy && key.ctrl && key.shift && (ch === "t" || ch === "T" || ch === "\u0014")) return "open";
+    if (!acMode && !busy && key.ctrl && !key.shift && (ch === "t" || ch === "T" || ch === "\u0014")) return "thinking";
+    return "none";
+  }
+
+  if (key.escape) return "close";
+  if (mode !== "select") return "prompt";
+  if (key.upArrow) return "move-up";
+  if (key.downArrow) return "move-down";
+  if (key.return) return "confirm";
+  if (ch === "a" || ch === "A") return "add";
+  if (ch === "e" || ch === "E") return "edit";
+  if (ch === "s" || ch === "S") return "status";
+  if (ch === "d" || ch === "D") return "delete";
+  return "prompt";
+}
 
 export type UseKeyboardHandlerDeps = {
   exit: () => void;
@@ -16,12 +63,18 @@ export type UseKeyboardHandlerDeps = {
   adjustThinkingLevel: (direction: "increase" | "decrease", wrap?: boolean) => void;
   resolvePendingPermission: (decision: PermissionDecision) => boolean;
   dispatch: Dispatch<TuiAction>;
-  acMode: string | null;
+  acMode: AcMode;
   state: { busy: boolean; pendingPermission?: unknown; phase: string; currentPlan?: { id: string } };
   feedHeight: number;
   handleAutocompleteKey: (key: Key) => boolean;
   suppressInputEchoRef: React.MutableRefObject<boolean>;
   pendingPermissionRef: React.MutableRefObject<boolean>;
+  todoEditorOpen: boolean;
+  todoEditorMode: "select" | "add" | "edit";
+  openTodoEditor: () => void;
+  closeTodoEditor: () => void;
+  todoEditorAction: (action: import("../todo-editor.ts").TodoEditorAction) => void;
+  commitTodoEditor: () => void;
 };
 
 export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
@@ -30,6 +83,7 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
     adjustThinkingLevel, resolvePendingPermission, dispatch,
     acMode, state, feedHeight, handleAutocompleteKey,
     suppressInputEchoRef, pendingPermissionRef,
+    todoEditorOpen, todoEditorMode, openTodoEditor, closeTodoEditor, todoEditorAction, commitTodoEditor,
   } = deps;
 
   useInput((_ch: string, key: Key) => {
@@ -97,6 +151,53 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
     }
     pendingPermissionRef.current = false;
 
+    const todoRoute = routeTodoEditorKey({
+      editorOpen: todoEditorOpen,
+      mode: todoEditorMode,
+      acMode,
+      busy: state.busy,
+      pendingPermission: false,
+      ch: _ch,
+      key,
+    });
+    switch (todoRoute) {
+      case "close":
+        closeTodoEditor();
+        return;
+      case "open":
+        suppressInputEchoRef.current = true;
+        openTodoEditor();
+        return;
+      case "move-up":
+        todoEditorAction({ type: "MOVE", delta: -1 });
+        return;
+      case "move-down":
+        todoEditorAction({ type: "MOVE", delta: 1 });
+        return;
+      case "add":
+        todoEditorAction({ type: "BEGIN_ADD" });
+        return;
+      case "edit":
+        todoEditorAction({ type: "BEGIN_EDIT" });
+        return;
+      case "status":
+        todoEditorAction({ type: "CYCLE_STATUS" });
+        return;
+      case "delete":
+        todoEditorAction({ type: "DELETE" });
+        return;
+      case "confirm":
+        commitTodoEditor();
+        return;
+      case "prompt":
+        if (todoEditorOpen) return;
+        break;
+      case "thinking":
+        suppressInputEchoRef.current = true;
+        dispatch({ type: "TOGGLE_THINKING_MODE" });
+        return;
+    }
+
     // Plan approval shortcuts
     if (!acMode && !state.busy && state.phase === "review" && state.currentPlan) {
       if (_ch === "a" || _ch === "A") {
@@ -136,7 +237,7 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
     }
 
     // Ctrl+T: cycle thinking mode
-    if (key.ctrl && (_ch === "t" || _ch === "T" || _ch === "\u0014")) {
+    if (key.ctrl && !key.shift && (_ch === "t" || _ch === "T" || _ch === "\u0014")) {
       suppressInputEchoRef.current = true;
       dispatch({ type: "TOGGLE_THINKING_MODE" });
       return;
