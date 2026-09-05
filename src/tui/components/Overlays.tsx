@@ -8,6 +8,7 @@ import type { AcMode } from "../input-utils.ts";
 import { TodoEditor } from "./TodoEditor.tsx";
 import type { TodoEditorState } from "../todo-editor.ts";
 import type { PersistedSessionMeta } from "../../session-store.ts";
+import type { ResumeMessageCandidate } from "../session-serialization.ts";
 
 export type OverlaysProps = {
   acMode: AcMode;
@@ -22,6 +23,7 @@ export type OverlaysProps = {
   sessionCandidates: PersistedSessionMeta[];
   sessionCommand?: "resume" | "sessions";
   sessionLoading: boolean;
+  resumeMessageCandidates?: ResumeMessageCandidate[];
   currentModel: string;
   modelSetup?: ModelSetupState;
   pendingProfileSetup?: PendingProfileSetup | null;
@@ -47,6 +49,7 @@ export function Overlays({
   sessionCandidates,
   sessionCommand,
   sessionLoading,
+  resumeMessageCandidates = [],
   currentModel,
   modelSetup,
   pendingProfileSetup,
@@ -76,6 +79,24 @@ export function Overlays({
         maxVisible={pickerItemRows}
         width={width}
       />
+    );
+  }
+
+  if (acMode === "resume-messages") {
+    return (
+      <Box flexDirection="column" paddingX={2} width={width} minWidth={0} overflow="hidden">
+        <Text dimColor wrap="truncate-end">── Choose history point</Text>
+        {resumeMessageCandidates.length === 0 && <Text color={C.running}>No selectable messages</Text>}
+        {resumeMessageCandidates.map((candidate, index) => (
+          <Box key={`${candidate.id ?? candidate.boundary}-${index}`} gap={1} minWidth={0}>
+            <Text color={index === acIndex ? C.running : undefined} bold={index === acIndex}>{index === acIndex ? "▶" : " "}</Text>
+            <Text color={index === acIndex ? C.assistant : C.muted} bold={index === acIndex} wrap="truncate-end">
+              {candidate.role}  {candidate.text || "(tool call)"}
+            </Text>
+          </Box>
+        ))}
+        <Text dimColor wrap="truncate-end">Enter rewind here  ↑↓ navigate  Esc back</Text>
+      </Box>
     );
   }
 

@@ -612,6 +612,11 @@ function mapThinkingLevelToEffort(
 			return "medium";
 		case "high":
 			return "high";
+		case "xhigh":
+			return "high";
+		case "max":
+		case "ultra":
+			return "max";
 		default:
 			return "high";
 	}

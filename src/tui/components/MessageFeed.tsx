@@ -8,6 +8,7 @@ import { MarkdownText } from "./MarkdownText.tsx";
 import { toMessageRenderModel } from "../render-model.ts";
 import { toolVisualName, toolVisualStatusIcon } from "../tool-lines.ts";
 import { thinkingRenderLines, thinkingVisibleLines } from "../thinking-lines.ts";
+import { compactStreamingText } from "../text-utils.ts";
 import { noticeText, noticeTitle, statusLabel, toolArgumentSummary } from "../claude-style.ts";
 import { isSubagentProtocolText, isSubagentToolName } from "../subagent-lines.ts";
 import { activityPresentation, formatActivity, loadingGlyph, LOADING_FRAME_MS } from "../activity.ts";
@@ -284,7 +285,7 @@ export function MessageFeed({
             <ViewportSlice key="streaming-text" clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
               <Box flexDirection="row">
                 <Text color={C.primary} bold>⏺ </Text>
-                <Text color={C.assistant} wrap="wrap">{stripInlineMarkdown(streamingText)}</Text>
+                <Text color={C.assistant} wrap="wrap">{busy ? compactStreamingText(stripInlineMarkdown(streamingText)) : stripInlineMarkdown(streamingText)}</Text>
               </Box>
             </ViewportSlice>
           );

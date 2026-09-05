@@ -61,7 +61,7 @@ import { MemoryStore } from "../orchestration/memory-store.ts";
 import { createAutoMemoryHook, isAutoMemoryEnabled } from "../memory/auto-memory.ts";
 import type { TuiAction } from "./state.ts";
 import { isTuiFeatureEnabled } from "./execution-policy.ts";
-import { formatAmbiguousSessionNotice, getStartupSessionRequest, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
+import { createSessionPickerState, formatAmbiguousSessionNotice, getStartupSessionRequest, moveSessionPicker, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, selectedSessionFromPicker, toPersistedTodos } from "./session-serialization.ts";
 import { compactText } from "./text-utils.ts";
 import { TUI_BRAND_VERSION } from "./brand.ts";
 
@@ -227,7 +227,7 @@ async function main(): Promise<void> {
     todoPlan: (await loadPlanDocument(cwd).catch(() => null)) ?? undefined,
     todoItems: undefined,
     todoRevision: 0,
-    todoViewMode: "expanded",
+    todoViewMode: "compact",
     cwd,
     modelName: `${activeLlm.provider}/${activeLlm.model}`,
     billingLabel: "API Usage Billing",
@@ -421,7 +421,21 @@ async function main(): Promise<void> {
   process.on("SIGINT", quit);
   process.on("exit", cleanup);
 
-  const submit = async (prompt: string) => {
+  const openSessionPicker = async (command: "resume" | "sessions"): Promise<void> => {
+    const picker = createSessionPickerState(command);
+    state.sessionPicker = picker;
+    state.input = "";
+    state.status = "加载会话...";
+    render(state);
+    const sessions = await sessionManager.list().catch(() => []);
+    // Escape or another picker action may have replaced the loading state.
+    if (state.sessionPicker !== picker) return;
+    state.sessionPicker = { ...picker, sessions, loading: false };
+    state.status = "就绪";
+    render(state);
+  };
+
+  const submit = async (prompt: string, knownSession?: PersistedSessionMeta) => {
     const text = prompt.trim();
     if (!text || state.busy) return;
     if (text === "/exit" || text === "/quit") return quit();
@@ -438,23 +452,22 @@ async function main(): Promise<void> {
       return;
     }
     if (text === "/sessions") {
-      const metas: PersistedSessionMeta[] = await sessionManager.list().catch(() => []);
-      if (metas.length === 0) {
-        state.status = "没有可恢复的会话";
-      } else {
-        state.status = `会话列表: ${metas
-          .slice(0, 5)
-          .map((meta) => `${meta.id.slice(0, 8)}(${meta.messageCount}条)`)
-          .join(", ")} — /resume <id> 恢复`;
-      }
-      render(state);
+      await openSessionPicker("sessions");
       return;
     }
     const resumeCommand = parseResumeCommand(text);
     if (resumeCommand) {
       const arg = resumeCommand.prefix;
-      const metas = await sessionManager.list().catch(() => []);
-      const selection = resolveSessionByPrefix(metas, arg);
+      if (!arg) {
+        await openSessionPicker("resume");
+        return;
+      }
+      const metas = knownSession
+        ? [knownSession]
+        : await sessionManager.list().catch(() => []);
+      const selection = knownSession
+        ? { session: knownSession, candidates: [knownSession] }
+        : resolveSessionByPrefix(metas, arg);
       if (!selection.session && selection.candidates.length > 1) {
         state.status = formatAmbiguousSessionNotice(arg, selection.candidates);
         render(state);
@@ -719,13 +732,30 @@ async function main(): Promise<void> {
       inputChunk = inputChunk.replaceAll("\u0012", "");
     }
     if (inputChunk.includes("\u001b[Z")) {
-      const current = PERMISSION_MODES.indexOf(state.permissionMode);
-      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
-      permissionManager.setMode(next);
-      state.permissionMode = permissionManager.getMode();
-      state.status = `权限模式: ${next}`;
+      if (state.sessionPicker) {
+        const selected = selectedSessionFromPicker(state.sessionPicker);
+        if (selected) {
+          state.input = `/resume ${selected.id}`;
+          state.sessionPicker = undefined;
+          state.status = "就绪";
+        }
+      } else {
+        const current = PERMISSION_MODES.indexOf(state.permissionMode);
+        const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
+        permissionManager.setMode(next);
+        state.permissionMode = permissionManager.getMode();
+        state.status = `权限模式: ${next}`;
+      }
       inputChunk = inputChunk.replaceAll("\u001b[Z", "");
       render(state);
+    }
+    if (state.sessionPicker) {
+      for (const [sequence, delta] of [["\u001b[A", -1] as const, ["\u001b[B", 1] as const]) {
+        if (!inputChunk.includes(sequence)) continue;
+        state.sessionPicker = moveSessionPicker(state.sessionPicker, delta);
+        inputChunk = inputChunk.replaceAll(sequence, "");
+        render(state);
+      }
     }
     // Strip recognized escape sequences BEFORE the per-char loop so they're not
     // emitted as individual printable characters.
@@ -737,7 +767,15 @@ async function main(): Promise<void> {
     // so that the per-char loop below can handle them explicitly.
     for (const char of inputChunk) {
       if (char === "\u0003") return quit();
-      if (char === "\u001b") continue;
+      if (char === "\u001b") {
+        if (state.sessionPicker) {
+          state.sessionPicker = undefined;
+          state.input = "";
+          state.status = "就绪";
+          render(state);
+        }
+        continue;
+      }
       // Arrow keys (sent as individual up/down/left/right chars when terminfo is active)
       if (char === "\u0001" || char === "\u0005" || char === "\u0002" || char === "\u0006") {
         if (!state.busy && state.pendingUser === undefined) {
@@ -772,6 +810,15 @@ async function main(): Promise<void> {
         continue;
       }
       if (char === "\r" || char === "\n") {
+        if (state.sessionPicker) {
+          const selected = selectedSessionFromPicker(state.sessionPicker);
+          if (selected) {
+            state.sessionPicker = undefined;
+            state.input = "";
+            void submit(`/resume ${selected.id}`, selected);
+          }
+          continue;
+        }
         // If there's a pending permission, deny it
         if (state.pendingPermissionRequestId && state.pendingPermissionSessionId) {
           permissionManager.resolve(state.pendingPermissionSessionId, state.pendingPermissionRequestId, "deny");
@@ -782,6 +829,18 @@ async function main(): Promise<void> {
           return;
         }
         void submit(state.input);
+        continue;
+      }
+      if (char === "\t") {
+        if (state.sessionPicker) {
+          const selected = selectedSessionFromPicker(state.sessionPicker);
+          if (selected) {
+            state.input = `/resume ${selected.id}`;
+            state.sessionPicker = undefined;
+            state.status = "就绪";
+            render(state);
+          }
+        }
         continue;
       }
       if (char === "\u007f") {
@@ -804,6 +863,7 @@ async function main(): Promise<void> {
         continue;
       }
       if (char >= " " && char !== "\u007f") {
+        if (state.sessionPicker) continue;
         // Handle permission resolution: 'a' = allow, 'd' = deny
         if (state.pendingPermissionRequestId && state.pendingPermissionSessionId) {
           const decision = char === "a" || char === "A" ? "allow" as const : char === "d" || char === "D" ? "deny" as const : null;

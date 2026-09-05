@@ -1,4 +1,5 @@
 import { restoreAgentHistory } from "../loop.ts";
+import { contentAsString } from "../content.ts";
 import { switchLlmModel, type LlmConfig } from "../llm/index.ts";
 import { withThinkingLevel } from "../think-intensity.ts";
 import { nextTodoRevision, type TodoItem } from "../todo.ts";
@@ -16,6 +17,42 @@ export type StartupSessionRequest = {
   resume: boolean;
   fork: boolean;
 };
+
+export type SessionPickerState = {
+  command: "resume" | "sessions";
+  sessions: PersistedSessionMeta[];
+  selectedIndex: number;
+  loading: boolean;
+};
+
+/** Keep the session picker contract identical across Ink and ANSI renderers. */
+export const SESSION_PICKER_HINT = "Tab fill /resume  ·  Enter resume selected  ↑↓ navigate  Esc close";
+
+export function createSessionPickerState(
+  command: SessionPickerState["command"],
+  sessions: PersistedSessionMeta[] = [],
+  loading = true,
+): SessionPickerState {
+  return { command, sessions, selectedIndex: 0, loading };
+}
+
+export function moveSessionPicker(
+  state: SessionPickerState,
+  delta: number,
+): SessionPickerState {
+  if (state.sessions.length === 0) return state;
+  const next = (state.selectedIndex + delta) % state.sessions.length;
+  return {
+    ...state,
+    selectedIndex: next < 0 ? next + state.sessions.length : next,
+  };
+}
+
+export function selectedSessionFromPicker(
+  state: SessionPickerState,
+): PersistedSessionMeta | undefined {
+  return state.sessions[state.selectedIndex];
+}
 
 export function parseResumeCommand(value: string): { prefix: string } | undefined {
   // Keep the slash form compatible with the command palette, while accepting
@@ -131,6 +168,50 @@ export function formatAmbiguousSessionNotice(
   return `前缀 ${prefix || "(最近会话)"} 匹配多个会话，请使用更长前缀或完整 ID:\n${formatSessionCandidates(candidates)}`;
 }
 
+export type ResumeMessageCandidate = {
+  role: "user" | "assistant";
+  text: string;
+  /** Number of non-system transcript messages retained at this point. */
+  boundary: number;
+  /** Original message id, when persisted. */
+  id?: string;
+};
+
+/**
+ * Build the user-visible rewind points for a resumed transcript. Tool results
+ * are not separate choices; an assistant tool-call choice includes its whole
+ * contiguous tool-result block so the restored history remains provider-safe.
+ */
+export function getResumeMessageCandidates(
+  messages: readonly AgentMessage[],
+): ResumeMessageCandidate[] {
+  const visible = messages.filter((message) => message.role !== "system");
+  const candidates: ResumeMessageCandidate[] = [];
+  for (let index = 0; index < visible.length; index += 1) {
+    const message = visible[index]!;
+    if (message.role !== "user" && message.role !== "assistant") continue;
+    let end = index + 1;
+    if (message.role === "assistant" && (message.toolCalls?.length ?? 0) > 0) {
+      while (end < visible.length && visible[end]?.role === "tool") end += 1;
+    }
+    candidates.push({
+      role: message.role,
+      text: contentAsString(message.content),
+      boundary: end,
+      ...(message.id ? { id: message.id } : {}),
+    });
+    index = end - 1;
+  }
+  return candidates;
+}
+
+export function messageBoundaryForSelection(
+  candidates: readonly ResumeMessageCandidate[],
+  index: number,
+): number | undefined {
+  return candidates[index]?.boundary;
+}
+
 export type RestoredTuiSession = {
   history: AgentMessage[];
   todos?: TodoItem[];
@@ -143,9 +224,10 @@ export function restoreTuiSession(
   systemPrompt: string,
   restoreHistory: SessionHistoryRestorer = (value, prompt) => restoreAgentHistory(value.messages, prompt),
 ): RestoredTuiSession {
+  const todos = fromPersistedTodos(session.todos);
   return {
     history: restoreHistory(session, systemPrompt),
-    todos: fromPersistedTodos(session.todos),
-    todoRevision: session.todoVersion ?? nextTodoRevision(),
+    todos,
+    todoRevision: session.todoVersion ?? (todos ? nextTodoRevision() : 0),
   };
 }

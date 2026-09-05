@@ -65,7 +65,8 @@ export function executionPlanToTodoItems(plan: ExecutionPlan): TodoItem[] {
 }
 
 export function resolveTodoItems(source: TodoSource): TodoItem[] {
-  return source.todos ? [...source.todos] : planToTodoItems(source.plan);
+  if (source.todos && source.todos.length > 0) return [...source.todos];
+  return planToTodoItems(source.plan);
 }
 
 export function todoIcon(status: TodoStatus): string {

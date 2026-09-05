@@ -1,6 +1,7 @@
 import type { ChatMessage, ThinkingDisplayMode } from "./state.ts";
 import { countTerminalRows } from "./terminal-width.ts";
 import { estimateThinkingRows } from "./thinking-lines.ts";
+import { compactStreamingText } from "./text-utils.ts";
 import { isSubagentProtocolText, isSubagentToolName, subagentRenderLineCount } from "./subagent-lines.ts";
 
 const TOOL_PREVIEW_LINES = 15;
@@ -109,7 +110,7 @@ function buildBlocks(options: {
   if (options.streamingText) {
     blocks.push({
       item: { kind: "streaming_text" },
-      height: Math.max(1, countTerminalRows(options.streamingText, Math.max(10, options.width - 2))),
+      height: Math.max(1, countTerminalRows(options.busy ? compactStreamingText(options.streamingText) : options.streamingText, Math.max(10, options.width - 2))),
     });
   }
   if (options.busy) blocks.push({ item: { kind: "busy_status" }, height: 1 });

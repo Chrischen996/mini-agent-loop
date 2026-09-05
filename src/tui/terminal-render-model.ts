@@ -15,6 +15,7 @@ import { isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from 
 import { activityPresentation, formatActivity, loadingGlyph } from "./activity.ts";
 import { TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "./brand.ts";
 import { welcomePanelRenderLines, type WelcomePanelData } from "./welcome-panel.ts";
+import { compactStreamingText } from "./text-utils.ts";
 
 export type TerminalRenderOptions = {
   maxMessages?: number;
@@ -87,6 +88,7 @@ export function buildTerminalRenderLines(
     plan: state.todoPlan,
     todos: state.todoItems,
     viewMode: state.todoViewMode,
+    maxVisibleItems: Math.max(3, Math.min(8, (options.height ?? 24) - 4)),
   }).map((line) => ({ ...line, key: `panel-${line.key}` }));
   const panelLinesAboveBody = scrollback ? [] : panelLines;
   const panelLinesInLiveTail = scrollback ? panelLines.map(markEphemeral) : [];
@@ -194,7 +196,10 @@ export function buildTerminalRenderLines(
   }
   if (state.streamingText) {
     addMessageGap(lines, state.messages.length + 1);
-    lines.push({ key: "streaming-text", text: stripInlineMarkdown(state.streamingText), prefix: "⏺ ", style: "assistant", ...(scrollback ? { ephemeral: true } : {}) });
+    const streamingText = state.busy
+      ? compactStreamingText(stripInlineMarkdown(state.streamingText))
+      : stripInlineMarkdown(state.streamingText);
+    lines.push({ key: "streaming-text", text: streamingText, prefix: "⏺ ", style: "assistant", ...(scrollback ? { ephemeral: true } : {}) });
   }
   const wrappedPanel = width === undefined ? panelLinesAboveBody : panelLinesAboveBody.flatMap((line) => wrapRenderLine(line, width));
   const bodyLines = scrollback ? lines.map((line) => line.tone === "running" ? markEphemeral(line) : line) : lines;
@@ -421,7 +426,11 @@ function headerRenderLines(
 
 function thinkingHeaderLines(content: string, mode: TuiState["thinkingMode"], streaming: boolean, key: number | string, focused: boolean): RenderLine[] {
   if (mode === "hidden") return [];
-  const label = streaming ? "∴ Thinking…" : mode === "summary" && content.split("\n").length > 3 ? "∴ Thinking ▸ (Alt+T)" : "∴ Thinking…";
+  const label = streaming && mode !== "full"
+    ? "∴ Thinking ▸"
+    : mode === "summary" && content.split("\n").length > 3
+      ? "∴ Thinking ▸ (Alt+T)"
+      : "∴ Thinking…";
   return [{ key: `thinking-header-${key}`, text: label, prefix: focused ? "│ " : "  ", style: "thinking", dim: true, italic: true }];
 }
 

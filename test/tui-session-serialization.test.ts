@@ -1,19 +1,38 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  createSessionPickerState,
   fromPersistedTodos,
   findSessionByPrefix,
   formatAmbiguousSessionNotice,
+  moveSessionPicker,
   resolveSessionByPrefix,
   getExplicitStartupSessionId,
   getStartupSessionRequest,
   parseResumeCommand,
   restoreTuiSession,
+  selectedSessionFromPicker,
   toPersistedTodos,
+  getResumeMessageCandidates,
+  messageBoundaryForSelection,
 } from "../src/tui/session-serialization.ts";
 import type { AgentMessage } from "../src/types.ts";
 
 describe("TUI session serialization", () => {
+  it("moves through session picker candidates and returns the selected session", () => {
+    const picker = createSessionPickerState("resume", [
+      { id: "first", createdAt: 1, lastActiveAt: 3, messageCount: 1, preview: "one" },
+      { id: "second", createdAt: 1, lastActiveAt: 2, messageCount: 1, preview: "two" },
+    ], false);
+    assert.equal(selectedSessionFromPicker(picker)?.id, "first");
+    assert.equal(selectedSessionFromPicker(moveSessionPicker(picker, 1))?.id, "second");
+    assert.equal(selectedSessionFromPicker(moveSessionPicker(picker, -1))?.id, "second");
+    assert.equal(selectedSessionFromPicker(moveSessionPicker(picker, 2))?.id, "first");
+    const loadingPicker = createSessionPickerState("resume");
+    assert.equal(moveSessionPicker(loadingPicker, 1), loadingPicker);
+    assert.equal(selectedSessionFromPicker(createSessionPickerState("resume", [], false)), undefined);
+  });
+
   it("starts a fresh session unless a session id is explicitly supplied", () => {
     assert.equal(getExplicitStartupSessionId({}), undefined);
     assert.equal(getExplicitStartupSessionId({ MINI_AGENT_SESSION_ID: "  session-123  " }), "session-123");
@@ -81,6 +100,24 @@ describe("TUI session serialization", () => {
     ]), [
       { id: "restored", content: "Restore", activeForm: "Restore", status: "pending", source: "model" },
     ]);
+  });
+
+  it("maps selectable resume messages to safe visible boundaries", () => {
+    const messages: AgentMessage[] = [
+      { role: "system", content: "system" },
+      { role: "user", content: "inspect", id: "u1" },
+      { role: "assistant", content: "", id: "a1", toolCalls: [{ id: "call", name: "read", arguments: {} }] },
+      { role: "tool", toolCallId: "call", name: "read", content: "contents" },
+      { role: "assistant", content: "done", id: "a2" },
+    ];
+    const candidates = getResumeMessageCandidates(messages);
+    assert.deepEqual(candidates.map((candidate) => ({ role: candidate.role, text: candidate.text, boundary: candidate.boundary })), [
+      { role: "user", text: "inspect", boundary: 1 },
+      { role: "assistant", text: "", boundary: 3 },
+      { role: "assistant", text: "done", boundary: 4 },
+    ]);
+    assert.equal(messageBoundaryForSelection(candidates, 1), 3);
+    assert.equal(messageBoundaryForSelection(candidates, 99), undefined);
   });
 
   it("restores history through the supplied session boundary", () => {

@@ -3,6 +3,8 @@ import { Box, Text } from "ink";
 import { TUI_COLORS as C } from "../theme.ts";
 import { TODO_COMMAND_USAGE } from "../todo-commands.ts";
 import type { PersistedSessionMeta } from "../../session-store.ts";
+import { SESSION_PICKER_HINT } from "../session-serialization.ts";
+
 // ─── Command palette ─────────────────────────────────────────────────────────
 
 export type CommandDef = {
@@ -10,6 +12,7 @@ export type CommandDef = {
   usage: string;      // e.g. "/read <path>"
   description: string;
 };
+
 export const SLASH_COMMANDS: CommandDef[] = [
   { name: "model", usage: "/model [ref] [url] [key]", description: "Switch model and gateway" },
   { name: "profiles", usage: "/profiles", description: "List and activate model profiles" },
@@ -24,7 +27,6 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "sessions", usage: "/sessions",           description: "List saved sessions" },
   { name: "resume", usage: "/resume [id]",          description: "Resume a saved session" },
   { name: "tasks", usage: TODO_COMMAND_USAGE, description: "Show or manage todos" },
-  { name: "todo", usage: "/todo [list|add|start|pending|done|edit|delete|clear]", description: "Edit the session Todo list" },
   { name: "context", usage: "/context",             description: "Show context and token usage" },
   { name: "plan", usage: "/plan [task]",            description: "Generate an execution plan (plan mode)" },
   { name: "plan-show", usage: "/plan-show",         description: "Show the current plan" },
@@ -113,16 +115,19 @@ export function SessionPalette({ sessions, selectedIndex, command, loading, maxV
         );
       })}
       {!loading && sessions.length > visible.length && (
-        <Text dimColor wrap="truncate-end">Showing {visible.length} / {sessions.length}</Text>
+        <Text dimColor wrap="truncate-end">
+          Showing {start + 1}-{start + visible.length} / {sessions.length}
+        </Text>
       )}
       <Text dimColor wrap="truncate-end">
-        {command === "resume" ? "Tab fill /resume  ·  Enter resume selected" : "Tab fill /resume"}  ↑↓ navigate  Esc close
+        {SESSION_PICKER_HINT}
       </Text>
     </Box>
   );
 }
 
 // ─── File autocomplete ────────────────────────────────────────────────────────
+
 type FileAutocompleteProps = {
   candidates: string[];
   selectedIndex: number;

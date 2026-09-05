@@ -6,6 +6,7 @@ import { modelChoices } from "../model-command.ts";
 import { type AcMode, type FileAcTrigger } from "../input-utils.ts";
 import type { ModelRef } from "../../models.ts";
 import type { PersistedSessionMeta } from "../../session-store.ts";
+import type { ResumeMessageCandidate } from "../session-serialization.ts";
 import type { ModelSetupState, PendingProfileSetup, ProfileListState } from "../types.ts";
 import {
   currentAutocompleteNavIndex,
@@ -39,6 +40,7 @@ export function useAutocomplete({
   const [sessionCandidates, setSessionCandidates] = useState<PersistedSessionMeta[]>([]);
   const [sessionCommand, setSessionCommand] = useState<"resume" | "sessions" | undefined>();
   const [sessionLoading, setSessionLoading] = useState(false);
+  const [resumeMessageCandidates, setResumeMessageCandidates] = useState<ResumeMessageCandidate[]>([]);
   const [modelContextWindows, setModelContextWindows] = useState<Record<string, number>>({});
   const [modelQuery, setModelQuery] = useState("");
   const [modelSetup, setModelSetup] = useState<ModelSetupState | undefined>();
@@ -48,6 +50,7 @@ export function useAutocomplete({
   const fileTriggerRef = useRef<FileAcTrigger | null>(null);
   const acDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const acRequestRef = useRef(0);
+  const sessionListRequestRef = useRef<"resume" | "sessions" | null>(null);
 
   const clearAc = useCallback(() => {
     acRequestRef.current += 1;
@@ -58,6 +61,7 @@ export function useAutocomplete({
     setSessionCandidates([]);
     setSessionCommand(undefined);
     setSessionLoading(false);
+    setResumeMessageCandidates([]);
     setModelContextWindows({});
     setModelQuery("");
     setModelSetup(undefined);
@@ -66,14 +70,23 @@ export function useAutocomplete({
     setAcIndex(0);
     setPendingProfileSetup(null);
     setProfileListState(null);
+    sessionListRequestRef.current = null;
   }, []);
 
   useEffect(() => {
     if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
-    const requestId = ++acRequestRef.current;
-
     const requestedSessionCommand = sessionListCommand(input);
     if (requestedSessionCommand && listSessions) {
+      // Changing acMode to session-list causes this effect to run again. The
+      // input has not changed, so reuse the in-flight request instead of
+      // scanning the session directory a second time.
+      if (sessionListRequestRef.current === requestedSessionCommand && acMode === "session-list") {
+        return () => {
+          if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
+        };
+      }
+      const requestId = ++acRequestRef.current;
+      sessionListRequestRef.current = requestedSessionCommand;
       setCmdCandidates([]);
       setFileCandidates([]);
       setModelCandidates([]);
@@ -96,10 +109,19 @@ export function useAutocomplete({
         setSessionLoading(false);
       });
       return () => {
-        acRequestRef.current += 1;
+        // React runs this cleanup before the next effect. Keep the request
+        // alive while the same session command is still active; the next
+        // effect invalidates it when the input leaves the picker or changes
+        // to another session command. clearAc() can invalidate it earlier.
+        if (sessionListRequestRef.current !== requestedSessionCommand) {
+          acRequestRef.current += 1;
+        }
         if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
       };
     }
+
+    const requestId = ++acRequestRef.current;
+    sessionListRequestRef.current = null;
 
     const resolution = resolveAutocompleteInput(input, acMode);
 
@@ -113,6 +135,7 @@ export function useAutocomplete({
     }
 
     if (resolution.kind === "sticky") return;
+    if (acMode === "resume-messages") return;
 
     if (resolution.kind === "command") {
       setCmdCandidates(resolution.candidates);
@@ -228,6 +251,13 @@ export function useAutocomplete({
     [acMode, cwd],
   );
 
+  const openResumeMessages = useCallback((candidates: ResumeMessageCandidate[]) => {
+    setResumeMessageCandidates([...candidates]);
+    setAcIndex(0);
+    setInput("");
+    setAcMode("resume-messages");
+  }, [setInput]);
+
   const openModelPicker = useCallback(
     (query = "", models?: ModelRef[]) => {
       const choices = modelChoices(query, models);
@@ -253,7 +283,7 @@ export function useAutocomplete({
         files: fileCandidates.length,
         models: modelCandidates.length,
         profiles: profileListState?.profiles.length ?? 0,
-        sessions: sessionCandidates.length,
+        sessions: acMode === "resume-messages" ? resumeMessageCandidates.length : sessionCandidates.length,
       });
 
       switch (action.type) {
@@ -297,6 +327,8 @@ export function useAutocomplete({
       cmdCandidates.length,
       fileCandidates.length,
       modelCandidates.length,
+      sessionCandidates,
+      resumeMessageCandidates,
       profileListState,
       acceptCommand,
       acceptFile,
@@ -315,6 +347,7 @@ export function useAutocomplete({
     fileCandidates,
     modelCandidates,
     sessionCandidates,
+    resumeMessageCandidates,
     sessionCommand,
     sessionLoading,
     modelContextWindows,
@@ -332,6 +365,7 @@ export function useAutocomplete({
     acceptModel,
     handleTabAt,
     handleAutocompleteKey,
+    openResumeMessages,
     openModelPicker,
   };
 }

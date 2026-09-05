@@ -27,8 +27,8 @@
   },
   "scripts": {
     "start": "tsx src/cli.ts",
-    "tui": "node scripts/run-tui.mjs",
-    "tui:terminal": "node scripts/run-tui.mjs",
+    "tui": "node --import tsx/esm src/tui/ink-main.tsx",
+    "tui:terminal": "tsx src/tui/terminal-main.ts",
     "tui:legacy": "tsx src/tui/main.ts",
     "tui:ink": "tsx src/tui/ink-main.tsx",
     "dev": "tsx watch src/server.ts",

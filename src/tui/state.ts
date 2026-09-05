@@ -277,7 +277,9 @@ export function createInitialState(modelName: string): TuiState {
     todoPlan: undefined,
     todoItems: undefined,
     todoRevision: 0,
-    todoViewMode: "expanded",
+    // Match Claude Code: keep the task list compact during normal work;
+    // users can expand it with Ctrl+T or /tasks expanded.
+    todoViewMode: "compact",
     spinnerMessage: undefined,
   };
 }
@@ -326,8 +328,14 @@ export function chatMessagesFromAgentHistory(history: readonly AgentMessage[]): 
     }
     if (message.role === "assistant") {
       const text = contentAsString(message.content);
-      if (text) messages.push({ kind: "assistant", text });
-      for (const call of message.toolCalls ?? []) {
+      const toolCalls = message.toolCalls ?? [];
+      // Always emit an assistant ChatMessage when there is text content.
+      // For tool-only turns (empty text but with tool calls), emit a minimal
+      // assistant marker so the conversation flow is visible after resume.
+      if (text || toolCalls.length === 0) {
+        messages.push({ kind: "assistant", text: text || "" });
+      }
+      for (const call of toolCalls) {
         const card: Extract<ChatMessage, { kind: "tool_call" }> = {
           kind: "tool_call",
           id: call.id,

@@ -15,12 +15,10 @@ import { PermissionManager } from "../permissions.ts";
 import { applyPermissionModePrompt, createAgentHistory, type AgentRuntimeRef } from "../loop.ts";
 import { cycleThinkingLevel, thinkingLevelToDisplay, withThinkingLevel } from "../think-intensity.ts";
 import { nextPermissionMode, switchPermissionMode } from "./permission-utils.ts";
-import { executeTodoCommand, parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
-import { confirmTodoEditor, createTodoEditorState, reduceTodoEditor, type TodoEditorAction, type TodoEditorState } from "./todo-editor.ts";
-import type { TodoItem } from "../todo.ts";
+import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
 import { parseSlashCommand } from "./slash-commands.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
-import { createInitialState, createTuiStore } from "./state.ts";
+import { createInitialState, createTuiStore, type TuiState } from "./state.ts";
 import { buildTerminalRenderLines } from "./terminal-render-model.ts";
 import { IncrementalTerminalRenderer, resolveTerminalDisplayMode, ScrollbackTerminalRenderer } from "./incremental-renderer.ts";
 import { TerminalInputController, type TerminalInputAction } from "./terminal-input-controller.ts";
@@ -39,13 +37,14 @@ import { finalizeExecCapture, finalizePlanCapture, parsePlanTurnOverride } from 
 import { SessionStore, type PersistedSession, type PersistedSessionMeta } from "../session-store.ts";
 import { SessionManager } from "../session-manager.ts";
 import type { AgentMessage } from "../types.ts";
-import { formatAmbiguousSessionNotice, getStartupSessionRequest, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
+import { formatAmbiguousSessionNotice, getResumeMessageCandidates, getStartupSessionRequest, messageBoundaryForSelection, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos, type ResumeMessageCandidate } from "./session-serialization.ts";
 import { adaptHistoryForModel } from "../message-adapter.ts";
 import { activateProfile, listProfiles, loadProfileStore, removeProfile, saveProfile } from "../profile-store.ts";
 import { parseModelCommand, shouldSubmitTypedModelCommand } from "./model-command.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
 import { TUI_BRAND_NAME, TUI_BRAND_VERSION } from "./brand.ts";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
+import { createPiTuiRuntime, type PiTuiRuntime } from "./pi-tui-runtime.ts";
 
 const ALTERNATE_SCREEN = "\x1b[?1049h";
 const MAIN_SCREEN = "\x1b[?1049l";
@@ -120,6 +119,7 @@ export async function runTerminalMain(): Promise<void> {
         history: initialHistory,
         permissionMode: mode,
         modelName: activeLlm.model,
+        thinkingMode: target.thinkingMode === "adaptive" ? "hidden" : "summary",
         phase: target.phase,
         currentPlan: target.currentPlan,
         todos: restoredState.todos,
@@ -256,77 +256,23 @@ export async function runTerminalMain(): Promise<void> {
     }
 
     const displayMode = resolveTerminalDisplayMode();
-    const fullscreen = displayMode === "fullscreen";
-    const fullscreenRenderer = new IncrementalTerminalRenderer(process.stdout);
+    let usePiTui = displayMode === "pi";
+    let scrollback = displayMode === "scrollback";
+    let fullscreen = displayMode === "fullscreen";
     const scrollbackRenderer = new ScrollbackTerminalRenderer(process.stdout);
-    const renderer = fullscreen ? fullscreenRenderer : scrollbackRenderer;
+    let renderer: IncrementalTerminalRenderer | ScrollbackTerminalRenderer = fullscreen
+      ? new IncrementalTerminalRenderer(process.stdout)
+      : scrollbackRenderer;
+    let piRuntime: PiTuiRuntime | undefined;
     // Existing scrollback rows cannot be reflowed after they have been handed
     // to the terminal, so keep the initial width for the append-only path.
     const scrollbackWidth = process.stdout.columns || 80;
     let autocomplete: TerminalAutocompleteController;
-    let todoEditorState: TodoEditorState | null = null;
     let render: () => void = () => undefined;
     let animationTimer: ReturnType<typeof setInterval> | undefined;
-    const persistTodoState = async (todos: readonly TodoItem[]): Promise<void> => {
-      try {
-        const existing = await sessionManager.load(sessionRef.current);
-        const state = store.getState();
-        const history = service.getHistory();
-        await sessionManager.save({
-          id: sessionRef.current,
-          modelId: activeLlm.model,
-          thinkingLevel: activeLlm.thinkingLevel,
-          thinkingMode: activeThinkingMode,
-          permissionMode: permissionManager.getMode(),
-          skillNames: activeSkillNames,
-          phase: state.phase,
-          currentPlan: state.currentPlan,
-          messages: history,
-          todos: persistableTodos(todos),
-          todoVersion: state.todoRevision,
-          ...(existing?.createdAt ? { createdAt: existing.createdAt } : {}),
-        });
-      } catch {
-        // Persistence is best-effort; a disk error must not break the TUI.
-      }
-    };
     const directAbortRef: { current?: AbortController } = {};
     const input = new TerminalInputController({
-      onAction: (action) => handleInputAction(action, {
-        store,
-        service,
-        permissionManager,
-        input,
-        cwd,
-        planCaptureRef,
-        execCaptureRef,
-        autocomplete,
-        sessionAccess: sessionManager,
-        sessionRef,
-        allTools,
-        runtimeContext,
-        directAbortRef,
-        setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); },
-        persistTodoState,
-        todoEditor: {
-          getState: () => todoEditorState,
-          setState: (next) => { todoEditorState = next; render(); },
-        },
-        commitTodoEditor: () => {
-          if (!todoEditorState) return;
-          const next = confirmTodoEditor(todoEditorState);
-          if (next.error) {
-            todoEditorState = next;
-            render();
-            return;
-          }
-          store.dispatch({ type: "SET_TODOS", todos: next.todos });
-          store.dispatch({ type: "ADD_NOTICE", title: "Todo", text: "Todo list updated." });
-          todoEditorState = null;
-          input.clear();
-          void persistTodoState(next.todos);
-        },
-      }),
+      onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); }, persistSession: persistSessionSnapshot, onSessionRestore: () => { if (scrollback) scrollbackRenderer.forceNewSegment(); } }),
       getScrollPageSize: () => Math.max(1, (process.stdout.rows || 24) - 8),
     });
     autocomplete = new TerminalAutocompleteController({
@@ -341,11 +287,31 @@ export async function runTerminalMain(): Promise<void> {
       listSessions: () => sessionManager.list(),
       onChange: () => render(),
     });
-    render = () => {
+    // Cache last rendered result to avoid double-buildTerminalRenderLines on every
+    // scroll frame, and to skip re-renders when the state hasn't changed.
+    let frameCache: {
+      state: TuiState;
+      dynamicKey: string;
+      width: number;
+      scrollOffset: number;
+      naturalLines: import("./render-lines.ts").RenderLine[];
+    } | undefined;
+    const buildFrameLines = (width: number, height: number): ReturnType<typeof buildTerminalRenderLines> => {
       const state = store.getState();
+      const autocompleteState = autocomplete.getState();
+      // Scrolling only changes which rows are visible. Keep the expensive
+      // message projection cached while still invalidating input, overlays,
+      // and time-based activity updates.
+      const dynamicKey = JSON.stringify([
+        input.getValue(),
+        input.getCursor(),
+        autocompleteState,
+        state.spinnerMessage,
+        state.busy ? Math.floor(Date.now() / 120) : 0,
+      ]);
       const renderOptions = {
-        width: fullscreen ? process.stdout.columns || 80 : scrollbackWidth,
-        ...(fullscreen ? {
+        width,
+        ...(fullscreen || usePiTui ? {
           scrollOffset: state.scrollOffset,
         } : {
           scrollback: true,
@@ -359,34 +325,86 @@ export async function runTerminalMain(): Promise<void> {
           model: `${service.getLlm().provider}/${service.getLlm().model}`,
           billing: "API Usage Billing",
           // Scrollback keeps the welcome frame as the first committed
-          // transcript segment; fullscreen condenses it after the first turn.
-          showWelcome: !fullscreen || (state.messages.length === 0 && !state.busy && !state.pendingPermission),
+          // transcript segment; alternate-screen views condense it after the
+          // first turn.
+          showWelcome: scrollback || (state.messages.length === 0 && !state.busy && !state.pendingPermission),
         },
         promptRule: true,
         input: input.getValue(),
         cursor: input.getCursor(),
-        autocomplete: autocomplete.getState(),
-        maskInput: autocomplete.getState().mode === "model-setup" && autocomplete.getState().modelSetup?.field === "apiKey",
+        autocomplete: autocompleteState,
+        maskInput: autocompleteState.mode === "model-setup" && autocompleteState.modelSetup?.field === "apiKey",
         now: Date.now(),
         contextWindow: service.getLlm().contextWindow,
         queuedCount: service.getQueuedCount(),
         thinkingLevel: service.getLlm().thinkingLevel,
-        todoEditor: todoEditorState ?? undefined,
       };
-      if (!fullscreen) {
-        renderer.renderLines(buildTerminalRenderLines(state, renderOptions));
-        return;
+      // Scrollback mode: no frame height cap, no double-build.
+      if (scrollback) {
+        frameCache = undefined;
+        return buildTerminalRenderLines(state, renderOptions);
       }
 
-      // Keep short fullscreen sessions compact. Once the natural frame is
-      // taller than the terminal, switch to the fixed viewport so scrolling
-      // and the prompt remain stable without manufacturing a wall of blank
-      // rows during the first few subagent updates.
-      const naturalLines = buildTerminalRenderLines(state, renderOptions);
-      const frameHeight = Math.max(1, (process.stdout.rows || 24) - 1);
-      renderer.renderLines(naturalLines.length > frameHeight
-        ? buildTerminalRenderLines(state, { ...renderOptions, height: frameHeight })
-        : naturalLines);
+      const frameHeight = usePiTui ? Math.max(1, height) : Math.max(1, height - 1);
+      const scrollOffset = state.scrollOffset;
+
+      // Reuse cached naturalLines unless state or viewport changed.
+      if (
+        !frameCache
+        || !sameRenderState(frameCache.state, state)
+        || frameCache.dynamicKey !== dynamicKey
+        || frameCache.width !== width
+        || frameCache.scrollOffset !== scrollOffset
+      ) {
+        const naturalLines = buildTerminalRenderLines(state, {
+          ...renderOptions,
+          // The height-aware renderer keeps the prompt/status footer fixed and
+          // clamps scrollOffset to the actual message viewport range.
+          height: frameHeight,
+        });
+        frameCache = { state, dynamicKey, width, scrollOffset, naturalLines };
+      }
+      return frameCache.naturalLines;
+    };
+    if (usePiTui) {
+      try {
+        piRuntime = await createPiTuiRuntime(buildFrameLines, (data) => input.handle(data));
+      } catch {
+        // pi-tui uses newer runtime syntax than the historical TUI path. Keep
+        // the app usable on older Node versions with the stable fullscreen
+        // renderer rather than failing during module evaluation.
+        piRuntime = undefined;
+        usePiTui = false;
+        scrollback = false;
+        fullscreen = true;
+        renderer = new IncrementalTerminalRenderer(process.stdout);
+      }
+    }
+    // Throttle render() to once per animation frame to avoid stacking
+    // intermediate frames during fast scroll or streaming updates.
+    let renderQueued = false;
+    render = () => {
+      if (renderQueued) return;
+      renderQueued = true;
+      const flush = () => {
+        renderQueued = false;
+        if (!screenActive || quitting) return;
+        if (piRuntime) {
+          piRuntime.tui.requestRender();
+          return;
+        }
+        const width = fullscreen ? process.stdout.columns || 80 : scrollbackWidth;
+        renderer.renderLines(buildFrameLines(width, process.stdout.rows || 24));
+      };
+      // requestAnimationFrame exists in browsers; in Node, schedule via setImmediate(0)
+      // which yields to I/O and avoids blocking the event loop.
+      const requestAnimationFrame = (globalThis as typeof globalThis & {
+        requestAnimationFrame?: (callback: () => void) => number;
+      }).requestAnimationFrame;
+      const raf = typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame.bind(globalThis)
+        : (cb: () => void) => setImmediate(cb);
+      raf(flush);
     };
     const syncAnimation = () => {
       const shouldAnimate = store.getState().busy || Boolean(store.getState().pendingPermission);
@@ -411,13 +429,18 @@ export async function runTerminalMain(): Promise<void> {
       screenActive = false;
       if (animationTimer) clearInterval(animationTimer);
       animationTimer = undefined;
-      process.stdin.removeAllListeners("data");
-      process.stdout.removeListener("resize", render);
-      if (process.stdin.isRaw) process.stdin.setRawMode(false);
-      process.stdin.pause();
+      if (piRuntime) {
+        piRuntime.tui.stop();
+        process.stdout.write(MAIN_SCREEN);
+      } else {
+        process.stdin.removeAllListeners("data");
+        process.stdout.removeListener("resize", render);
+        if (process.stdin.isRaw) process.stdin.setRawMode(false);
+        process.stdin.pause();
+      }
       if (fullscreen) {
         process.stdout.write(`\x1b[?25h${MAIN_SCREEN}`);
-      } else {
+      } else if (scrollback) {
         // Scrollback mode never entered the alternate buffer. The renderer
         // already left the cursor after the live tail; just restore it.
         scrollbackRenderer.finish();
@@ -425,14 +448,15 @@ export async function runTerminalMain(): Promise<void> {
       unsubscribe();
       finishLoop();
     };
-    const quit = () => {
+    const quit = async () => {
       if (quitting) return;
       quitting = true;
       service.abort();
+      await service.waitForIdle();
       cleanup();
     };
 
-    if (fullscreen) {
+    if (piRuntime || fullscreen) {
       process.stdout.write(`${ALTERNATE_SCREEN}\x1b[?25l\x1b[H`);
     } else {
       // Start a clean transcript row in the user's main screen. Do not clear
@@ -440,20 +464,24 @@ export async function runTerminalMain(): Promise<void> {
       process.stdout.write("\x1b[2K\r\x1b[?25l");
     }
     screenActive = true;
-    syncAnimation();
-    process.stdin.setRawMode(true);
-    process.stdin.setEncoding("utf8");
-    process.stdin.resume();
     process.once("SIGINT", quit);
     process.once("exit", cleanup);
-    process.stdin.on("data", (chunk: string) => {
-      input.handle(chunk);
-      // An action such as /exit can synchronously tear down the screen while
-      // handling the same input chunk. Do not render a fresh scrollback
-      // segment after cleanup has already returned control to the shell.
-      if (screenActive && !quitting) render();
-    });
-    process.stdout.on("resize", render);
+    syncAnimation();
+    if (piRuntime) {
+      piRuntime.tui.start();
+    } else {
+      process.stdin.setRawMode(true);
+      process.stdin.setEncoding("utf8");
+      process.stdin.resume();
+      process.stdin.on("data", (chunk: string) => {
+        input.handle(chunk);
+        // An action such as /exit can synchronously tear down the screen while
+        // handling the same input chunk. Do not render a fresh scrollback
+        // segment after cleanup has already returned control to the shell.
+        if (screenActive && !quitting) render();
+      });
+      process.stdout.on("resize", render);
+    }
     render();
 
     // Keep the promise alive until the user exits. `stdin` is paused by
@@ -462,10 +490,17 @@ export async function runTerminalMain(): Promise<void> {
       finishLoop = resolve;
       process.stdin.once("close", resolve);
     });
-    quit();
+    await quit();
   } finally {
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close(), sandboxRunner?.cleanup() ?? Promise.resolve()]);
   }
+}
+
+function sameRenderState(left: TuiState, right: TuiState): boolean {
+  for (const key of Object.keys(left) as Array<keyof TuiState>) {
+    if (key !== "scrollOffset" && left[key] !== right[key]) return false;
+  }
+  return true;
 }
 
 export type InputDeps = {
@@ -487,12 +522,12 @@ export type InputDeps = {
   runtimeContext: RuntimeExecutionContext;
   directAbortRef: { current?: AbortController };
   setThinkingMode: (mode: "fixed" | "adaptive") => void;
-  persistTodoState?: (todos: readonly TodoItem[]) => void | Promise<void>;
-  todoEditor?: {
-    getState: () => TodoEditorState | null;
-    setState: (state: TodoEditorState | null) => void;
-  };
-  commitTodoEditor?: () => void;
+  /** Persist the transcript immediately after a model switch. */
+  persistSession?: (history: AgentMessage[]) => Promise<void>;
+  /** Called when a session restore resets the transcript so the renderer can
+   *  flush stale committed rows before the new content is rendered. */
+  onSessionRestore?: () => void;
+  resumePickerRef?: { current: { session: PersistedSession; candidates: ResumeMessageCandidate[] } | undefined };
 };
 
 export type SessionAccess = {
@@ -501,6 +536,7 @@ export type SessionAccess = {
   newSession(): string;
   setSessionId(sessionId: string): void;
   restoreHistory(session: PersistedSession, systemPrompt: string): AgentMessage[];
+  rewind?(sessionId: string, visibleCount: number): Promise<PersistedSession | undefined>;
 };
 
 function getSessionAccess(deps: InputDeps): SessionAccess {
@@ -518,19 +554,8 @@ function getSessionAccess(deps: InputDeps): SessionAccess {
 
 export function handleInputAction(action: TerminalInputAction, deps: InputDeps): void {
   const { store, service, permissionManager, input, cwd } = deps;
+  const sessionAccess = getSessionAccess(deps);
   const state = store.getState();
-  const editor = deps.todoEditor?.getState() ?? null;
-  if (action.type === "shortcut" && action.name === "todo") {
-    if (!editor && !state.busy && !state.pendingPermission && !deps.autocomplete.getState().mode && deps.todoEditor) {
-      const todos = state.todos.length > 0 ? state.todos : state.todoItems ?? [];
-      deps.todoEditor.setState(createTodoEditorState(todos));
-    }
-    return;
-  }
-  if (editor && deps.todoEditor) {
-    handleTodoEditorInput(action, deps, editor);
-    return;
-  }
   if (action.type === "exit") {
     service.abort();
     deps.directAbortRef.current?.abort();
@@ -617,13 +642,37 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
       store.dispatch({ type: "ADD_NOTICE", title: "正在执行", text: "当前 turn 完成后再切换模型或配置文件。普通消息仍会排队。" });
       return;
     }
+    if (autocompleteState.mode === "resume-messages") {
+      const picker = deps.resumePickerRef?.current;
+      const selected = autocompleteState.resumeMessages?.[autocompleteState.index];
+      if (!picker) return;
+      if (picker && selected && sessionAccess.rewind) {
+        void sessionAccess.rewind(picker.session.id, selected.boundary).then((rewound) => {
+          if (!rewound) return;
+          const mode = rewound.permissionMode ?? permissionManager.getMode();
+          const base = createAgentHistory(undefined, mode);
+          const prompt = typeof base[0]?.content === "string" ? base[0].content : "";
+          const history = sessionAccess.restoreHistory(rewound, prompt);
+          service.replaceHistory(history);
+          deps.sessionRef.current = rewound.id;
+          sessionAccess.setSessionId(rewound.id);
+          service.setSessionId(rewound.id);
+          store.dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: service.getLlm().model });
+          store.dispatch({ type: "ADD_NOTICE", title: "已回退会话", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} 条消息` });
+        }).catch((error) => store.dispatch({ type: "ADD_NOTICE", title: "回退失败", text: error instanceof Error ? error.message : String(error) }));
+      }
+      deps.autocomplete.clear();
+      input.clear();
+      return;
+    }
     if (autocompleteState.mode === "session-list") {
       const selected = autocompleteState.sessions[autocompleteState.index];
-      const command = autocompleteState.sessionCommand === "resume" && selected
+      if (!selected && autocompleteState.sessionLoading) return;
+      const command = selected
         ? `/resume ${selected.id}`
         : action.value;
       deps.autocomplete.clear();
-      void submitInput(command, deps);
+      void submitInput(command, deps, selected, autocompleteState.sessions);
       return;
     }
     // Sticky overlays own Enter. Keep their state intact until the async
@@ -655,56 +704,6 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
     deps.autocomplete.clear();
     void submitInput(action.value, deps);
   }
-}
-
-function handleTodoEditorInput(action: TerminalInputAction, deps: InputDeps, editor: TodoEditorState): void {
-  const todoEditor = deps.todoEditor;
-  if (!todoEditor) return;
-  if (action.type === "cancel") {
-    todoEditor.setState(null);
-    deps.input.clear();
-    return;
-  }
-  if (editor.mode === "select") {
-    if (action.type === "cursor" && (action.direction === "up" || action.direction === "down")) {
-      todoEditor.setState(reduceTodoEditor(editor, { type: "MOVE", delta: action.direction === "up" ? -1 : 1 }));
-      return;
-    }
-    if (action.type === "insert") {
-      const value = action.value.slice(-1);
-      const editorAction: TodoEditorAction | undefined = value.toLowerCase() === "a"
-        ? { type: "BEGIN_ADD" }
-        : value.toLowerCase() === "e" ? { type: "BEGIN_EDIT" }
-          : value.toLowerCase() === "s" ? { type: "CYCLE_STATUS" }
-            : value.toLowerCase() === "d" ? { type: "DELETE" }
-              : undefined;
-      if (editorAction) todoEditor.setState(reduceTodoEditor(editor, editorAction));
-      return;
-    }
-    if (action.type === "submit") {
-      deps.commitTodoEditor?.();
-      return;
-    }
-    return;
-  }
-  if (action.type === "insert" || action.type === "backspace") {
-    todoEditor.setState(reduceTodoEditor(editor, { type: "INPUT", value: deps.input.getValue() }));
-    return;
-  }
-  if (action.type === "submit") {
-    deps.commitTodoEditor?.();
-  }
-}
-
-function persistableTodos(items: readonly TodoItem[] | undefined): PersistedSession["todos"] {
-  if (!items) return undefined;
-  return items.map((item) => ({
-    id: item.id,
-    content: item.content,
-    activeForm: item.activeForm,
-    // SessionStore's wire format predates failed/skipped TUI-only states.
-    status: item.status === "completed" ? "completed" : item.status === "in_progress" ? "in_progress" : "pending",
-  }));
 }
 
 async function copyTerminalText(
@@ -779,11 +778,42 @@ function handleShortcut(action: Extract<TerminalInputAction, { type: "shortcut" 
   }
 }
 
-async function submitInput(value: string, deps: InputDeps): Promise<void> {
+async function submitInput(
+  value: string,
+  deps: InputDeps,
+  knownSession?: PersistedSessionMeta,
+  knownSessions?: PersistedSessionMeta[],
+): Promise<void> {
   const text = value.trim();
   const { store, service, permissionManager, input } = deps;
   const sessionAccess = getSessionAccess(deps);
   const autocompleteState = deps.autocomplete.getState();
+  if (autocompleteState.mode === "resume-messages") {
+    const selected = autocompleteState.resumeMessages?.[autocompleteState.index];
+    const picker = deps.resumePickerRef?.current;
+    const boundary = picker && selected ? selected.boundary : undefined;
+    if (boundary === undefined || !picker || !sessionAccess.rewind) {
+      input.clear();
+      deps.autocomplete.clear();
+      return;
+    }
+    void sessionAccess.rewind(picker.session.id, boundary).then((rewound) => {
+      if (!rewound) return;
+      const mode = rewound.permissionMode ?? permissionManager.getMode();
+      const base = createAgentHistory(undefined, mode);
+      const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
+      const history = sessionAccess.restoreHistory(rewound, systemPrompt);
+      service.replaceHistory(history);
+      deps.sessionRef.current = rewound.id;
+      sessionAccess.setSessionId(rewound.id);
+      service.setSessionId(rewound.id);
+      store.dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: service.getLlm().model, thinkingMode: rewound.thinkingMode === "adaptive" ? "hidden" : "summary", phase: rewound.phase, currentPlan: rewound.currentPlan });
+      store.dispatch({ type: "ADD_NOTICE", title: "已回退会话", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} 条消息` });
+    }).catch((error) => store.dispatch({ type: "ADD_NOTICE", title: "回退失败", text: error instanceof Error ? error.message : String(error) }));
+    input.clear();
+    deps.autocomplete.clear();
+    return;
+  }
   const allowEmptyApiKey = autocompleteState.mode === "model-setup" && autocompleteState.modelSetup?.field === "apiKey";
   const allowEmptyProfileSelection = autocompleteState.mode === "profile-list";
   if (!text && !allowEmptyApiKey && !allowEmptyProfileSelection) return;
@@ -808,7 +838,7 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
     return;
   }
   if (text === "/sessions") {
-    const sessions = await sessionAccess.list().catch(() => []);
+    const sessions = knownSessions ?? await sessionAccess.list().catch(() => []);
     store.dispatch({
       type: "ADD_NOTICE",
       title: "会话列表",
@@ -930,13 +960,6 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
     return;
   }
   const slashCommand = parseSlashCommand(text);
-  if (slashCommand?.cmd === "todo") {
-    const todos = store.getState().todos.length > 0 ? store.getState().todos : store.getState().todoItems ?? [];
-    const result = executeTodoCommand(todos, slashCommand.todo, store.dispatch);
-    if (result.ok) void deps.persistTodoState?.(result.todos);
-    input.clear();
-    return;
-  }
   if (slashCommand) {
     input.recordSubmission(text);
     input.clear();
@@ -946,7 +969,9 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
       ? { path: slashCommand.path }
       : slashCommand.cmd === "bash"
         ? { command: slashCommand.command }
-        : { pattern: slashCommand.pattern, path: slashCommand.path };
+        : slashCommand.cmd === "find"
+          ? { pattern: slashCommand.pattern, path: slashCommand.path }
+          : { pattern: slashCommand.pattern, path: slashCommand.path };
     deps.directAbortRef.current = abortController;
     try {
       const directResult = await runDirectTool(slashCommand.cmd, args, {
@@ -966,8 +991,12 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
   const resumeCommand = parseResumeCommand(text);
   if (resumeCommand) {
     const prefix = resumeCommand.prefix;
-    const sessions = await sessionAccess.list().catch(() => []);
-    const selection = resolveSessionByPrefix(sessions, prefix);
+    const sessions = knownSession
+      ? [knownSession]
+      : knownSessions ?? await sessionAccess.list().catch(() => []);
+    const selection = knownSession
+      ? { session: knownSession, candidates: [knownSession] }
+      : resolveSessionByPrefix(sessions, prefix);
     if (!selection.session && selection.candidates.length > 1) {
       store.dispatch({
         type: "ADD_NOTICE",
@@ -1015,17 +1044,28 @@ async function submitInput(value: string, deps: InputDeps): Promise<void> {
     sessionAccess.setSessionId(restored.id);
     service.setSessionId(restored.id);
     deps.runtimeContext.sessionId = restored.id;
+    // Force the scrollback renderer to treat the next render as a new visual
+    // segment so the entire restored transcript is written cleanly, rather than
+    // attempting an incremental prefix diff from the pre-resume committed rows
+    // which would leave stale content on screen.
+    deps.onSessionRestore?.();
     store.dispatch({
       type: "RESTORE_SESSION",
       history: restoredState.history,
       permissionMode: mode,
       modelName: service.getLlm().model,
+      thinkingMode: restored.thinkingMode === "adaptive" ? "hidden" : "summary",
       phase: restored.phase,
       currentPlan: restored.currentPlan,
       todos: restoredState.todos,
       todoRevision: restoredState.todoRevision,
     });
     store.dispatch({ type: "ADD_NOTICE", title: "会话已恢复", text: `${restored.id.slice(0, 8)} · ${restored.messages.length} 条消息` });
+    if (sessionAccess.rewind) {
+      const picker = { session: restored, candidates: getResumeMessageCandidates(restored.messages) };
+      if (deps.resumePickerRef) deps.resumePickerRef.current = picker;
+      deps.autocomplete.openResumeMessages(picker.candidates);
+    }
     input.clear();
     return;
   }
@@ -1119,6 +1159,9 @@ async function applyTerminalModel(
         sourceCapabilities: previous.capabilities,
       }));
     }
+    // Save immediately: a model switch can happen between turns, so waiting
+    // for the next prompt would lose the adapted history on restart.
+    await deps.persistSession?.(deps.service.getHistory());
     deps.store.dispatch({ type: "MODEL_CHANGED", modelName: next.model });
     deps.autocomplete.clear();
     deps.input.clear();

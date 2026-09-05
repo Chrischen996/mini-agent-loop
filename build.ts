@@ -44,5 +44,5 @@ async function buildEntry(
 
 // Keep the published default aligned with README's one-shot CLI contract.
 await buildEntry("src/cli.ts", "cli.js", true);
-// Publish the interactive ANSI client as a separate executable as well.
-await buildEntry("src/tui/terminal-main.ts", "tui.js", false);
+// Publish the interactive Ink client as the package's TUI executable.
+await buildEntry("src/tui/ink-main.tsx", "tui.js", false);

@@ -14,7 +14,10 @@ export type ThinkingLineOptions = {
 
 export function thinkingVisibleLines(content: string, options: ThinkingLineOptions): { lines: string[]; truncated: number; expanded: boolean } {
   const all = content.split("\n");
-  const streamingCollapse = Boolean(options.isStreaming && !options.forceExpanded && options.mode !== "full" && all.length > 15);
+  // Keep the live thinking region to one summary row by default. Full mode
+  // remains an explicit opt-in for users who want to inspect reasoning while
+  // it streams; completed messages retain the existing summary behavior.
+  const streamingCollapse = Boolean(options.isStreaming && !options.forceExpanded && options.mode !== "full");
   const expanded = Boolean(options.forceExpanded || options.mode === "full" || (options.mode === "summary" && !options.isStreaming && all.length <= THINKING_SUMMARY_LINES) || (options.isStreaming && !streamingCollapse && options.mode !== "summary"));
   const limit = expanded ? THINKING_MAX_FULL_LINES : THINKING_SUMMARY_LINES;
   return { lines: all.slice(0, limit), truncated: Math.max(0, all.length - limit), expanded };
@@ -23,6 +26,10 @@ export function thinkingVisibleLines(content: string, options: ThinkingLineOptio
 export function thinkingRenderLines(content: string, options: ThinkingLineOptions): RenderLine[] {
   if (!content || (options.mode === "hidden" && !options.forceExpanded)) return [];
   const visible = thinkingVisibleLines(content, options);
+  // The streaming header is the complete live representation in collapsed
+  // mode. Do not also emit the first three reasoning lines; doing so makes
+  // the terminal tail grow while the summary says it is collapsed.
+  if (options.isStreaming && !visible.expanded) return [];
   let inCode = false;
   const lines = visible.lines.map((text, index) => {
     const fence = text.trimStart().startsWith("```");

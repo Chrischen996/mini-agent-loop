@@ -12,6 +12,7 @@ import express, {
 import multer from "multer";
 import { documentTextPart, MAX_ATTACHMENT_BYTES } from "./attachments.ts";
 import { contentAsString, imagePart, textPart } from "./content.ts";
+import { adaptHistoryForModel, mergeConsecutiveSameRole } from "./message-adapter.ts";
 import { loadInstructionBundle } from "./agents-md.ts";
 import { DocumentStore } from "./documents.ts";
 import type { PersistedSession } from "./session-store.ts";
@@ -1425,12 +1426,20 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     try {
+      const previousLlm = session.llmOverride ?? options.llm;
       const newLlm = switchLlmModel(
-        session.llmOverride ?? options.llm,
+        previousLlm,
         modelId,
         {},
         options.relayRegistry,
       );
+      // Persist a provider-safe transcript at the switch boundary. This is
+      // important for a later request/restart: the next model must not be
+      // handed tool calls or images it cannot consume.
+      session.messages = mergeConsecutiveSameRole(adaptHistoryForModel(session.messages, {
+        targetCapabilities: newLlm.capabilities,
+        sourceCapabilities: previousLlm.capabilities,
+      }));
       session.modelId = `${newLlm.provider}/${newLlm.model}`;
       session.llmOverride = newLlm;
       session.thinkingLevel = newLlm.thinkingLevel;

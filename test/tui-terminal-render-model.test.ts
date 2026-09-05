@@ -83,6 +83,33 @@ describe("standalone terminal render model", () => {
     const lines = buildTerminalRenderLines(createInitialState("test-model"), { autocomplete, input: "/resume" });
     assert.ok(lines.some((line) => line.text.includes("abc123456789")));
     assert.ok(lines.some((line) => line.text.includes("inspect the repository")));
+    assert.ok(lines.some((line) => line.text.includes("Enter resume selected")));
+  });
+
+  it("keeps the selected session visible after moving past the first page", () => {
+    const autocomplete: TerminalAutocompleteState = {
+      mode: "session-list",
+      index: 9,
+      commands: [],
+      files: [],
+      models: [],
+      sessions: Array.from({ length: 10 }, (_, index) => ({
+        id: `session-${String(index + 1).padStart(2, "0")}`,
+        createdAt: 1,
+        lastActiveAt: 2,
+        messageCount: 1,
+        preview: `prompt ${index + 1}`,
+      })),
+      modelContextWindows: {},
+      modelQuery: "",
+      fileFragment: "",
+      sessionCommand: "resume",
+      sessionLoading: false,
+    };
+    const lines = buildTerminalRenderLines(createInitialState("test-model"), { autocomplete, input: "/resume" });
+    assert.ok(lines.some((line) => line.text.includes("session-10")));
+    assert.equal(lines.some((line) => line.text.includes("session-01")), false);
+    assert.ok(lines.some((line) => line.text.includes("Showing 3-10 / 10")));
   });
 
   it("keeps inline Markdown out of ANSI transcript rows", () => {
@@ -160,7 +187,7 @@ describe("standalone terminal render model", () => {
     state = tuiReducer(state, { type: "USER_MESSAGE", text: "history" });
     state = tuiReducer(state, { type: "SCROLL_BY", delta: 3 });
     const lines = buildTerminalRenderLines(state, { height: 5, input: "" });
-    assert.equal(lines[0]?.key, "panel-todo-header");
+    assert.equal(lines[0]?.key, "panel-todo-compact");
   });
 
   it("masks API keys while the model setup overlay owns the input", () => {

@@ -6,6 +6,7 @@ import type { TodoItem } from "../src/todo.ts";
 import { getMessageFeedHeight, getPickerLayout, getTuiViewportHeight } from "../src/tui/layout.ts";
 import { TUI_BRAND_HEADER_HEIGHT, TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "../src/tui/brand.ts";
 import { buildWelcomePanelRows } from "../src/tui/welcome-panel.ts";
+import { createSessionPickerState } from "../src/tui/session-serialization.ts";
 
 describe("legacy TUI renderer", () => {
   it("places the mini-agent mark in the top identity row", () => {
@@ -76,6 +77,28 @@ describe("legacy TUI renderer", () => {
     assert.match(rendered, /in progress/);
     assert.match(rendered, /1\. Read/);
     assert.match(rendered, /2\. Write/);
+  });
+
+  it("renders the legacy session picker with selection controls", () => {
+    const lines = buildLegacyFrameLines({
+      history: [],
+      streamingText: "",
+      tools: [],
+      busy: false,
+      input: "",
+      status: "就绪",
+      permissionMode: "plan",
+      thinkingLevel: "off",
+      sessionPicker: createSessionPickerState("resume", [
+        { id: "session-123456789", createdAt: 1, lastActiveAt: 2, messageCount: 3, preview: "inspect the repository" },
+      ], false),
+    });
+    const rendered = lines.join("\n");
+    assert.match(rendered, /Resume sessions/);
+    assert.match(rendered, /session-1234/);
+    assert.match(rendered, /3 msgs/);
+    assert.match(rendered, /Tab fill \/resume/);
+    assert.match(rendered, /Enter resume selected/);
   });
 
   it("renders dynamic TodoWrite items with completed strike-through", () => {

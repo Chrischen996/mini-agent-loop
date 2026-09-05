@@ -173,6 +173,22 @@ export class SessionManager {
     return persisted;
   }
 
+  /** Rewind a persisted session in place, retaining the first visible messages. */
+  async rewind(
+    sessionId = this.activeSessionId,
+    visibleCount: number,
+  ): Promise<PersistedSession | undefined> {
+    if (!Number.isInteger(visibleCount) || visibleCount < 0) {
+      throw new Error("visibleCount must be a non-negative integer");
+    }
+    const session = await this.load(sessionId);
+    if (!session) return undefined;
+    session.messages = sanitizeResumableMessages(session.messages, visibleCount);
+    const persisted = await this.save(session);
+    if (this.activeSessionId === sessionId) this.activeSessionId = persisted.id;
+    return persisted;
+  }
+
   async remove(sessionId: string): Promise<void> {
     await this.store.remove(sessionId);
     if (this.activeSessionId === sessionId) this.newSession();
@@ -203,6 +219,9 @@ export class SessionManager {
 
   /** Rebuild only the base prompt, retaining compact summaries in the log. */
   restoreHistory(session: PersistedSession, systemPrompt: string): AgentMessage[] {
-    return restoreAgentHistory(sanitizeResumableMessages(session.messages), systemPrompt);
+    // `load()` already sanitizes the messages; avoid double-sanitization which
+    // could drop messages in edge cases (e.g. when an interrupted turn leaves
+    // the `discardUntilUser` flag active across the second pass).
+    return restoreAgentHistory(session.messages, systemPrompt);
   }
 }
