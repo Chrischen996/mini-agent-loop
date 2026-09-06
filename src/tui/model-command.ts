@@ -87,6 +87,20 @@ export function shouldSubmitTypedModelCommand(rawInput: string, models = getAllM
   return Boolean(match?.model && !match.ambiguous);
 }
 
+/**
+ * Normalize what the model picker holds into a submittable `/model` command.
+ *
+ * While the picker is open the prompt holds the bare query in both clients, so
+ * the empty field can show its `Search models` hint. Enter on a typed reference
+ * must still switch the model instead of sending that reference to the model as
+ * a prompt.
+ */
+export function modelCommandFromPickerInput(rawInput: string): string {
+  const value = rawInput.trim();
+  if (!value) return value;
+  return /^\/model(?:\s|$)/i.test(value) ? value : `/model ${value}`;
+}
+
 /** Previous picker logic: simple substring match on `provider/id`. */
 export function filterModelsByQuery(query: string, models: ModelRef[]): ModelRef[] {
   const needle = query.trim().toLowerCase();

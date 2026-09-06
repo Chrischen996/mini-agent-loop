@@ -6,6 +6,7 @@ import {
   createSpinnerTicker,
   getSpinnerFrame,
   loadingLabel,
+  spinnerTipLabel,
 } from "../src/tui/loading.ts";
 
 describe("TUI loading presentation", () => {
@@ -19,6 +20,15 @@ describe("TUI loading presentation", () => {
     assert.equal(loadingLabel("思考中..."), "Thinking…");
     assert.equal(loadingLabel("任务列表已更新", "▶ Inspecting files"), "Inspecting files…");
     assert.equal(loadingLabel("read..."), "Working…");
+  });
+
+  it("normalizes a Todo tip into the shared spinner label", () => {
+    assert.equal(spinnerTipLabel("▶ Writing tests"), "Writing tests…");
+    assert.equal(spinnerTipLabel("Running checks…"), "Running checks…");
+    assert.equal(spinnerTipLabel("   "), undefined);
+    assert.equal(spinnerTipLabel(undefined), undefined);
+    // The tip is the label of the single activity row, never a second spinner.
+    assert.equal(loadingLabel("", "▶ Writing tests"), "Writing tests…");
   });
 
   it("advances a ticker only while it is running", () => {

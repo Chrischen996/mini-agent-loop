@@ -1,5 +1,6 @@
 import type { ThinkingDisplayMode } from "./state.ts";
 import type { RenderLine } from "./render-lines.ts";
+import { markdownRowText } from "./markdown-lines.ts";
 import { countTerminalRows } from "./terminal-width.ts";
 
 export const THINKING_SUMMARY_LINES = 3;
@@ -30,15 +31,24 @@ export function thinkingRenderLines(content: string, options: ThinkingLineOption
   // mode. Do not also emit the first three reasoning lines; doing so makes
   // the terminal tail grow while the summary says it is collapsed.
   if (options.isStreaming && !visible.expanded) return [];
+  // Reasoning blocks use the same fenced-code treatment as answer markdown:
+  // a `▌` gutter instead of literal ``` markers, one output row per source row
+  // so `estimateThinkingRows` keeps matching what is actually rendered.
   let inCode = false;
   const lines = visible.lines.map((text, index) => {
     const fence = text.trimStart().startsWith("```");
-    const style = fence ? "thinking" : inCode ? "muted" : "assistant";
-    if (fence) inCode = !inCode;
-    return { key: `thinking-${index}`, text, style, dim: true } satisfies RenderLine;
+    if (fence) {
+      const opening = !inCode;
+      inCode = opening;
+      const lang = opening ? text.trimStart().slice(3).trim() : "";
+      return { key: `thinking-${index}`, text: markdownRowText({ kind: "code-fence", text, opening, lang }), style: "thinking", dim: true } satisfies RenderLine;
+    }
+    const style = inCode ? "muted" : "assistant";
+    const body = inCode ? markdownRowText({ kind: "code", text }) : text;
+    return { key: `thinking-${index}`, text: body, style, dim: true } satisfies RenderLine;
   });
   if (visible.truncated > 0) {
-    lines.push({ key: "thinking-more", text: `··· ${visible.truncated} more lines${options.streamInfo ?? ""}`, style: "thinking", dim: true });
+    lines.push({ key: "thinking-more", text: `··· ${visible.truncated} more ${visible.truncated === 1 ? "line" : "lines"}${options.streamInfo ?? ""}`, style: "thinking", dim: true });
   }
   return lines;
 }

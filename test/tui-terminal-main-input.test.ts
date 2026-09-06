@@ -8,6 +8,7 @@ import { TerminalAutocompleteController } from "../src/tui/terminal-autocomplete
 import { TerminalInputController } from "../src/tui/terminal-input-controller.ts";
 import { TerminalAgentService } from "../src/tui/terminal-agent-service.ts";
 import { handleInputAction, type InputDeps } from "../src/tui/terminal-main.ts";
+import { formatHelpNotice, SLASH_COMMANDS } from "../src/tui/slash-commands.ts";
 import { confirmTodoEditor, type TodoEditorState } from "../src/tui/todo-editor.ts";
 
 function model(): ModelRef {
@@ -133,6 +134,26 @@ describe("terminal main input routing", () => {
     assert.equal(deps.autocomplete.getState().modelSetup?.baseUrl, "https://new.test/v1");
   });
 
+  it("routes a reference typed into the model picker to model setup", () => {
+    const deps = dependencies();
+    // The picker owns the query, so the prompt holds the bare reference and the
+    // empty field can show its `Search models` hint.
+    deps.autocomplete.openModelPicker();
+    deps.input.setValue("openai/gpt-4o");
+
+    handleInputAction({ type: "submit", value: "openai/gpt-4o" }, deps);
+
+    // Enter switches the model instead of sending the reference to it as a
+    // prompt, and the base URL step stays pre-filled the way Ink pre-fills it.
+    assert.equal(deps.service.getHistory().filter((message) => message.role === "user").length, 0);
+    const state = deps.autocomplete.getState();
+    assert.equal(state.mode, "model-setup");
+    assert.equal(state.modelSetup?.field, "baseUrl");
+    assert.equal(state.modelSetup?.model.id, "gpt-4o");
+    assert.equal(deps.input.getValue(), state.modelSetup?.baseUrl);
+    assert.notEqual(deps.input.getValue(), "");
+  });
+
   it("handles /copy locally instead of starting a model turn", async () => {
     const deps = dependencies();
     deps.input.setValue("/copy");
@@ -143,7 +164,49 @@ describe("terminal main input routing", () => {
     assert.equal(deps.service.getHistory().filter((message) => message.role === "user").length, 0);
     const notice = deps.store.getState().messages.at(-1);
     assert.equal(notice?.kind, "notice");
-    assert.match(notice?.kind === "notice" ? notice.text : "", /没有可复制/);
+    assert.match(notice?.kind === "notice" ? notice.text : "", /Nothing to copy yet/);
+  });
+
+  it("rejects an unknown slash command instead of spending a model turn", async () => {
+    const deps = dependencies();
+    deps.input.setValue("/deploy the app");
+
+    handleInputAction({ type: "submit", value: "/deploy the app" }, deps);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    assert.equal(deps.service.getHistory().filter((message) => message.role === "user").length, 0);
+    const notice = deps.store.getState().messages.at(-1);
+    assert.equal(notice?.kind, "notice");
+    assert.equal(notice?.kind === "notice" ? notice.title : "", "Unknown command");
+    assert.match(notice?.kind === "notice" ? notice.text : "", /\/deploy is not a command\. Use \/help/);
+    assert.equal(deps.input.getValue(), "");
+    // The typo is still recoverable from prompt history.
+    assert.ok(deps.input.getHistory().includes("/deploy the app"));
+  });
+
+  it("still submits a prompt that starts with an absolute path", async () => {
+    const deps = dependencies();
+    handleInputAction({ type: "submit", value: "/home/user/project is broken" }, deps);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const notice = deps.store.getState().messages.at(-1);
+    assert.equal(notice?.kind === "notice" ? notice.title : undefined, undefined);
+  });
+
+  it("answers /help from the shared command catalog", async () => {
+    const deps = dependencies();
+    handleInputAction({ type: "submit", value: "/help" }, deps);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    assert.equal(deps.service.getHistory().filter((message) => message.role === "user").length, 0);
+    const notice = deps.store.getState().messages.at(-1);
+    assert.equal(notice?.kind === "notice" ? notice.title : "", "Available commands");
+    const text = notice?.kind === "notice" ? notice.text : "";
+    // The entrypoint formats help for the current terminal width.
+    assert.equal(text, formatHelpNotice(SLASH_COMMANDS, process.stdout.columns || 80));
+    for (const command of SLASH_COMMANDS.filter((entry) => !entry.alias)) {
+      assert.ok(text.includes(command.usage) || text.includes(`/${command.name}`), command.usage);
+    }
   });
 
   it("handles /todo locally instead of starting an Agent turn", async () => {
@@ -387,6 +450,6 @@ describe("terminal main input routing", () => {
 
     assert.equal(listCalls, 1);
     const notice = deps.store.getState().messages.at(-1);
-    assert.match(notice?.kind === "notice" ? notice.text : "", /没有可恢复的会话/);
+    assert.match(notice?.kind === "notice" ? notice.text : "", /No saved sessions/);
   });
 });

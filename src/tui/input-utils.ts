@@ -76,6 +76,38 @@ export type AcMode =
   | "profile-list"
   | null;
 
+export type PromptPlaceholderContext = {
+  busy?: boolean;
+  acMode?: AcMode;
+  /** Field the model-setup overlay is editing, when that overlay is open. */
+  modelSetupField?: string;
+};
+
+/**
+ * The hint an empty prompt shows.
+ *
+ * Both clients render the same cascade. The ANSI prompt used to print a bare
+ * cursor with no hint at all, so `/model`'s search field, the API-key field, and
+ * the idle prompt gave the user nothing to go on.
+ */
+export function promptPlaceholder(context: PromptPlaceholderContext = {}): string {
+  if (context.busy) return "Working; type a message to queue";
+  switch (context.acMode) {
+    case "model-picker":
+      return "Search models";
+    case "model-setup":
+      return context.modelSetupField === "baseUrl"
+        ? "Enter Base URL"
+        : "Enter API key (or leave blank for env)";
+    case "profile-name":
+      return "Enter a profile name (for example coding-fast)";
+    case "profile-list":
+      return "↑↓ select profile, Enter activate";
+    default:
+      return "Message, /command, or @file reference";
+  }
+}
+
 /** Enter accepts a candidate only for list-style autocomplete modes. */
 export function shouldAcceptAutocompleteOnEnter(acMode: AcMode): boolean {
   return acMode === "command"

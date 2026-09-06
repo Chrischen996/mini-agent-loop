@@ -50,13 +50,13 @@ export async function parsePlanTurnOverride(
       const doc = await loadPlanDocument(cwd);
       if (!doc) {
         dispatch({ type: "SET_TODO_PLAN", plan: undefined });
-        dispatch({ type: "ADD_NOTICE", title: "计划", text: "当前没有保存的计划。使用 /plan <任务> 生成。" });
+        dispatch({ type: "ADD_NOTICE", title: "Plan", text: "No saved plan. Use /plan <task> to generate one." });
       } else {
         dispatch({ type: "SET_TODO_PLAN", plan: doc });
-        dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
+        dispatch({ type: "ADD_NOTICE", title: "Current plan", text: formatPlanDocumentPreview(doc) });
       }
     } catch (err) {
-      dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      dispatch({ type: "ADD_NOTICE", title: "Plan error", text: err instanceof Error ? err.message : String(err) });
     }
     return null;
   }
@@ -68,11 +68,11 @@ export async function parsePlanTurnOverride(
       dispatch({ type: "SET_TODO_PLAN", plan: doc });
       dispatch({
         type: "ADD_NOTICE",
-        title: "计划已批准",
+        title: "Plan approved",
         text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}`,
       });
     } catch (err) {
-      dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      dispatch({ type: "ADD_NOTICE", title: "Plan error", text: err instanceof Error ? err.message : String(err) });
     }
     return null;
   }
@@ -82,9 +82,9 @@ export async function parsePlanTurnOverride(
     try {
       const doc = await rejectCurrentPlan(cwd);
       dispatch({ type: "SET_TODO_PLAN", plan: doc });
-      dispatch({ type: "ADD_NOTICE", title: "计划已拒绝", text: `id=${doc.id} status=${doc.status}` });
+      dispatch({ type: "ADD_NOTICE", title: "Plan rejected", text: `id=${doc.id} status=${doc.status}` });
     } catch (err) {
-      dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      dispatch({ type: "ADD_NOTICE", title: "Plan error", text: err instanceof Error ? err.message : String(err) });
     }
     return null;
   }
@@ -94,16 +94,16 @@ export async function parsePlanTurnOverride(
     try {
       const history = await listPlanHistory(cwd);
       if (history.length === 0) {
-        dispatch({ type: "ADD_NOTICE", title: "计划历史", text: "尚无归档计划。" });
+        dispatch({ type: "ADD_NOTICE", title: "Plan history", text: "No archived plans." });
       } else {
         const lines = history.map((doc: any) => {
           const promptSlice = doc.prompt.length > 60 ? `${doc.prompt.slice(0, 60)}…` : doc.prompt;
           return `${doc.id}  ${doc.status.padEnd(10)}  ${doc.updatedAt}  ${promptSlice}`;
         });
-        dispatch({ type: "ADD_NOTICE", title: "计划历史", text: lines.join("\n") });
+        dispatch({ type: "ADD_NOTICE", title: "Plan history", text: lines.join("\n") });
       }
     } catch (err) {
-      dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      dispatch({ type: "ADD_NOTICE", title: "Plan error", text: err instanceof Error ? err.message : String(err) });
     }
     return null;
   }
@@ -115,11 +115,11 @@ export async function parsePlanTurnOverride(
       dispatch({ type: "SET_TODO_PLAN", plan: document });
       dispatch({
         type: "ADD_NOTICE",
-        title: "计划已归档",
+        title: "Plan archived",
         text: `id=${document.id}\npath=${archivedPath}`,
       });
     } catch (err) {
-      dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      dispatch({ type: "ADD_NOTICE", title: "Plan error", text: err instanceof Error ? err.message : String(err) });
     }
     return null;
   }
@@ -134,12 +134,12 @@ export async function parsePlanTurnOverride(
         const doc = await loadPlanDocument(cwd);
         if (doc) {
           dispatch({ type: "SET_TODO_PLAN", plan: doc });
-          dispatch({ type: "ADD_NOTICE", title: "当前计划", text: formatPlanDocumentPreview(doc) });
+          dispatch({ type: "ADD_NOTICE", title: "Current plan", text: formatPlanDocumentPreview(doc) });
         } else {
-          dispatch({ type: "ADD_NOTICE", title: "计划", text: "用法: /plan <任务>" });
+          dispatch({ type: "ADD_NOTICE", title: "Plan", text: "Usage: /plan <task>" });
         }
       } catch (err) {
-        dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+        dispatch({ type: "ADD_NOTICE", title: "Plan error", text: err instanceof Error ? err.message : String(err) });
       }
       return null;
     }
@@ -167,13 +167,13 @@ export async function parsePlanTurnOverride(
       executionPromptSuffix = prepared.executionPromptSuffix;
       dispatch({
         type: "ADD_NOTICE",
-        title: isRetry ? "重试计划" : "执行计划",
+        title: isRetry ? "Plan retry" : "Plan execution",
         text: `id=${prepared.document.id} status=executing\nprompt: ${prepared.document.prompt}`,
       });
       dispatch({ type: "SET_TODO_PLAN", plan: prepared.document });
     } catch (err) {
       setInput("");
-      dispatch({ type: "ADD_NOTICE", title: "计划错误", text: err instanceof Error ? err.message : String(err) });
+      dispatch({ type: "ADD_NOTICE", title: "Plan error", text: err instanceof Error ? err.message : String(err) });
       return null;
     }
     execCaptureRef.current = { mode: isRetry ? "retry" : "run" };
@@ -210,7 +210,7 @@ export async function finalizePlanCapture(deps: FinalizePlanDeps): Promise<void>
   const lastAssistant = lastAssistantMessage(history);
   const answer = assistantContentAsString(lastAssistant);
   if (!answer.trim()) {
-    dispatch({ type: "ADD_NOTICE", title: "计划", text: "Agent 未返回可保存的计划内容。" });
+    dispatch({ type: "ADD_NOTICE", title: "Plan", text: "The agent did not return savable plan content." });
     return;
   }
   try {
@@ -218,13 +218,13 @@ export async function finalizePlanCapture(deps: FinalizePlanDeps): Promise<void>
     dispatch({ type: "SET_TODO_PLAN", plan: doc });
     dispatch({
       type: "ADD_NOTICE",
-      title: "计划已保存",
-      text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}\n\n使用 /plan-approve 批准，然后 /plan-run 执行。`,
+      title: "Plan saved",
+      text: `id=${doc.id} status=${doc.status}\n\n${formatPlanDocumentPreview(doc)}\n\nUse /plan-approve to approve it, then /plan-run to execute.`,
     });
   } catch (err) {
     dispatch({
       type: "ADD_NOTICE",
-      title: "计划保存失败",
+      title: "Plan save failed",
       text: err instanceof Error ? err.message : String(err),
     });
   }
@@ -259,7 +259,7 @@ export async function finalizeExecCapture(deps: FinalizeExecCaptureDeps): Promis
         : "";
       dispatch({
         type: "ADD_NOTICE",
-        title: "计划执行完成",
+        title: "Plan execution completed",
         text: `id=${completed.id} status=${completed.status}${audit}`,
       });
     } else {
@@ -274,14 +274,14 @@ export async function finalizeExecCapture(deps: FinalizeExecCaptureDeps): Promis
         : "";
       dispatch({
         type: "ADD_NOTICE",
-        title: "计划执行失败",
+        title: "Plan execution failed",
         text: `id=${failed.id} status=${failed.status}\n${errorMessage ?? ""}${audit}`,
       });
     }
   } catch (err) {
     dispatch({
       type: "ADD_NOTICE",
-      title: "计划结果记录失败",
+      title: "Plan result could not be recorded",
       text: err instanceof Error ? err.message : String(err),
     });
   }

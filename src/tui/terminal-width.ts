@@ -65,17 +65,26 @@ export function truncateTerminalPath(value: string, maxWidth: number): string {
 
   const separator = value.includes("\\") && !value.includes("/") ? "\\" : "/";
   const segments = value.split(/[\\/]+/).filter(Boolean);
-  const suffix = segments.slice(-2).join(separator);
-  const candidate = suffix ? `…${separator}${suffix}` : `…${value}`;
-  if (terminalStringWidth(candidate) <= safeWidth) return candidate;
 
-  let result = "";
+  // Walk whole segments from the end. Only when the final segment itself does
+  // not fit does the fallback cut inside it, so the visible suffix never starts
+  // with a fragment such as `…p/mini-agent`.
+  let suffix = "";
+  for (let index = segments.length - 1; index >= 0; index--) {
+    const candidate = suffix ? `${segments[index]}${separator}${suffix}` : segments[index]!;
+    if (terminalStringWidth(`…${separator}${candidate}`) > safeWidth) break;
+    suffix = candidate;
+  }
+  if (suffix) return `…${separator}${suffix}`;
+
+  const last = segments[segments.length - 1] ?? value;
+  let tail = "";
   let used = 0;
-  for (const grapheme of [...value].reverse()) {
+  for (const grapheme of [...last].reverse()) {
     const glyphWidth = Math.max(1, terminalStringWidth(grapheme));
     if (used + glyphWidth > safeWidth - 1) break;
-    result = grapheme + result;
+    tail = grapheme + tail;
     used += glyphWidth;
   }
-  return `…${result}`;
+  return `…${tail}`;
 }

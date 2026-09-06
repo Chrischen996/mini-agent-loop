@@ -124,7 +124,7 @@ describe("TUI todo state", () => {
     assert.deepEqual(state.messages, []);
     assert.deepEqual(state.steps, []);
     assert.deepEqual(state.toolCards, []);
-    assert.equal(state.status, "任务列表已更新");
+    assert.equal(state.status, "Todos updated");
   });
 });
 

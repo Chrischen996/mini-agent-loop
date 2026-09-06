@@ -1,9 +1,17 @@
 import type { ChatMessage, PendingPermissionState } from "./state.ts";
 import { statusLabel } from "./claude-style.ts";
 import { toolVisualName } from "./tool-lines.ts";
+import { CLAUDE_SPINNER_FRAMES, SPINNER_INTERVAL_MS, getSpinnerFrame, spinnerTipLabel } from "./loading.ts";
 
-export const LOADING_GLYPHS = ["·", "✢", "✱", "✶", "✻", "✽", "✻", "✶", "✱", "✢"] as const;
-export const LOADING_FRAME_MS = 120;
+/**
+ * One spinner for both clients.
+ *
+ * This module previously kept a second glyph set whose first frame was `·`,
+ * which was indistinguishable from the `·` separators in the status row right
+ * below it. `loading.ts` is now the single source of frames and cadence.
+ */
+export const LOADING_GLYPHS = CLAUDE_SPINNER_FRAMES;
+export const LOADING_FRAME_MS = SPINNER_INTERVAL_MS;
 export const STREAM_STALL_NOTICE_MS = 5_000;
 export const STREAM_STALL_WARNING_MS = 15_000;
 
@@ -33,6 +41,13 @@ export type ActivityState = {
   pendingPermission?: PendingPermissionState;
   turnStartedAt?: number;
   lastStreamAt?: number;
+  /** Active Todo tip; becomes the loading label when nothing more specific is running. */
+  spinnerMessage?: string;
+  /**
+   * True while the Todo panel is on screen. The compact panel already names the
+   * active step, so the spinner row must not repeat it two rows later.
+   */
+  todoPanelVisible?: boolean;
 };
 
 export type ActivityOptions = {
@@ -43,7 +58,7 @@ export type ActivityOptions = {
 /** Fixed-width, terminal-safe animation used by both TUI renderers. */
 export function loadingGlyph(now: number, startedAt = now): string {
   const elapsed = Math.max(0, now - startedAt);
-  return LOADING_GLYPHS[Math.floor(elapsed / LOADING_FRAME_MS) % LOADING_GLYPHS.length]!;
+  return getSpinnerFrame(Math.floor(elapsed / LOADING_FRAME_MS));
 }
 
 /** Derive one coherent live status from reducer state without changing loop behavior. */
@@ -86,6 +101,12 @@ export function activityPresentation(
   } else if (state.streamingReasoning) {
     phase = "thinking";
     label = stalled ? "Waiting for reasoning tokens…" : "Thinking…";
+  } else if (!state.todoPanelVisible && spinnerTipLabel(state.spinnerMessage)) {
+    // The Todo tip is the only live information between tool calls. It shares
+    // this row instead of stacking a second spinner above the prompt, and it
+    // stays out of the way entirely while the Todo panel shows the same step.
+    phase = "working";
+    label = spinnerTipLabel(state.spinnerMessage)!;
   } else if (/自动续跑|续跑|continu/i.test(state.status)) {
     phase = "continuing";
     label = "Continuing…";

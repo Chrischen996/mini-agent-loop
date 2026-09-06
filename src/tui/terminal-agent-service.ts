@@ -309,12 +309,12 @@ export class TerminalAgentService {
                 this.emitTerminalEvent(runId, this.abortEvent(this.history, abortController.signal.reason));
                 aborted = true;
               } else {
-                errorMessage = `已达到自动续跑上限 (${maxContinues} 次)`;
+                errorMessage = `Auto-continue limit reached (${maxContinues} turns)`;
                 this.emitTerminalEvent(runId, { type: "error", message: errorMessage });
               }
               break;
             }
-            currentPrompt = "继续完成之前的工作";
+            currentPrompt = "Continue the remaining work.";
             userContent = currentPrompt;
             this.dispatch({ type: "AUTO_CONTINUE", count: continueCount, max: maxContinues });
             continue;

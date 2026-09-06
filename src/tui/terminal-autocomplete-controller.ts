@@ -14,7 +14,7 @@ import {
   resolveAutocompleteNav,
   type AutocompleteNavKey,
 } from "./autocomplete.ts";
-import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
+import { SLASH_COMMANDS } from "./slash-commands.ts";
 
 export type TerminalAutocompleteState = {
   mode: AcMode;
@@ -200,7 +200,11 @@ export class TerminalAutocompleteController {
 
   openModelPicker(query = "", models?: ModelRef[]): void {
     const choices = modelChoices(query, models);
-    this.options.setInput(`/model ${query}`.trimEnd());
+    // The picker owns the prompt while it is open: the input holds the bare
+    // query (empty shows the `Search models` placeholder), exactly like Ink's
+    // `openModelPicker`. Keeping `/model ` in the prompt hid the placeholder and
+    // made the two clients type different text into the same field.
+    this.options.setInput(query);
     this.setState({ ...EMPTY_STATE, mode: "model-picker", modelQuery: query, models: choices.references, modelContextWindows: choices.contextWindows });
   }
 

@@ -41,7 +41,7 @@ describe("TUI copy helpers", () => {
 
   it("copies full tool output instead of the preview window", () => {
     const selection = resolveCopyTarget({ messages, target: "tool" });
-    assert.equal(selection?.label, "bash 输出");
+    assert.equal(selection?.label, "bash output");
     assert.equal(selection?.text, "alpha\nbeta\ngamma");
   });
 
@@ -93,8 +93,8 @@ describe("TUI copy helpers", () => {
 
   it("formats a copy notice with line and character counts", () => {
     assert.equal(
-      formatCopyResultNotice({ label: "助手回复", text: "ab\ncd" }, "pbcopy"),
-      "助手回复 · 2 行 / 5 字 · pbcopy",
+      formatCopyResultNotice({ label: "assistant reply", text: "ab\ncd" }, "pbcopy"),
+      "assistant reply · 2 lines / 5 chars · pbcopy",
     );
   });
 

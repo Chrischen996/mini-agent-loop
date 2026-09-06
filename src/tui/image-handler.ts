@@ -20,7 +20,7 @@ export function addPendingImage(image: ImageAttachment, deps: ImageHandlerDeps):
   if (pendingImages.length >= MAX_TUI_IMAGES) {
     dispatch({
       type: "ATTACHMENT_ERROR",
-      message: `最多可同时添加 ${MAX_TUI_IMAGES} 张图片`,
+      message: `At most ${MAX_TUI_IMAGES} images can be attached at once`,
     });
     return false;
   }
@@ -41,7 +41,7 @@ export async function handlePasteImage(deps: ImageHandlerDeps): Promise<boolean>
     const detail = error instanceof Error ? error.message : String(error);
     deps.dispatch({
       type: "ATTACHMENT_ERROR",
-      message: `无法粘贴图片: ${detail}`,
+      message: `Unable to paste image: ${detail}`,
     });
     return false;
   }
