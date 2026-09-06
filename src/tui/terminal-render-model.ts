@@ -8,6 +8,8 @@ import { toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { autocompleteRenderLines, permissionPanelRenderLines, planApprovalRenderLines, todoEditorRenderLines } from "./terminal-overlay-lines.ts";
 import { pickerChromeRows } from "./picker-window.ts";
+import { promptPlaceholder } from "./input-utils.ts";
+import { TUI_COLORS as C } from "./theme.ts";
 import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
 import type { TodoEditorState } from "./todo-editor.ts";
 import { noticeText, noticeTitle, toolArgumentSummary } from "./claude-style.ts";
@@ -274,7 +276,18 @@ export function buildTerminalRenderLines(
     footer.push({ key: "prompt-rule", text: "─".repeat(Math.max(1, width)), style: "border", dim: true });
   }
   if (options.input !== undefined) {
-    const inputLines = inputRenderLines(options.input, options.cursor, options.maskInput);
+    const placeholder = promptPlaceholder({
+      busy: state.busy,
+      acMode: options.autocomplete?.mode ?? null,
+      modelSetupField: options.autocomplete?.modelSetup?.field,
+    });
+    const inputLines = inputRenderLines(options.input, options.cursor, options.maskInput, {
+      busy: state.busy,
+      // A hint is clipped, never wrapped: wrapping it would add prompt rows the
+      // frame budget does not reserve. Two columns for the marker, one for the
+      // block cursor.
+      placeholder: width === undefined ? placeholder : truncateEnd(placeholder, Math.max(1, width - 3)),
+    });
     footer.push(...(width === undefined ? inputLines : inputLines.flatMap((line) => wrapRenderLine(line, width))));
   }
   if (!options.todoEditor) {
@@ -470,18 +483,42 @@ function wrapRenderLine(line: RenderLine, width: number): RenderLine[] {
   });
 }
 
-function inputRenderLines(value: string, cursor?: number, mask = false): RenderLine[] {
+function inputRenderLines(
+  value: string,
+  cursor?: number,
+  mask = false,
+  options?: { placeholder?: string; busy?: boolean },
+): RenderLine[] {
   const source = splitGraphemes(value);
+  // Ink's prompt pointer is a colored, bold `❯` that becomes a `⟳` while a turn
+  // is running; the typed text itself stays regular weight.
+  const marker = options?.busy ? "⟳ " : "❯ ";
+  const markerLine = {
+    prefix: marker,
+    prefixTone: (options?.busy ? "running" : "default") as RenderLine["prefixTone"],
+    prefixBold: true,
+    style: "user" as const,
+  };
+  if (source.length === 0 && options?.placeholder) {
+    // Same hint Ink's PromptInput shows: a block cursor followed by dim text.
+    return [{
+      key: "input-0",
+      ...markerLine,
+      text: `▌${options.placeholder}`,
+      segments: [
+        { text: "▌", color: C.assistant },
+        { text: options.placeholder, color: C.muted, dim: true },
+      ],
+    }];
+  }
   const position = Math.max(0, Math.min(source.length, cursor ?? source.length));
   const visible = mask ? source.map(() => "*") : source;
   const withCursor = [...visible.slice(0, position), "▌", ...visible.slice(position)].join("");
   const rows = withCursor.split("\n");
   return rows.map((text, index) => ({
     key: `input-${index}`,
-    prefix: index === 0 ? "❯ " : "  ",
+    ...(index === 0 ? markerLine : { prefix: "  ", style: "assistant" as const }),
     text,
-    style: "assistant",
-    bold: index === 0,
   }));
 }
 

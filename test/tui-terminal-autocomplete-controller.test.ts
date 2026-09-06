@@ -37,6 +37,33 @@ describe("terminal autocomplete controller", () => {
     assert.equal(controller.getState().fileFragment, "");
   });
 
+  it("opens the model picker with a bare query so the prompt shows its placeholder", () => {
+    let value = "/model";
+    const controller = new TerminalAutocompleteController({
+      cwd: process.cwd(),
+      getInput: () => value,
+      setInput: (next) => { value = next; },
+    });
+
+    // Ink's openModelPicker puts the query itself in the prompt; keeping
+    // `/model ` there hid the `Search models` placeholder and made the two
+    // clients type different text into the same field.
+    controller.openModelPicker();
+    assert.equal(value, "");
+    assert.equal(controller.getState().mode, "model-picker");
+    assert.equal(controller.getState().modelQuery, "");
+    assert.ok(controller.getState().models.length > 0);
+
+    value = "gpt-4o-mini";
+    controller.update();
+    assert.equal(controller.getState().mode, "model-picker");
+    assert.equal(controller.getState().modelQuery, "gpt-4o-mini");
+
+    controller.openModelPicker("anthropic");
+    assert.equal(value, "anthropic");
+    assert.equal(controller.getState().modelQuery, "anthropic");
+  });
+
   it("keeps model setup as a sticky overlay and advances to the API key field", () => {
     let value = "";
     const controller = new TerminalAutocompleteController({

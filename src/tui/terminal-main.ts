@@ -43,7 +43,7 @@ import type { AgentMessage } from "../types.ts";
 import { formatAmbiguousSessionNotice, getResumeMessageCandidates, getStartupSessionRequest, messageBoundaryForSelection, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos, type ResumeMessageCandidate } from "./session-serialization.ts";
 import { adaptHistoryForModel } from "../message-adapter.ts";
 import { activateProfile, listProfiles, loadProfileStore, removeProfile, saveProfile } from "../profile-store.ts";
-import { parseModelCommand, shouldSubmitTypedModelCommand } from "./model-command.ts";
+import { modelCommandFromPickerInput, parseModelCommand, shouldSubmitTypedModelCommand } from "./model-command.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
 import { TUI_BRAND_NAME, TUI_BRAND_VERSION } from "./brand.ts";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
@@ -759,7 +759,11 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
       }
     }
     deps.autocomplete.clear();
-    void submitInput(action.value, deps);
+    // The model picker holds the bare query, so restore the `/model` command
+    // before submitting: Enter on a typed reference switches the model instead
+    // of sending that reference to the model as a prompt.
+    const modelMode = autocompleteState.mode === "model" || autocompleteState.mode === "model-picker";
+    void submitInput(modelMode ? modelCommandFromPickerInput(action.value) : action.value, deps);
   }
 }
 
@@ -961,12 +965,15 @@ async function submitInput(
   if (/^\/model(?:\s+.*)?$/i.test(text)) {
     const parsed = parseModelCommand(text.replace(/^\/model\s*/i, ""));
     if (!parsed.reference) {
+      // openModelPicker clears the prompt to the bare query; the empty input
+      // then shows the shared `Search models` placeholder.
       deps.autocomplete.openModelPicker();
-      input.setValue("/model ");
       return;
     }
-    selectTerminalModel(parsed.reference, parsed.overrides, deps);
+    // Clear first: selectTerminalModel pre-fills the prompt with the base URL
+    // (or the picker query) for the step it opens, and Ink does the same.
     input.clear();
+    selectTerminalModel(parsed.reference, parsed.overrides, deps);
     return;
   }
   if (text === "/context") {

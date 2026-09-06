@@ -33,6 +33,8 @@ export type RenderLine = {
   prefix?: string;
   /** Optional tone for the marker/prefix while the body keeps its own tone. */
   prefixTone?: RenderLineTone;
+  /** Bold the marker only. Ink bolds the prompt pointer, not the typed text. */
+  prefixBold?: boolean;
   style: RenderLineStyle;
   tone?: RenderLineTone;
   indent?: number;

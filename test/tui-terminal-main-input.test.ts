@@ -134,6 +134,26 @@ describe("terminal main input routing", () => {
     assert.equal(deps.autocomplete.getState().modelSetup?.baseUrl, "https://new.test/v1");
   });
 
+  it("routes a reference typed into the model picker to model setup", () => {
+    const deps = dependencies();
+    // The picker owns the query, so the prompt holds the bare reference and the
+    // empty field can show its `Search models` hint.
+    deps.autocomplete.openModelPicker();
+    deps.input.setValue("openai/gpt-4o");
+
+    handleInputAction({ type: "submit", value: "openai/gpt-4o" }, deps);
+
+    // Enter switches the model instead of sending the reference to it as a
+    // prompt, and the base URL step stays pre-filled the way Ink pre-fills it.
+    assert.equal(deps.service.getHistory().filter((message) => message.role === "user").length, 0);
+    const state = deps.autocomplete.getState();
+    assert.equal(state.mode, "model-setup");
+    assert.equal(state.modelSetup?.field, "baseUrl");
+    assert.equal(state.modelSetup?.model.id, "gpt-4o");
+    assert.equal(deps.input.getValue(), state.modelSetup?.baseUrl);
+    assert.notEqual(deps.input.getValue(), "");
+  });
+
   it("handles /copy locally instead of starting a model turn", async () => {
     const deps = dependencies();
     deps.input.setValue("/copy");

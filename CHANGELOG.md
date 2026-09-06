@@ -112,6 +112,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ink's history picker listed every candidate, which could push the prompt past
   the last terminal row; the ANSI profile palette dropped the base URL and the
   `/profiles delete <name>` hint that Ink shows.
+- `/model` reopened the picker with `/model ` sitting in the prompt in the ANSI
+  client, so its search field never showed a hint and Enter on a bare reference
+  (for example `openai/gpt-4o-mini`) was sent to the model as a prompt. The
+  picker now owns the query in both clients: the prompt is empty and shows
+  `Search models`, the heading still reads `Models <query>`, and
+  `modelCommandFromPickerInput` turns a typed reference back into a `/model`
+  command on Enter.
+- `/model <reference>` cleared the prompt *after* opening model setup in the
+  ANSI client, so its Base URL step started empty while Ink pre-fills it, and
+  Enter there committed a blank base URL. The prompt is cleared before the step
+  opens, so both clients start from the model's base URL.
+- The ANSI prompt had no placeholder at all — no idle hint, no busy marker, and
+  a prompt pointer drawn at regular weight while Ink bolds it. Empty-prompt
+  hints now come from one shared resolver (`promptPlaceholder`), the ANSI prompt
+  renders them dim next to the block cursor (truncated so a hint can never add a
+  prompt row), the busy marker is the running-colored `⟳` Ink uses, and the
+  pointer is bold in both clients (`RenderLine.prefixBold`).
 
 ## [0.1.0] - 2026-08-15
 

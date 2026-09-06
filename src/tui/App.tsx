@@ -48,6 +48,7 @@ import { adaptHistoryForModel } from "../message-adapter.ts";
 import { findExactModelReferenceMatch, getAllModels } from "../models.ts";
 import {
   parseModelCommand,
+  modelCommandFromPickerInput,
   shouldSubmitTypedModelCommand,
 } from "./model-command.ts";
 import {
@@ -75,7 +76,7 @@ import { TurnEventBuffer } from "./stream-buffer.ts";
 import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./layout.ts";
 import { pickerChromeRows, pickerRequestedItems } from "./picker-window.ts";
 import { thinkingLevelStatusText } from "./status-line.ts";
-import type { AcMode } from "./input-utils.ts";
+import { promptPlaceholder, type AcMode } from "./input-utils.ts";
 import { estimateViewportContentHeight } from "./message-viewport.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
@@ -1289,7 +1290,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                     return;
                   }
                   if ((acMode === "model" || acMode === "model-picker") && shouldSubmitTypedModelCommand(val)) {
-                    void handleSubmit(val);
+                    // The picker holds the bare query; restore the command so
+                    // Enter switches the model instead of prompting with its
+                    // reference.
+                    void handleSubmit(modelCommandFromPickerInput(val));
                     return;
                   }
                   const chosen = modelCandidates[acIndex];
@@ -1302,15 +1306,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                 }
                 void handleSubmit(val);
               }}
-              placeholder={
-                state.busy ? "Working; type a message to queue"
-                  : acMode === "model-picker" ? "Search models"
-                    : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "Enter Base URL"
-                      : acMode === "model-setup" ? "Enter API key (or leave blank for env)"
-                        : acMode === "profile-name" ? "Enter a profile name (for example coding-fast)"
-                          : acMode === "profile-list" ? "↑↓ select profile, Enter activate"
-                            : "Message, /command, or @file reference"
-              }
+              placeholder={promptPlaceholder({
+                busy: state.busy,
+                acMode,
+                modelSetupField: modelSetup?.field,
+              })}
             />
           </Box>
         </Box>

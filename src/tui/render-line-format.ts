@@ -29,9 +29,10 @@ export function formatRenderLine(line: RenderLine): string {
   // row-level background and strike-through survive.
   if (line.segments?.length) {
     const base = `\x1b[${codes.join(";")}m`;
+    const pointerBase = line.prefixBold && !line.bold ? `\x1b[${[...codes, 1].join(";")}m` : base;
     const pointerColor = hexToAnsi(line.prefixTone === undefined ? C.muted : renderLineColor({ ...line, tone: line.prefixTone }));
     let out = `${indent}${strike}${base}`;
-    if (prefix) out += `\x1b[${pointerColor}m${prefix}`;
+    if (prefix) out += `${pointerBase}\x1b[${pointerColor}m${prefix}`;
     for (const segment of line.segments) {
       const segmentCodes: Array<number | string> = [];
       if (segment.bold) segmentCodes.push(1);
@@ -49,7 +50,8 @@ export function formatRenderLine(line: RenderLine): string {
   if (prefix && (line.prefixTone !== undefined || line.style === "user")) {
     const bodyColor = hexToAnsi(line.style === "user" ? C.assistant : color);
     const pointerColor = hexToAnsi(line.prefixTone === undefined ? C.muted : renderLineColor({ ...line, tone: line.prefixTone }));
-    return `${indent}${strike}\x1b[${codes.join(";")}m\x1b[${pointerColor}m${prefix}\x1b[${bodyColor}m${line.text}${fill}\x1b[0m`;
+    const pointerCodes = line.prefixBold && !line.bold ? [...codes, 1] : codes;
+    return `${indent}${strike}\x1b[${pointerCodes.join(";")}m\x1b[${pointerColor}m${prefix}\x1b[${codes.join(";")}m\x1b[${bodyColor}m${line.text}${fill}\x1b[0m`;
   }
   return `${indent}${strike}\x1b[${codes.join(";")}m${visible}${fill}\x1b[0m`;
 }

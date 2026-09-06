@@ -36,6 +36,9 @@ import { terminalStringWidth, truncateTerminalPath } from "../src/tui/terminal-w
 import { buildTerminalRenderLines } from "../src/tui/terminal-render-model.ts";
 import { thinkingRenderLines } from "../src/tui/thinking-lines.ts";
 import { createInitialState, tuiReducer } from "../src/tui/state.ts";
+import { promptPlaceholder } from "../src/tui/input-utils.ts";
+import { modelCommandFromPickerInput } from "../src/tui/model-command.ts";
+import { formatRenderLine } from "../src/tui/render-line-format.ts";
 import { statusLabel } from "../src/tui/claude-style.ts";
 
 /**
@@ -285,6 +288,65 @@ describe("shared TUI presentation", () => {
     assert.equal(rows.at(-2)?.text, pickerRangeText(10, pageSize, commands.length));
     assert.equal(rows.at(-2)?.text, "Showing 11-16 / 20");
     assert.equal(rows.at(-1)?.text, pickerHintText("command"));
+  });
+
+  it("normalizes the model picker query into a /model command in both clients", () => {
+    // While the picker is open the prompt holds the bare query so the empty
+    // field can show its `Search models` hint; Enter must still switch the model
+    // rather than send the typed reference to the model as a prompt.
+    assert.equal(modelCommandFromPickerInput("openai/gpt-4o-mini"), "/model openai/gpt-4o-mini");
+    assert.equal(modelCommandFromPickerInput("/model openai/gpt-4o-mini"), "/model openai/gpt-4o-mini");
+    assert.equal(modelCommandFromPickerInput("  anthropic/claude-sonnet-4  "), "/model anthropic/claude-sonnet-4");
+    assert.equal(modelCommandFromPickerInput(""), "");
+  });
+
+  it("shows the same empty-prompt hint in both clients", () => {
+    // The ANSI prompt used to print a bare cursor: no hint for the idle prompt,
+    // the model search field, or the API-key field.
+    assert.equal(promptPlaceholder({}), "Message, /command, or @file reference");
+    assert.equal(promptPlaceholder({ busy: true }), "Working; type a message to queue");
+    assert.equal(promptPlaceholder({ acMode: "model-picker" }), "Search models");
+    assert.equal(promptPlaceholder({ acMode: "model-setup", modelSetupField: "baseUrl" }), "Enter Base URL");
+    assert.equal(promptPlaceholder({ acMode: "model-setup", modelSetupField: "apiKey" }), "Enter API key (or leave blank for env)");
+    assert.equal(promptPlaceholder({ acMode: "profile-name" }), "Enter a profile name (for example coding-fast)");
+    assert.equal(promptPlaceholder({ acMode: "profile-list" }), "↑↓ select profile, Enter activate");
+    // Busy outranks every overlay, matching Ink's cascade.
+    assert.equal(promptPlaceholder({ busy: true, acMode: "model-picker" }), "Working; type a message to queue");
+
+    const state = createInitialState("gpt-4o-mini");
+    const promptRow = (options: Record<string, unknown>) => {
+      const rows = buildTerminalRenderLines(state, { width: 100, promptRule: true, includeStatus: false, ...options } as never);
+      return rows.find((row) => row.key === "input-0");
+    };
+
+    const idle = promptRow({ input: "" });
+    assert.equal(idle?.prefix, "❯ ");
+    assert.equal(idle?.text, `▌${promptPlaceholder({})}`);
+
+    const picker = promptRow({ input: "", autocomplete: { mode: "model-picker", index: 0, commands: [], files: [], models: [], sessions: [], modelContextWindows: {}, modelQuery: "", fileFragment: "", sessionLoading: false } });
+    assert.equal(picker?.text, "▌Search models");
+
+    const busy = buildTerminalRenderLines({ ...state, busy: true }, { width: 100, promptRule: true, includeStatus: false, input: "" } as never)
+      .find((row) => row.key === "input-0");
+    assert.equal(busy?.prefix, "⟳ ", "busy prompt keeps the idle marker");
+    assert.equal(busy?.text, `▌${promptPlaceholder({ busy: true })}`);
+
+    // A hint is clipped instead of wrapped: wrapping would add prompt rows the
+    // frame budget does not reserve.
+    const narrow = buildTerminalRenderLines(state, {
+      width: 30,
+      promptRule: true,
+      includeStatus: false,
+      input: "",
+    } as never).filter((row) => row.key.startsWith("input-"));
+    assert.equal(narrow.length, 1);
+    assert.ok(terminalStringWidth(`${narrow[0]!.prefix ?? ""}${narrow[0]!.text}`) <= 30);
+    assert.match(narrow[0]!.text, /…$/);
+
+    // Ink bolds the prompt pointer and leaves the hint dim and regular.
+    const formatted = formatRenderLine(idle!);
+    assert.match(formatted, /\x1b\[38;2;\d+;\d+;\d+;1m\x1b\[38;2;\d+;\d+;\d+m❯ /, "marker is not its own bold run");
+    assert.match(formatted, /\x1b\[2;38;2;\d+;\d+;\d+mMessage, \/command/, "hint is not a dim, regular-weight run");
   });
 
   it("shrinks the ANSI picker to the frame instead of cutting the welcome panel", () => {
