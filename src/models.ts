@@ -100,8 +100,77 @@ const PROVIDER_ENV_KEYS: Record<string, string[]> = {
 
 const piRuntime = builtinModels();
 
-function supportsNativeCustomBaseUrl(model: ModelRef): boolean {
-  return model.api === "anthropic-messages";
+export type LlmGatewayProtocol = "openai-compatible" | "anthropic-messages";
+
+export function isOfficialAnthropicHost(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl.includes("://") ? baseUrl : `https://${baseUrl}`).hostname.toLowerCase();
+    return host === "api.anthropic.com" || host.endsWith(".api.anthropic.com");
+  } catch {
+    return /api\.anthropic\.com/i.test(baseUrl);
+  }
+}
+
+/**
+ * OpenAI-compatible gateways serve `/v1/chat/completions`.
+ * A bare origin (`https://gw.example`) would otherwise hit the marketing site
+ * and look like a truncated SSE stream. Anthropic Messages must not get this
+ * rewrite — the SDK already appends `/v1/messages`.
+ */
+export function normalizeOpenAiCompatibleBaseUrl(baseUrl: string): string {
+  const trimmed = baseUrl.trim().replace(/\/$/, "");
+  if (!trimmed || isOfficialAnthropicHost(trimmed)) return trimmed;
+  try {
+    const url = new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`);
+    const path = url.pathname.replace(/\/$/, "") || "";
+    if (!path || path === "/") {
+      url.pathname = "/v1";
+      return url.toString().replace(/\/$/, "");
+    }
+  } catch {
+    if (!/\/[^/]/.test(trimmed.replace(/^https?:\/\//i, ""))) {
+      return `${trimmed}/v1`;
+    }
+  }
+  return trimmed;
+}
+
+export function looksLikeAnthropicMessagesEndpoint(baseUrl: string): boolean {
+  if (isOfficialAnthropicHost(baseUrl)) return true;
+  try {
+    const url = new URL(baseUrl.includes("://") ? baseUrl : `https://${baseUrl}`);
+    const host = url.hostname.toLowerCase();
+    const path = url.pathname.toLowerCase();
+    if (host.includes("anthropic.com")) return true;
+    if (path.includes("/anthropic")) return true;
+    if (path.includes("/messages")) return true;
+  } catch {
+    return /anthropic/i.test(baseUrl);
+  }
+  return false;
+}
+
+/**
+ * Built-in Claude stays on Anthropic Messages for api.anthropic.com.
+ * A custom 中转站 / relay defaults to OpenAI-compatible `/chat/completions`,
+ * which is what most gateways expose. Opt back into Messages with an
+ * Anthropic-shaped URL, `protocol: "anthropic-messages"`, or a catalog entry
+ * whose own baseUrl already points at that gateway.
+ */
+export function shouldUseAnthropicMessages(
+  model: Pick<ModelRef, "api" | "baseUrl">,
+  targetBaseUrl?: string,
+  protocol?: LlmGatewayProtocol,
+): boolean {
+  if (protocol === "openai-compatible") return false;
+  if (model.api !== "anthropic-messages") {
+    return protocol === "anthropic-messages";
+  }
+  if (protocol === "anthropic-messages") return true;
+  const catalogUrl = model.baseUrl.replace(/\/$/, "");
+  const url = (targetBaseUrl ?? model.baseUrl).replace(/\/$/, "");
+  if (!targetBaseUrl || url === catalogUrl) return true;
+  return looksLikeAnthropicMessagesEndpoint(url);
 }
 
 function toModelRef(model: PiModel<Api>): ModelRef {
@@ -273,6 +342,12 @@ export function getAvailableModels(env: NodeJS.ProcessEnv = process.env): ModelR
   });
 }
 
+export function modelReference(provider: string, modelId: string): string {
+  const id = modelId.trim();
+  const prefix = `${provider.trim()}/`;
+  return id.toLowerCase().startsWith(prefix.toLowerCase()) ? id : `${provider.trim()}/${id}`;
+}
+
 export function findExactModelReferenceMatch(
   reference: string,
   models: ModelRef[] = getAvailableModels(),
@@ -287,39 +362,89 @@ export function findExactModelReferenceMatch(
   return { model: matches[0] };
 }
 
-export function resolveModel(modelId: string, baseUrl?: string): ModelRef {
-  const legacyAliases: Record<string, string> = {
-    "deepseek-chat": "deepseek-v4-flash",
-    "deepseek/deepseek-chat": "deepseek/deepseek-v4-flash",
-    "deepseek-reasoner": "deepseek-v4-pro",
-    "deepseek/deepseek-reasoner": "deepseek/deepseek-v4-pro",
+function applyGatewayTransport(
+  model: ModelRef,
+  baseUrl?: string,
+  protocol?: LlmGatewayProtocol,
+): ModelRef {
+  const rawUrl = (baseUrl ?? model.baseUrl).replace(/\/$/, "");
+  const catalogUrl = model.baseUrl.replace(/\/$/, "");
+  const sameHost = !baseUrl || rawUrl === catalogUrl;
+  // Claude (or an explicit protocol override) is the only catalog transport
+  // rewritten for a custom 中转站. Other pi-backed models keep native
+  // transport on their catalog host and fall back to OpenAI-compatible
+  // Chat Completions on a different gateway.
+  if (model.api === "anthropic-messages" || protocol) {
+    const useAnthropic = shouldUseAnthropicMessages(model, baseUrl, protocol);
+    const url = useAnthropic ? rawUrl : normalizeOpenAiCompatibleBaseUrl(rawUrl);
+    return {
+      ...model,
+      baseUrl: url,
+      piModel: useAnthropic && model.piModel
+        ? { ...model.piModel, baseUrl: url }
+        : undefined,
+    };
+  }
+  const url = sameHost ? rawUrl : normalizeOpenAiCompatibleBaseUrl(rawUrl);
+  return {
+    ...model,
+    baseUrl: url,
+    piModel: sameHost && model.piModel
+      ? { ...model.piModel, baseUrl: url }
+      : undefined,
   };
-  modelId = legacyAliases[modelId.trim().toLowerCase()] ?? modelId;
+}
+
+/**
+ * Static alias map: old model IDs → canonical IDs.
+ * Defined at module level to avoid per-call object allocation.
+ */
+const LEGACY_MODEL_ALIASES: Record<string, string> = {
+  "deepseek-chat": "deepseek-v4-flash",
+  "deepseek/deepseek-chat": "deepseek/deepseek-v4-flash",
+  "deepseek-reasoner": "deepseek-v4-pro",
+  "deepseek/deepseek-reasoner": "deepseek/deepseek-v4-pro",
+  // Catalog ids use hyphens (`claude-sonnet-4-6`); users type dotted versions.
+  "claude-sonnet-4.6": "anthropic/claude-sonnet-4-6",
+  "anthropic/claude-sonnet-4.6": "anthropic/claude-sonnet-4-6",
+  "sonnet-4.6": "anthropic/claude-sonnet-4-6",
+  "claude-sonnet-4.5": "anthropic/claude-sonnet-4-5",
+  "anthropic/claude-sonnet-4.5": "anthropic/claude-sonnet-4-5",
+  "sonnet-4.5": "anthropic/claude-sonnet-4-5",
+  "claude-haiku-4.5": "anthropic/claude-haiku-4-5",
+  "anthropic/claude-haiku-4.5": "anthropic/claude-haiku-4-5",
+  "haiku-4.5": "anthropic/claude-haiku-4-5",
+  "claude-opus-4.1": "anthropic/claude-opus-4-1",
+  "anthropic/claude-opus-4.1": "anthropic/claude-opus-4-1",
+  "opus-4.1": "anthropic/claude-opus-4-1",
+  "claude-opus-4.5": "anthropic/claude-opus-4-5",
+  "anthropic/claude-opus-4.5": "anthropic/claude-opus-4-5",
+  "opus-4.5": "anthropic/claude-opus-4-5",
+  "claude-opus-4.6": "anthropic/claude-opus-4-6",
+  "anthropic/claude-opus-4.6": "anthropic/claude-opus-4-6",
+  "opus-4.6": "anthropic/claude-opus-4-6",
+  "claude-opus-4.7": "anthropic/claude-opus-4-7",
+  "anthropic/claude-opus-4.7": "anthropic/claude-opus-4-7",
+  "opus-4.7": "anthropic/claude-opus-4-7",
+  "claude-opus-4.8": "anthropic/claude-opus-4-8",
+  "anthropic/claude-opus-4.8": "anthropic/claude-opus-4-8",
+  "opus-4.8": "anthropic/claude-opus-4-8",
+};
+
+export function resolveModel(modelId: string, baseUrl?: string, protocol?: LlmGatewayProtocol): ModelRef {
+  modelId = LEGACY_MODEL_ALIASES[modelId.trim().toLowerCase()] ?? modelId;
   const normalizedBaseUrl = baseUrl?.replace(/\/$/, "");
   const all = getAllModels();
   const exact = findExactModelReferenceMatch(modelId, all);
   if (exact?.model && !exact.ambiguous) {
-    const matched = exact.model;
-    return {
-      ...matched,
-      baseUrl: normalizedBaseUrl || matched.baseUrl,
-      piModel: normalizedBaseUrl && normalizedBaseUrl !== matched.baseUrl
-        ? supportsNativeCustomBaseUrl(matched) ? matched.piModel : undefined
-        : matched.piModel,
-    };
+    return applyGatewayTransport(exact.model, normalizedBaseUrl, protocol);
   }
   const idMatches = all.filter((model) => model.id.toLowerCase() === modelId.toLowerCase());
   const known = normalizedBaseUrl
     ? idMatches.find((model) => normalizedBaseUrl.startsWith(model.baseUrl) || model.baseUrl.startsWith(normalizedBaseUrl))
     : idMatches.find((model) => model.apiKeyEnv.some((name) => Boolean(process.env[name]))) ?? idMatches[0];
   if (known) {
-    return {
-      ...known,
-      baseUrl: normalizedBaseUrl || known.baseUrl,
-      piModel: normalizedBaseUrl && normalizedBaseUrl !== known.baseUrl
-        ? supportsNativeCustomBaseUrl(known) ? known.piModel : undefined
-        : known.piModel,
-    };
+    return applyGatewayTransport(known, normalizedBaseUrl, protocol);
   }
   return {
     id: modelId,
@@ -398,11 +523,17 @@ export function searchModels(query: string, models: ModelRef[] = getAllModels())
 
     let totalScore = 0;
     for (const term of terms) {
+      const hyphenTerm = term.replaceAll(".", "-");
       const s = Math.max(
         scoreTerm(term, qualifiedId),
         scoreTerm(term, modelId),
         scoreTerm(term, modelName),
         scoreTerm(term, provider),
+        // Users type dotted versions (`sonnet-4.6`) while catalog ids use hyphens.
+        scoreTerm(term, modelId.replaceAll("-", ".")),
+        scoreTerm(term, modelName.replaceAll("-", ".")),
+        scoreTerm(hyphenTerm, modelId),
+        scoreTerm(hyphenTerm, qualifiedId),
       );
       if (s === 0) { totalScore = 0; break; } // all terms must match
       totalScore += s;

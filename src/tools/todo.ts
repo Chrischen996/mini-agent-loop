@@ -73,7 +73,7 @@ export function createTodoTool(onUpdate: (todos: TodoItem[]) => void | Promise<v
       "Use pending, in_progress, or completed status; keep at most one item in_progress.",
       "Update the list when work starts, changes, or finishes.",
     ].join(" "),
-    annotations: { readOnlyHint: true, idempotentHint: true },
+    annotations: { readOnlyHint: false, idempotentHint: true },
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -115,10 +115,8 @@ export function createTodoTool(onUpdate: (todos: TodoItem[]) => void | Promise<v
         };
       }
 
-      const counts = todos.reduce(
-        (result, todo) => ({ ...result, [todo.status]: result[todo.status] + 1 }),
-        { pending: 0, in_progress: 0, completed: 0 },
-      );
+      const counts = { pending: 0, in_progress: 0, completed: 0 };
+      for (const todo of todos) counts[todo.status]++;
       return {
         content: `Todo list updated: pending=${counts.pending}, in_progress=${counts.in_progress}, completed=${counts.completed}`,
       };

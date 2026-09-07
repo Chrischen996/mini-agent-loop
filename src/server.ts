@@ -43,7 +43,7 @@ import { createDocumentEditTool } from "./tools/document-edit.ts";
 import { createTodoTool, validateTodoSnapshot, type TodoItem } from "./tools/todo.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "./tools/types.ts";
 import type { SandboxRunner } from "./sandbox/types.ts";
-import type { AgentMessage, ContentPart, MessageContent } from "./types.ts";
+import type { AgentMessage, ContentPart, ImageMimeType, MessageContent } from "./types.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
 import type { McpServerStatus } from "./mcp/types.ts";
 import {
@@ -461,7 +461,7 @@ function isRetryableError(message: string): boolean {
   );
 }
 
-function sniffImageMime(buffer: Buffer): string | undefined {
+function sniffImageMime(buffer: Buffer): ImageMimeType | undefined {
   if (
     buffer.length >= 8 &&
     buffer[0] === 0x89 &&

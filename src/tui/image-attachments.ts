@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import type { ImagePart } from "../types.ts";
+import type { ImageMimeType, ImagePart } from "../types.ts";
 import type { ImageAttachment } from "./state.ts";
 import { runChildProcess } from "./child-process.ts";
 
@@ -16,7 +16,7 @@ type ClipboardImageOptions = {
   now?: () => number;
 };
 
-function sniffImageMime(buffer: Buffer): string | undefined {
+function sniffImageMime(buffer: Buffer): ImageMimeType | undefined {
   if (
     buffer.length >= 8
     && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
@@ -38,7 +38,7 @@ function sniffImageMime(buffer: Buffer): string | undefined {
   return undefined;
 }
 
-function validateImageBuffer(buffer: Buffer, source: string): string {
+function validateImageBuffer(buffer: Buffer, source: string): ImageMimeType {
   if (buffer.byteLength === 0) throw new Error(`${source} is empty`);
   if (buffer.byteLength > MAX_TUI_IMAGE_BYTES) {
     throw new Error(`${source} exceeds the 4MB image limit`);

@@ -5,6 +5,7 @@ import { terminateProcessTree } from "../process-tree.ts";
 
 export type BashArgs = { command: string; timeout?: number };
 
+/** Maximum output size in bytes before truncation notice is appended. */
 const MAX_OUTPUT_BYTES = 100 * 1024;
 
 export function createBashTool(
@@ -56,7 +57,7 @@ export function createBashTool(
           });
 
           const content = result.stdout + (result.stderr ? `\n${result.stderr}` : "");
-          const truncated = result.stdout.length > MAX_OUTPUT_BYTES
+          const truncated = Buffer.byteLength(result.stdout, "utf8") > MAX_OUTPUT_BYTES
             ? `[notice: output truncated to ${MAX_OUTPUT_BYTES} bytes]`
             : "";
           const suffix = result.timedOut

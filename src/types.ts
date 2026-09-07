@@ -3,9 +3,12 @@ export type TextPart = {
   text: string;
 };
 
+export type ImageMimeType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+
 export type ImagePart = {
   type: "image";
-  mimeType: string; // image/png | image/jpeg | image/gif | image/webp
+  /** Supported image MIME types. */
+  mimeType: ImageMimeType;
   /** Base64 payload without data: prefix */
   data: string;
   source?: string; // relative path, "cli", etc.

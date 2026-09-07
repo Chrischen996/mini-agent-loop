@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { isAbortError } from "../llm/retry.ts";
 import { resolveWorkspaceWritePath } from "../workspace.ts";
 import type { Tool, ToolResult } from "./types.ts";
 
@@ -75,14 +76,7 @@ export function createWriteTool(cwd: string): Tool<WriteArgs> {
           content: `${action} ${resolved.relative} (${bytes} bytes)`,
         };
       } catch (err) {
-        if (
-          err &&
-          typeof err === "object" &&
-          "name" in err &&
-          (err as { name: unknown }).name === "AbortError"
-        ) {
-          throw err;
-        }
+        if (isAbortError(err)) throw err;
         const message = err instanceof Error ? err.message : String(err);
         return {
           content: `Failed to write ${args.path}: ${message}`,

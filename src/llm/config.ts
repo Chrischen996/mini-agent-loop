@@ -11,9 +11,11 @@ import {
 import { getActiveProfile, loadProfileStoreSync } from "../profile-store.ts";
 import {
   getAvailableModels,
+  modelReference,
   parseImagePolicy,
   resolveModel,
   type ImagePolicy,
+  type LlmGatewayProtocol,
   type ModelCapabilities,
   type ModelRef,
 } from "../models.ts";
@@ -88,6 +90,8 @@ export type ChatFn = (
 export type ModelSwitchOverrides = {
   baseUrl?: string;
   apiKey?: string;
+  /** Force OpenAI-compatible or Anthropic Messages when pointing Claude at a gateway. */
+  protocol?: LlmGatewayProtocol;
 };
 
 export const DEFAULT_OUTPUT_TOKEN_CAP = 32_768;
@@ -256,6 +260,14 @@ export function createRequestSignal(
   };
 }
 
+// ─── Environment variable parsers ────────────────────────────────────────────
+
+/** Safely parse MINI_AGENT_CACHE_RETENTION; returns undefined for invalid values. */
+function parseCacheRetention(raw: string | undefined): CacheRetention | undefined {
+  if (raw === "none" || raw === "short" || raw === "long") return raw;
+  return undefined;
+}
+
 // ─── .env loader ─────────────────────────────────────────────────────────────
 
 /**
@@ -323,7 +335,7 @@ export function loadLlmConfigFromEnv(): LlmConfig {
       imagePolicy,
       toolCallFormat: resolved.toolCallFormat ?? "openai",
       sessionId: process.env.MINI_AGENT_SESSION_ID,
-      cacheRetention: process.env.MINI_AGENT_CACHE_RETENTION as CacheRetention | undefined,
+      cacheRetention: parseCacheRetention(process.env.MINI_AGENT_CACHE_RETENTION),
     };
     const relayRegistry = loadRelayRegistryFromEnv();
     return applyRelayIfMatched({
@@ -394,7 +406,7 @@ export function loadLlmConfigFromEnv(): LlmConfig {
     imagePolicy,
     toolCallFormat: resolved.toolCallFormat ?? "openai",
     sessionId: process.env.MINI_AGENT_SESSION_ID,
-    cacheRetention: process.env.MINI_AGENT_CACHE_RETENTION as CacheRetention | undefined,
+    cacheRetention: parseCacheRetention(process.env.MINI_AGENT_CACHE_RETENTION),
   };
 
   // Apply relay from MINI_AGENT_RELAY env var (overrides baseUrl + adds getApiKey)
@@ -465,9 +477,9 @@ export function switchLlmModel(
 ): LlmConfig {
   const requestedBaseUrl = overrides.baseUrl?.trim().replace(/\/$/, "");
   const resolved = typeof model === "string"
-    ? resolveModel(model, requestedBaseUrl)
-    : requestedBaseUrl
-      ? resolveModel(`${model.provider}/${model.id}`, requestedBaseUrl)
+    ? resolveModel(model, requestedBaseUrl, overrides.protocol)
+    : requestedBaseUrl || overrides.protocol
+      ? resolveModel(modelReference(model.provider, model.id), requestedBaseUrl, overrides.protocol)
       : model;
   const apiKey = resolved.apiKeyEnv
     .map((name) => process.env[name])
@@ -512,7 +524,7 @@ export function switchLlmModel(
     toolCallFormat: resolved.toolCallFormat ?? "openai",
     // Inherit sessionId and cacheRetention from current config or env
     sessionId: config.sessionId ?? process.env.MINI_AGENT_SESSION_ID,
-    cacheRetention: config.cacheRetention ?? (process.env.MINI_AGENT_CACHE_RETENTION as CacheRetention | undefined),
+    cacheRetention: config.cacheRetention ?? parseCacheRetention(process.env.MINI_AGENT_CACHE_RETENTION),
     timeoutMs: resolved.timeoutMs,
     firstResponseTimeoutMs: resolved.firstResponseTimeoutMs,
     streamIdleTimeoutMs: resolved.streamIdleTimeoutMs,

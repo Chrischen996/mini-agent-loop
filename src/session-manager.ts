@@ -159,7 +159,7 @@ export class SessionManager {
       // Forked records must not share mutable transcript/state objects with
       // the parent; later turns can append tool results or update the plan.
       messages: structuredClone(parent.messages),
-      todos: parent.todos ? structuredClone(parent.todos) : parent.todos,
+      todos: structuredClone(parent.todos),
       skillNames: parent.skillNames ? [...parent.skillNames] : parent.skillNames,
       currentPlan: parent.currentPlan
         ? { ...structuredClone(parent.currentPlan), sessionId: newSessionId }

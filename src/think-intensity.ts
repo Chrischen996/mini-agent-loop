@@ -195,15 +195,11 @@ export function getIntensities(): ThinkingIntensity[] {
   return ["off", "low", "med", "high", "xhigh", "ultra"];
 }
 
+/** Derived from THINKING_INTENSITY_TO_MODEL_LEVEL to ensure single source of truth. */
+const VALID_INTENSITIES = new Set<string>(Object.keys(THINKING_INTENSITY_TO_MODEL_LEVEL));
+
 export function isValidIntensity(test: unknown): test is ThinkingIntensity {
-  return (
-    test === "off"
-    || test === "low"
-    || test === "med"
-    || test === "high"
-    || test === "xhigh"
-    || test === "ultra"
-  );
+  return typeof test === "string" && VALID_INTENSITIES.has(test);
 }
 
 /** Resolve the default intensity from the legacy environment variable. */

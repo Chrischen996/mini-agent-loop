@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { imagePart, textPart } from "./content.ts";
+import type { ImageMimeType } from "./types.ts";
 import { loadLlmConfigFromEnv, switchLlmModel } from "./llm/index.ts";
 import { MaxTurnsExceededError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
 import { loadInstructionBundle } from "./agents-md.ts";
@@ -68,7 +69,7 @@ import {
   type PermissionTurnContext,
 } from "./permissions.ts";
 
-const IMAGE_EXT: Record<string, string> = {
+const IMAGE_EXT: Record<string, ImageMimeType> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",

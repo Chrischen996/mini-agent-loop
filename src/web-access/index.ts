@@ -2,7 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { imagePart, textPart } from "../content.ts";
 import { resolveWorkspacePath } from "../workspace.ts";
-import type { ContentPart } from "../types.ts";
+import type { ContentPart, ImageMimeType } from "../types.ts";
 import type { Tool, ToolResult } from "../tools/types.ts";
 
 const MAX_RESULT_CHARS = 30_000;
@@ -209,11 +209,11 @@ function contentParts(results: ExtractedContent[], text: string): ContentPart[] 
   const parts: ContentPart[] = [textPart(text)];
   for (const result of results) {
     if (result.thumbnail?.data && result.thumbnail.mimeType) {
-      parts.push(imagePart(result.thumbnail.mimeType, result.thumbnail.data, result.url));
+      parts.push(imagePart(result.thumbnail.mimeType as ImageMimeType, result.thumbnail.data, result.url));
     }
     for (const frame of result.frames ?? []) {
       if (frame.data && frame.mimeType) {
-        parts.push(imagePart(frame.mimeType, frame.data, `${result.url} @ ${frame.timestamp}`));
+        parts.push(imagePart(frame.mimeType as ImageMimeType, frame.data, `${result.url} @ ${frame.timestamp}`));
       }
     }
   }

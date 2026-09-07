@@ -149,6 +149,7 @@ export class JobManager {
       if (job.status === "cancelled" || active.abort.signal.aborted) {
         job.error = error instanceof Error ? error.message : "Job cancelled";
         await this.store.save(job);
+        this.notify(job); // ensure observers receive the error on cancel path
       } else {
         job.error = error instanceof Error ? error.message : String(error);
         await this.update(job, "failed", job.error);
