@@ -3,6 +3,7 @@ import { builtinModels } from "./pi-ai/providers/all.ts";
 import type { Api, Model as PiModel } from "./pi-ai/types.ts";
 import type { ToolCallFormat } from "./hermes/types.ts";
 import { KIMI_K3_MODELS } from "./kimi-k3-models.ts";
+import { GPT6_ASTRA_MODELS } from "./openai-gpt6-astra.ts";
 import { TOKENROUTER_MODELS, tokenrouterProvider } from "./tokenrouter-models.ts";
 
 export type ModelCapabilities = {
@@ -143,7 +144,7 @@ function mergeBuiltInModels(
 
 const BUILT_IN_MODELS = mergeBuiltInModels(
   piRuntime.getModels(),
-  [...KIMI_K3_MODELS, ...TOKENROUTER_MODELS],
+  [...KIMI_K3_MODELS, ...TOKENROUTER_MODELS, ...GPT6_ASTRA_MODELS],
 ).map(toModelRef);
 
 // The project-owned fallback is outside pi-ai's generated provider catalog,

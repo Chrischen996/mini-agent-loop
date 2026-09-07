@@ -184,6 +184,9 @@ export OPENAI_API_KEY=sk-...
 # optional:
 # export OPENAI_BASE_URL=https://api.openai.com/v1
 # export OPENAI_MODEL=gpt-4o-mini
+# export OPENAI_MODEL=openai/gpt-6-astra
+# Codex ChatGPT backend (same model id, qualified reference required):
+# export OPENAI_MODEL=openai-codex/gpt-6-astra
 ```
 
 #### DeepSeek (recommended for local development in CN)
@@ -268,6 +271,8 @@ npm run tui
 # examples inside the TUI
 /model
 /model deepseek/deepseek-v4-flash
+/model openai/gpt-6-astra
+/model openai-codex/gpt-6-astra
 /model google/gemini-2.5-pro
 /model openrouter/anthropic/claude-sonnet-4
 # positional custom gateway: model, base URL, api key

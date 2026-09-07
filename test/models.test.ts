@@ -242,6 +242,93 @@ describe("model selection", () => {
     assert.equal(resolved.baseUrl, "https://openrouter.ai/api/v1");
   });
 
+  it("registers GPT-6 Astra on OpenAI API and OpenAI Codex", () => {
+    const apiModel = getAllModels().find(
+      (model) => model.provider === "openai" && model.id === "gpt-6-astra",
+    );
+    assert.ok(apiModel);
+    assert.equal(apiModel.name, "GPT-6 Astra");
+    assert.equal(apiModel.api, "openai-responses");
+    assert.equal(apiModel.baseUrl, "https://api.openai.com/v1");
+    assert.deepEqual(apiModel.apiKeyEnv, ["OPENAI_API_KEY"]);
+    assert.equal(apiModel.reasoning, true);
+    assert.deepEqual(apiModel.capabilities.input, ["text", "image"]);
+    assert.equal(apiModel.capabilities.tools, true);
+    assert.equal(apiModel.contextWindow, 272000);
+    assert.equal(apiModel.maxTokens, 128000);
+    assert.deepEqual(apiModel.thinkingLevelMap, {
+      off: "none",
+      xhigh: "xhigh",
+      max: "max",
+    });
+    assert.deepEqual(apiModel.compat, { supportsToolSearch: true });
+    assert.deepEqual(apiModel.cost, {
+      input: 2.5,
+      output: 15,
+      cacheRead: 0.25,
+      cacheWrite: 3.125,
+      tiers: [{
+        inputTokensAbove: 272000,
+        input: 5,
+        output: 22.5,
+        cacheRead: 0.5,
+        cacheWrite: 6.25,
+      }],
+    });
+    assert.ok(apiModel.piModel);
+
+    const codexModel = getAllModels().find(
+      (model) => model.provider === "openai-codex" && model.id === "gpt-6-astra",
+    );
+    assert.ok(codexModel);
+    assert.equal(codexModel.name, "GPT-6 Astra");
+    assert.equal(codexModel.api, "openai-codex-responses");
+    assert.equal(codexModel.baseUrl, "https://chatgpt.com/backend-api");
+    assert.deepEqual(codexModel.apiKeyEnv, ["OPENAI_CODEX_AUTH_JSON", "OPENAI_API_KEY"]);
+    assert.equal(codexModel.reasoning, true);
+    assert.deepEqual(codexModel.capabilities.input, ["text", "image"]);
+    assert.equal(codexModel.capabilities.tools, true);
+    assert.equal(codexModel.contextWindow, 372000);
+    assert.equal(codexModel.maxTokens, 128000);
+    assert.deepEqual(codexModel.thinkingLevelMap, {
+      xhigh: "xhigh",
+      max: "max",
+      minimal: "low",
+    });
+    assert.deepEqual(codexModel.compat, { supportsToolSearch: true });
+    assert.ok(codexModel.piModel);
+
+    assert.ok(getAvailableModels({ OPENAI_API_KEY: "test" }).some(
+      (model) => model.provider === "openai" && model.id === "gpt-6-astra",
+    ));
+    assert.ok(getAvailableModels({ OPENAI_CODEX_AUTH_JSON: "test" }).some(
+      (model) => model.provider === "openai-codex" && model.id === "gpt-6-astra",
+    ));
+    assert.equal(
+      getAvailableModels({ DEEPSEEK_API_KEY: "test" }).some((model) => model.id === "gpt-6-astra"),
+      false,
+    );
+
+    const apiResolved = resolveModel("openai/gpt-6-astra");
+    assert.equal(apiResolved.provider, "openai");
+    assert.equal(apiResolved.id, "gpt-6-astra");
+    assert.equal(apiResolved.baseUrl, "https://api.openai.com/v1");
+
+    const codexResolved = resolveModel("openai-codex/gpt-6-astra");
+    assert.equal(codexResolved.provider, "openai-codex");
+    assert.equal(codexResolved.id, "gpt-6-astra");
+    assert.equal(codexResolved.baseUrl, "https://chatgpt.com/backend-api");
+
+    const searchReferences = searchModels("gpt-6-astra").map(
+      (model) => `${model.provider}/${model.id}`,
+    );
+    assert.ok(searchReferences.includes("openai/gpt-6-astra"));
+    assert.ok(searchReferences.includes("openai-codex/gpt-6-astra"));
+    assert.ok(searchModels("astra").some(
+      (model) => model.provider === "openai" && model.id === "gpt-6-astra",
+    ));
+  });
+
   it("registers Agnes AI with its documented OpenAI-compatible capabilities", () => {
     const models = getAvailableModels({ AGNES_API_KEY: "test" })
       .filter((model) => model.provider === "agnes-ai");
