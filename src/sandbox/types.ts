@@ -12,6 +12,7 @@ export interface SandboxExecOptions {
   cpuLimit?: number;
   memoryLimit?: string;
   stdin?: string;
+  signal?: AbortSignal;
 }
 
 export interface SandboxResult {

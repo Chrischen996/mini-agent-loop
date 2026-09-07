@@ -306,41 +306,27 @@ function buildRuntimeInfo(
 }
 
 /**
- * Merge multiple abort signals into a single AbortController.
- * Compatible with Node.js 18 (no AbortSignal.any()).
+ * Merge multiple abort signals into one native composite signal.
  *
- * Returns a controller whose signal aborts when ANY of the input signals
- * fires, plus a cleanup function to remove the listeners.
+ * Returns a signal that aborts when ANY of the input signals fires.
  */
 function mergeAbortSignals(
   ...signals: (AbortSignal | undefined)[]
-): { controller: AbortController; cleanup: () => void } {
-  const controller = new AbortController();
-  const cleanups: (() => void)[] = [];
-
-  for (const sig of signals) {
-    if (!sig) continue;
-
-    // Already aborted — abort immediately.
-    if (sig.aborted) {
-      controller.abort(sig.reason);
-      return { controller, cleanup: () => {} };
-    }
-
-    const handler = () => controller.abort(sig.reason);
-    sig.addEventListener("abort", handler, { once: true });
-    cleanups.push(() => sig.removeEventListener("abort", handler));
+): { signal: AbortSignal; cleanup: () => void } {
+  const active = [...new Set(
+    signals.filter((signal): signal is AbortSignal => Boolean(signal)),
+  )];
+  if (active.length === 0) {
+    return { signal: new AbortController().signal, cleanup: () => {} };
   }
-
-  return {
-    controller,
-    cleanup: () => cleanups.forEach((fn) => fn()),
-  };
+  if (active.length === 1) return { signal: active[0]!, cleanup: () => {} };
+  return { signal: AbortSignal.any(active), cleanup: () => {} };
 }
 
 /**
  * Run tasks with a concurrency limit using a token-bucket semaphore.
- * Compatible with Node.js 18 (no AbortSignal.any()).
+ * Uses native signal composition so concurrent subagents do not fan out
+ * explicit listeners onto a shared parent signal.
  *
  * When `maxConcurrency` is 0 or undefined, all tasks run concurrently
  * (original Promise.allSettled behavior).
@@ -672,8 +658,6 @@ ${args.sharedContext}
       });
 
       // ── Merge abort signals (fix: properly combine ALL signals) ─
-      // On Node 18 we can't use AbortSignal.any(), so we use a manual
-      // merge that fires when ANY source signal aborts.
       const signalsToMerge: (AbortSignal | undefined)[] = [execSignal, signal];
 
       // ── Timeout support ─────────────────────────────────────────
@@ -727,7 +711,7 @@ ${args.sharedContext}
           tools: childTools,
           systemPrompt,
           maxTurns,
-          signal: merged.controller.signal,
+          signal: merged.signal,
           preprocessors,
           permissionMode,
           permissionTurn: getPermissionTurn?.() ?? permissionTurn,

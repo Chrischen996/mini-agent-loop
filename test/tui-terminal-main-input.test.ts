@@ -134,6 +134,47 @@ describe("terminal main input routing", () => {
     assert.equal(deps.autocomplete.getState().modelSetup?.baseUrl, "https://new.test/v1");
   });
 
+  it("applies a replacement URL and API key without retaining the old values", async () => {
+    const deps = dependencies();
+    deps.autocomplete.openModelSetup({
+      model: model(),
+      baseUrl: "https://old.test/v1",
+      apiKey: "old-key",
+      field: "baseUrl",
+    });
+    deps.input.setValue("");
+
+    handleInputAction({ type: "submit", value: "" }, deps);
+    assert.equal(deps.autocomplete.getState().modelSetup?.baseUrl, "https://old.test/v1");
+    assert.equal(deps.input.getValue(), "");
+
+    deps.input.setValue("new-key");
+    handleInputAction({ type: "submit", value: "new-key" }, deps);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(deps.service.getLlm().baseUrl, "https://old.test/v1");
+    assert.equal(deps.service.getLlm().apiKey, "new-key");
+    assert.equal(deps.autocomplete.getState().mode, null);
+    assert.equal(deps.input.getValue(), "");
+  });
+
+  it("keeps the existing API key when the key step is submitted empty", async () => {
+    const deps = dependencies();
+    deps.autocomplete.openModelSetup({
+      model: model(),
+      baseUrl: "https://old.test/v1",
+      apiKey: "env-key",
+      field: "apiKey",
+    });
+    deps.input.setValue("");
+
+    handleInputAction({ type: "submit", value: "" }, deps);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(deps.service.getLlm().apiKey, "env-key");
+    assert.equal(deps.autocomplete.getState().mode, null);
+  });
+
   it("routes a reference typed into the model picker to model setup", () => {
     const deps = dependencies();
     // The picker owns the query, so the prompt holds the bare reference and the
@@ -144,14 +185,15 @@ describe("terminal main input routing", () => {
     handleInputAction({ type: "submit", value: "openai/gpt-4o" }, deps);
 
     // Enter switches the model instead of sending the reference to it as a
-    // prompt, and the base URL step stays pre-filled the way Ink pre-fills it.
+    // prompt, and the base URL step starts empty with the catalog URL retained
+    // as the fallback.
     assert.equal(deps.service.getHistory().filter((message) => message.role === "user").length, 0);
     const state = deps.autocomplete.getState();
     assert.equal(state.mode, "model-setup");
     assert.equal(state.modelSetup?.field, "baseUrl");
     assert.equal(state.modelSetup?.model.id, "gpt-4o");
-    assert.equal(deps.input.getValue(), state.modelSetup?.baseUrl);
-    assert.notEqual(deps.input.getValue(), "");
+    assert.equal(deps.input.getValue(), "");
+    assert.equal(state.modelSetup?.baseUrl, "https://api.openai.com/v1");
   });
 
   it("handles /copy locally instead of starting a model turn", async () => {

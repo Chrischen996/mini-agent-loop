@@ -1289,7 +1289,7 @@ function convertTools(
 	});
 }
 
-function mapStopReason(
+export function mapStopReason(
 	reason: Anthropic.Messages.StopReason | string,
 	stopDetails?: RefusalStopDetails | null,
 ): { stopReason: StopReason; errorMessage?: string } {
@@ -1312,7 +1312,10 @@ function mapStopReason(
 		case "sensitive": // Content flagged by safety filters (not yet in SDK types)
 			return { stopReason: "error" };
 		default:
-			// Handle unknown stop reasons gracefully (API may add new values)
-			throw new Error(`Unhandled stop reason: ${reason}`);
+			// Unknown values must not kill the stream; Anthropic adds stop reasons over time.
+			return {
+				stopReason: "stop",
+				errorMessage: `Unhandled stop reason: ${reason}`,
+			};
 	}
 }

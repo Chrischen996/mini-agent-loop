@@ -74,6 +74,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Claude/Anthropic thinking blocks, signatures, and reasoning-token usage now
+  round-trip through the LLM wire format, session snapshots, and context-budget
+  estimates so multi-turn continuity survives compaction and resume.
+- Unknown Anthropic stop reasons no longer kill the stream; they map to a
+  non-fatal stop with a diagnostic message.
+- Custom `MINI_AGENT_MODELS` entries can declare `anthropic-messages` plus
+  `thinkingLevelMap` / `compat` instead of being forced onto OpenAI Completions.
+- Bash and sandbox runners now honor abort signals, kill descendant process
+  groups on timeout/cancel, and report timeouts independently of exit code.
+- Concurrent permission/subagent operations compose abort signals with
+  `AbortSignal.any()` so a shared parent signal does not accumulate listeners.
+- Model setup no longer pre-fills Base URL / API key into the prompt; catalog
+  and existing values stay as fallbacks so a pasted replacement is not appended.
 - `tsc --noEmit` passes: the Bedrock custom-header middleware is typed against
   the client's own service types.
 - Restored bare-word file completion in `extractFileAcTrigger`.

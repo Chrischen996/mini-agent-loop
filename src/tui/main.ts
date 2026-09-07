@@ -624,7 +624,6 @@ async function main(): Promise<void> {
         tools,
         autoSubagent,
         preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
-        signal: abortController.signal,
         permissionTurn,
         autoValidate: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_VALIDATE),
         validationWorkspace: cwd,

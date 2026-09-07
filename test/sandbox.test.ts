@@ -92,6 +92,39 @@ describe("NodeSandboxRunner", () => {
     });
   });
 
+  it("terminates shell descendants when a command times out", async () => {
+    await withTempDir(async (cwd) => {
+      const runner = new NodeSandboxRunner();
+      const startedAt = Date.now();
+      const result = await runner.execute({
+        command: "bash",
+        args: ["-lc", "sleep 30"],
+        cwd,
+        timeout: 100,
+      });
+
+      assert.equal(result.timedOut, true);
+      assert.ok(Date.now() - startedAt < 2_000, "timeout should not wait for shell descendants");
+    });
+  });
+
+  it("stops a shell and its descendants when aborted", async () => {
+    await withTempDir(async (cwd) => {
+      const runner = new NodeSandboxRunner();
+      const controller = new AbortController();
+      const execution = runner.execute({
+        command: "bash",
+        args: ["-lc", "sleep 30"],
+        cwd,
+        timeout: 30_000,
+        signal: controller.signal,
+      });
+      setTimeout(() => controller.abort(), 25);
+
+      await assert.rejects(execution, (error: Error) => error.name === "AbortError");
+    });
+  });
+
   it("handles non-zero exit codes", async () => {
     await withTempDir(async (cwd) => {
       const runner = new NodeSandboxRunner();

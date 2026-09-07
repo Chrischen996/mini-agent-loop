@@ -56,6 +56,9 @@ function messageTokens(message: AgentMessage): number {
   if (message.role === "assistant" && message.toolCalls) {
     value += estimateTextTokens(JSON.stringify(message.toolCalls));
   }
+  if (message.role === "assistant" && message.thinking?.length) {
+    value += estimateTextTokens(JSON.stringify(message.thinking));
+  }
   if (message.role === "tool") value += estimateTextTokens(message.toolCallId);
   for (const part of normalizeToParts(message.content)) {
     if (part.type !== "text") value += 256;

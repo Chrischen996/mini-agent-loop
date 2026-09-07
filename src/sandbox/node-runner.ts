@@ -3,6 +3,7 @@ import { platform } from "node:os";
 import { isPathInsideCwd } from "../workspace.ts";
 import { resolve } from "node:path";
 import type { SandboxRunner, SandboxExecOptions, SandboxResult } from "./types.ts";
+import { terminateProcessTree } from "../process-tree.ts";
 
 const INHERITED_ENVIRONMENT = new Set([
   "PATH",
@@ -31,15 +32,20 @@ export class NodeSandboxRunner implements SandboxRunner {
       timeout = 30000,
       allowNetwork = false,
       stdin,
+      signal,
     } = options;
+
+    if (signal?.aborted) {
+      return Promise.reject(Object.assign(new Error("Operation aborted"), { name: "AbortError" }));
+    }
 
     return new Promise((resolve, reject) => {
       const finalEnv = this.prepareEnvironment(env, allowNetwork);
       const proc = spawn(command, args, {
         cwd,
         env: finalEnv,
-        timeout,
         shell: false,
+        detached: platform() !== "win32",
       });
 
       let stdout = "";
@@ -47,6 +53,8 @@ export class NodeSandboxRunner implements SandboxRunner {
       let timedOut = false;
       let timeoutHandle: NodeJS.Timeout | undefined;
       let forceKillHandle: NodeJS.Timeout | undefined;
+      let settled = false;
+      let aborted = false;
 
       const clearTimeoutHandle = () => {
         if (timeoutHandle) {
@@ -56,6 +64,25 @@ export class NodeSandboxRunner implements SandboxRunner {
         if (forceKillHandle) {
           clearTimeout(forceKillHandle);
           forceKillHandle = undefined;
+        }
+        signal?.removeEventListener("abort", abort);
+      };
+
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeoutHandle();
+        reject(error);
+      };
+
+      const abort = () => {
+        aborted = true;
+        terminateProcessTree(proc);
+        if (!forceKillHandle) {
+          forceKillHandle = setTimeout(() => {
+            forceKillHandle = undefined;
+            terminateProcessTree(proc, "SIGKILL");
+          }, 1_000);
         }
       };
 
@@ -74,11 +101,18 @@ export class NodeSandboxRunner implements SandboxRunner {
 
       proc.on("error", (err) => {
         clearTimeoutHandle();
-        reject(new Error(`Failed to spawn process: ${err.message}`));
+        fail(new Error(`Failed to spawn process: ${err.message}`));
       });
 
       proc.on("close", (exitCode, signal) => {
         clearTimeoutHandle();
+        if (settled) return;
+        settled = true;
+        if (aborted) {
+          const error = Object.assign(new Error("Operation aborted"), { name: "AbortError" });
+          reject(error);
+          return;
+        }
         resolve({
           stdout,
           stderr,
@@ -91,13 +125,20 @@ export class NodeSandboxRunner implements SandboxRunner {
       if (timeout) {
         timeoutHandle = setTimeout(() => {
           timedOut = true;
-          proc.kill("SIGTERM");
-          forceKillHandle = setTimeout(() => {
-            forceKillHandle = undefined;
-            proc.kill("SIGKILL");
-          }, 1000);
+          terminateProcessTree(proc);
+          if (!forceKillHandle) {
+            forceKillHandle = setTimeout(() => {
+              forceKillHandle = undefined;
+              terminateProcessTree(proc, "SIGKILL");
+            }, 1_000);
+          }
         }, timeout);
       }
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+      signal?.addEventListener("abort", abort, { once: true });
     });
   }
 

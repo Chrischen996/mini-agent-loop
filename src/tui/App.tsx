@@ -560,9 +560,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     knownSessions?: PersistedSessionMeta[],
   ) => {
     const trimmed = text.trim();
-    const allowEmptyApiKey = acMode === "model-setup" && modelSetup?.field === "apiKey";
+    const allowEmptyModelSetup = acMode === "model-setup" && Boolean(modelSetup);
     const hasPendingImages = pendingImagesRef.current.length > 0;
-    if (!trimmed && !allowEmptyApiKey && !hasPendingImages) return;
+    if (!trimmed && !allowEmptyModelSetup && !hasPendingImages) return;
     if (acMode === "resume-messages") {
       const selected = resumePickerCandidatesRef.current[acIndex] ?? resumeMessageCandidates[acIndex];
       const session = resumePickerSessionRef.current;
@@ -643,9 +643,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
     if (acMode === "model-setup" && modelSetup) {
       if (modelSetup.field === "baseUrl") {
-        const baseUrl = trimmed.replace(/\/$/, "");
+        const baseUrl = (trimmed || modelSetup.baseUrl).replace(/\/$/, "");
         setModelSetup({ ...modelSetup, baseUrl, field: "apiKey", error: undefined });
-        setInput(modelSetup.apiKey);
+        // The key is kept in modelSetup as a fallback, but must not be shown
+        // or appended to when the user enters a replacement key.
+        setInput("");
       } else {
         void commitModelSetup(modelSetup, trimmed, {
           llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
@@ -996,7 +998,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools(turnLlm)],
             autoSubagent,
             preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
-            signal: abortRef.current.signal,
             userContent: currentUserContent,
             permissionTurn,
             runtimeContext: {

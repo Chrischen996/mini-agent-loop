@@ -168,6 +168,20 @@ function positiveTimeout(value: unknown): number | undefined {
     : undefined;
 }
 
+function parseThinkingLevelMap(value: unknown): Record<string, string | null> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const mapped: Record<string, string | null> = {};
+  for (const [level, mappedValue] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof mappedValue === "string" || mappedValue === null) mapped[level] = mappedValue;
+  }
+  return Object.keys(mapped).length > 0 ? mapped : undefined;
+}
+
+function parseCompat(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return { ...(value as Record<string, unknown>) };
+}
+
 function parseCustomModels(raw: string | undefined): ModelRef[] {
   if (!raw?.trim()) return [];
   let parsed: unknown;
@@ -187,21 +201,15 @@ function parseCustomModels(raw: string | undefined): ModelRef[] {
       : typeof item.apiKeyEnv === "string" ? [item.apiKeyEnv] : [];
     if (apiKeyEnv.length === 0) continue;
     const contextWindow = positiveInteger(item.contextWindow, 128000);
-    models.push({
-      id: item.id,
-      name: typeof item.name === "string" ? item.name : item.id,
-      provider: item.provider,
-      api: "openai-completions",
-      protocol: "openai-compatible",
-      baseUrl: item.baseUrl.replace(/\/$/, ""),
-      apiKeyEnv,
-      capabilities: {
-        input: Array.isArray(item.input) && item.input.includes("image") ? ["text", "image"] : ["text"],
-        tools: item.tools !== false,
-      },
-      contextWindow,
-      maxTokens: Math.min(positiveInteger(item.maxTokens, 16384), Math.max(1, contextWindow - 1)),
-      reasoning: item.reasoning === true,
+    const maxTokens = Math.min(positiveInteger(item.maxTokens, 16384), Math.max(1, contextWindow - 1));
+    const baseUrl = item.baseUrl.replace(/\/$/, "");
+    const input = Array.isArray(item.input) && item.input.includes("image")
+      ? ["text", "image"] as const
+      : ["text"] as const;
+    const reasoning = item.reasoning === true;
+    const thinkingLevelMap = parseThinkingLevelMap(item.thinkingLevelMap);
+    const compat = parseCompat(item.compat);
+    const timeouts = {
       ...(item.timeoutMs !== undefined ? { timeoutMs: positiveTimeout(item.timeoutMs) } : {}),
       ...(item.firstResponseTimeoutMs !== undefined
         ? { firstResponseTimeoutMs: positiveTimeout(item.firstResponseTimeoutMs) }
@@ -209,6 +217,44 @@ function parseCustomModels(raw: string | undefined): ModelRef[] {
       ...(item.streamIdleTimeoutMs !== undefined
         ? { streamIdleTimeoutMs: positiveTimeout(item.streamIdleTimeoutMs) }
         : {}),
+    };
+    const anthropic = item.api === "anthropic-messages";
+    const piModel = anthropic
+      ? {
+          id: item.id,
+          name: typeof item.name === "string" ? item.name : item.id,
+          api: "anthropic-messages" as const,
+          provider: "anthropic" as const,
+          baseUrl,
+          reasoning,
+          ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+          input: [...input],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow,
+          maxTokens,
+          ...(compat ? { compat } : {}),
+          ...timeouts,
+        } satisfies PiModel<"anthropic-messages">
+      : undefined;
+    models.push({
+      id: item.id,
+      name: typeof item.name === "string" ? item.name : item.id,
+      provider: item.provider,
+      api: anthropic ? "anthropic-messages" : "openai-completions",
+      protocol: anthropic ? "pi" : "openai-compatible",
+      baseUrl,
+      apiKeyEnv,
+      capabilities: {
+        input: [...input],
+        tools: item.tools !== false,
+      },
+      contextWindow,
+      maxTokens,
+      reasoning,
+      ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+      ...(compat ? { compat } : {}),
+      ...(piModel ? { piModel } : {}),
+      ...timeouts,
     });
   }
   return models;

@@ -280,7 +280,6 @@ export class TerminalAgentService {
             chat: this.options.chat,
             autoSubagent: this.options.autoSubagent,
             preprocessors: this.options.preprocessors,
-            signal: abortController.signal,
             userContent,
             permissionTurn,
             runtimeRef: this.options.runtimeRef,

@@ -43,6 +43,38 @@ describe("PermissionManager", () => {
     });
   });
 
+  it("does not warn when many tools share one cancellation signal", async () => {
+    const manager = new PermissionManager("bypass");
+    const turn = manager.beginTurn("parallel", () => {});
+    const executionController = new AbortController();
+    const warnings: Error[] = [];
+    const onWarning = (warning: Error & { name?: string }) => {
+      if (warning.name === "MaxListenersExceededWarning") warnings.push(warning);
+    };
+    const slowTool: Tool = {
+      ...writeTool,
+      name: "read",
+      execute: async (_args, signal) => {
+        assert.equal(signal?.aborted, false);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        return { content: "ok" };
+      },
+    };
+
+    process.on("warning", onWarning);
+    try {
+      await Promise.all(
+        Array.from({ length: 12 }, () => turn.execute(slowTool, {}, executionController.signal)),
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      process.off("warning", onWarning);
+      turn.close();
+    }
+
+    assert.equal(warnings.length, 0);
+  });
+
   it("pauses risky tools in approval mode and resumes after an explicit decision", async () => {
     const manager = new PermissionManager("approval");
     const requests: string[] = [];

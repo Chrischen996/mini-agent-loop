@@ -9,6 +9,26 @@ describe("context compaction", () => {
     assert.ok(estimateContextTokens([{ role: "user", content: "hello" }]) > 0);
   });
 
+  it("counts Claude thinking blocks toward the context budget", () => {
+    const withoutThinking = estimateContextTokens([
+      { role: "assistant", content: "I'll read it." },
+    ]);
+    const withThinking = estimateContextTokens([
+      {
+        role: "assistant",
+        content: "I'll read it.",
+        thinking: [
+          {
+            type: "thinking",
+            thinking: "need to inspect a very long file before answering",
+            thinkingSignature: "sig_abc",
+          },
+        ],
+      },
+    ]);
+    assert.ok(withThinking > withoutThinking);
+  });
+
   it("keeps system and recent messages while summarizing older context", () => {
     const history: AgentMessage[] = [
       { role: "system", content: "system" },

@@ -645,7 +645,7 @@ export class SessionStore {
           index,
           role: message.role,
           content: message.content,
-          ...(message.role === "assistant" ? { toolCalls: message.toolCalls } : {}),
+          ...(message.role === "assistant" ? { toolCalls: message.toolCalls, thinking: message.thinking } : {}),
           ...(message.role === "tool"
             ? { toolCallId: message.toolCallId, name: message.name, isError: message.isError }
             : {}),

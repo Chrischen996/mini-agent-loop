@@ -375,19 +375,12 @@ function mergeLoopSignals(...signals: (AbortSignal | undefined)[]): {
   signal?: AbortSignal;
   cleanup: () => void;
 } {
-  const active = signals.filter((value): value is AbortSignal => Boolean(value));
+  const active = [...new Set(
+    signals.filter((value): value is AbortSignal => Boolean(value)),
+  )];
   if (active.length === 0) return { cleanup: () => {} };
   if (active.length === 1) return { signal: active[0], cleanup: () => {} };
-  const controller = new AbortController();
-  const cleanups = active.map((signal) => {
-    const abort = () => {
-      if (!controller.signal.aborted) controller.abort(signal.reason);
-    };
-    if (signal.aborted) abort();
-    signal.addEventListener("abort", abort, { once: true });
-    return () => signal.removeEventListener("abort", abort);
-  });
-  return { signal: controller.signal, cleanup: () => cleanups.forEach((remove) => remove()) };
+  return { signal: AbortSignal.any(active), cleanup: () => {} };
 }
 
 /** Maximum characters of the injected memory section (Claude Code caps its MEMORY.md index similarly). */

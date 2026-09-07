@@ -44,7 +44,9 @@ export function startModelSetup(
     apiKey: overrides.apiKey ?? (canReuseCurrentKey ? llm.apiKey : providerKey ?? ""),
     field: "baseUrl",
   });
-  setInput(overrides.baseUrl || model.baseUrl);
+  // Keep the default in modelSetup as the fallback, but leave the field empty
+  // so a pasted gateway URL replaces it instead of being appended to it.
+  setInput("");
   setAcMode("model-setup");
   setAcIndex(0);
 }
@@ -60,9 +62,10 @@ export async function commitModelSetup(
   const { llm, setLlm, setModelSetup, setAcMode, setInput, dispatch, historyRef } = deps;
 
   try {
+    const effectiveApiKey = apiKey.trim() || setup.apiKey.trim();
     const newLlmConfig = switchLlmModel(llm, setup.model, {
       baseUrl: setup.baseUrl,
-      apiKey,
+      apiKey: effectiveApiKey,
     });
     setLlm(newLlmConfig);
     dispatch({ type: "MODEL_CHANGED", modelName: setup.model.id });
@@ -88,7 +91,7 @@ export async function commitModelSetup(
       await saveProfile(defaultName, {
         model: `${setup.model.provider}/${setup.model.id}`,
         baseUrl: setup.baseUrl,
-        apiKey,
+        apiKey: newLlmConfig.apiKey,
         thinkingLevel: newLlmConfig.thinkingLevel,
         ...(newLlmConfig.timeoutMs !== undefined ? { timeoutMs: newLlmConfig.timeoutMs } : {}),
         ...(newLlmConfig.firstResponseTimeoutMs !== undefined
@@ -102,7 +105,7 @@ export async function commitModelSetup(
       // non-fatal: model is already switched in memory
     }
   } catch (error) {
-    setModelSetup({ ...setup, apiKey, error: error instanceof Error ? error.message : String(error) });
+    setModelSetup({ ...setup, apiKey: apiKey.trim(), error: error instanceof Error ? error.message : String(error) });
     setInput(apiKey);
   }
 }

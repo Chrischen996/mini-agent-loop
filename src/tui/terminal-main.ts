@@ -885,9 +885,9 @@ async function submitInput(
     deps.autocomplete.clear();
     return;
   }
-  const allowEmptyApiKey = autocompleteState.mode === "model-setup" && autocompleteState.modelSetup?.field === "apiKey";
+  const allowEmptyModelSetup = autocompleteState.mode === "model-setup" && Boolean(autocompleteState.modelSetup);
   const allowEmptyProfileSelection = autocompleteState.mode === "profile-list";
-  if (!text && !allowEmptyApiKey && !allowEmptyProfileSelection) return;
+  if (!text && !allowEmptyModelSetup && !allowEmptyProfileSelection) return;
   if (store.getState().busy && /^(?:resume|\/(?:clear|resume|model|profiles?|plan(?:-|\s|$)))/i.test(text)) {
     store.dispatch({ type: "ADD_NOTICE", title: "Turn in progress", text: "The current turn is still running. This control command runs once it finishes; normal messages are queued." });
     input.clear();
@@ -970,8 +970,8 @@ async function submitInput(
       deps.autocomplete.openModelPicker();
       return;
     }
-    // Clear first: selectTerminalModel pre-fills the prompt with the base URL
-    // (or the picker query) for the step it opens, and Ink does the same.
+    // Clear first: selectTerminalModel opens an empty Base URL field (catalog
+    // URL stays in setup as the fallback), matching Ink.
     input.clear();
     selectTerminalModel(parsed.reference, parsed.overrides, deps);
     return;
@@ -1240,7 +1240,9 @@ function selectTerminalModel(
     return;
   }
   deps.autocomplete.openModelSetup(setup);
-  deps.input.setValue(setup.baseUrl);
+  // Keep the catalog URL in setup as the fallback, but let a pasted URL start
+  // from an empty field instead of appending to the catalog value.
+  deps.input.setValue("");
 }
 
 async function applyTerminalModel(
@@ -1277,13 +1279,18 @@ async function submitModelSetup(value: string, deps: InputDeps): Promise<void> {
   const setup = current.modelSetup;
   if (!setup) return;
   if (setup.field === "baseUrl") {
-    const baseUrl = value.replace(/\/$/, "");
+    const baseUrl = (value.trim() || setup.baseUrl).replace(/\/$/, "");
     deps.autocomplete.setModelSetup({ ...setup, baseUrl, field: "apiKey", error: undefined });
-    deps.input.setValue(setup.apiKey);
+    // Keep the existing/env key as a fallback without putting it into the
+    // editable field where a replacement would be appended.
+    deps.input.setValue("");
     return;
   }
   try {
-    const applied = await applyTerminalModel(setup.model, { baseUrl: setup.baseUrl, apiKey: value }, deps);
+    const applied = await applyTerminalModel(setup.model, {
+      baseUrl: setup.baseUrl,
+      apiKey: value.trim() || setup.apiKey,
+    }, deps);
     if (!applied) {
       deps.autocomplete.setModelSetup({ ...setup, apiKey: value, error: "Model setup could not be applied" });
       deps.input.setValue(value);

@@ -157,6 +157,47 @@ describe("SessionStore", () => {
     }
   });
 
+  it("round-trips Claude thinking signatures on assistant messages", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-thinking-parts-"));
+    try {
+      const store = new SessionStore(root);
+      const messages = [
+        { role: "user" as const, content: "inspect the file" },
+        {
+          role: "assistant" as const,
+          content: "I'll read it.",
+          thinking: [
+            {
+              type: "thinking" as const,
+              thinking: "need to inspect the file first",
+              thinkingSignature: "sig_abc",
+            },
+          ],
+          toolCalls: [{ id: "toolu_1", name: "read", arguments: { path: "src/loop.ts" } }],
+        },
+      ];
+      await store.create({
+        id: "thinking-parts",
+        createdAt: Date.now(),
+        messages,
+      });
+
+      const restored = await new SessionStore(root).load("thinking-parts");
+      const assistant = restored?.messages.find((message) => message.role === "assistant");
+      assert.equal(assistant?.role, "assistant");
+      if (assistant?.role !== "assistant") return;
+      assert.deepEqual(assistant.thinking, [
+        {
+          type: "thinking",
+          thinking: "need to inspect the file first",
+          thinkingSignature: "sig_abc",
+        },
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("round-trips active skill names", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-skills-"));
     try {

@@ -30,6 +30,15 @@ export type UserMessage = {
   content: MessageContent;
 };
 
+export type ThinkingPart = {
+  type: "thinking";
+  thinking: string;
+  /** Provider-encrypted thinking signature required for Claude multi-turn continuity. */
+  thinkingSignature?: string;
+  /** When true, `thinkingSignature` holds the opaque redacted_thinking payload. */
+  redacted?: boolean;
+};
+
 export type AssistantMessage = {
   /** Stable identity used by persisted sessions and fork/rewind APIs. */
   id?: string;
@@ -37,6 +46,8 @@ export type AssistantMessage = {
   /** Assistant response text is kept separate from structured tool calls. */
   content: string;
   toolCalls?: ToolCall[];
+  /** Claude/Anthropic thinking blocks replayed on the next turn. */
+  thinking?: ThinkingPart[];
 };
 
 export type SystemMessage = {

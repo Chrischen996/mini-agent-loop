@@ -392,6 +392,36 @@ describe("model selection", () => {
     assert.equal(custom?.id, "company-model-v1");
     assert.deepEqual(custom?.capabilities.input, ["text", "image"]);
     assert.equal(custom?.contextWindow, 64000);
+    assert.equal(custom?.api, "openai-completions");
+    assert.equal(custom?.protocol, "openai-compatible");
+  });
+
+  it("loads custom Anthropic Messages models from MINI_AGENT_MODELS", () => {
+    const env = {
+      CUSTOM_CLAUDE_KEY: "test",
+      MINI_AGENT_MODELS: JSON.stringify([{
+        provider: "company-claude",
+        id: "claude-proxy",
+        api: "anthropic-messages",
+        baseUrl: "https://claude.internal/v1",
+        apiKeyEnv: "CUSTOM_CLAUDE_KEY",
+        reasoning: true,
+        contextWindow: 200000,
+        maxTokens: 16000,
+        compat: { forceAdaptiveThinking: true, supportsTemperature: false },
+        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+      }]),
+    };
+    const custom = getAvailableModels(env).find((model) => model.id === "claude-proxy");
+    assert.ok(custom);
+    assert.equal(custom.api, "anthropic-messages");
+    assert.equal(custom.protocol, "pi");
+    assert.equal(custom.reasoning, true);
+    assert.equal(custom.piModel?.api, "anthropic-messages");
+    assert.equal(custom.piModel?.baseUrl, "https://claude.internal/v1");
+    assert.equal(custom.piModel?.provider, "anthropic");
+    assert.deepEqual(custom.compat, { forceAdaptiveThinking: true, supportsTemperature: false });
+    assert.deepEqual(custom.thinkingLevelMap, { xhigh: "xhigh", max: "max" });
   });
 
   it("parses per-model timeout overrides from MINI_AGENT_MODELS", () => {

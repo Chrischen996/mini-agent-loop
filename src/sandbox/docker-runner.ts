@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import type { SandboxRunner, SandboxExecOptions, SandboxResult } from "./types.ts";
+import { terminateProcessTree } from "../process-tree.ts";
 
 export class DockerSandboxRunner implements SandboxRunner {
   readonly type = "docker" as const;
@@ -21,7 +22,12 @@ export class DockerSandboxRunner implements SandboxRunner {
       cpuLimit = 1.0,
       memoryLimit = "512m",
       stdin,
+      signal,
     } = options;
+
+    if (signal?.aborted) {
+      return Promise.reject(Object.assign(new Error("Operation aborted"), { name: "AbortError" }));
+    }
 
     const containerId = this.generateContainerId();
     this.containerIds.add(containerId);
@@ -39,7 +45,7 @@ export class DockerSandboxRunner implements SandboxRunner {
         args,
       });
 
-      return await this.runContainer(dockerArgs, timeout, stdin);
+      return await this.runContainer(dockerArgs, timeout, stdin, signal);
     } finally {
       await this.removeContainer(containerId);
       this.containerIds.delete(containerId);
@@ -112,15 +118,42 @@ export class DockerSandboxRunner implements SandboxRunner {
     dockerArgs: string[],
     timeout: number,
     stdin?: string,
+    signal?: AbortSignal,
   ): Promise<SandboxResult> {
     return new Promise((resolve, reject) => {
       const proc = spawn("docker", dockerArgs, {
         stdio: ["pipe", "pipe", "pipe"],
+        detached: process.platform !== "win32",
       });
 
       let stdout = "";
       let stderr = "";
       let timedOut = false;
+      let timeoutHandle: NodeJS.Timeout | undefined;
+      let forceKillHandle: NodeJS.Timeout | undefined;
+      let aborted = false;
+      let settled = false;
+
+      const scheduleForceKill = () => {
+        if (forceKillHandle) return;
+        forceKillHandle = setTimeout(() => {
+          forceKillHandle = undefined;
+          terminateProcessTree(proc, "SIGKILL");
+        }, 1_000);
+      };
+      const abort = () => {
+        aborted = true;
+        terminateProcessTree(proc);
+        scheduleForceKill();
+      };
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (forceKillHandle) clearTimeout(forceKillHandle);
+        signal?.removeEventListener("abort", abort);
+        fn();
+      };
 
       proc.stdout.on("data", (chunk) => {
         stdout += chunk.toString();
@@ -136,28 +169,36 @@ export class DockerSandboxRunner implements SandboxRunner {
       }
 
       proc.on("error", (err) => {
-        reject(new Error(`Docker spawn failed: ${err.message}`));
+        settle(() => reject(new Error(`Docker spawn failed: ${err.message}`)));
       });
 
-      proc.on("close", (exitCode, signal) => {
-        resolve({
-          stdout,
-          stderr,
-          exitCode: exitCode ?? -1,
-          timedOut,
-          signal: signal ?? undefined,
+      proc.on("close", (exitCode, signalName) => {
+        settle(() => {
+          if (aborted) {
+            reject(Object.assign(new Error("Operation aborted"), { name: "AbortError" }));
+            return;
+          }
+          resolve({
+            stdout,
+            stderr,
+            exitCode: exitCode ?? -1,
+            timedOut,
+            signal: signalName ?? undefined,
+          });
         });
       });
 
-      const timeoutHandle = setTimeout(() => {
+      timeoutHandle = setTimeout(() => {
         timedOut = true;
-        proc.kill("SIGTERM");
-        setTimeout(() => proc.kill("SIGKILL"), 1000);
+        terminateProcessTree(proc);
+        scheduleForceKill();
       }, timeout);
 
-      proc.on("close", () => {
-        clearTimeout(timeoutHandle);
-      });
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+      signal?.addEventListener("abort", abort, { once: true });
     });
   }
 

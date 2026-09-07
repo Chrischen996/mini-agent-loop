@@ -73,20 +73,15 @@ function mergeAbortSignals(...signals: (AbortSignal | undefined)[]): {
   signal: AbortSignal;
   cleanup: () => void;
 } {
-  const active = signals.filter((signal): signal is AbortSignal => Boolean(signal));
+  const active = [...new Set(
+    signals.filter((signal): signal is AbortSignal => Boolean(signal)),
+  )];
   if (active.length === 0) return { signal: new AbortController().signal, cleanup: () => {} };
   if (active.length === 1) return { signal: active[0]!, cleanup: () => {} };
 
-  const controller = new AbortController();
-  const listeners = active.map((signal) => {
-    const abort = () => {
-      if (!controller.signal.aborted) controller.abort(signal.reason);
-    };
-    if (signal.aborted) abort();
-    signal.addEventListener("abort", abort, { once: true });
-    return () => signal.removeEventListener("abort", abort);
-  });
-  return { signal: controller.signal, cleanup: () => listeners.forEach((remove) => remove()) };
+  // Native composition avoids adding one explicit listener per concurrent
+  // operation to the shared parent signal.
+  return { signal: AbortSignal.any(active), cleanup: () => {} };
 }
 
 const WRITE_TOOLS = new Set([
