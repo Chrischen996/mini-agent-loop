@@ -30,7 +30,7 @@ export type CommandDef = {
  * `/help` describing a different set of commands than the palette offered.
  */
 export const SLASH_COMMANDS: CommandDef[] = [
-  { name: "model", usage: "/model [ref] [url] [key]", description: "Switch model and gateway" },
+  { name: "model", usage: "/model [ref] [url] [key] [--protocol]", description: "Switch model and gateway" },
   { name: "profiles", usage: "/profiles", description: "List and activate model profiles" },
   { name: "image", usage: "/image <path>", description: "Attach a local image" },
   { name: "paste-image", usage: "/paste-image", description: "Attach an image from the clipboard" },

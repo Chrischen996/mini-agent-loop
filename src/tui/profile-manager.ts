@@ -43,6 +43,7 @@ export function startModelSetup(
     baseUrl: overrides.baseUrl || model.baseUrl,
     apiKey: overrides.apiKey ?? (canReuseCurrentKey ? llm.apiKey : providerKey ?? ""),
     field: "baseUrl",
+    ...(overrides.protocol ? { protocol: overrides.protocol } : {}),
   });
   // Keep the default in modelSetup as the fallback, but leave the field empty
   // so a pasted gateway URL replaces it instead of being appended to it.
@@ -66,6 +67,7 @@ export async function commitModelSetup(
     const newLlmConfig = switchLlmModel(llm, setup.model, {
       baseUrl: setup.baseUrl,
       apiKey: effectiveApiKey,
+      ...(setup.protocol ? { protocol: setup.protocol } : {}),
     });
     setLlm(newLlmConfig);
     dispatch({ type: "MODEL_CHANGED", modelName: setup.model.id });

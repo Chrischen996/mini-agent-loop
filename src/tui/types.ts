@@ -1,4 +1,4 @@
-import type { ModelRef } from "../models.ts";
+import type { LlmGatewayProtocol, ModelRef } from "../models.ts";
 import type { listProfiles } from "../profile-store.ts";
 
 export type ModelSetupState = {
@@ -6,6 +6,8 @@ export type ModelSetupState = {
   baseUrl: string;
   apiKey: string;
   field: "baseUrl" | "apiKey";
+  /** Preserve `/model --protocol` across the Base URL / API key overlay. */
+  protocol?: LlmGatewayProtocol;
   error?: string;
 };
 

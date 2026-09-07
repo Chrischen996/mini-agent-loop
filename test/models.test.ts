@@ -349,13 +349,54 @@ describe("model selection", () => {
     assert.equal(resolveModel("deepseek-reasoner").id, "deepseek-v4-pro");
   });
 
-  it("keeps Anthropic native transport when using a custom gateway", () => {
+  it("maps dotted Claude version aliases to hyphenated catalog ids", () => {
+    assert.equal(resolveModel("claude-sonnet-4.6").id, "claude-sonnet-4-6");
+    assert.equal(resolveModel("sonnet-4.6").id, "claude-sonnet-4-6");
+    assert.ok(searchModels("sonnet-4.6").some((model) => model.id === "claude-sonnet-4-6"));
+  });
+
+  it("keeps Anthropic native transport on the official API host", () => {
     const model = getAllModels().find((item) => item.provider === "anthropic");
     assert.ok(model?.piModel);
-    const resolved = resolveModel(`anthropic/${model.id}`, "https://anthropic-gateway.example/v1");
-    assert.equal(resolved.baseUrl, "https://anthropic-gateway.example/v1");
+    const resolved = resolveModel(`anthropic/${model.id}`, "https://api.anthropic.com");
+    assert.equal(resolved.baseUrl, "https://api.anthropic.com");
     assert.ok(resolved.piModel);
+    assert.equal(resolved.piModel?.api, "anthropic-messages");
+  });
+
+  it("appends /v1 for a bare OpenAI-compatible Claude gateway origin", () => {
+    const resolved = resolveModel("anthropic/claude-sonnet-4-6", "https://ai.wudi987.com");
+    assert.equal(resolved.baseUrl, "https://ai.wudi987.com/v1");
+    assert.equal(resolved.piModel, undefined);
+    assert.equal(resolveModel("anthropic/claude-sonnet-4-6", "https://ai.wudi987.com/v1").baseUrl, "https://ai.wudi987.com/v1");
+    const native = resolveModel("anthropic/claude-sonnet-4-6", "https://ai.wudi987.com", "anthropic-messages");
+    assert.equal(native.baseUrl, "https://ai.wudi987.com");
+    assert.ok(native.piModel);
+  });
+
+  it("routes a generic Claude 中转站 through OpenAI-compatible Chat Completions", () => {
+    const model = getAllModels().find((item) => item.provider === "anthropic");
+    assert.ok(model?.piModel);
+    const resolved = resolveModel(`anthropic/${model.id}`, "https://api.sparkcode.top/v1");
+    assert.equal(resolved.baseUrl, "https://api.sparkcode.top/v1");
+    assert.equal(resolved.piModel, undefined);
     assert.equal(resolved.api, "anthropic-messages");
+  });
+
+  it("keeps Anthropic Messages when a custom gateway looks like /v1/messages", () => {
+    const model = getAllModels().find((item) => item.provider === "anthropic");
+    assert.ok(model);
+    const resolved = resolveModel(`anthropic/${model.id}`, "https://gw.example/anthropic/v1");
+    assert.ok(resolved.piModel);
+    assert.equal(resolved.piModel?.baseUrl, "https://gw.example/anthropic/v1");
+  });
+
+  it("can force Anthropic Messages on a generic Claude gateway", () => {
+    const model = getAllModels().find((item) => item.provider === "anthropic");
+    assert.ok(model);
+    const resolved = resolveModel(`anthropic/${model.id}`, "https://api.sparkcode.top/v1", "anthropic-messages");
+    assert.ok(resolved.piModel);
+    assert.equal(resolved.piModel?.baseUrl, "https://api.sparkcode.top/v1");
   });
 
   it("reports duplicate unqualified ids as ambiguous", () => {

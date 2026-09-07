@@ -22,7 +22,13 @@ export function selectModel(
   const applyModel = (model: ModelRef) => {
     if (hasGatewayOverrides(overrides)) {
       void commitModelSetup(
-        { model, baseUrl: overrides.baseUrl!, apiKey: overrides.apiKey!, field: "apiKey" },
+        {
+          model,
+          baseUrl: overrides.baseUrl!,
+          apiKey: overrides.apiKey!,
+          field: "apiKey",
+          ...(overrides.protocol ? { protocol: overrides.protocol } : {}),
+        },
         overrides.apiKey!,
       );
       return;
@@ -34,7 +40,7 @@ export function selectModel(
 
   if (!match) {
     // An unknown id is a valid custom OpenAI-compatible model
-    applyModel(resolveModel(reference, overrides.baseUrl));
+    applyModel(resolveModel(reference, overrides.baseUrl, overrides.protocol));
     return;
   }
 

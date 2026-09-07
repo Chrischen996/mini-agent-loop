@@ -279,6 +279,11 @@ npm run tui
 /model xai/grok-3 https://api.sparkcode.top/v1 sk-...
 # flag form still works for a custom OpenAI-compatible gateway
 /model openai/gpt-4.1 --base-url https://llm.example/v1 --api-key-env COMPANY_LLM_KEY
+# Claude 中转站: most gateways speak Chat Completions, so a custom URL
+# drops native Anthropic Messages. Force Messages only when the gateway
+# actually implements /v1/messages.
+/model anthropic/claude-sonnet-4-6 https://api.sparkcode.top/v1 sk-...
+/model anthropic/claude-sonnet-4-6 https://gw.example/anthropic/v1 sk-... --protocol anthropic
 ```
 
 Models are shown even when their provider credential is not configured. Selecting
@@ -295,8 +300,18 @@ MINI_AGENT_MODELS='[{"provider":"company","id":"company-model-v1","baseUrl":"htt
 ```
 
 `MINI_AGENT_MODELS` is a JSON array. Each entry requires `provider`, `id`,
-`baseUrl`, and `apiKeyEnv`; optional fields are `input`, `tools`, and
-`contextWindow`.
+`baseUrl`, and `apiKeyEnv`; optional fields are `input`, `tools`,
+`contextWindow`, and `api` (`"anthropic-messages"` keeps Claude on native
+Messages even when `baseUrl` is a private gateway).
+
+A persistent 中转站 for every Claude request can also be set with
+`MINI_AGENT_RELAY`. Omit `protocol` (or set `"openai-compatible"`) for the
+usual Chat Completions gateways; set `"protocol":"anthropic-messages"` only
+when the relay implements Anthropic `/v1/messages`:
+
+```bash
+MINI_AGENT_RELAY='{"providers":["anthropic"],"baseUrl":"https://api.sparkcode.top/v1","apiKey":"sk-..."}'
+```
 
 #### Per-model timeouts
 

@@ -216,7 +216,7 @@ describe("shared TUI presentation", () => {
     // Every description starts in the shared usage column, so the ANSI overlay
     // and the Ink CommandPalette line up row for row.
     const column = commandUsageColumn(candidates);
-    assert.equal(rows[1]?.text, `  ${"/model [ref] [url] [key]".padEnd(column)}Switch model and gateway`);
+    assert.equal(rows[1]?.text, `  ${"/model [ref] [url] [key] [--protocol]".padEnd(column)}Switch model and gateway`);
     assert.equal(rows[2]?.text, `❯ ${"/profiles".padEnd(column)}List and activate model profiles`);
     for (const row of rows.slice(1)) {
       const command = candidates.find((entry) => row.text.startsWith(`  ${entry.usage}`) || row.text.startsWith(`❯ ${entry.usage}`));

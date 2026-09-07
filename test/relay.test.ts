@@ -10,6 +10,7 @@ import {
   type RelayRegistry,
 } from "../src/relay.ts";
 import { makeLlmConfig } from "../src/llm/index.ts";
+import { resolveModel } from "../src/models.ts";
 
 // ─── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -155,6 +156,42 @@ describe("applyRelay", () => {
     const result = applyRelay(baseConfig, relay);
     // Static field still has original value; getApiKey() is the authoritative source
     assert.equal(result.apiKey, baseConfig.apiKey);
+  });
+
+  it("routes a Claude relay through OpenAI-compatible Chat Completions by default", () => {
+    const claude = resolveModel("anthropic/claude-sonnet-4-6");
+    const config = makeLlmConfig({
+      apiKey: "anth-key",
+      baseUrl: claude.baseUrl,
+      model: `${claude.provider}/${claude.id}`,
+      provider: claude.provider,
+    });
+    assert.equal(config.piModel?.api, "anthropic-messages");
+    const result = applyRelay(config, makeRelay({
+      providers: ["anthropic"],
+      baseUrl: "https://api.sparkcode.top/v1",
+      apiKey: "relay-key",
+    }));
+    assert.equal(result.baseUrl, "https://api.sparkcode.top/v1");
+    assert.equal(result.piModel, undefined);
+  });
+
+  it("keeps Anthropic Messages when a Claude relay opts into that protocol", () => {
+    const claude = resolveModel("anthropic/claude-sonnet-4-6");
+    const config = makeLlmConfig({
+      apiKey: "anth-key",
+      baseUrl: claude.baseUrl,
+      model: `${claude.provider}/${claude.id}`,
+      provider: claude.provider,
+    });
+    const result = applyRelay(config, makeRelay({
+      providers: ["anthropic"],
+      baseUrl: "https://api.sparkcode.top/v1",
+      apiKey: "relay-key",
+      protocol: "anthropic-messages",
+    }));
+    assert.equal(result.piModel?.api, "anthropic-messages");
+    assert.equal(result.piModel?.baseUrl, "https://api.sparkcode.top/v1");
   });
 });
 

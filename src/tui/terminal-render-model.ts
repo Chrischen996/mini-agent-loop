@@ -322,28 +322,17 @@ export function buildTerminalRenderLines(
   const end = Math.max(0, wrappedBody.length - offset);
   const cropStart = Math.max(0, end - bodyHeight);
   const clipped = wrappedBody.slice(cropStart, end);
-  // Keep a stable number of physical rows without splitting the transcript.
-  // Spare rows are inserted into the footer below the live activity so the
-  // prompt remains anchored while message and subagent rows stay together.
+  // Spare rows are placed above the message body so that the transcript and
+  // the prompt chrome stay visually anchored at the bottom of the frame.
   const padding = Math.max(0, bodyHeight - clipped.length);
-  if (padding > 0) {
-    const spacers = Array.from({ length: padding }, (_, index) => ({
-      key: `frame-spacer-${index}`,
-      text: "",
-      style: "muted" as const,
-    }));
-    // Keep the transcript and the live activity contiguous. The spare rows
-    // belong between activity metadata and the fixed prompt chrome; putting
-    // them before the body makes old history look disconnected from the work
-    // currently happening (especially with multiple subagents).
-    const activityIndex = clippedFooter.findIndex((line) => line.key === "activity");
-    const promptChromeIndex = clippedFooter.findIndex((line) => line.key === "status" || line.key === "prompt-rule" || line.key.startsWith("input-"));
-    const insertAt = activityIndex >= 0
-      ? activityIndex + 1
-      : promptChromeIndex >= 0 ? promptChromeIndex : clippedFooter.length;
-    clippedFooter.splice(insertAt, 0, ...spacers);
-  }
-  return [...visibleHeader, ...visiblePanel, ...clipped, ...clippedFooter];
+  const spacers = padding > 0
+    ? Array.from({ length: padding }, (_, index) => ({
+        key: `frame-spacer-${index}`,
+        text: "",
+        style: "muted" as const,
+      }))
+    : [];
+  return [...visibleHeader, ...visiblePanel, ...spacers, ...clipped, ...clippedFooter];
 }
 
 function truncateEnd(value: string, maxWidth: number): string {

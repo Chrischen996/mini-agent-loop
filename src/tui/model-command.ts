@@ -1,5 +1,11 @@
-import { findExactModelReferenceMatch, getAllModels, type ModelRef } from "../models.ts";
+import { findExactModelReferenceMatch, getAllModels, type LlmGatewayProtocol, type ModelRef } from "../models.ts";
 import type { ModelSwitchOverrides } from "../llm/index.ts";
+
+function parseGatewayProtocol(value: string | undefined): LlmGatewayProtocol | undefined {
+  if (value === "openai-compatible" || value === "openai" || value === "chat") return "openai-compatible";
+  if (value === "anthropic-messages" || value === "anthropic" || value === "messages") return "anthropic-messages";
+  return undefined;
+}
 
 export type ModelCommand = {
   reference: string;
@@ -18,6 +24,7 @@ export function looksLikeUrl(token: string): boolean {
  * - `/model xai/grok-3 https://gateway.example/v1 sk-...`
  * - `/model xai/grok-3 --base-url URL --api-key KEY`
  * - `/model xai/grok-3 --api-key-env ENV`
+ * - `/model anthropic/claude-sonnet-4-6 https://gw.example/v1 sk --protocol openai|anthropic`
  *
  * Positional URL / key tokens are stripped from the model reference so they
  * never participate in picker filtering.
@@ -45,6 +52,11 @@ export function parseModelCommand(
     if (token === "--api-key-env") {
       const envName = tokens[++index];
       if (envName && env[envName]) overrides.apiKey = env[envName];
+      continue;
+    }
+    if (token === "--protocol") {
+      const protocol = parseGatewayProtocol(tokens[++index]);
+      if (protocol) overrides.protocol = protocol;
       continue;
     }
     positional.push(token);
@@ -82,7 +94,7 @@ export function hasGatewayOverrides(overrides: ModelSwitchOverrides): boolean {
 export function shouldSubmitTypedModelCommand(rawInput: string, models = getAllModels()): boolean {
   const parsed = parseModelCommand(rawInput.replace(/^\/model\s*/i, ""));
   if (!parsed.reference) return false;
-  if (parsed.overrides.baseUrl || parsed.overrides.apiKey) return true;
+  if (parsed.overrides.baseUrl || parsed.overrides.apiKey || parsed.overrides.protocol) return true;
   const match = findExactModelReferenceMatch(parsed.reference, models);
   return Boolean(match?.model && !match.ambiguous);
 }
@@ -105,9 +117,11 @@ export function modelCommandFromPickerInput(rawInput: string): string {
 export function filterModelsByQuery(query: string, models: ModelRef[]): ModelRef[] {
   const needle = query.trim().toLowerCase();
   if (!needle) return models;
-  return models.filter((model) =>
-    `${model.provider}/${model.id}`.toLowerCase().includes(needle),
-  );
+  const normalizedNeedle = needle.replaceAll(".", "-");
+  return models.filter((model) => {
+    const haystack = `${model.provider}/${model.id}`.toLowerCase();
+    return haystack.includes(needle) || haystack.replaceAll(".", "-").includes(normalizedNeedle);
+  });
 }
 
 export function modelChoices(query = "", models = getAllModels()): {

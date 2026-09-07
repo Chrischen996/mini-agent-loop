@@ -61,6 +61,20 @@ describe("parseModelCommand", () => {
     );
   });
 
+  it("parses --protocol for a Claude gateway", () => {
+    assert.deepEqual(
+      parseModelCommand("anthropic/claude-sonnet-4-6 https://api.sparkcode.top/v1 sk --protocol anthropic"),
+      {
+        reference: "anthropic/claude-sonnet-4-6",
+        overrides: {
+          baseUrl: "https://api.sparkcode.top/v1",
+          apiKey: "sk",
+          protocol: "anthropic-messages",
+        },
+      },
+    );
+  });
+
   it("lets flags win over positional url/key", () => {
     assert.deepEqual(
       parseModelCommand(
@@ -113,6 +127,11 @@ describe("filterModelsByQuery", () => {
     assert.ok(results.every((model) => `${model.provider}/${model.id}`.toLowerCase().includes("grok-3")));
   });
 
+  it("matches dotted Claude versions against hyphenated catalog ids", () => {
+    const results = filterModelsByQuery("sonnet-4.6", models);
+    assert.ok(results.some((model) => model.id === "claude-sonnet-4-6"));
+  });
+
   it("does not AND extra url/key tokens into the query", () => {
     const parsed = parseModelCommand("xai/grok-3 https://api.sparkcode.top/v1 sk-test-key");
     const results = filterModelsByQuery(parsed.reference, models);
@@ -127,5 +146,6 @@ describe("slash command help", () => {
     assert.ok(model);
     assert.match(model.usage, /\[url\]/);
     assert.match(model.usage, /\[key\]/);
+    assert.match(model.usage, /\[--protocol\]/);
   });
 });

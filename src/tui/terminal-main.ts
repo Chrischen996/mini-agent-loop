@@ -7,7 +7,7 @@ import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createAllTools, createTools } from "../tools/index.ts";
 import { resolveToolProvider, type ToolProvider } from "../tools/types.ts";
 import { loadLlmConfigFromEnv, switchLlmModel } from "../llm/index.ts";
-import { findExactModelReferenceMatch, getAllModels, resolveModel } from "../models.ts";
+import { findExactModelReferenceMatch, getAllModels, resolveModel, type LlmGatewayProtocol } from "../models.ts";
 import { createVisionPreprocessor, loadVisionConfigFromEnv } from "../preprocessors/index.ts";
 import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 import { applySkillCommand, discoverWorkspaceSkills, loadSkillNamesFromEnv, defaultSkillRegistry } from "../skills/index.ts";
@@ -1212,7 +1212,7 @@ async function submitInput(
 
 function selectTerminalModel(
   reference: string,
-  overrides: { baseUrl?: string; apiKey?: string },
+  overrides: { baseUrl?: string; apiKey?: string; protocol?: LlmGatewayProtocol },
   deps: InputDeps,
 ): void {
   const match = findExactModelReferenceMatch(reference, getAllModels());
@@ -1220,7 +1220,7 @@ function selectTerminalModel(
     deps.autocomplete.openModelPicker(reference, match.matches);
     return;
   }
-  const model = match?.model ?? resolveModel(reference, overrides.baseUrl);
+  const model = match?.model ?? resolveModel(reference, overrides.baseUrl, overrides.protocol);
   const current = deps.service.getLlm();
   const providerKey = model.apiKeyEnv
     .map((name) => process.env[name])
@@ -1231,6 +1231,7 @@ function selectTerminalModel(
     baseUrl: overrides.baseUrl ?? model.baseUrl,
     apiKey: overrides.apiKey ?? (canReuseCurrentKey ? current.apiKey : providerKey ?? ""),
     field: "baseUrl" as const,
+    ...(overrides.protocol ? { protocol: overrides.protocol } : {}),
   };
 
   // A fully specified gateway can be applied immediately; otherwise use the
@@ -1247,7 +1248,7 @@ function selectTerminalModel(
 
 async function applyTerminalModel(
   model: Parameters<typeof switchLlmModel>[1],
-  overrides: { baseUrl?: string; apiKey?: string },
+  overrides: { baseUrl?: string; apiKey?: string; protocol?: LlmGatewayProtocol },
   deps: InputDeps,
 ): Promise<boolean> {
   try {
@@ -1290,6 +1291,7 @@ async function submitModelSetup(value: string, deps: InputDeps): Promise<void> {
     const applied = await applyTerminalModel(setup.model, {
       baseUrl: setup.baseUrl,
       apiKey: value.trim() || setup.apiKey,
+      ...(setup.protocol ? { protocol: setup.protocol } : {}),
     }, deps);
     if (!applied) {
       deps.autocomplete.setModelSetup({ ...setup, apiKey: value, error: "Model setup could not be applied" });

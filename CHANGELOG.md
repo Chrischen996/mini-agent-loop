@@ -81,6 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-fatal stop with a diagnostic message.
 - Custom `MINI_AGENT_MODELS` entries can declare `anthropic-messages` plus
   `thinkingLevelMap` / `compat` instead of being forced onto OpenAI Completions.
+- Built-in Claude on a custom 中转站 / `MINI_AGENT_RELAY` now uses OpenAI
+  Chat Completions by default. Official `api.anthropic.com` and URLs that look
+  like Anthropic Messages stay on `/v1/messages`; `--protocol anthropic`
+  forces Messages on a generic gateway.
 - Bash and sandbox runners now honor abort signals, kill descendant process
   groups on timeout/cancel, and report timeouts independently of exit code.
 - Concurrent permission/subagent operations compose abort signals with

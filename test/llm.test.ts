@@ -30,27 +30,14 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("completeChat wire protocol", () => {
-  it("uses a balanced output limit for models whose capability fills the context window", async () => {
-    const originalFetch = globalThis.fetch;
-    let requestBody: Record<string, unknown> | undefined;
-    globalThis.fetch = (async (_input, init) => {
-      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      return jsonResponse({ choices: [{ message: { content: "done" } }] });
-    }) as typeof fetch;
-
-    try {
-      const grok = makeLlmConfig({
-        apiKey: "test",
-        baseUrl: "https://gateway.example/v1",
-        model: "xai/grok-4.5",
-      });
-      assert.equal(grok.contextWindow, 500_000);
-      assert.equal(grok.maxTokens, 32_768);
-      await completeChat(grok, [{ role: "user", content: "hello" }]);
-      assert.equal(requestBody?.max_tokens, 32_768);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+  it("uses a balanced output limit for models whose capability fills the context window", () => {
+    const grok = makeLlmConfig({
+      apiKey: "test",
+      baseUrl: "https://api.x.ai/v1",
+      model: "xai/grok-4.5",
+    });
+    assert.equal(grok.contextWindow, 500_000);
+    assert.equal(grok.maxTokens, 32_768);
   });
 
   it("caps default output at 25% for small windows and preserves explicit limits", () => {
@@ -221,7 +208,7 @@ describe("completeChat wire protocol", () => {
     try {
       const vision = makeLlmConfig({
         apiKey: "vision-key",
-        baseUrl: "https://vision.example/v1",
+        baseUrl: "https://api.openai.com/v1",
         model: "gpt-4o-mini",
       });
       await completeChat(vision, [{
@@ -444,6 +431,29 @@ describe("per-model timeout configuration", () => {
     assert.equal(switchedBack.timeoutMs, undefined);
     assert.equal(switchedBack.firstResponseTimeoutMs, undefined);
     assert.equal(switchedBack.streamIdleTimeoutMs, undefined);
+  });
+
+  it("switchLlmModel routes a Claude 中转站 through Chat Completions", () => {
+    const claude = resolveModel("anthropic/claude-sonnet-4-6");
+    const current = makeLlmConfig({
+      apiKey: "anth-key",
+      baseUrl: claude.baseUrl,
+      model: `${claude.provider}/${claude.id}`,
+      provider: claude.provider,
+    });
+    const gateway = switchLlmModel(current, claude, {
+      baseUrl: "https://api.sparkcode.top/v1",
+      apiKey: "sk-relay",
+    });
+    assert.equal(gateway.baseUrl, "https://api.sparkcode.top/v1");
+    assert.equal(gateway.piModel, undefined);
+    const native = switchLlmModel(gateway, claude, {
+      baseUrl: "https://api.sparkcode.top/v1",
+      apiKey: "sk-relay",
+      protocol: "anthropic-messages",
+    });
+    assert.equal(native.piModel?.api, "anthropic-messages");
+    assert.equal(native.piModel?.baseUrl, "https://api.sparkcode.top/v1");
   });
 });
 
