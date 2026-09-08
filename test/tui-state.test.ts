@@ -370,10 +370,10 @@ describe("TUI sidebar state", () => {
   });
 
   it("preserveScrollOnAppend keeps history stable while scrolled up", () => {
-    assert.equal(preserveScrollOnAppend(0, 4, 6), 0); // pinned to bottom
-    assert.equal(preserveScrollOnAppend(2, 4, 6), 4); // 2 + (6-4) = 4
-    assert.equal(preserveScrollOnAppend(2, 4, 4), 2); // no change
-    assert.equal(preserveScrollOnAppend(5, 4, 3), 4); // 5 + (3-4) = 4
+    assert.equal(preserveScrollOnAppend(0, 2), 0); // pinned to bottom
+    assert.equal(preserveScrollOnAppend(2, 2), 4); // 2 + 2 added rows
+    assert.equal(preserveScrollOnAppend(2, 0), 2); // no new rows
+    assert.equal(preserveScrollOnAppend(5, 0), 5); // no new rows
   });
 
   it("preserves upward scroll when assistant and tool messages append", () => {
@@ -391,7 +391,7 @@ describe("TUI sidebar state", () => {
     state = tuiReducer(state, { type: "SCROLL_BY", delta: 2 });
     assert.equal(state.scrollOffset, 2);
 
-    // Assistant finalizes a new message while user is scrolled up.
+    // Assistant finalizes a new message ("reply" = 1 margin + 1 text line = 2 rows).
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
       event: {
@@ -400,9 +400,10 @@ describe("TUI sidebar state", () => {
       },
     });
     assert.equal(state.messages.length, 4);
-    assert.equal(state.scrollOffset, 3); // 2 + 1
+    assert.equal(state.scrollOffset, 4); // 2 + 2 rows (margin + text)
 
     // Tool cards also append into history and must preserve viewport.
+    // tool_call has no text field so estimateNewMessageRows gives 1+1=2.
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
       event: {
@@ -411,15 +412,15 @@ describe("TUI sidebar state", () => {
       },
     });
     assert.equal(state.messages.length, 5);
-    assert.equal(state.scrollOffset, 4); // 3 + 1
+    assert.equal(state.scrollOffset, 6); // 4 + 2 rows
 
-    // Errors append too.
+    // Errors append too ("boom" = 1 margin + 1 text line = 2 rows).
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
       event: { type: "error", message: "boom" },
     });
     assert.equal(state.messages.length, 6);
-    assert.equal(state.scrollOffset, 5); // 4 + 1
+    assert.equal(state.scrollOffset, 8); // 6 + 2 rows
   });
 
   it("adds help and other notices as renderable messages", () => {

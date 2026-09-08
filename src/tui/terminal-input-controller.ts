@@ -25,6 +25,7 @@ export class TerminalInputController {
   private readonly getScrollPageSize: () => number;
   private pendingEscape = "";
   private preferredColumn: number | undefined;
+  private skipNextLf = false;
   private readonly history: TerminalInputHistory;
 
   constructor(options: TerminalInputControllerOptions) {
@@ -125,8 +126,8 @@ export class TerminalInputController {
       const code = input.codePointAt(index) ?? 0;
       const char = String.fromCodePoint(code);
       if (code === 3) this.emit({ type: "exit" });
-      else if (code === 13) this.submit();
-      else if (code === 10) this.insert("\n");
+      else if (code === 13) { this.submit(); this.skipNextLf = true; }
+      else if (code === 10) { if (!this.skipNextLf) this.insert("\n"); this.skipNextLf = false; }
       else if (code === 127 || code === 8) this.backspace();
       else if (code === 25) this.emit({ type: "shortcut", name: "copy" });
       else if (code === 22) this.emit({ type: "shortcut", name: "paste-image" });
@@ -238,10 +239,15 @@ export class TerminalInputController {
   private emit(action: TerminalInputAction): void { this.onAction(action); }
 }
 
+/** Module-level singleton – Intl.Segmenter construction is expensive. */
+const _graphemeSegmenter: Intl.Segmenter | undefined =
+  typeof Intl !== "undefined" && "Segmenter" in Intl
+    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+    : undefined;
+
 function graphemes(value: string): string[] {
-  if (typeof Intl !== "undefined" && "Segmenter" in Intl) {
-    const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-    return [...segmenter.segment(value)].map((part) => part.segment);
+  if (_graphemeSegmenter) {
+    return [..._graphemeSegmenter.segment(value)].map((part) => part.segment);
   }
   return [...value];
 }

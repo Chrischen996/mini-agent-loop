@@ -335,7 +335,8 @@ export function buildTerminalRenderLines(
   const visiblePanel = wrappedPanel.slice(0, remaining);
   remaining = Math.max(0, remaining - visiblePanel.length);
   const bodyHeight = remaining;
-  const offset = Math.max(0, options.scrollOffset ?? 0);
+  const maxOffset = Math.max(0, wrappedBody.length - bodyHeight);
+  const offset = Math.max(0, Math.min(options.scrollOffset ?? 0, maxOffset));
   const end = Math.max(0, wrappedBody.length - offset);
   const cropStart = Math.max(0, end - bodyHeight);
   const clipped = wrappedBody.slice(cropStart, end);
@@ -527,10 +528,15 @@ function inputRenderLines(
   }));
 }
 
+/** Module-level singleton – Intl.Segmenter construction is expensive. */
+const _graphemeSegmenter: Intl.Segmenter | undefined =
+  typeof Intl !== "undefined" && "Segmenter" in Intl
+    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+    : undefined;
+
 function splitGraphemes(value: string): string[] {
-  if (typeof Intl !== "undefined" && "Segmenter" in Intl) {
-    const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-    return [...segmenter.segment(value)].map((part) => part.segment);
+  if (_graphemeSegmenter) {
+    return [..._graphemeSegmenter.segment(value)].map((part) => part.segment);
   }
   return [...value];
 }

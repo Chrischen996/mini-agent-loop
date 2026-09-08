@@ -51,7 +51,9 @@ export function estimateMessageHeight(
   switch (message.kind) {
     case "user":
       // +1 for the marginTop={1} rendered above the user bubble in MessageFeed.
-      return 1 + Math.max(1, countTerminalRows(message.displayText ?? message.text, Math.max(10, width - 4))) + (message.images?.length ? 1 : 0);
+      // The terminal renderer prefixes user messages with "❯ " (2 cols), so
+      // the available wrap width is width - 2, not width - 4.
+      return 1 + Math.max(1, countTerminalRows(message.displayText ?? message.text, Math.max(10, width - 2))) + (message.images?.length ? 1 : 0);
     case "assistant":
       if (isSubagentProtocolText(message.text)) return 0;
       // +1 for the marginTop={1} rendered above the assistant block in MessageFeed.

@@ -313,12 +313,28 @@ export function reasoningMessageIndices(messages: ChatMessage[]): number[] {
  */
 export function preserveScrollOnAppend(
   scrollOffset: number,
-  previousCount: number,
-  nextCount: number,
+  addedRows: number,
 ): number {
   // Stick to bottom when pinned; otherwise preserve visual position.
   if (scrollOffset === 0) return 0;
-  return Math.max(0, scrollOffset + (nextCount - previousCount));
+  return Math.max(0, scrollOffset + addedRows);
+}
+
+/**
+ * Estimate the rendered row count contributed by newly added messages.
+ * Cannot use estimateMessageHeight (circular dependency), so we count
+ * newline characters as a cheap proxy – accurate enough to keep the scroll
+ * position stable without knowing the terminal width.
+ */
+function estimateNewMessageRows(previous: readonly ChatMessage[], next: readonly ChatMessage[]): number {
+  let rows = 0;
+  for (let i = previous.length; i < next.length; i++) {
+    const msg = next[i]!;
+    const text = ("text" in msg ? msg.text : "") || "";
+    // +1 for the mandatory margin row above each message, then count text lines.
+    rows += 1 + Math.max(1, text.split("\n").length);
+  }
+  return rows;
 }
 
 /**
@@ -672,8 +688,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             cacheReadTokens,
             scrollOffset: preserveScrollOnAppend(
               state.scrollOffset,
-              state.messages.length,
-              newMessages.length,
+              estimateNewMessageRows(state.messages, newMessages),
             ),
           };
         }
@@ -694,8 +709,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             taskDurationMs: taskDuration(state.taskStartedAt),
             scrollOffset: preserveScrollOnAppend(
               state.scrollOffset,
-              state.messages.length,
-              newMessages.length,
+              estimateNewMessageRows(state.messages, newMessages),
             ),
           };
         }
@@ -806,8 +820,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             spinnerMessage: undefined,
             scrollOffset: preserveScrollOnAppend(
               state.scrollOffset,
-              state.messages.length,
-              newMessages.length,
+              estimateNewMessageRows(state.messages, newMessages),
             ),
           };
         }
@@ -1038,8 +1051,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             status: `Delegating (depth ${evt.depth})…`,
             scrollOffset: preserveScrollOnAppend(
               state.scrollOffset,
-              state.messages.length,
-              newMessages.length,
+              estimateNewMessageRows(state.messages, newMessages),
             ),
           };
         }
@@ -1157,10 +1169,9 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         messages: newMessages,
         status: "Unable to attach image",
         scrollOffset: preserveScrollOnAppend(
-          state.scrollOffset,
-          state.messages.length,
-          newMessages.length,
-        ),
+              state.scrollOffset,
+              estimateNewMessageRows(state.messages, newMessages),
+            ),
       };
     }
 

@@ -117,12 +117,8 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
       return;
     }
 
-    // Ctrl+V: paste image from clipboard
-    if (!acMode && key.ctrl && (_ch === "v" || _ch === "V" || _ch === "\u0016")) {
-      suppressInputEchoRef.current = true;
-      void pasteImage();
-      return;
-    }
+    // Ctrl+V: paste image — handled by PromptInput.useInput so it only fires once.
+    // Do NOT duplicate it here; a second call would add the same image twice.
 
     // Shift+Tab: cycle permission mode
     if (key.shift && key.tab) {
