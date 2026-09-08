@@ -182,7 +182,8 @@ describe("message viewport", () => {
       availableHeight: 3,
       width: 20,
     });
-    assert.equal(viewport.totalHeight, 3);
+    // assistant messages include a marginTop={1} row accounted for in the height estimate.
+    assert.equal(viewport.totalHeight, 4);
   });
 
   it("clamps scroll offsets to message bounds", () => {

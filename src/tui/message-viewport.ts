@@ -50,10 +50,12 @@ export function estimateMessageHeight(
   const { width, thinkingMode, expandedThinking, index } = options;
   switch (message.kind) {
     case "user":
-      return Math.max(1, countTerminalRows(message.displayText ?? message.text, Math.max(10, width - 4))) + (message.images?.length ? 1 : 0);
+      // +1 for the marginTop={1} rendered above the user bubble in MessageFeed.
+      return 1 + Math.max(1, countTerminalRows(message.displayText ?? message.text, Math.max(10, width - 4))) + (message.images?.length ? 1 : 0);
     case "assistant":
       if (isSubagentProtocolText(message.text)) return 0;
-      return Math.max(
+      // +1 for the marginTop={1} rendered above the assistant block in MessageFeed.
+      return 1 + Math.max(
         1,
         thinkingRows(message.reasoning, thinkingMode, expandedThinking.has(index), width) +
           countTerminalRows(message.text, Math.max(10, width - 2)),
