@@ -33,6 +33,14 @@ export function toolVisualStatusIcon(status: ToolState): string {
   return status === "error" ? "✗" : "✓";
 }
 
+/** Keep multi-line tool results on one fixed tree gutter column. */
+export function toolResultPrefix(index: number, total: number): string {
+  if (total <= 1) return "  └─ ";
+  if (index <= 0) return "  ├─ ";
+  if (index >= total - 1) return "  └─ ";
+  return "  │  ";
+}
+
 export function toolSummary(name: string, status: ToolState, durationMs?: number): string {
   const duration = durationMs === undefined ? "" : ` (${durationMs}ms)`;
   return `${toolStatusIcon(status)} ${toolDisplayName(name)}${duration}`;

@@ -311,7 +311,6 @@ const PERMISSION_MODE_MARKER = "\n[MODE]\n";
 /** Mode-specific suffix appended to the system prompt. */
 const MODE_SUFFIX: Record<PermissionMode, string> = {
   plan: "mode=plan. Read-only tools only. No writes, dangerous bash, or MCP. Output a plan first.",
-  approval: "mode=approval. Safe reads may run; writes, dangerous bash, and remote tools pause for explicit approval.",
   bypass: "mode=bypass. All tools run without approval; sandbox rules still apply.",
 };
 
@@ -417,8 +416,7 @@ export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string, memo
     "",
     "### Permission Mode Awareness",
     "- plan mode: you CANNOT write. Say \"我当前处于计划模式，无权限改代码。\" and output a clear plan for user review.",
-    "- approval mode: safe reads may run; writes, dangerous bash, and remote tools pause until the user explicitly allows or denies them.",
-    "- bypass mode: all registered tools may run without interactive approval; sandbox rules still apply.",
+    "- bypass mode: all registered tools may run without approval; sandbox rules still apply.",
     "- When a tool call is blocked, adapt and inform the user about the mode constraint.",
     "",
     "### Security",

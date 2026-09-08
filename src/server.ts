@@ -77,7 +77,7 @@ import {
 } from "./think-intensity.ts";
 import { loadThinkingModeFromEnv, type ThinkingMode } from "./thinking-policy.ts";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
-import { PermissionManager, isPermissionMode, type PermissionDecision, type PermissionMode, type PermissionTurnContext } from "./permissions.ts";
+import { PermissionManager, isPermissionMode, removedApprovalModeMessage, type PermissionDecision, type PermissionMode, type PermissionTurnContext } from "./permissions.ts";
 import { planManager } from "./plan-act/plan-manager.ts";
 import { validatePhaseTransition } from "./plan-act/state-machine.ts";
 import { planGenerator } from "./plan-act/plan-generator.ts";
@@ -843,6 +843,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
     instructionContent = bundle.content;
   });
   const envPermissionMode = process.env.MINI_AGENT_PERMISSION_MODE;
+  if (envPermissionMode === "approval") {
+    throw new Error(removedApprovalModeMessage("MINI_AGENT_PERMISSION_MODE=approval"));
+  }
   // All entry points use plan unless an explicit mode is configured.
   const defaultPermissionMode: PermissionMode = options.permissionMode
     ?? (isPermissionMode(envPermissionMode) ? envPermissionMode : "plan");
@@ -930,6 +933,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
             sessionId: persisted.id,
           })
         : undefined;
+      if (persisted.permissionModeMigratedFrom === "approval") {
+        console.warn(`[session] ${persisted.id}: removed permission mode 'approval' was restored as 'plan'`);
+      }
       const session: Session = {
         id: persisted.id,
         messages: persisted.messages,

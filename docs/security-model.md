@@ -7,15 +7,19 @@ same runtime; operators need a single place that states the defaults.
 
 ## 1. Permission modes
 
-Sessions run in one of three modes (`src/permissions.ts`). All entry points
+Sessions run in two permission modes (`src/permissions.ts`). All entry points
 (CLI, TUI, HTTP) default to **`plan`** unless `MINI_AGENT_PERMISSION_MODE` or an
 explicit option overrides it.
 
 | Mode | Intent | Behavior |
 |---|---|---|
 | `plan` | Analysis only (default) | Read-only tools run freely. Writes, `validate_workspace`, dangerous shell, and **every** MCP tool are blocked as high risk. |
-| `approval` | Human-in-the-loop | Same risk classification as `plan`, but high-risk calls raise a `PermissionRequest` the user can allow or deny. An allowed `(tool, args)` pair is remembered for the rest of the session. |
 | `bypass` | Trusted automation | Every tool auto-allows. Path sandboxing inside the tools still applies; user approval does not. |
+
+The former `approval` permission mode was removed. New `approval` values are
+rejected rather than silently upgraded to `bypass`; existing persisted sessions
+using it are restored safely as `plan`. For human review before writes, use the
+separate plan workflow.
 
 Changing the mode mid-turn aborts the in-flight turn with
 `PermissionModeChangedError` (an `AbortError` subclass), so a turn can never
@@ -27,21 +31,21 @@ with `POST /api/sessions/:id/permissions/:requestId`.
 
 ## 2. Default tool permission matrix
 
-"Approval" below means the call is high risk: blocked in `plan`, prompted in
-`approval`, auto-allowed in `bypass`.
+A high-risk call is blocked in `plan` and auto-allowed in `bypass`. Human review
+is provided by the separate plan workflow, not by a per-tool permission mode.
 
-| Tool | Category | `plan` | `approval` | Notes |
+| Tool | Category | `plan` | `bypass` | Notes |
 |---|---|---|---|---|
 | `read`, `ls`, `list`, `grep`, `find`, `search` | Workspace read | allowed | allowed | Confined to the workspace root by the tool implementations. |
-| `write`, `edit`, `delete`, `mkdir`, `copy`, `move`, `patch`, `document_edit` | Workspace write | **blocked** | approval | The `WRITE_TOOLS` set in `src/permissions.ts`. |
+| `write`, `edit`, `delete`, `mkdir`, `copy`, `move`, `patch`, `document_edit` | Workspace write | **blocked** | allowed | The `WRITE_TOOLS` set in `src/permissions.ts`. |
 | `bash` (benign command) | Process | allowed | allowed | Classified by `analyzeShellCommand`. |
-| `bash` (dangerous command) | Process | **blocked** | approval | Destructive/privileged/exfiltration-shaped commands. |
-| `validate_workspace` | Process | **blocked** | approval | Runs the project's own test/typecheck/build commands. |
+| `bash` (dangerous command) | Process | **blocked** | allowed | Destructive/privileged/exfiltration-shaped commands. |
+| `validate_workspace` | Process | **blocked** | allowed | Runs the project's own test/typecheck/build commands. |
 | `git_status`, `git_diff`, `git_checkpoint`, `git_undo`, `git_branch_isolate` | VCS | allowed | allowed | `git_undo` restores a prior checkpoint; it does not delete history. |
 | `TodoWrite` | Session state | allowed | allowed | No filesystem or network effect. |
 | `web_search`, `fetch_content`, `get_search_content`, `source_check` | Network | allowed | allowed | Egress — see §4. Off unless web-access tools are registered. |
 | `codebase_open`, `codebase_search`, `codebase_read`, `codebase_explain` | Network | allowed | allowed | Egress to GitHub / DeepWiki — see §4. |
-| **any MCP tool** | Remote | **blocked** | approval | Always high risk regardless of the name it advertises. |
+| **any MCP tool** | Remote | **blocked** | allowed | Always high risk regardless of the name it advertises. |
 
 Two rules matter more than the table:
 
@@ -91,7 +95,7 @@ the container or network layer rather than relying on the agent.
 
 ## 5. Hardening checklist for untrusted input
 
-- Keep the default `plan` mode; grant `approval` per session, never `bypass`.
+- Keep the default `plan` mode; use the plan workflow for human review and grant `bypass` only for trusted execution.
 - Provide an explicit sandbox runner so `bash` is containerized with
   `allowNetwork: false`.
 - Leave `MINI_AGENT_MCP_AUTO_APPROVE` unset — setting it to `1` removes the

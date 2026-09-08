@@ -91,7 +91,7 @@ describe("shared TUI presentation", () => {
     const input: StatusLineInput = {
       modelName: "claude-sonnet",
       cwd: "/workspace/mini-agent",
-      permissionMode: "approval",
+      permissionMode: "plan",
       thinkingLevel: "high",
       contextTokens: 42_100,
       contextWindow: 200_000,
@@ -620,9 +620,10 @@ describe("shared TUI presentation", () => {
     );
     assert.equal(rows[0]?.prefix, "✓ ");
     assert.match(rows[0]?.text ?? "", /^Bash\(seq 1 16\)/);
-    assert.equal(rows[1]?.prefix, "  ⎿ ");
-    assert.equal(rows.some((row) => /[╭╰│]/.test(row.text)), false);
-    for (const row of rows.slice(2)) assert.equal(row.prefix, "     ");
+    assert.equal(rows[1]?.prefix, "  ├─ ");
+    assert.equal(rows[2]?.prefix, "  │  ");
+    assert.equal(rows.at(-1)?.prefix, "  └─ ");
+    assert.equal(rows.some((row) => /[╭╰]/.test(row.text)), false);
     assert.match(rows.at(-1)?.text ?? "", /1 more line$/);
   });
 });

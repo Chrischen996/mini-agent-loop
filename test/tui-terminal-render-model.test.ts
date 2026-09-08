@@ -191,6 +191,76 @@ describe("standalone terminal render model", () => {
     assert.equal(lines[0]?.key, "panel-todo-compact");
   });
 
+  it("renders a completed task root with its checklist, duration, and tokens", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "审查工具执行与沙箱安全" });
+    state = tuiReducer(state, {
+      type: "SET_TODO_ITEMS",
+      revision: 1,
+      todos: [
+        { id: "done", content: "定位失败测试的根因", activeForm: "定位失败测试的根因", status: "completed", source: "model" },
+        { id: "pending", content: "审查 TUI 层", activeForm: "审查 TUI 层", status: "pending", source: "model" },
+      ],
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "finished" },
+        usage: { promptTokens: 800, inputTokens: 800, completionTokens: 400, totalTokens: 1200 },
+      },
+    });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "done", messages: [] } });
+
+    const lines = buildTerminalRenderLines(state, { width: 100 });
+    const root = lines.find((line) => line.key === "panel-task-summary-root");
+    assert.equal(root?.prefix, "✻ ");
+    assert.match(root?.text ?? "", /审查工具执行与沙箱安全/);
+    assert.match(root?.text ?? "", /1\.2k tokens/);
+    assert.equal(lines.find((line) => line.key === "panel-task-summary-item-done")?.prefix, "  ├─ ✓ ");
+    assert.equal(lines.find((line) => line.key === "panel-task-summary-item-pending")?.prefix, "  └─ ■ ");
+  });
+
+  it("keeps the checklist visible and marks the task root failed after an error", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "审查任务" });
+    state = tuiReducer(state, {
+      type: "SET_TODO_ITEMS",
+      revision: 1,
+      todos: [{ id: "pending", content: "审查持久化", activeForm: "审查持久化", status: "pending", source: "model" }],
+    });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "error", message: "provider failed" } });
+
+    const root = buildTerminalRenderLines(state).find((line) => line.key === "panel-task-summary-root");
+    assert.equal(root?.prefixTone, "error");
+    assert.match(root?.text ?? "", /审查任务/);
+  });
+
+  it("keeps the completed task root on one row in a narrow terminal", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "审查任务" });
+    state = tuiReducer(state, {
+      type: "SET_TODO_ITEMS",
+      revision: 1,
+      todos: [{ id: "done", content: "完成检查", activeForm: "完成检查", status: "completed", source: "model" }],
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "finished" },
+        usage: { promptTokens: 800, inputTokens: 800, completionTokens: 400, totalTokens: 1200 },
+      },
+    });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "done", messages: [] } });
+
+    const lines = buildTerminalRenderLines(state, { width: 24 });
+    const root = lines.find((line) => line.key === "panel-task-summary-root");
+    assert.ok(root);
+    assert.ok(terminalStringWidth(`${root.prefix ?? ""}${root.text}`) <= 24);
+    assert.equal(lines.some((line) => line.key === "panel-task-summary-root-w1"), false);
+  });
+
   it("masks API keys while the model setup overlay owns the input", () => {
     const state = createInitialState("test-model");
     const lines = buildTerminalRenderLines(state, {
@@ -291,7 +361,7 @@ describe("standalone terminal render model", () => {
     const tool = lines.find((line) => line.key.endsWith("-tool"));
     assert.match(tool?.text ?? "", /Read\(src\/app\.tsx\)/);
     assert.equal(tool?.prefix, "✓ ");
-    assert.equal(lines.find((line) => line.key.endsWith("-result-0"))?.prefix, "  ⎿ ");
+    assert.equal(lines.find((line) => line.key.endsWith("-result-0"))?.prefix, "  ├─ ");
   });
 
   it("keeps standalone errors readable instead of painting the full row red", () => {
@@ -311,11 +381,12 @@ describe("standalone terminal render model", () => {
     const width = 36;
     const lines = buildTerminalRenderLines(state, { width });
     const rows = lines.filter((line) => line.key.includes("message-0-tool") || line.key.includes("message-0-result"));
-    // One status row plus a nested `⎿` gutter for the result: no box chrome, so
+    // One status row plus a connected tree gutter for the result: no box chrome, so
     // the ANSI projection matches the Ink tool row at any terminal width.
     assert.equal(rows[0]?.prefix, "✓ ");
     assert.match(rows[0]?.text ?? "", /^Read\(src\/app\.tsx\)/);
-    assert.equal(rows[1]?.prefix, "  ⎿ ");
+    assert.equal(rows[1]?.prefix, "  ├─ ");
+    assert.equal(rows[2]?.prefix, "  └─ ");
     assert.equal(rows.some((line) => /[╭╰]/.test(line.text)), false);
     for (const line of rows) assert.ok(terminalStringWidth(`${line.prefix ?? ""}${line.text}`) <= width);
   });

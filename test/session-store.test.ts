@@ -250,10 +250,12 @@ describe("SessionStore", () => {
           type: "session_created",
           sessionId,
           createdAt: Date.now(),
+          permissionMode: "approval",
         })}\n${JSON.stringify({
           type: "session_snapshot",
           sessionId,
           createdAt: Date.now(),
+          permissionMode: "approval",
           messages: [],
         })}\n`,
         "utf8",
@@ -262,6 +264,7 @@ describe("SessionStore", () => {
       const restored = await new SessionStore(root).loadAll();
       assert.deepEqual(restored.get(sessionId)?.todos, []);
       assert.equal(restored.get(sessionId)?.todoVersion, 0);
+      assert.equal(restored.get(sessionId)?.permissionMode, "plan");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

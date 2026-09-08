@@ -103,6 +103,42 @@ describe("TUI sidebar state", () => {
     assert.deepEqual(state.messages.at(-1), { kind: "error", text: "Clipboard has no image" });
   });
 
+  it("tracks the completed task root and accumulates assistant usage", () => {
+    let state = createInitialState("model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Review the workspace" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "part one" },
+        usage: { promptTokens: 100, inputTokens: 100, completionTokens: 50, totalTokens: 150 },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "part two" },
+        usage: { promptTokens: 200, inputTokens: 200, completionTokens: 50, totalTokens: 250 },
+      },
+    });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "done", messages: [] } });
+
+    assert.equal(state.taskTitle, "Review the workspace");
+    assert.equal(state.taskStatus, "completed");
+    assert.equal(state.taskTokens, 400);
+    assert.ok((state.taskDurationMs ?? -1) >= 0);
+  });
+
+  it("does not turn a cancelled task back into completed on a late done event", () => {
+    let state = createInitialState("model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Stop this task" });
+    state = tuiReducer(state, { type: "CANCEL_GENERATION" });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "done", messages: [] } });
+
+    assert.equal(state.taskStatus, "cancelled");
+  });
+
   it("tracks the goal, workflow step, file path, and tool card", () => {
     let state = createInitialState("test-model");
     state = tuiReducer(state, { type: "USER_MESSAGE", text: "Inspect the workspace" });
@@ -150,15 +186,10 @@ describe("TUI sidebar state", () => {
 
   it("cycles permission mode with TOGGLE_PERMISSION_MODE", () => {
     let state = createInitialState("test-model");
-    // Default is plan; order is plan -> approval -> bypass
+    // Default is plan; order is plan -> bypass
     assert.equal(state.permissionMode, "plan");
 
-    // plan -> approval
-    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
-    assert.equal(state.permissionMode, "approval");
-    assert.equal(state.status, "Permission mode: Default permissions");
-
-    // approval -> bypass
+    // plan -> bypass
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "bypass");
     assert.equal(state.status, "Permission mode: Bypass permissions");
@@ -171,8 +202,7 @@ describe("TUI sidebar state", () => {
 
   it("preserves permission mode on RESET", () => {
     let state = createInitialState("test-model");
-    // plan -> approval -> bypass
-    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
+    // plan -> bypass
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "bypass");
 

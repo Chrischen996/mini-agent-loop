@@ -23,6 +23,8 @@ export type ToolState = "running" | "done" | "error";
 /** Global thinking display mode for extended reasoning (DeepSeek / Claude). */
 export type ThinkingDisplayMode = "hidden" | "summary" | "full";
 
+export type TaskSummaryStatus = "running" | "completed" | "failed" | "cancelled";
+
 export const THINKING_MODE_ORDER: ThinkingDisplayMode[] = ["hidden", "summary", "full"];
 
 export type ToolCardState = {
@@ -75,6 +77,12 @@ export type TuiState = {
   messages: ChatMessage[];
   /** First user prompt in the active conversation. */
   goal: string;
+  /** Root task metadata used by the completed checklist projection. */
+  taskTitle: string;
+  taskStatus: TaskSummaryStatus;
+  taskStartedAt?: number;
+  taskDurationMs?: number;
+  taskTokens: number;
   /** Tool-backed steps shown in the workflow sidebar. */
   steps: WorkflowStep[];
   /** Workspace paths seen in tool arguments during this conversation. */
@@ -251,6 +259,11 @@ export function createInitialState(modelName: string): TuiState {
   return {
     messages: [],
     goal: "",
+    taskTitle: "",
+    taskStatus: "completed",
+    taskStartedAt: undefined,
+    taskDurationMs: undefined,
+    taskTokens: 0,
     steps: [],
     touchedFiles: [],
     toolCards: [],
@@ -390,6 +403,10 @@ function resultPreviewForChat(content: MessageContent): string {
   return "";
 }
 
+function taskDuration(startedAt?: number): number | undefined {
+  return startedAt === undefined ? undefined : Math.max(0, Date.now() - startedAt);
+}
+
 export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
   switch (action.type) {
     case "USER_MESSAGE":
@@ -402,6 +419,11 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           ...(action.images?.length ? { images: action.images } : {}),
         }],
         goal: state.goal || action.text,
+        taskTitle: action.text,
+        taskStatus: "running",
+        taskStartedAt: Date.now(),
+        taskDurationMs: undefined,
+        taskTokens: 0,
         busy: true,
         status: "Thinking…",
         streamingText: "",
@@ -421,6 +443,11 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         permissionMode: action.permissionMode,
         messages,
         goal: firstUser?.text ?? "",
+        taskTitle: firstUser?.text ?? "",
+        taskStatus: "completed",
+        taskStartedAt: undefined,
+        taskDurationMs: undefined,
+        taskTokens: 0,
         phase: action.phase ?? "planning",
         currentPlan: action.currentPlan,
         todoPlan: state.todoPlan,
@@ -435,6 +462,11 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         ...createInitialState(state.modelName),
         thinkingMode: state.thinkingMode,
         permissionMode: state.permissionMode,
+        taskTitle: "",
+        taskStatus: "completed",
+        taskStartedAt: undefined,
+        taskDurationMs: undefined,
+        taskTokens: 0,
         todoPlan: state.todoPlan,
         todoViewMode: state.todoViewMode,
         todoRevision: nextTodoRevision(),
@@ -490,6 +522,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         turnStartedAt: undefined,
         lastStreamAt: undefined,
         status: "Generation cancelled (ESC)",
+        taskStatus: "cancelled",
+        taskDurationMs: taskDuration(state.taskStartedAt),
       };
 
     case "AUTO_CONTINUE":
@@ -633,6 +667,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: "",
             status: hasTools ? "Running tool…" : "Finalizing response…",
             usedTokens,
+            taskTokens: state.taskTokens + (event.usage?.totalTokens ?? 0),
             contextTokens,
             cacheReadTokens,
             scrollOffset: preserveScrollOnAppend(
@@ -655,6 +690,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             lastStreamAt: undefined,
             pendingPermission: undefined,
             status: "Request failed",
+            taskStatus: "failed",
+            taskDurationMs: taskDuration(state.taskStartedAt),
             scrollOffset: preserveScrollOnAppend(
               state.scrollOffset,
               state.messages.length,
@@ -850,6 +887,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             lastStreamAt: undefined,
             pendingPermission: undefined,
             status: "Aborted",
+            taskStatus: "cancelled",
+            taskDurationMs: taskDuration(state.taskStartedAt),
           };
 
         case "done":
@@ -862,6 +901,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             lastStreamAt: undefined,
             pendingPermission: undefined,
             status: "Ready",
+            taskStatus: state.taskStatus === "failed" || state.taskStatus === "cancelled" ? state.taskStatus : "completed",
+            taskDurationMs: taskDuration(state.taskStartedAt),
           };
 
         default:

@@ -7,13 +7,14 @@ import type { PlanDocument } from "../plan/document.ts";
 import type { TodoItem, TodoViewMode } from "../todo.ts";
 import type { ThinkingMode } from "../thinking-policy.ts";
 import { compactText } from "./text-utils.ts";
-import { TODO_PANEL_MAX_VISIBLE_ITEMS } from "./todo-format.ts";
+import { TODO_PANEL_MAX_VISIBLE_ITEMS, resolveTodoItems } from "./todo-format.ts";
 import { countTerminalRows, terminalStringWidth } from "./terminal-width.ts";
 import { todoPanelRenderLines } from "./todo-lines.ts";
+import { taskSummaryRenderLines, taskSummaryViewMode, type TaskSummaryStatus } from "./task-summary.ts";
 import { noticeText, noticeTitle, permissionModeLabel, statusLabel, thinkingLevelLabel } from "./claude-style.ts";
 import { isSubagentProtocolText, isSubagentToolName } from "./subagent-lines.ts";
 import { stripInlineMarkdown } from "./markdown-lines.ts";
-import { toolVisualName } from "./tool-lines.ts";
+import { toolResultPrefix, toolVisualName } from "./tool-lines.ts";
 import type { RenderLine } from "./render-lines.ts";
 import { formatRenderLine } from "./render-line-format.ts";
 import { TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "./brand.ts";
@@ -59,6 +60,11 @@ export type LegacyTuiState = {
   todoItems?: TodoItem[];
   todoRevision?: number;
   todoViewMode?: TodoViewMode;
+  taskTitle?: string;
+  taskStatus?: TaskSummaryStatus;
+  taskStartedAt?: number;
+  taskDurationMs?: number;
+  taskTokens?: number;
   notice?: LegacyNotice;
   /** Auto-memory updates from completed turns, rendered as inline cards. */
   memoryEvents?: MemoryUpdateEvent[];
@@ -197,11 +203,25 @@ export function buildLegacyRenderLines(state: LegacyTuiState, width = 80): Rende
     }
     if (message.role === "tool" && !isSubagentToolName(message.name)) {
       lines.push({ key: `history-${messageIndex}-tool`, text: toolVisualName(message.name), prefix: "⏺ ", style: "tool", bold: true, prefixTone: message.isError ? "error" : "success", tone: message.isError ? "error" : undefined });
-      appendTextLines(lines, `history-${messageIndex}-result`, compactText(content, 160), { prefix: "  ⎿ ", style: "muted", dim: true, tone: message.isError ? "error" : undefined });
+      lines.push({ key: `history-${messageIndex}-result-0`, text: compactText(content, 160), prefix: toolResultPrefix(0, 1), style: "muted", dim: true, tone: message.isError ? "error" : undefined });
     }
   }
 
-  if (state.todoPlan || state.todoItems) {
+  const taskTodos = resolveTodoItems({ plan: state.todoPlan, todos: state.todoItems });
+  const showTaskSummary = !state.busy && Boolean(state.taskTitle?.trim()) && taskTodos.length > 0 && state.taskStatus !== "running";
+  if (showTaskSummary) {
+    lines.push(...taskSummaryRenderLines({
+      title: state.taskTitle!,
+      status: state.taskStatus ?? "completed",
+      durationMs: state.taskDurationMs,
+      totalTokens: state.taskTokens,
+      todos: taskTodos,
+      viewMode: taskSummaryViewMode(state.taskStatus ?? "completed", state.todoViewMode ?? "expanded"),
+      maxVisibleItems: TODO_PANEL_MAX_VISIBLE_ITEMS,
+      width,
+    }));
+    lines.push({ key: "legacy-task-summary-gap", text: "", style: "muted" });
+  } else if (state.todoPlan || state.todoItems) {
     lines.push(...todoPanelRenderLines({ plan: state.todoPlan, todos: state.todoItems, viewMode: state.todoViewMode ?? "expanded", maxVisibleItems: TODO_PANEL_MAX_VISIBLE_ITEMS }));
     lines.push({ key: "legacy-todo-gap", text: "", style: "muted" });
   }
@@ -237,7 +257,7 @@ export function buildLegacyRenderLines(state: LegacyTuiState, width = 80): Rende
     if (committedToolIds.has(tool.id)) continue;
     const tone = tool.status === "error" ? "error" : tool.status === "running" ? "running" : "success";
     lines.push({ key: `legacy-tool-${tool.id}`, text: toolVisualName(tool.name), prefix: "⏺ ", style: "tool", bold: true, prefixTone: tone, tone: tool.status === "error" ? "error" : undefined });
-    if (tool.preview) appendTextLines(lines, `legacy-tool-${tool.id}-result`, compactText(tool.preview, 100), { prefix: "  ⎿ ", style: "muted", dim: true, tone: tool.status === "error" ? "error" : undefined });
+    if (tool.preview) lines.push({ key: `legacy-tool-${tool.id}-result-0`, text: compactText(tool.preview, 100), prefix: toolResultPrefix(0, 1), style: "muted", dim: true, tone: tool.status === "error" ? "error" : undefined });
   }
 
   lines.push(

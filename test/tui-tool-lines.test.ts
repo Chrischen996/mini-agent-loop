@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { toolDisplayName, toolStatusIcon, toolSummary } from "../src/tui/tool-lines.ts";
+import { toolDisplayName, toolResultPrefix, toolStatusIcon, toolSummary } from "../src/tui/tool-lines.ts";
 
 describe("TUI tool render model", () => {
   it("normalizes tool names and status icons", () => {
@@ -15,5 +15,12 @@ describe("TUI tool render model", () => {
     assert.equal(toolSummary("bash", "done", 12), "✓ bash (12ms)");
     assert.equal(toolSummary("read", "running"), "… read");
   });
-});
 
+  it("keeps multi-line tool results on a connected tree gutter", () => {
+    assert.deepEqual(
+      [0, 1, 2].map((index) => toolResultPrefix(index, 3)),
+      ["  ├─ ", "  │  ", "  └─ "],
+    );
+    assert.equal(toolResultPrefix(0, 1), "  └─ ");
+  });
+});

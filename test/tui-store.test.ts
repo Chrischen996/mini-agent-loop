@@ -45,7 +45,7 @@ describe("TUI store adapter", () => {
     state = tuiReducer(state, {
       type: "RESTORE_SESSION",
       history,
-      permissionMode: "approval",
+      permissionMode: "plan",
       modelName: "new-model",
       phase: "review",
       currentPlan: plan,
@@ -53,7 +53,7 @@ describe("TUI store adapter", () => {
       todoRevision: 9,
     });
     assert.equal(state.modelName, "new-model");
-    assert.equal(state.permissionMode, "approval");
+    assert.equal(state.permissionMode, "plan");
     assert.equal(state.phase, "review");
     assert.equal(state.currentPlan?.id, "plan-1");
     assert.equal(state.messages.filter((message) => message.kind === "user").length, 1);

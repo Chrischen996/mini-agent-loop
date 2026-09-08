@@ -9,7 +9,7 @@ describe("Claude-style status presentation", () => {
 
   it("maps transient internal statuses to stable English labels", () => {
     assert.equal(statusLabel("请求超时，正在重试 (1/3)", true), "Retrying…");
-    assert.equal(statusLabel("权限模式: 审批"), "Default permissions");
+    assert.equal(statusLabel("权限模式: 审批"), "Waiting for permission");
     assert.equal(statusLabel("会话已恢复"), "Session resumed");
     assert.equal(statusLabel("已停止"), "Cancelled");
   });
@@ -36,7 +36,6 @@ describe("Claude-style status presentation", () => {
     // The reducer writes the label, the legacy client writes the raw mode; both
     // must land on the same text so `idleStatusTail` can suppress the echo.
     assert.equal(statusLabel("Permission mode: Plan mode"), "Plan mode");
-    assert.equal(statusLabel("Permission mode: approval"), "Default permissions");
     assert.equal(statusLabel("Permission mode: bypass"), "Bypass permissions");
     assert.equal(statusLabel("Thinking level: 高"), "high");
     assert.equal(statusLabel("Thinking display: hidden"), "Thinking display: hidden");

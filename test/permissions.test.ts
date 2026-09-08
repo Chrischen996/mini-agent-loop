@@ -75,15 +75,15 @@ describe("PermissionManager", () => {
     assert.equal(warnings.length, 0);
   });
 
-  it("pauses risky tools in approval mode and resumes after an explicit decision", async () => {
-    const manager = new PermissionManager("approval");
+  it("allows risky tools in bypass mode without requiring explicit approval", async () => {
+    const manager = new PermissionManager("bypass");
     const requests: string[] = [];
     manager.onPermissionEvent = (event) => {
-      if (event.type === "request") requests.push(event.request.id);
+      if (event.type === "allow") requests.push(event.request.id);
     };
     let executed = false;
-    const pending = manager.beginTurn("session", (request) => {
-      requests.push(request.id);
+    const result = await manager.beginTurn("session", () => {
+      throw new Error("bypass mode must not open interactive approval");
     }).execute({
       ...writeTool,
       execute: async () => {
@@ -92,13 +92,9 @@ describe("PermissionManager", () => {
       },
     }, { path: "approved.txt" });
 
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(executed, false);
-    assert.equal(requests.length, 2);
-    assert.equal(manager.resolve("session", requests[0]!, "allow"), true);
-    const result = await pending;
-    assert.equal(result.content, "approved");
     assert.equal(executed, true);
+    assert.equal(result.content, "approved");
+    assert.equal(requests.length, 1);
   });
 
   it("automatically allows read-only codebase operations after opening a handle", async () => {

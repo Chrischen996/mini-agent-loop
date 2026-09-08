@@ -64,6 +64,7 @@ import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from 
 import {
   PermissionManager,
   isPermissionMode,
+  removedApprovalModeMessage,
   type PermissionMode,
   type PermissionRequest,
   type PermissionTurnContext,
@@ -335,10 +336,12 @@ export function parseCliArgs(argv: string[]): {
     if (arg === "--mode") {
       const next = argv[i + 1];
       if (!next || next.startsWith("--")) {
-        throw new Error("--mode requires an argument: plan, approval, or bypass");
+        throw new Error("--mode requires an argument: plan or bypass");
       }
       if (!isPermissionMode(next)) {
-        throw new Error("Invalid mode: use 'plan', 'approval', or 'bypass'");
+        throw new Error(next === "approval"
+          ? removedApprovalModeMessage("Permission mode 'approval'")
+          : "Invalid mode: use 'plan' or 'bypass'");
       }
       mode = next;
       modeExplicit = true;
@@ -348,7 +351,9 @@ export function parseCliArgs(argv: string[]): {
     if (arg.startsWith("--mode=")) {
       const value = arg.slice("--mode=".length);
       if (!isPermissionMode(value)) {
-        throw new Error("Invalid mode: use 'plan', 'approval', or 'bypass'");
+        throw new Error(value === "approval"
+          ? removedApprovalModeMessage("Permission mode 'approval'")
+          : "Invalid mode: use 'plan' or 'bypass'");
       }
       mode = value;
       modeExplicit = true;
@@ -793,8 +798,8 @@ async function main(): Promise<void> {
       console.error(
         `[permission] mode=${permissionTurn?.mode ?? mode} tool=${request.tool} risk=${request.risk} request_id=${request.id}`,
       );
-      // The one-shot CLI has no approval UI. Approval mode therefore denies
-      // pending requests instead of leaving the process blocked indefinitely.
+      // The one-shot CLI has no interactive per-tool approval UI. Plan mode
+      // denies high-risk requests instead of leaving the process blocked.
       permissionManager.resolve(persistenceSessionId, request.id, "deny");
   };
 

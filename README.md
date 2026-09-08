@@ -585,8 +585,11 @@ the local `/model` selector. Permission modes are cycled with `Shift+Tab`:
 | Mode | Executes tools? | Asks user? | Typical use |
 | --- | --- | --- | --- |
 | `plan` (default) | Local read-only only; writes/dangerous shell/MCP hard-denied | No approval path | Risk analysis / planning |
-| `approval` | Yes, after an explicit A/allow decision for risky tools | A allow, D/Enter/Esc deny | Interactive changes with review |
 | `bypass` | Yes, including MCP | Never | Trusted local runs / CI |
+
+The former `approval` permission mode was removed. It must not be silently
+mapped to `bypass`; use `plan` for safe analysis or the plan workflow for
+reviewing a complete plan before execution.
 
 ```bash
 npm run tui
@@ -627,9 +630,12 @@ keep vertical cursor movement). `Alt+↑`/`Alt+↓` moves focus between reasonin
 messages, and `Alt+T` expands or collapses the focused reasoning block.
 `/tasks`, `/copy`, `/skills`, and `/resume` provide argument completion;
 `/resume` loads session IDs from the shared session store.
-CLI one-shot runs accept `--mode plan|bypass` (default `plan`).
-`--plan` forces plan mode; `--plan-execute` loads a saved plan and runs it in
-`bypass`. Use `--mode=bypass` for unattended execution that may write files.
+CLI one-shot runs accept `--mode plan|bypass` (default `plan`). The former
+`approval` permission mode is no longer supported; migrate read-only runs to
+`plan`, trusted unattended execution to `bypass`, or use the plan workflow
+below for human review before writes. `--plan` forces plan mode;
+`--plan-execute` loads a saved plan and runs it in `bypass`. Use
+`--mode=bypass` for unattended execution that may write files.
 
 ### Plan workflow
 

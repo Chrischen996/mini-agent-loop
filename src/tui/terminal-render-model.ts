@@ -3,8 +3,10 @@ import { markdownRowText, markdownRuleText, parseMarkdownLines, stripInlineMarkd
 import { toMessageRenderModel } from "./render-model.ts";
 import type { RenderLine } from "./render-lines.ts";
 import { thinkingRenderLines } from "./thinking-lines.ts";
+import { resolveTodoItems } from "./todo-format.ts";
 import { todoPanelRenderLines } from "./todo-lines.ts";
-import { toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
+import { taskSummaryRenderLines, taskSummaryViewMode } from "./task-summary.ts";
+import { toolResultPrefix, toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { autocompleteRenderLines, permissionPanelRenderLines, planApprovalRenderLines, todoEditorRenderLines } from "./terminal-overlay-lines.ts";
 import { pickerChromeRows } from "./picker-window.ts";
@@ -90,12 +92,27 @@ export function buildTerminalRenderLines(
   // Fullscreen keeps the task panel above the message feed. In main-screen
   // mode it belongs to the live tail so Todo updates never require rewriting
   // already committed transcript rows in terminal scrollback.
-  const panelLines = todoPanelRenderLines({
-    plan: state.todoPlan,
-    todos: state.todoItems,
-    viewMode: state.todoViewMode,
-    maxVisibleItems: Math.max(3, Math.min(8, (options.height ?? 24) - 4)),
-  }).map((line) => ({ ...line, key: `panel-${line.key}` }));
+  const taskTodos = resolveTodoItems({ plan: state.todoPlan, todos: state.todoItems });
+  const taskViewMode = taskSummaryViewMode(state.taskStatus, state.todoViewMode);
+  const showTaskSummary = state.taskStatus !== "running" && state.taskTitle.trim().length > 0 && taskTodos.length > 0;
+  const panelLines = (showTaskSummary
+    ? taskSummaryRenderLines({
+      title: state.taskTitle,
+      status: state.taskStatus,
+      durationMs: state.taskDurationMs,
+      totalTokens: state.taskTokens,
+      todos: taskTodos,
+      viewMode: taskViewMode,
+      maxVisibleItems: Math.max(3, Math.min(8, (options.height ?? 24) - 4)),
+      width,
+    })
+    : todoPanelRenderLines({
+      plan: state.todoPlan,
+      todos: state.todoItems,
+      viewMode: state.todoViewMode,
+      maxVisibleItems: Math.max(3, Math.min(8, (options.height ?? 24) - 4)),
+    }))
+    .map((line) => ({ ...line, key: `panel-${line.key}` }));
   const panelLinesAboveBody = scrollback ? [] : panelLines;
   const panelLinesInLiveTail = scrollback ? panelLines.map(markEphemeral) : [];
 
@@ -382,14 +399,13 @@ function toolCardRenderLines(
     bold: true,
   }];
   if (message.result) {
-    rows.push(...plainPreviewLines(message.result, `message-${index}-result`).map((line, lineIndex) => ({
+    const resultRows = plainPreviewLines(message.result, `message-${index}-result`);
+    rows.push(...resultRows.map((line, lineIndex) => ({
       ...line,
-      // One nested result marker, then plain continuation indentation instead
-      // of a box-drawing column.
-      prefix: lineIndex === 0 ? "  ⎿ " : "     ",
+      prefix: toolResultPrefix(lineIndex, resultRows.length),
     })));
   } else if (message.status === "running") {
-    rows.push({ key: `message-${index}-result-running`, text: "Working…", prefix: "  ⎿ ", style: "muted", tone: "running", dim: true });
+    rows.push({ key: `message-${index}-result-running`, text: "Working…", prefix: toolResultPrefix(0, 1), style: "muted", tone: "running", dim: true });
   }
   return rows;
 }

@@ -17,6 +17,19 @@ const llm = makeLlmConfig({
 });
 
 describe("agent server", () => {
+  it("rejects the removed approval environment mode instead of silently defaulting", () => {
+    const previous = process.env.MINI_AGENT_PERMISSION_MODE;
+    process.env.MINI_AGENT_PERMISSION_MODE = "approval";
+    try {
+      assert.throws(
+        () => createAgentServer({ llm, tools: [], permissionMode: undefined }),
+        /approval.*removed.*plan.*bypass/i,
+      );
+    } finally {
+      if (previous === undefined) delete process.env.MINI_AGENT_PERMISSION_MODE;
+      else process.env.MINI_AGENT_PERMISSION_MODE = previous;
+    }
+  });
   it("exposes session permission mode and approval APIs", async () => {
     const app = createAgentServer({
       llm,
@@ -45,6 +58,11 @@ describe("agent server", () => {
       .put(`/api/sessions/${sessionId}/permission-mode`)
       .send({ mode: "unknown" });
     assert.equal(alsoInvalid.status, 400);
+    const removedApproval = await request(app)
+      .put(`/api/sessions/${sessionId}/permission-mode`)
+      .send({ mode: "approval" });
+    assert.equal(removedApproval.status, 400);
+    assert.match(removedApproval.body.error, /approval.*removed.*plan.*bypass/i);
     const decision = await request(app)
       .post(`/api/sessions/${sessionId}/permissions/request-id`)
       .send({ decision: "allow" });

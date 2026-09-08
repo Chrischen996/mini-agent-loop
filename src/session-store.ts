@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { contentAsString } from "./content.ts";
+import { isPermissionMode } from "./permissions.ts";
 import type { AgentMessage } from "./types.ts";
 import type { PermissionMode } from "./permissions.ts";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
@@ -62,6 +63,8 @@ export type PersistedSession = {
   thinkingLevel?: ModelThinkingLevel;
   thinkingMode?: ThinkingMode;
   permissionMode?: PermissionMode;
+  /** Set when a legacy approval-mode session was safely restored as plan. */
+  permissionModeMigratedFrom?: "approval";
   /** Currently active Skill names for this session. */
   skillNames?: string[];
   /** Current phase of the Plan-Act workflow. */
@@ -490,7 +493,10 @@ export class SessionStore {
             modelId: parsed.modelId,
             thinkingLevel: parsed.thinkingLevel,
             thinkingMode: parsed.thinkingMode,
-            permissionMode: parsed.permissionMode,
+            permissionMode: isPermissionMode(parsed.permissionMode) ? parsed.permissionMode : "plan",
+            ...((parsed as { permissionMode?: unknown }).permissionMode === "approval"
+              ? { permissionModeMigratedFrom: "approval" as const }
+              : {}),
             skillNames: parsed.skillNames,
             phase: parsed.phase,
             currentPlan: parsed.currentPlan,
@@ -511,7 +517,10 @@ export class SessionStore {
             modelId: parsed.modelId ?? current?.modelId,
             thinkingLevel: parsed.thinkingLevel ?? current?.thinkingLevel,
             thinkingMode: parsed.thinkingMode ?? current?.thinkingMode,
-            permissionMode: parsed.permissionMode ?? current?.permissionMode,
+            permissionMode: isPermissionMode(parsed.permissionMode) ? parsed.permissionMode : isPermissionMode(current?.permissionMode) ? current.permissionMode : undefined,
+            ...((parsed as { permissionMode?: unknown }).permissionMode === "approval" || current?.permissionModeMigratedFrom === "approval"
+              ? { permissionModeMigratedFrom: "approval" as const }
+              : {}),
             skillNames: parsed.skillNames ?? current?.skillNames,
             phase: parsed.phase ?? current?.phase,
             currentPlan: parsed.currentPlan === null ? undefined : parsed.currentPlan ?? current?.currentPlan,

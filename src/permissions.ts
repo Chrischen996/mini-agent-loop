@@ -12,9 +12,14 @@ export type PermissionRequest = {
   source?: ToolSource;
 };
 
-export type PermissionMode = "plan" | "approval" | "bypass";
+export type PermissionMode = "plan" | "bypass";
 
-export const PERMISSION_MODES: readonly PermissionMode[] = ["plan", "approval", "bypass"] as const;
+export const PERMISSION_MODES: readonly PermissionMode[] = ["plan", "bypass"] as const;
+
+/** Explain the safe migration path for the removed interactive approval mode. */
+export function removedApprovalModeMessage(subject = "Permission mode 'approval'"): string {
+  return `${subject} was removed; use 'plan' for read-only analysis or 'bypass' for trusted execution. For human review before writes, use the plan workflow.`;
+}
 
 export function isPermissionMode(value: unknown): value is PermissionMode {
   return typeof value === "string" && (PERMISSION_MODES as readonly string[]).includes(value);
@@ -330,7 +335,6 @@ export function getRiskLevel(
 export class PermissionManager {
   private readonly pending = new Map<string, Pending>();
   private readonly activeTurns = new Set<ActiveTurn>();
-  private approved = new Set<string>();
   private mode: PermissionMode;
   private revision = 0;
 
@@ -356,8 +360,6 @@ export class PermissionManager {
     }
     this.mode = mode;
     this.revision += 1;
-    // A decision made under one policy must never silently carry into another.
-    this.approved.clear();
     const reason = new PermissionModeChangedError(previousMode, mode, previousRevision, this.revision);
     let interrupted = false;
     for (const [requestId, pending] of this.pending) {
@@ -455,39 +457,20 @@ export class PermissionManager {
     };
   }
 
-  /** Serialize state for persistence (mode + approved keys). */
+  /** Serialize state for persistence (mode only). */
   serialize(): string {
-    return JSON.stringify({ mode: this.mode, approved: [...this.approved] });
+    return JSON.stringify({ mode: this.mode });
   }
 
   /** Deserialize state from JSON string. */
   deserialize(data: string): void {
     try {
-      const parsed = JSON.parse(data) as { mode: unknown; approved: unknown };
+      const parsed = JSON.parse(data) as { mode: unknown };
       const nextMode = isPermissionMode(parsed.mode) ? parsed.mode : "plan";
       if (nextMode !== this.mode) this.setMode(nextMode);
-      this.approved = new Set(
-        Array.isArray(parsed.approved)
-          ? parsed.approved.filter((value): value is string => typeof value === "string")
-          : [],
-      );
     } catch {
       // Ignore deserialization errors; fall back to defaults
     }
-  }
-
-  private key(sessionId: string, tool: Tool, args: Record<string, unknown>): string {
-    const source = tool.source ? this.stableStringify(tool.source as Record<string, unknown>) : "local";
-    return `${sessionId}:${source}:${tool.name}:${this.stableStringify(args)}`;
-  }
-
-  /** Serialize args with sorted keys for stable approval key generation. */
-  private stableStringify(obj: Record<string, unknown>): string {
-    const sorted = Object.keys(obj).sort().reduce((acc, key) => {
-      acc[key] = obj[key];
-      return acc;
-    }, {} as Record<string, unknown>);
-    return JSON.stringify(sorted);
   }
 
   async authorize(
@@ -556,46 +539,6 @@ export class PermissionManager {
       risk: "high",
       source: tool.source,
     };
-    if (mode === "approval") {
-      const key = this.key(sessionId, tool, args);
-      if (this.approved.has(key)) {
-        this.onPermissionEvent?.({ type: "allow", request });
-        return;
-      }
-
-      await new Promise<void>((resolve, reject) => {
-        let settled = false;
-        const onAbort = () => finish(() => reject(
-          signal?.reason instanceof Error
-            ? signal.reason
-            : Object.assign(new Error("Operation aborted"), { name: "AbortError" }),
-        ));
-        const cleanup = () => {
-          signal?.removeEventListener("abort", onAbort);
-          this.pending.delete(request.id);
-        };
-        const finish = (callback: () => void) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          callback();
-        };
-        this.pending.set(request.id, {
-          request,
-          key,
-          revision,
-          resolve: () => finish(resolve),
-          reject: (error) => finish(() => reject(error)),
-          cleanup,
-        });
-        signal?.addEventListener("abort", onAbort, { once: true });
-        this.onPermissionEvent?.({ type: "request", request });
-        onRequest(request);
-        if (signal?.aborted) onAbort();
-      });
-      this.assertRevision(mode, revision);
-      return;
-    }
 
     // Plan is analysis-only: audit the blocked call, but never open an
     // interactive approval prompt that could be "allowed" into execution.
@@ -613,7 +556,6 @@ export class PermissionManager {
     this.pending.delete(requestId);
     pending.cleanup?.();
     if (decision === "allow") {
-      this.approved.add(pending.key);
       this.onPermissionEvent?.({ type: "allow", request: pending.request });
       pending.resolve();
     } else {
@@ -628,9 +570,6 @@ export class PermissionManager {
       if (pending.request.sessionId !== sessionId) continue;
       this.pending.delete(id);
       pending.reject(new Error("Session closed"));
-    }
-    for (const key of this.approved) {
-      if (key.startsWith(`${sessionId}:`)) this.approved.delete(key);
     }
   }
 }

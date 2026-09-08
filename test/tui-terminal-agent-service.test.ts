@@ -167,7 +167,7 @@ describe("terminal agent service", () => {
     assert.equal(service.getHistory().filter((message) => message.role === "assistant").length, 2);
   });
 
-  it("blocks on approval and resumes after the permission panel decision", async () => {
+  it("executes write tools and completes without blocking in bypass mode", async () => {
     const store = createTuiStore(createInitialState("test-model"));
     let responses = 0;
     const service = new TerminalAgentService({
@@ -179,21 +179,14 @@ describe("terminal agent service", () => {
         parameters: { type: "object" },
         execute: async () => ({ content: "written" }),
       }],
-      permissionManager: new PermissionManager("approval"),
-      permissionSessionId: "approval-session",
+      permissionManager: new PermissionManager("bypass"),
+      permissionSessionId: "bypass-session",
       chat: async () => responses++ === 0
         ? { role: "assistant", content: "", toolCalls: [{ id: "write-1", name: "write", arguments: { path: "a" } }] }
         : { role: "assistant", content: "finished" },
     });
 
-    const turn = service.submit("write file");
-    for (let attempt = 0; attempt < 50 && !store.getState().pendingPermission; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 2));
-    }
-    const pending = store.getState().pendingPermission;
-    assert.equal(pending?.tool, "write");
-    assert.equal(service.resolvePermission("allow"), true);
-    const result = await turn;
+    const result = await service.submit("write file");
     assert.equal(result.succeeded, true);
     assert.equal(store.getState().messages.find((message) => message.kind === "tool_call")?.status, "done");
   });

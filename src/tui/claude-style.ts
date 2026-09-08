@@ -19,7 +19,6 @@ export const TODO_EDITOR_DRAFT_HINT = "enter confirm  ·  esc cancel";
 export function permissionModeLabel(mode: PermissionMode): string {
   switch (mode) {
     case "plan": return "Plan mode";
-    case "approval": return "Default permissions";
     case "bypass": return "Bypass permissions";
   }
 }
@@ -74,7 +73,6 @@ export function statusLabel(status: string, busy = false): string {
   if (/计划.*审批|待审批|plan.*review|pending.*approval/i.test(value)) return "Plan ready for review";
   if (/权限模式/i.test(value)) {
     if (/计划/.test(value)) return "Plan mode";
-    if (/审批|默认/.test(value)) return "Default permissions";
     if (/绕过/.test(value)) return "Bypass permissions";
   }
   if (/权限|permission|授权/i.test(value)) return "Waiting for permission";

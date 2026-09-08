@@ -98,7 +98,14 @@ function handleEvent(state: TuiState, event: LoopEvent): void {
       break;
     case "assistant":
       state.streamingText = "";
+      state.taskTokens = (state.taskTokens ?? 0) + (event.usage?.totalTokens ?? 0);
       state.status = event.message.toolCalls?.length ? "Preparing tool…" : "";
+      break;
+    case "error":
+      state.busy = false;
+      state.taskStatus = "failed";
+      state.taskDurationMs = state.taskStartedAt === undefined ? undefined : Math.max(0, Date.now() - state.taskStartedAt);
+      state.status = `Error: ${event.message}`;
       break;
     case "context_compacted":
       state.status = `Context compacted ${event.beforeTokens} → ${event.afterTokens} tokens`;
@@ -152,10 +159,14 @@ function handleEvent(state: TuiState, event: LoopEvent): void {
     case "aborted":
       state.streamingText = "";
       state.busy = false;
+      state.taskStatus = "cancelled";
+      state.taskDurationMs = state.taskStartedAt === undefined ? undefined : Math.max(0, Date.now() - state.taskStartedAt);
       state.status = "Cancelled";
       break;
     case "done":
       state.busy = false;
+      state.taskStatus = state.taskStatus === "failed" || state.taskStatus === "cancelled" ? state.taskStatus : "completed";
+      state.taskDurationMs = state.taskStartedAt === undefined ? undefined : Math.max(0, Date.now() - state.taskStartedAt);
       state.status = "Ready";
       break;
   }
@@ -221,6 +232,11 @@ async function main(): Promise<void> {
     busy: false,
     input: "",
     pendingUser: undefined,
+    taskTitle: "",
+    taskStatus: "completed",
+    taskStartedAt: undefined,
+    taskDurationMs: undefined,
+    taskTokens: 0,
     status: "Ready",
     permissionMode: "plan" as PermissionMode,
         thinkingLevel: activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off"),
@@ -584,6 +600,11 @@ async function main(): Promise<void> {
     cursorCol = 0;
     cursorRow = 0;
     state.pendingUser = planTurnOverride?.displayText ?? text;
+    state.taskTitle = state.pendingUser;
+    state.taskStatus = "running";
+    state.taskStartedAt = Date.now();
+    state.taskDurationMs = undefined;
+    state.taskTokens = 0;
     state.showWelcome = false;
     state.streamingText = "";
     state.busy = true;
@@ -650,12 +671,16 @@ async function main(): Promise<void> {
         state.history = error.messages;
         state.pendingUser = undefined;
         state.busy = false;
+        state.taskStatus = "failed";
+        state.taskDurationMs = state.taskStartedAt === undefined ? undefined : Math.max(0, Date.now() - state.taskStartedAt);
         state.status = `Turn limit reached (${error.maxTurns}); this turn stopped`;
         render(state);
         return;
       }
       state.pendingUser = undefined;
       state.busy = false;
+      state.taskStatus = "failed";
+      state.taskDurationMs = state.taskStartedAt === undefined ? undefined : Math.max(0, Date.now() - state.taskStartedAt);
       turnErrorMessage = error instanceof Error ? error.message : String(error);
       state.status = `Error: ${turnErrorMessage}`;
       render(state);

@@ -6,7 +6,7 @@ import { TUI_COLORS as C } from "../theme.ts";
 import { selectMessageViewport } from "../message-viewport.ts";
 import { MarkdownText } from "./MarkdownText.tsx";
 import { toMessageRenderModel } from "../render-model.ts";
-import { toolVisualName, toolVisualStatusIcon } from "../tool-lines.ts";
+import { toolResultPrefix, toolVisualName, toolVisualStatusIcon } from "../tool-lines.ts";
 import { thinkingRenderLines, thinkingVisibleLines } from "../thinking-lines.ts";
 import { compactStreamingText } from "../text-utils.ts";
 import { noticeText, noticeTitle, statusLabel, toolArgumentSummary } from "../claude-style.ts";
@@ -120,15 +120,15 @@ function ToolCallRow({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }>
         {argument ? <Text color={C.assistant}>({argument})</Text> : null}
       </Box>
       {resultLines.length > 0 ? (
-        <Box flexDirection="column" marginLeft={2}>
+        <Box flexDirection="column">
           {resultLines.map((line, index) => (
             <Text key={index} color={isError ? C.error : C.muted} dimColor wrap="truncate-end">
-              {index === 0 ? "⎿ " : "   "}{line}
+              {toolResultPrefix(index, resultLines.length)}{line}
             </Text>
           ))}
         </Box>
       ) : isRunning ? (
-        <Text color={C.muted} dimColor>  ⎿ Running…</Text>
+        <Text color={C.muted} dimColor>{toolResultPrefix(0, 1)}Working…</Text>
       ) : null}
     </Box>
   );

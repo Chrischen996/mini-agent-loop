@@ -109,6 +109,11 @@ describe("parseCliArgs", () => {
     assert.throws(() => parseCliArgs(["--mode", "auto", "do something"]), /Invalid mode/);
   });
 
+  it("explains how to migrate the removed approval mode", () => {
+    assert.throws(() => parseCliArgs(["--mode=approval", "do something"]), /approval.*removed.*plan.*bypass/i);
+    assert.throws(() => parseCliArgs(["--mode", "approval", "do something"]), /approval.*removed.*plan.*bypass/i);
+  });
+
   it("defaults to plan mode when not specified", () => {
     const result = parseCliArgs(["hello world"]);
     assert.equal(result.mode, "plan");

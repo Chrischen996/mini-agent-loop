@@ -5,7 +5,9 @@ import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { TodoPanel } from "./components/TodoPanel.tsx";
-import { getTodoPanelRows } from "./todo-format.ts";
+import { TaskSummaryPanel } from "./components/TaskSummaryPanel.tsx";
+import { getTodoPanelRows, resolveTodoItems } from "./todo-format.ts";
+import { taskSummaryRows, taskSummaryViewMode } from "./task-summary.ts";
 import { formatHelpNotice, parseSlashCommand, parseUnknownSlashCommand, SLASH_COMMANDS } from "./slash-commands.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
 
@@ -456,8 +458,23 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const headerRows = getWelcomeHeaderHeight(termWidth, showWelcome);
   const todoRows = getTodoPanelRows(
     { plan: state.todoPlan, todos: state.todoItems },
-    state.todoViewMode,
+    state.taskStatus !== "running" && state.taskTitle.trim() && resolveTodoItems({ plan: state.todoPlan, todos: state.todoItems }).length > 0
+      ? taskSummaryViewMode(state.taskStatus, state.todoViewMode)
+      : state.todoViewMode,
   );
+  const taskTodos = resolveTodoItems({ plan: state.todoPlan, todos: state.todoItems });
+  const showTaskSummary = state.taskStatus !== "running" && state.taskTitle.trim().length > 0 && taskTodos.length > 0;
+  const taskRows = showTaskSummary
+    ? taskSummaryRows({
+      title: state.taskTitle,
+      status: state.taskStatus,
+      durationMs: state.taskDurationMs,
+      totalTokens: state.taskTokens,
+      todos: taskTodos,
+      viewMode: taskSummaryViewMode(state.taskStatus, state.todoViewMode),
+      width: termWidth,
+    })
+    : 0;
   // Approval chrome: the permission card / plan approval bar render between
   // the feed and the input row; reserve their rows in every height budget.
   // Ink's bordered approval cards include two border rows plus the content
@@ -1174,7 +1191,17 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         />
       )}
 
-      {(state.todoPlan || state.todoItems) && (
+      {showTaskSummary ? (
+        <TaskSummaryPanel
+          title={state.taskTitle}
+          status={state.taskStatus}
+          durationMs={state.taskDurationMs}
+          totalTokens={state.taskTokens}
+          todos={taskTodos}
+          viewMode={taskSummaryViewMode(state.taskStatus, state.todoViewMode)}
+          width={termWidth}
+        />
+      ) : (state.todoPlan || state.todoItems) && (
         <TodoPanel
           plan={state.todoPlan}
           todos={state.todoItems}
@@ -1197,7 +1224,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           turnStartedAt={state.turnStartedAt}
           lastStreamAt={state.lastStreamAt}
           spinnerMessage={state.spinnerMessage}
-          todoPanelVisible={todoRows > 0}
+          todoPanelVisible={Math.max(todoRows, taskRows) > 0}
           availableHeight={feedHeight}
           width={termWidth}
           scrollOffset={state.scrollOffset}

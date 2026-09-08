@@ -6,6 +6,7 @@
 import type { Express } from "express";
 import {
   isPermissionMode,
+  removedApprovalModeMessage,
   type PermissionDecision,
   type PermissionManager,
 } from "../../permissions.ts";
@@ -45,7 +46,11 @@ export function registerPermissionRoutes<TSession extends PermissionRoutesSessio
     }
     const mode = request.body?.mode;
     if (!isPermissionMode(mode)) {
-      response.status(400).json({ error: "mode must be plan, approval, or bypass" });
+      response.status(400).json({
+        error: mode === "approval"
+          ? removedApprovalModeMessage()
+          : "mode must be plan or bypass",
+      });
       return;
     }
     const change = session.permissionManager.setMode(mode);
