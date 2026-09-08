@@ -92,6 +92,7 @@ import { useKeyboardHandler } from "./hooks/useKeyboardHandler.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
 import { PromptInput } from "./components/PromptInput.tsx";
+import { TerminalInputHistory } from "./terminal-input-history.ts";
 import {
   sanitizeInput,
   shouldAcceptAutocompleteOnEnter,
@@ -192,6 +193,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   // Bump to remount the text input so ink-text-input resets cursorOffset to value.length
   // after programmatic completions (Tab @file / slash commands).
   const [inputEpoch, setInputEpoch] = useState(0);
+  const promptInputHistoryRef = useRef(new TerminalInputHistory());
   const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "plan"));
   const sessionRestoreCompletedRef = useRef(false);
   const resumePickerSessionRef = useRef<import("../session-store.ts").PersistedSession | null>(null);
@@ -580,6 +582,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const allowEmptyModelSetup = acMode === "model-setup" && Boolean(modelSetup);
     const hasPendingImages = pendingImagesRef.current.length > 0;
     if (!trimmed && !allowEmptyModelSetup && !hasPendingImages) return;
+    // Record plain prompts (not slash commands) into the input history so ↑ can recall them
+    if (trimmed && !trimmed.startsWith("/")) {
+      promptInputHistoryRef.current.add(trimmed);
+    }
     if (acMode === "resume-messages") {
       const selected = resumePickerCandidatesRef.current[acIndex] ?? resumeMessageCandidates[acIndex];
       const session = resumePickerSessionRef.current;
@@ -1290,6 +1296,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               pasteEnabled={!state.pendingPermission && todoEditorState === null}
               focus={!state.pendingPermission && todoEditorState === null}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
+              inputHistory={promptInputHistoryRef.current}
               onSubmit={(val) => {
                 if (shouldAcceptAutocompleteOnEnter(acMode)) {
                   if (acMode === "session-list") {

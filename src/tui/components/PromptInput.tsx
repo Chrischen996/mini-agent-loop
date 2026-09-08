@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { TUI_COLORS as C } from "../theme.ts";
+import type { TerminalInputHistory } from "../terminal-input-history.ts";
 
 export function isPasteShortcut(input: string, key?: { ctrl?: boolean; meta?: boolean }): boolean {
   return Boolean((key?.ctrl || key?.meta) && (input === "v" || input === "V" || input === "\u0016"));
@@ -19,6 +20,8 @@ export type PromptInputProps = {
   mask?: string;
   placeholder?: string;
   attachments?: string[];
+  /** Optional history instance for ↑/↓ history navigation in single-line mode */
+  inputHistory?: TerminalInputHistory;
 };
 
 const MAX_VISIBLE_LINES = 10;
@@ -95,6 +98,7 @@ export function PromptInput({
   mask,
   placeholder = "",
   attachments,
+  inputHistory,
 }: PromptInputProps): React.ReactElement {
   const parts = useMemo(() => splitGraphemes(value), [value]);
   const [cursor, setCursor] = useState(() => parts.length);
@@ -151,6 +155,7 @@ export function PromptInput({
           apply(inserted.next, inserted.cursor);
           return;
         }
+        inputHistory?.resetNavigation();
         onSubmit(valueRef.current);
         return;
       }
@@ -174,8 +179,26 @@ export function PromptInput({
       }
 
       if (key.upArrow || key.downArrow) {
-        if (!valueRef.current.includes("\n")) return;
-        setCursor(moveVertical(currentParts, currentCursor, key.upArrow ? -1 : 1));
+        const isMultiLine = valueRef.current.includes("\n");
+        if (isMultiLine) {
+          // In multi-line mode: only use history navigation when cursor is
+          // already at the very first character (can't go up further in text).
+          const newCursor = moveVertical(currentParts, currentCursor, key.upArrow ? -1 : 1);
+          if (newCursor !== currentCursor) {
+            setCursor(newCursor);
+            return;
+          }
+        }
+        if (inputHistory) {
+          const next = inputHistory.navigate(key.upArrow ? -1 : 1, valueRef.current);
+          if (next !== undefined) {
+            onChange(next);
+            // Move cursor to end of the restored text
+            setCursor(splitGraphemes(next).length);
+          }
+          return;
+        }
+        if (!isMultiLine) return;
         return;
       }
 
