@@ -138,29 +138,39 @@ export function useAutocomplete({
     if (acMode === "resume-messages") return;
 
     if (resolution.kind === "command") {
-      setCmdCandidates(resolution.candidates);
-      setFileCandidates([]);
-      setSessionCandidates([]);
-      setSessionCommand(undefined);
-      setSessionLoading(false);
-      setAcMode(resolution.candidates.length > 0 ? "command" : null);
-      setAcIndex(0);
-      return;
+      acDebounceRef.current = setTimeout(() => {
+        if (requestId !== acRequestRef.current) return;
+        setCmdCandidates(resolution.candidates);
+        setFileCandidates([]);
+        setSessionCandidates([]);
+        setSessionCommand(undefined);
+        setSessionLoading(false);
+        setAcMode(resolution.candidates.length > 0 ? "command" : null);
+        setAcIndex(0);
+      }, 80);
+      return () => {
+        if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
+      };
     }
 
     if (resolution.kind === "model") {
-      const choices = modelChoices(resolution.query);
-      setModelQuery(resolution.query);
-      setModelCandidates(choices.references);
-      setModelContextWindows(choices.contextWindows);
-      setCmdCandidates([]);
-      setFileCandidates([]);
-      setSessionCandidates([]);
-      setSessionCommand(undefined);
-      setSessionLoading(false);
-      setAcMode("model");
-      setAcIndex(0);
-      return;
+      acDebounceRef.current = setTimeout(() => {
+        if (requestId !== acRequestRef.current) return;
+        const choices = modelChoices(resolution.query);
+        setModelQuery(resolution.query);
+        setModelCandidates(choices.references);
+        setModelContextWindows(choices.contextWindows);
+        setCmdCandidates([]);
+        setFileCandidates([]);
+        setSessionCandidates([]);
+        setSessionCommand(undefined);
+        setSessionLoading(false);
+        setAcMode("model");
+        setAcIndex(0);
+      }, 80);
+      return () => {
+        if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
+      };
     }
 
     if (resolution.kind === "file") {
@@ -176,7 +186,7 @@ export function useAutocomplete({
         setFileCandidates(candidates);
         setAcMode(candidates.length > 0 ? "file" : null);
         setAcIndex(0);
-      }, 150);
+      }, 300);
       return () => {
         if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
       };

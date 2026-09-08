@@ -66,8 +66,10 @@ export function estimateMessageHeight(
       // Ink's Claude-style tool row is no longer a bordered card: one title
       // row plus the nested MessageResponse result (or Running... while the
       // call is active). Keep this estimate in lockstep with ToolCallRow.
+      // ToolCallRow renders each \n-split line with wrap="truncate-end" (no
+      // reflowing), so count newlines rather than terminal-width-wrapped rows.
       return 1 + (message.result
-        ? Math.min(TOOL_PREVIEW_LINES + 1, countTerminalRows(message.result, Math.max(10, width - 4)))
+        ? Math.min(TOOL_PREVIEW_LINES + 1, message.result.split("\n").length)
         : message.status === "running" ? 1 : 0);
     case "subagent_call":
       return subagentRenderLineCount(message, { width });

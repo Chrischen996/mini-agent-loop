@@ -72,10 +72,16 @@ describe("TUI input utils", () => {
     assert.equal(trigger.replaceFn("src/App.tsx"), "/read src/App.tsx");
   });
 
-  it("recognizes a bare file fragment for direct completion", () => {
+  it("does not trigger file completion for a bare English word without path indicator", () => {
+    // Plain words like "app" must not open a file picker on every keystroke.
     const trigger = extractFileAcTrigger("app");
+    assert.equal(trigger, null);
+  });
+
+  it("recognizes a bare fragment that contains a path indicator", () => {
+    const trigger = extractFileAcTrigger("src/app");
     assert.ok(trigger);
-    assert.equal(trigger.fragment, "app");
+    assert.equal(trigger.fragment, "src/app");
     assert.equal(trigger.replaceFn("src/tui/App.tsx"), "src/tui/App.tsx");
   });
 
