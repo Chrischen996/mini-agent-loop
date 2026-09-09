@@ -206,3 +206,40 @@ export function parseMarkdownLines(source: string): MarkdownLine[] {
   }
   return parsed;
 }
+
+/**
+ * Count the rows the Ink MarkdownText renderer actually occupies for one
+ * assistant body at `width` terminal columns.
+ *
+ * Mirrors the renderer exactly: truncated kinds (code fences, code, tables,
+ * rules) hold one row per source line, while wrapping kinds (text, headings,
+ * quotes, list items) may span multiple rows at the available width. The
+ * viewport uses this to size slice boxes, so the rendered frame never leaves
+ * blank padding between the transcript and the prompt.
+ */
+export function countMarkdownRenderRows(source: string, width: number): number {
+  if (!source) return 0;
+  const available = Math.max(10, width - 2);
+  let rows = 0;
+  for (const line of parseMarkdownLines(source)) {
+    switch (line.kind) {
+      case "code-fence":
+      case "code":
+      case "table":
+      case "rule":
+        rows += 1;
+        break;
+      case "heading":
+      case "quote":
+      case "text":
+        rows += Math.max(1, Math.ceil(terminalStringWidth(stripInlineMarkdown(line.text)) / available));
+        break;
+      case "list":
+        rows += Math.max(1, Math.ceil(
+          (terminalStringWidth(stripInlineMarkdown(line.text)) || 1) + 3,
+        ) / Math.max(10, available - line.indent * 2));
+        break;
+    }
+  }
+  return rows;
+}

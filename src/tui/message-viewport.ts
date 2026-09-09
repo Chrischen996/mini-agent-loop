@@ -2,11 +2,13 @@ import type { ChatMessage, ThinkingDisplayMode } from "./state.ts";
 import { countTerminalRows } from "./terminal-width.ts";
 import { estimateThinkingRows } from "./thinking-lines.ts";
 import { compactStreamingText } from "./text-utils.ts";
+import { stripInlineMarkdown } from "./markdown-lines.ts";
+import { countMarkdownRenderRows } from "./markdown-lines.ts";
 import { isSubagentProtocolText, isSubagentToolName, subagentRenderLineCount } from "./subagent-lines.ts";
 
 const TOOL_PREVIEW_LINES = 15;
 
-type ClippedItem = { clipTop: number; visibleHeight: number };
+type ClippedItem = { clipTop: number; visibleHeight: number; actualHeight: number };
 type RawViewportItem =
   | { kind: "message"; index: number; message: ChatMessage }
   | { kind: "streaming_reasoning" }
@@ -91,40 +93,67 @@ function buildBlocks(options: {
   expandedThinking: number[];
   width: number;
   maxMessages: number;
-}): Array<{ item: RawViewportItem; height: number }> {
+}): Array<{ item: RawViewportItem; height: number; actual: number }> {
   const startIndex = Math.max(0, options.messages.length - options.maxMessages);
   const expanded = new Set(options.expandedThinking);
-  const blocks: Array<{ item: RawViewportItem; height: number }> = [];
+  const blocks: Array<{ item: RawViewportItem; height: number; actual: number }> = [];
   for (let index = startIndex; index < options.messages.length; index++) {
     const message = options.messages[index]!;
-    blocks.push({
-      item: { kind: "message", index, message },
-      height: estimateMessageHeight(message, {
-        width: options.width,
-        thinkingMode: options.thinkingMode,
-        expandedThinking: expanded,
-        index,
-      }),
+    const estimated = estimateMessageHeight(message, {
+      width: options.width,
+      thinkingMode: options.thinkingMode,
+      expandedThinking: expanded,
+      index,
     });
+    // Rows the Ink component actually draws. Markdown keeps one row per
+    // source line for truncated kinds, so wrapping text can render fewer
+    // rows than `countTerminalRows` estimates. The viewport clamps slice
+    // boxes to the smaller number to avoid blank padding above the prompt.
+    let actual = estimated;
+    if (message.kind === "assistant" && !isSubagentProtocolText(message.text)) {
+      actual = 1 +
+        estimateThinkingRows(message.reasoning, {
+          mode: options.thinkingMode,
+          forceExpanded: expanded.has(index),
+          width: options.width,
+        }) +
+        countMarkdownRenderRows(message.text, options.width);
+    }
+    blocks.push({ item: { kind: "message", index, message }, height: estimated, actual });
   }
   if (options.streamingReasoning) {
     blocks.push({
       item: { kind: "streaming_reasoning" },
       height: thinkingRows(options.streamingReasoning, options.thinkingMode, false, options.width),
+      actual: thinkingRows(options.streamingReasoning, options.thinkingMode, false, options.width),
     });
   }
   if (options.streamingText) {
+    const displayText = options.busy
+      ? compactStreamingText(stripInlineMarkdown(options.streamingText))
+      : stripInlineMarkdown(options.streamingText);
     blocks.push({
       item: { kind: "streaming_text" },
       height: Math.max(1, countTerminalRows(options.busy ? compactStreamingText(options.streamingText) : options.streamingText, Math.max(10, options.width - 2))),
+      actual: Math.max(1, countTerminalRows(displayText, Math.max(10, options.width - 4))),
     });
   }
-  if (options.busy) blocks.push({ item: { kind: "busy_status" }, height: 1 });
+  if (options.busy) blocks.push({ item: { kind: "busy_status" }, height: 1, actual: 1 });
   return blocks;
 }
 
 export function estimateViewportContentHeight(options: Omit<Parameters<typeof selectMessageViewport>[0], "scrollOffset" | "availableHeight">): number {
   return buildBlocks({ ...options, maxMessages: options.maxMessages ?? 200 }).reduce((sum, block) => sum + block.height, 0);
+}
+
+/**
+ * Sum of the rows Ink will actually draw for the same content selection.
+ * Used to size the TUI frame so over-estimated transcript height does not
+ * pin the frame at full terminal height and leave a blank band above the
+ * prompt. Never exceeds `estimateViewportContentHeight` for the same input.
+ */
+export function estimateViewportActualHeight(options: Omit<Parameters<typeof selectMessageViewport>[0], "scrollOffset" | "availableHeight">): number {
+  return buildBlocks({ ...options, maxMessages: options.maxMessages ?? 200 }).reduce((sum, block) => sum + Math.min(block.height, block.actual), 0);
 }
 
 /** Build a bottom-anchored, row-addressable viewport. */
@@ -174,6 +203,7 @@ export function selectMessageViewport(options: {
         ...block.item,
         clipTop: visibleStart - blockStart,
         visibleHeight: visibleEnd - visibleStart,
+        actualHeight: Math.min(block.actual, block.height),
       } as ViewportItem);
     }
     blockStart = blockEnd;

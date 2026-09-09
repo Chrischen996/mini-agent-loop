@@ -3,7 +3,7 @@ import { Box, Text } from "ink";
 import type { ChatMessage, PendingPermissionState, ThinkingDisplayMode } from "../state.ts";
 import { SubagentCard } from "./SubagentCard.tsx";
 import { TUI_COLORS as C } from "../theme.ts";
-import { selectMessageViewport } from "../message-viewport.ts";
+import { selectMessageViewport, type ViewportItem } from "../message-viewport.ts";
 import { MarkdownText } from "./MarkdownText.tsx";
 import { toMessageRenderModel } from "../render-model.ts";
 import { toolResultPrefix, toolVisualName, toolVisualStatusIcon } from "../tool-lines.ts";
@@ -186,6 +186,18 @@ function ViewportSlice({
   );
 }
 
+/**
+ * Clamp a slice box to the rows its content actually draws. Scroll clipping
+ * still runs in estimated-row space (`visibleHeight`), but the box itself
+ * shrinks so estimate surplus never pads the gap between the transcript and
+ * the prompt.
+ */
+type ClippedViewportItem = Extract<ViewportItem, { clipTop: number; visibleHeight: number }>;
+function sliceHeightFor(item: ClippedViewportItem): number {
+  return Math.min(item.visibleHeight, item.actualHeight ?? item.visibleHeight);
+}
+
+
 function ActivityRow({
   status,
   streamingText,
@@ -283,6 +295,13 @@ export function MessageFeed({
 
   return (
     <Box flexDirection="column" flexGrow={1} paddingX={1} width={width} minWidth={0} overflow="hidden">
+      {/* Bottom-anchor the transcript inside the feed box. The frame height is
+          derived from wrap-aware row estimates, which can exceed the rows the
+          Ink renderer actually draws (e.g. truncate-end table rows, clipped
+          code fences). Absorbing the surplus above the visible window keeps
+          the last message directly above the input chrome instead of leaving
+          an empty band between the transcript and the prompt. */}
+      <Box flexGrow={1} minHeight={0} />
       {viewport.items.map((item) => {
         if (item.kind === "history_hint") {
           // Keep viewport accounting intact, but do not replace transcript
@@ -292,14 +311,14 @@ export function MessageFeed({
         }
         if (item.kind === "streaming_reasoning") {
           return (
-            <ViewportSlice key="streaming-reasoning" clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
+            <ViewportSlice key="streaming-reasoning" clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}>
               <ThinkingBlock content={streamingReasoning} isStreaming={busy} mode={effectiveMode} />
             </ViewportSlice>
           );
         }
         if (item.kind === "streaming_text") {
           return (
-            <ViewportSlice key="streaming-text" clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
+            <ViewportSlice key="streaming-text" clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}>
               <Box flexDirection="row">
                 <Text color={C.primary} bold>⏺ </Text>
                 <Text color={C.assistant} wrap="wrap">{busy ? compactStreamingText(stripInlineMarkdown(streamingText)) : stripInlineMarkdown(streamingText)}</Text>
@@ -309,7 +328,7 @@ export function MessageFeed({
         }
         if (item.kind === "busy_status") {
           return (
-            <ViewportSlice key="busy-status" clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
+            <ViewportSlice key="busy-status" clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}>
               <ActivityRow
                 status={status}
                 streamingText={streamingText}
@@ -330,7 +349,7 @@ export function MessageFeed({
         const visual = toMessageRenderModel(msg);
         if (msg.kind === "user") {
           return (
-            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
+            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}>
               <Box
                 marginBottom={0}
                 flexDirection="column"
@@ -356,7 +375,7 @@ export function MessageFeed({
           if (isSubagentProtocolText(msg.text)) return null;
           const focused = focusedMessageIndex === absoluteIndex;
           return (
-            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
+            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}>
               <Box marginBottom={0} flexDirection="column" marginTop={1}>
                 <Box flexDirection="row">
                   <Text color={focused ? C.running : C.assistant} bold>{focused ? "◆" : visual.marker} </Text>
@@ -378,11 +397,11 @@ export function MessageFeed({
         }
         if (msg.kind === "tool_call") {
           if (isSubagentToolName(msg.name)) return null;
-          return <ViewportSlice key={msg.id} clipTop={item.clipTop} visibleHeight={item.visibleHeight}><ToolCallRow msg={msg} /></ViewportSlice>;
+          return <ViewportSlice key={msg.id} clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}><ToolCallRow msg={msg} /></ViewportSlice>;
         }
         if (msg.kind === "notice") {
           return (
-            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
+            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}>
               <Box flexDirection="column" paddingX={1}>
                 {msg.title && (
                   <Text color={C.info} dimColor>
@@ -395,11 +414,11 @@ export function MessageFeed({
           );
         }
         if (msg.kind === "subagent_call") {
-          return <ViewportSlice key={msg.id} clipTop={item.clipTop} visibleHeight={item.visibleHeight}><SubagentCard msg={msg} width={width} /></ViewportSlice>;
+          return <ViewportSlice key={msg.id} clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}><SubagentCard msg={msg} width={width} /></ViewportSlice>;
         }
         if (msg.kind === "error") {
           return (
-            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={item.visibleHeight}>
+            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}>
               <Box flexDirection="row" minWidth={0}>
                 <Text color={C.error} bold>✗ </Text>
                 <Text color={C.assistant} wrap="wrap">{msg.text}</Text>

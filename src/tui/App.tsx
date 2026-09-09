@@ -79,7 +79,7 @@ import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./l
 import { pickerChromeRows, pickerRequestedItems } from "./picker-window.ts";
 import { thinkingLevelStatusText } from "./status-line.ts";
 import { promptPlaceholder, type AcMode } from "./input-utils.ts";
-import { estimateViewportContentHeight } from "./message-viewport.ts";
+import { estimateViewportContentHeight, estimateViewportActualHeight } from "./message-viewport.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
 import { executeTodoCommand, parseLegacyTodoCommand, parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
@@ -1160,6 +1160,21 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     width: termWidth,
     maxMessages: 200,
   });
+  // Rows the Ink renderer actually draws. Truncated markdown kinds (tables,
+  // code, rules) hold one row per source line, so the estimate can exceed the
+  // drawn content. Sizing the frame with the drawn count keeps estimate
+  // surplus from pinning the frame at full terminal height and leaving a
+  // blank band between the transcript and the prompt.
+  const viewportActualHeight = estimateViewportActualHeight({
+    messages: state.messages,
+    streamingText: state.streamingText,
+    streamingReasoning: state.streamingReasoning,
+    busy: state.busy,
+    thinkingMode: state.thinkingMode,
+    expandedThinking: state.expandedThinking,
+    width: termWidth,
+    maxMessages: 200,
+  });
   // Do not force a short session to occupy the entire alternate screen. The
   // fixed-height viewport is useful once the transcript reaches the terminal
   // edge, but before that point it creates a large empty band above the prompt
@@ -1174,7 +1189,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     2; // prompt + stable status row
   const naturalFrameHeight = Math.max(
     1,
-    fixedChromeRows + Math.min(viewportContentHeight, feedHeight),
+    fixedChromeRows + Math.min(viewportActualHeight, feedHeight),
   );
   const frameHeight = Math.min(termHeight, naturalFrameHeight);
   const previousViewportHeightRef = useRef(viewportContentHeight);

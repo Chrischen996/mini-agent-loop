@@ -213,3 +213,61 @@ describe("message viewport", () => {
     assert.equal(viewport.items.some((item) => item.kind === "history_hint"), false);
   });
 });
+
+import {
+  estimateViewportActualHeight,
+  estimateViewportContentHeight,
+} from "../src/tui/message-viewport.ts";
+import { countMarkdownRenderRows } from "../src/tui/markdown-lines.ts";
+
+describe("actual viewport heights", () => {
+  const wideColumns = Array.from({ length: 20 }, (_, i) => `column-name-${i}`);
+  const table = [
+    `| ${wideColumns.join(" | ")} |`,
+    `| ${Array(20).fill("---").join(" | ")} |`,
+    `| ${Array.from({ length: 20 }, (_, i) => `value-${i}`).join(" | ")} |`,
+  ].join("\n");
+  const options = {
+    messages: [assistant(`# Report\n${table}\n`)],
+    streamingText: "",
+    streamingReasoning: "",
+    busy: false,
+    thinkingMode: "hidden" as const,
+    expandedThinking: [] as number[],
+    width: 80,
+    maxMessages: 200,
+  };
+
+  it("estimates more rows than the renderer draws for wide table rows", () => {
+    const estimated = estimateViewportContentHeight(options);
+    const actual = estimateViewportActualHeight(options);
+    assert.ok(actual < estimated, `expected actual (${actual}) < estimated (${estimated})`);
+  });
+
+  it("matches the estimate when nothing is over-estimated", () => {
+    const simple = { ...options, messages: [assistant("short line")] };
+    assert.equal(
+      estimateViewportActualHeight(simple),
+      estimateViewportContentHeight(simple),
+    );
+  });
+
+  it("clamps slice boxes to the drawn rows", () => {
+    const viewport = selectMessageViewport({
+      ...options,
+      scrollOffset: 0,
+      availableHeight: 40,
+    });
+    const item = viewport.items.find((candidate) => candidate.kind === "message");
+    assert.ok(item && "actualHeight" in item);
+    const clipped = item as { actualHeight: number; visibleHeight: number };
+    assert.ok(clipped.actualHeight < clipped.visibleHeight);
+    assert.ok(clipped.actualHeight >= 1);
+  });
+
+  it("keeps actual rows per truncated markdown kind at one", () => {
+    assert.equal(countMarkdownRenderRows("```js\nx = 1\ny = 2\n```", 40), 4);
+    assert.equal(countMarkdownRenderRows(table, 80), 3);
+    assert.equal(countMarkdownRenderRows("a".repeat(120), 40), 4);
+  });
+});
