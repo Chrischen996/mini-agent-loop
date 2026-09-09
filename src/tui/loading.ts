@@ -1,8 +1,8 @@
 import { statusLabel } from "./claude-style.ts";
 
-/** Claude Code's lightweight glyph animation used for active work. */
-export const CLAUDE_SPINNER_FRAMES = ["✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳"] as const;
-export const SPINNER_INTERVAL_MS = 80;
+/** Stable terminal marker used for active work across fonts and renderers. */
+export const CLAUDE_SPINNER_FRAMES = ["✻", "✻", "✻", "✻", "✻", "✻", "✻", "✻"] as const;
+export const SPINNER_INTERVAL_MS = 240;
 
 export type SpinnerTimer = {
   setInterval(callback: () => void, delay: number): unknown;

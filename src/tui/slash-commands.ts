@@ -55,7 +55,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "plan-retry", usage: "/plan-retry", description: "Retry a failed plan" },
   { name: "plan-history", usage: "/plan-history", description: "List plan history" },
   { name: "plan-archive", usage: "/plan-archive", description: "Archive the current plan" },
-  { name: "copy", usage: "/copy [last|assistant|input|tool|thinking|user]", description: "Copy a message or transcript to the clipboard" },
+  { name: "copy", usage: "/copy [last|assistant|input|tool|thinking|user|all]", description: "Copy a message or transcript to the clipboard" },
   { name: "skill", usage: "/skill [on|off|list|clear] [name]", description: "Alias of /skills", alias: true },
   { name: "skills", usage: "/skills [on|off|list|clear] [name]", description: "Manage session skills" },
   { name: "help", usage: "/help", description: "Show help" },

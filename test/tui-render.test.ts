@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildLegacyFrameLines, buildLegacyFrameOutput, buildLegacyFrameRowCount } from "../src/tui/legacy-render.ts";
+import { buildLegacyFrameLines, buildLegacyFrameOutput, buildLegacyFrameRowCount, buildLegacyRenderLines } from "../src/tui/legacy-render.ts";
 import { createPlanDocument } from "../src/plan/document.ts";
 import type { TodoItem } from "../src/todo.ts";
 import { getMessageFeedHeight, getPickerLayout, getTuiViewportHeight } from "../src/tui/layout.ts";
@@ -124,6 +124,57 @@ describe("legacy TUI renderer", () => {
     assert.match(rendered, /Read files/);
     assert.match(rendered, /Edit code/);
     assert.match(rendered, /\x1b\[9m/);
+  });
+
+  it("places the completed task summary above the legacy prompt", () => {
+    const lines = buildLegacyRenderLines({
+      history: [
+        { role: "user", content: "Inspect the workspace" },
+        { role: "assistant", content: "Workspace inspected" },
+      ],
+      streamingText: "",
+      tools: [],
+      busy: false,
+      input: "next",
+      status: "就绪",
+      permissionMode: "plan",
+      thinkingLevel: "off",
+      taskTitle: "Inspect the workspace",
+      taskStatus: "completed",
+      taskDurationMs: 1_000,
+      taskTokens: 120,
+      todoItems: [{ id: "done", content: "Read files", activeForm: "Reading files", status: "completed", source: "model" }],
+    });
+
+    const summaryIndex = lines.findIndex((line) => line.key === "task-summary-root");
+    const answerIndex = lines.findIndex((line) => line.text === "Workspace inspected");
+    const inputIndex = lines.findIndex((line) => line.key === "legacy-input");
+    assert.ok(summaryIndex > answerIndex);
+    assert.ok(summaryIndex < inputIndex);
+  });
+
+  it("places the active Todo panel above the legacy prompt", () => {
+    const lines = buildLegacyRenderLines({
+      history: [
+        { role: "user", content: "Inspect the workspace" },
+        { role: "assistant", content: "Reading files" },
+      ],
+      streamingText: "",
+      tools: [],
+      busy: true,
+      input: "",
+      status: "Running Read",
+      permissionMode: "plan",
+      thinkingLevel: "off",
+      todoItems: [{ id: "active", content: "Read files", activeForm: "Reading files", status: "in_progress", source: "model" }],
+      todoViewMode: "compact",
+    });
+
+    const panelIndex = lines.findIndex((line) => line.key === "todo-compact");
+    const answerIndex = lines.findIndex((line) => line.text === "Reading files");
+    const inputIndex = lines.findIndex((line) => line.key === "legacy-input");
+    assert.ok(panelIndex > answerIndex);
+    assert.ok(panelIndex < inputIndex);
   });
 
   it("keeps nested subagent protocol rows out of the legacy transcript", () => {

@@ -458,14 +458,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const hasHeader = true;
   const showWelcome = state.messages.length === 0 && !state.busy && !state.pendingPermission;
   const headerRows = getWelcomeHeaderHeight(termWidth, showWelcome);
-  const todoRows = getTodoPanelRows(
-    { plan: state.todoPlan, todos: state.todoItems },
-    state.taskStatus !== "running" && state.taskTitle.trim() && resolveTodoItems({ plan: state.todoPlan, todos: state.todoItems }).length > 0
-      ? taskSummaryViewMode(state.taskStatus, state.todoViewMode)
-      : state.todoViewMode,
-  );
   const taskTodos = resolveTodoItems({ plan: state.todoPlan, todos: state.todoItems });
   const showTaskSummary = state.taskStatus !== "running" && state.taskTitle.trim().length > 0 && taskTodos.length > 0;
+  const todoRows = getTodoPanelRows(
+    { plan: state.todoPlan, todos: state.todoItems },
+    state.todoViewMode,
+  );
   const taskRows = showTaskSummary
     ? taskSummaryRows({
       title: state.taskTitle,
@@ -477,6 +475,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       width: termWidth,
     })
     : 0;
+  // The completed task summary lives in the bottom input chrome. While a
+  // turn is active, the ordinary Todo panel remains above the transcript.
+  const bottomPanelRows = showTaskSummary ? taskRows : todoRows;
   // Approval chrome: the permission card / plan approval bar render between
   // the feed and the input row; reserve their rows in every height budget.
   // Ink's bordered approval cards include two border rows plus the content
@@ -492,7 +493,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     headerRows,
     requestedItems: requestedPickerItems,
     hasPendingImages: state.pendingImages.length > 0,
-    todoRows,
+    todoRows: bottomPanelRows,
     extraRows: pickerChromeRows(acMode ?? undefined),
     permissionRows,
     planApprovalRows,
@@ -502,7 +503,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     hasHeader,
     headerRows,
     hasPendingImages: state.pendingImages.length > 0,
-    todoRows,
+    todoRows: bottomPanelRows,
     pickerRows: pickerLayout.totalRows,
     permissionRows,
     planApprovalRows,
@@ -977,8 +978,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
     const onLoopEvent = (event: LoopEvent) => {
       if (event.type === "thinking_policy") {
+        // Keep adaptive escalation local to this turn. The selected level in
+        // llmRef is user-owned and is what session persistence must restore.
         turnLlm = withThinkingLevel(turnLlm, event.level);
-        setLlm(turnLlm);
       } else if (event.type === "auto_subagent") {
         const status = event.executed
           ? `Auto subagent started (${event.profile}, score=${event.score})`
@@ -1164,7 +1166,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   // (most noticeable while a restored session is still loading).
   const fixedChromeRows =
     (hasHeader ? headerRows : 0) +
-    todoRows +
+    bottomPanelRows +
     pickerLayout.totalRows +
     permissionRows +
     planApprovalRows +
@@ -1197,25 +1199,6 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         />
       )}
 
-      {showTaskSummary ? (
-        <TaskSummaryPanel
-          title={state.taskTitle}
-          status={state.taskStatus}
-          durationMs={state.taskDurationMs}
-          totalTokens={state.taskTokens}
-          todos={taskTodos}
-          viewMode={taskSummaryViewMode(state.taskStatus, state.todoViewMode)}
-          width={termWidth}
-        />
-      ) : (state.todoPlan || state.todoItems) && (
-        <TodoPanel
-          plan={state.todoPlan}
-          todos={state.todoItems}
-          viewMode={state.todoViewMode}
-          width={termWidth}
-        />
-      )}
-
       <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
         <MessageFeed
           messages={state.messages}
@@ -1230,7 +1213,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           turnStartedAt={state.turnStartedAt}
           lastStreamAt={state.lastStreamAt}
           spinnerMessage={state.spinnerMessage}
-          todoPanelVisible={Math.max(todoRows, taskRows) > 0}
+          todoPanelVisible={bottomPanelRows > 0}
           availableHeight={feedHeight}
           width={termWidth}
           scrollOffset={state.scrollOffset}
@@ -1263,6 +1246,24 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       </Box>
 
       <Box flexDirection="column" flexShrink={0}>
+        {showTaskSummary ? (
+          <TaskSummaryPanel
+            title={state.taskTitle}
+            status={state.taskStatus}
+            durationMs={state.taskDurationMs}
+            totalTokens={state.taskTokens}
+            todos={taskTodos}
+            viewMode={taskSummaryViewMode(state.taskStatus, state.todoViewMode)}
+            width={termWidth}
+          />
+        ) : (state.todoPlan || state.todoItems) && (
+          <TodoPanel
+            plan={state.todoPlan}
+            todos={state.todoItems}
+            viewMode={state.todoViewMode}
+            width={termWidth}
+          />
+        )}
         {state.pendingPermission && (
           <PermissionPanel request={state.pendingPermission} width={termWidth} />
         )}
@@ -1297,6 +1298,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               focus={!state.pendingPermission && todoEditorState === null}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               inputHistory={promptInputHistoryRef.current}
+              disableArrowNavigation={Boolean(acMode)}
+              onScrollContext={(direction) => {
+                if (state.busy || acMode || state.pendingPermission || todoEditorState !== null || state.phase === "review") return;
+                dispatch({ type: "SCROLL_BY", delta: direction === "up" ? 1 : -1 });
+              }}
               onSubmit={(val) => {
                 if (shouldAcceptAutocompleteOnEnter(acMode)) {
                   if (acMode === "session-list") {

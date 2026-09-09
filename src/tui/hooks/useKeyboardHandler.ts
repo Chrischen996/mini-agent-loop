@@ -7,6 +7,10 @@ import type { TuiAction } from "../state.ts";
 import type { PermissionDecision, PermissionManager, PermissionTurnContext } from "../../permissions.ts";
 import type { AcMode } from "../input-utils.ts";
 
+export function shouldExitOnCtrlC(input: string, key: { ctrl?: boolean; shift?: boolean }): boolean {
+  return Boolean(key.ctrl && !key.shift && (input === "c" || input === "C"));
+}
+
 export type TodoEditorKeyRoute =
   | "none"
   | "permission"
@@ -89,7 +93,7 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
 
   useInput((_ch: string, key: Key) => {
     // Ctrl+C: abort and exit
-    if (key.ctrl && (_ch === "c" || _ch === "C")) {
+    if (shouldExitOnCtrlC(_ch, key)) {
       abortRef.current.abort();
       exit();
       return;

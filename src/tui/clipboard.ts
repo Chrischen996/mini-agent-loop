@@ -15,6 +15,9 @@ export type ClipboardIo = {
 
 const CLIPBOARD_TIMEOUT_MS = 5_000;
 
+// OSC 52 base64 payload is limited to ~76 bytes per terminal command.
+const MAX_OSC52_BASE64_BYTES = 76;
+
 function encodeOsc52(text: string): string {
   return `\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`;
 }
@@ -56,17 +59,21 @@ export async function writeClipboardText(
   // Emit the OSC 52 sequence and let the terminal perform the copy.
   try {
     const osc52 = encodeOsc52(text);
-    writeStdout(osc52);
-    // After OSC 52 succeeds, fire-and-forget a native tool as a safety net so
-    // the clipboard is still filled when the terminal ignores OSC 52.
-    if (platform !== "win32") {
-      const candidates = nativeCandidates(platform, env);
-      for (const candidate of candidates) {
-        run(candidate.command, candidate.args, text).catch(() => {}); // fire-and-forget
-        break; // only try the first available backend
+    // Only use OSC 52 for text that fits within terminal limits
+    if (Buffer.byteLength(osc52, "utf8") <= MAX_OSC52_BASE64_BYTES) {
+      writeStdout(osc52);
+      // After OSC 52 succeeds, fire-and-forget a native tool as a safety net so
+      // the clipboard is still filled when the terminal ignores OSC 52.
+      if (platform !== "win32") {
+        const candidates = nativeCandidates(platform, env);
+        for (const candidate of candidates) {
+          run(candidate.command, candidate.args, text).catch(() => {}); // fire-and-forget
+          break; // only try the first available backend
+        }
       }
+      return { ok: true, method: "osc52" };
     }
-    return { ok: true, method: "osc52" };
+    // For large text, fall through to native tools
   } catch (error) {
     // OSC 52 failed; fall back to the native tools.
   }

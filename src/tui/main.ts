@@ -610,7 +610,7 @@ async function main(): Promise<void> {
     state.busy = true;
     state.status = "Waiting for model…";
     const parsedThinking = parseThinkingIntensityPrompt(text);
-    const turnLlm = parsedThinking.intensity
+    let turnLlm = parsedThinking.intensity
       ? buildIntenseLlm(activeLlm, parsedThinking.intensity)
       : activeLlm;
     if (parsedThinking.intensity) {
@@ -658,7 +658,8 @@ async function main(): Promise<void> {
         onEvent: (event) => {
           handleEvent(state, event);
           if (event.type === "thinking_policy") {
-            activeLlm = withThinkingLevel(activeLlm, event.level);
+            // Adaptive escalation is local to this turn; keep the session-owned level unchanged.
+            turnLlm = withThinkingLevel(turnLlm, event.level);
           }
           render(state);
         },

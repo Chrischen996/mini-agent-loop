@@ -11,7 +11,7 @@ import { thinkingRenderLines, thinkingVisibleLines } from "../thinking-lines.ts"
 import { compactStreamingText } from "../text-utils.ts";
 import { noticeText, noticeTitle, statusLabel, toolArgumentSummary } from "../claude-style.ts";
 import { isSubagentProtocolText, isSubagentToolName } from "../subagent-lines.ts";
-import { activityPresentation, formatActivity, loadingGlyph, LOADING_FRAME_MS } from "../activity.ts";
+import { activityPresentation, formatActivity, loadingGlyph, loadingMarkerBright, LOADING_FRAME_MS } from "../activity.ts";
 import { stripInlineMarkdown } from "../markdown-lines.ts";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -224,10 +224,15 @@ function ActivityRow({
     spinnerMessage,
     todoPanelVisible,
   }, { now });
+  const markerColor = activity?.stalled
+    ? C.error
+    : loadingMarkerBright(now, turnStartedAt)
+      ? C.running
+      : C.muted;
 
   return (
     <Box marginBottom={0} gap={1} flexWrap="nowrap" minWidth={0}>
-      <Text color={activity?.stalled ? C.error : C.running} bold>
+      <Text color={markerColor} bold>
         {loadingGlyph(now, turnStartedAt)}
       </Text>
       <Text color={activity?.stalled ? C.error : C.running} dimColor wrap="truncate-end">

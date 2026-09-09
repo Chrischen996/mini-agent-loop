@@ -19,11 +19,13 @@ const messages: ChatMessage[] = [
 describe("TUI copy helpers", () => {
   it("parses /copy commands", () => {
     assert.equal(parseCopyCommand("/copy"), "auto");
-    assert.equal(parseCopyCommand("/copy last"), "auto");
+    assert.equal(parseCopyCommand("/copy last"), "last");
+    assert.equal(parseCopyCommand("/copy all"), "all");
     assert.equal(parseCopyCommand("/copy assistant"), "assistant");
     assert.equal(parseCopyCommand("/copy tool"), "tool");
     assert.equal(parseCopyCommand("/copy thinking"), "thinking");
     assert.equal(parseCopyCommand("/copy input"), "input");
+    assert.equal(parseCopyCommand("/copy user"), "user");
     assert.equal(parseCopyCommand("/help"), undefined);
   });
 
@@ -58,6 +60,48 @@ describe("TUI copy helpers", () => {
     assert.equal(selection?.text, "hidden reasoning");
   });
 
+  it("copies the last non-empty message regardless of kind with /copy last", () => {
+    const last = resolveCopyTarget({ messages, target: "last" });
+    assert.equal(last?.text, "alpha\nbeta\ngamma");
+    assert.equal(last?.label, "bash output");
+  });
+
+  it("does not confuse /copy last with /copy assistant", () => {
+    const ordered: ChatMessage[] = [
+      { kind: "assistant", text: "answer" },
+      { kind: "user", text: "prompt" },
+    ];
+    const last = resolveCopyTarget({ messages: ordered, target: "last" });
+    assert.equal(last?.text, "prompt");
+    const assistant = resolveCopyTarget({ messages: ordered, target: "assistant" });
+    assert.equal(assistant?.text, "answer");
+  });
+
+  it("/copy last falls back to current input when nothing is copied yet", () => {
+    const draft = resolveCopyTarget({ messages: [], input: "type something", target: "last" });
+    assert.equal(draft?.text, "type something");
+  });
+
+  it("copies the full transcript with /copy all", () => {
+    const all = resolveCopyTarget({ messages, target: "all" });
+    assert.equal(all?.text, "line one\nline two\n\n## 结论\n**重要**\n\nalpha\nbeta\ngamma");
+    assert.equal(all?.label, "transcript");
+  });
+
+  it("/copy all returns nothing when there is no transcript or draft", () => {
+    const none = resolveCopyTarget({ messages: [], target: "all" });
+    assert.equal(none, undefined);
+  });
+
+  it("focuses an empty tool_call does not block fallback to the last assistant", () => {
+    const focusEmpty: ChatMessage[] = [
+      { kind: "assistant", text: "answer" },
+      { kind: "tool_call", id: "t", name: "bash", args: "{}", rawArgs: { command: "ls" }, status: "running", startedAt: 1 },
+    ];
+    const auto = resolveCopyTarget({ messages: focusEmpty, focusedIndex: 1 });
+    assert.equal(auto?.text, "answer");
+  });
+
   it("falls back to OSC 52 when native clipboard commands fail", async () => {
     const writes: string[] = [];
     const result = await writeClipboardText("hello", {
@@ -73,6 +117,40 @@ describe("TUI copy helpers", () => {
     assert.equal(result.ok, true);
     assert.equal(result.method, "osc52");
     assert.equal(writes[0], osc52Payload("hello"));
+  });
+
+  it("skips OSC 52 for large payloads that exceed terminal limits", async () => {
+    const writes: string[] = [];
+    const result = await writeClipboardText("x".repeat(200), {
+      platform: "linux",
+      env: {},
+      run: async () => {
+        throw new Error("missing");
+      },
+      writeStdout: (data) => {
+        writes.push(data);
+      },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.method, "none");
+    assert.equal(writes.length, 0);
+  });
+
+  it("still uses OSC 52 for short text", async () => {
+    const writes: string[] = [];
+    const result = await writeClipboardText("hi", {
+      platform: "linux",
+      env: {},
+      run: async () => {
+        throw new Error("missing");
+      },
+      writeStdout: (data) => {
+        writes.push(data);
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.method, "osc52");
+    assert.equal(writes[0], osc52Payload("hi"));
   });
 
   it("uses pbcopy on macOS when the helper succeeds", async () => {

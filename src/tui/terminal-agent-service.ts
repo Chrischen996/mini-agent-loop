@@ -248,6 +248,7 @@ export class TerminalAgentService {
       this.options.onPermissionTurnChange?.(permissionTurn);
       const runId = this.streamBuffer.start();
     let currentPrompt = prompt;
+    let turnLlm = this.activeLlm;
     let userContent = submitOptions.userContent;
     let continueCount = 0;
     let succeeded = false;
@@ -275,7 +276,7 @@ export class TerminalAgentService {
       while (true) {
         try {
           this.history = await runAgentTurn(this.history, currentPrompt, {
-            llm: { ...this.activeLlm, ...(this.activeSessionId ? { sessionId: this.activeSessionId } : {}) },
+            llm: { ...turnLlm, ...(this.activeSessionId ? { sessionId: this.activeSessionId } : {}) },
             tools: this.options.tools,
             chat: this.options.chat,
             autoSubagent: this.options.autoSubagent,
@@ -293,6 +294,11 @@ export class TerminalAgentService {
             skillRegistry: this.options.skillRegistry,
             onEvent: (event) => {
               if (event.type === "aborted") aborted = true;
+              if (event.type === "thinking_policy") {
+                // Adaptive escalation is local to this turn; keep the
+                // session-owned level unchanged for persistence and shortcuts.
+                turnLlm = { ...turnLlm, thinkingLevel: event.level };
+              }
               this.handleEvent(runId, event);
             },
           });
@@ -351,11 +357,6 @@ export class TerminalAgentService {
   }
 
   private handleEvent(runId: number, event: LoopEvent): void {
-    if (event.type === "thinking_policy") {
-      const next = { ...this.activeLlm, thinkingLevel: event.level };
-      this.activeLlm = next;
-      this.options.onLlmChange?.(next);
-    }
     // `runAgentTurn` emits terminal events itself. The service only forwards
     // them, so it must not synthesize a second completion event in finally.
     this.streamBuffer.handle(runId, event);

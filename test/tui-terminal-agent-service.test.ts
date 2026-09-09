@@ -138,6 +138,51 @@ describe("terminal agent service", () => {
     assert.equal(service.getHistory().filter((message) => message.role === "assistant").length, 1);
   });
 
+  it("keeps adaptive request escalation separate from the persisted thinking level", async () => {
+    const store = createTuiStore(createInitialState("test-model"));
+    const requestLevels: string[] = [];
+    const changedLevels: string[] = [];
+    let responses = 0;
+    const service = new TerminalAgentService({
+      store,
+      llm: {
+        ...testLlm(),
+        reasoning: true,
+        thinkingLevel: "low",
+      },
+      tools: [{
+        name: "failing_tool",
+        description: "always fails",
+        parameters: { type: "object" },
+        execute: async () => ({ content: "failure", isError: true }),
+      }],
+      permissionManager: new PermissionManager("bypass"),
+      permissionSessionId: "thinking-session",
+      thinkingMode: "adaptive",
+      onLlmChange: (llm) => {
+        changedLevels.push(llm.thinkingLevel ?? "off");
+      },
+      chat: async (config) => {
+        requestLevels.push(config.thinkingLevel ?? "off");
+        responses += 1;
+        return responses === 1
+          ? {
+              role: "assistant",
+              content: "",
+              toolCalls: [{ id: "failure-1", name: "failing_tool", arguments: {} }],
+            }
+          : { role: "assistant", content: "done" };
+      },
+    });
+
+    await service.submit("run tool");
+    await service.submit("follow up");
+
+    assert.deepEqual(requestLevels, ["medium", "high", "medium"]);
+    assert.equal(service.getLlm().thinkingLevel, "low");
+    assert.deepEqual(changedLevels, []);
+  });
+
   it("keeps tool calls and results on the same loop history", async () => {
     const store = createTuiStore(createInitialState("test-model"));
     let responses = 0;

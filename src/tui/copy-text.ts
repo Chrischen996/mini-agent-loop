@@ -7,7 +7,8 @@ export type CopyTarget =
   | "input"
   | "tool"
   | "thinking"
-  | "user";
+  | "user"
+  | "all";
 
 export type CopySelection = {
   label: string;
@@ -18,7 +19,9 @@ export function parseCopyCommand(input: string): CopyTarget | undefined {
   const match = input.trim().match(/^\/copy(?:\s+(last|assistant|input|tool|thinking|user|all))?$/i);
   if (!match) return undefined;
   const verb = match[1]?.toLowerCase();
-  if (!verb || verb === "last" || verb === "all") return verb === "all" ? "assistant" : "auto";
+  if (!verb) return "auto";
+  if (verb === "last") return "last";
+  if (verb === "all") return "all";
   return verb as CopyTarget;
 }
 
@@ -51,6 +54,16 @@ function findLast(
     if (message && match(message)) return message;
   }
   return undefined;
+}
+
+function messageLabel(message: ChatMessage): string {
+  if (message.kind === "assistant") return "assistant reply";
+  if (message.kind === "user") return "user prompt";
+  if (message.kind === "tool_call") return `${message.name} output`;
+  if (message.kind === "subagent_call") return "subagent output";
+  if (message.kind === "notice") return "notice";
+  if (message.kind === "error") return "error";
+  return "unknown";
 }
 
 export function resolveCopyTarget(options: {
@@ -110,7 +123,37 @@ export function resolveCopyTarget(options: {
     return lastUser && lastUser.kind === "user" ? { label: "user prompt", text: lastUser.text } : undefined;
   }
 
-  if (target === "assistant" || target === "last") {
+  // NEW: distinct "last" behavior - get last message with any non-empty copy text
+  if (target === "last") {
+    if (streamingText.trim()) return { label: "current response", text: streamingText };
+    const last = findLast(messages, (message) => Boolean(extractMessageCopyText(message)));
+    if (last) {
+      const text = extractMessageCopyText(last);
+      if (text) {
+        return { label: messageLabel(last), text };
+      }
+    }
+    const draft = input.trim();
+    return draft ? { label: "current input", text: draft } : undefined;
+  }
+
+  // NEW: "all" copies the full transcript
+  if (target === "all") {
+    const parts: string[] = [];
+    for (const message of messages) {
+      const text = extractMessageCopyText(message);
+      if (text.trim()) parts.push(text);
+    }
+    if (streamingText.trim()) parts.push(streamingText);
+    if (parts.length === 0) {
+      const draft = input.trim();
+      if (draft) return { label: "current input", text: draft };
+      return undefined;
+    }
+    return { label: "transcript", text: parts.join("\n\n") };
+  }
+
+  if (target === "assistant") {
     if (streamingText.trim()) return { label: "current response", text: streamingText };
     const lastAssistant = findLast(messages, (message) => message.kind === "assistant" && Boolean(message.text.trim()));
     return lastAssistant && lastAssistant.kind === "assistant" ? { label: "assistant reply", text: lastAssistant.text } : undefined;

@@ -209,8 +209,7 @@ export function buildLegacyRenderLines(state: LegacyTuiState, width = 80): Rende
 
   const taskTodos = resolveTodoItems({ plan: state.todoPlan, todos: state.todoItems });
   const showTaskSummary = !state.busy && Boolean(state.taskTitle?.trim()) && taskTodos.length > 0 && state.taskStatus !== "running";
-  if (showTaskSummary) {
-    lines.push(...taskSummaryRenderLines({
+  const taskSummaryLines = showTaskSummary ? taskSummaryRenderLines({
       title: state.taskTitle!,
       status: state.taskStatus ?? "completed",
       durationMs: state.taskDurationMs,
@@ -219,12 +218,10 @@ export function buildLegacyRenderLines(state: LegacyTuiState, width = 80): Rende
       viewMode: taskSummaryViewMode(state.taskStatus ?? "completed", state.todoViewMode ?? "expanded"),
       maxVisibleItems: TODO_PANEL_MAX_VISIBLE_ITEMS,
       width,
-    }));
-    lines.push({ key: "legacy-task-summary-gap", text: "", style: "muted" });
-  } else if (state.todoPlan || state.todoItems) {
-    lines.push(...todoPanelRenderLines({ plan: state.todoPlan, todos: state.todoItems, viewMode: state.todoViewMode ?? "expanded", maxVisibleItems: TODO_PANEL_MAX_VISIBLE_ITEMS }));
-    lines.push({ key: "legacy-todo-gap", text: "", style: "muted" });
-  }
+    }) : [];
+  const todoPanelLines = !showTaskSummary && (state.todoPlan || state.todoItems)
+    ? todoPanelRenderLines({ plan: state.todoPlan, todos: state.todoItems, viewMode: state.todoViewMode ?? "expanded", maxVisibleItems: TODO_PANEL_MAX_VISIBLE_ITEMS })
+    : [];
 
   appendMemoryCards(lines, state.memoryEvents);
 
@@ -261,6 +258,10 @@ export function buildLegacyRenderLines(state: LegacyTuiState, width = 80): Rende
   }
 
   lines.push(
+    ...todoPanelLines,
+    ...(todoPanelLines.length > 0 ? [{ key: "legacy-todo-gap", text: "", style: "muted" as const }] : []),
+    ...taskSummaryLines,
+    ...(taskSummaryLines.length > 0 ? [{ key: "legacy-task-summary-gap", text: "", style: "muted" as const }] : []),
     { key: "legacy-footer-gap", text: "", style: "muted" },
     { key: "legacy-status", text: `${thinkingLevelLabel(thinkingLevelToDisplay(state.thinkingLevel))} · ${permissionModeLabel(state.permissionMode)} · ${statusLabel(state.status, state.busy)}`, prefix: state.busy ? "⟳ " : "· ", style: "muted", dim: true, prefixTone: state.busy ? "running" : "success" },
     { key: "legacy-input", text: state.input, prefix: state.busy ? "" : "❯ ", style: "assistant", bold: !state.busy },

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   activityPresentation,
   formatActivity,
+  loadingMarkerBright,
   loadingGlyph,
   LOADING_FRAME_MS,
   LOADING_GLYPHS,
@@ -60,6 +61,8 @@ describe("TUI activity presentation", () => {
     assert.equal(loadingGlyph(0, 0), CLAUDE_SPINNER_FRAMES[0]);
     assert.equal(loadingGlyph(LOADING_FRAME_MS, 0), CLAUDE_SPINNER_FRAMES[1]);
     assert.equal(loadingGlyph(LOADING_FRAME_MS * (CLAUDE_SPINNER_FRAMES.length + 2), 0), CLAUDE_SPINNER_FRAMES[2]);
+    assert.equal(loadingMarkerBright(0, 0), true);
+    assert.equal(loadingMarkerBright(LOADING_FRAME_MS, 0), false);
     for (const glyph of LOADING_GLYPHS) assert.equal(terminalStringWidth(glyph), 1);
     assert.ok(!(LOADING_GLYPHS as readonly string[]).includes("·"));
   });

@@ -10,10 +10,11 @@ import {
 } from "../src/tui/loading.ts";
 
 describe("TUI loading presentation", () => {
-  it("cycles through the Claude-style spinner frames", () => {
+  it("keeps the active-work marker visually stable", () => {
     assert.equal(getSpinnerFrame(0), CLAUDE_SPINNER_FRAMES[0]);
     assert.equal(getSpinnerFrame(CLAUDE_SPINNER_FRAMES.length), CLAUDE_SPINNER_FRAMES[0]);
     assert.equal(getSpinnerFrame(-1), CLAUDE_SPINNER_FRAMES.at(-1));
+    assert.ok(CLAUDE_SPINNER_FRAMES.every((frame) => frame === CLAUDE_SPINNER_FRAMES[0]));
   });
 
   it("normalizes internal statuses into one loading label", () => {

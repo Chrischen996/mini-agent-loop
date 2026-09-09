@@ -188,7 +188,11 @@ describe("standalone terminal render model", () => {
     state = tuiReducer(state, { type: "USER_MESSAGE", text: "history" });
     state = tuiReducer(state, { type: "SCROLL_BY", delta: 3 });
     const lines = buildTerminalRenderLines(state, { height: 5, input: "" });
-    assert.equal(lines[0]?.key, "panel-todo-compact");
+    const panelIndex = lines.findIndex((line) => line.key.startsWith("panel-todo"));
+    const messageIndex = lines.findIndex((line) => line.key === "message-0");
+    const inputIndex = lines.findIndex((line) => line.key === "input-0");
+    assert.ok(panelIndex > messageIndex);
+    assert.ok(panelIndex < inputIndex);
   });
 
   it("renders a completed task root with its checklist, duration, and tokens", () => {
@@ -219,6 +223,15 @@ describe("standalone terminal render model", () => {
     assert.match(root?.text ?? "", /1\.2k tokens/);
     assert.equal(lines.find((line) => line.key === "panel-task-summary-item-done")?.prefix, "  ├─ ✓ ");
     assert.equal(lines.find((line) => line.key === "panel-task-summary-item-pending")?.prefix, "  └─ ■ ");
+    const rootIndex = lines.findIndex((line) => line.key === "panel-task-summary-root");
+    const answerIndex = lines.findIndex((line) => line.text === "finished");
+    assert.ok(rootIndex > answerIndex);
+
+    const withInput = buildTerminalRenderLines(state, { width: 100, input: "next" });
+    const inputIndex = withInput.findIndex((line) => line.key === "input-0");
+    const summaryIndex = withInput.findIndex((line) => line.key === "panel-task-summary-root");
+    assert.ok(summaryIndex < inputIndex);
+    assert.equal(withInput.at(-1)?.key, "input-0");
   });
 
   it("keeps the checklist visible and marks the task root failed after an error", () => {

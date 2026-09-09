@@ -55,10 +55,19 @@ export type ActivityOptions = {
   queuedCount?: number;
 };
 
-/** Fixed-width, terminal-safe animation used by both TUI renderers. */
-export function loadingGlyph(now: number, startedAt = now): string {
+/** Stable marker frame used by both TUI renderers. */
+export function loadingFrameIndex(now: number, startedAt = now): number {
   const elapsed = Math.max(0, now - startedAt);
-  return getSpinnerFrame(Math.floor(elapsed / LOADING_FRAME_MS));
+  return Math.floor(elapsed / LOADING_FRAME_MS);
+}
+
+export function loadingGlyph(now: number, startedAt = now): string {
+  return getSpinnerFrame(loadingFrameIndex(now, startedAt));
+}
+
+/** Pulse only the marker; activity text keeps a stable position and color. */
+export function loadingMarkerBright(now: number, startedAt = now): boolean {
+  return loadingFrameIndex(now, startedAt) % 2 === 0;
 }
 
 /** Derive one coherent live status from reducer state without changing loop behavior. */

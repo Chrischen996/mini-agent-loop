@@ -13,8 +13,10 @@ import {
   isPasteShortcut,
   PromptInput,
 } from "../src/tui/components/PromptInput.tsx";
+import { TerminalInputHistory } from "../src/tui/terminal-input-history.ts";
 import { useAutocomplete } from "../src/tui/hooks/useAutocomplete.ts";
 import type { AutocompleteNavKey } from "../src/tui/autocomplete.ts";
+import { shouldExitOnCtrlC } from "../src/tui/hooks/useKeyboardHandler.ts";
 
 const nextFrame = () => new Promise((resolve) => setTimeout(resolve, 25));
 
@@ -34,6 +36,11 @@ function createTerminal() {
 }
 
 describe("TUI input utils", () => {
+  it("does not treat Ctrl+Shift+C as the exit shortcut", () => {
+    assert.equal(shouldExitOnCtrlC("c", { ctrl: true, shift: true }), false);
+    assert.equal(shouldExitOnCtrlC("c", { ctrl: true, shift: false }), true);
+  });
+
   it("keeps newlines and tabs while stripping other control characters", () => {
     assert.equal(sanitizeInput("a\nb\tc\u0001d\u0014e\u007Ff"), "a\nb\tcdef");
   });
@@ -159,6 +166,148 @@ describe("PromptInput", () => {
       terminalIn.write("\r");
       await nextFrame();
       assert.equal(submitted, currentValue);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("does not recall history when an autocomplete overlay owns arrows", async () => {
+    const { terminalIn, terminalOut } = createTerminal();
+    const inputHistory = new TerminalInputHistory();
+    inputHistory.add("previous prompt");
+    let currentValue = "";
+
+    function Harness(): React.ReactElement {
+      const [value, setValue] = useState("");
+      currentValue = value;
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+        inputHistory,
+        disableArrowNavigation: true,
+      });
+    }
+
+    const app = render(React.createElement(Harness), {
+      stdin: terminalIn as unknown as NodeJS.ReadStream,
+      stdout: terminalOut as unknown as NodeJS.WriteStream,
+      stderr: terminalOut as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    try {
+      await nextFrame();
+      terminalIn.write("\x1b[A");
+      await nextFrame();
+      assert.equal(currentValue, "");
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("does not recall history for Shift+Up thinking-level shortcut", async () => {
+    const { terminalIn, terminalOut } = createTerminal();
+    const inputHistory = new TerminalInputHistory();
+    inputHistory.add("previous prompt");
+    let currentValue = "";
+
+    function Harness(): React.ReactElement {
+      const [value, setValue] = useState("");
+      currentValue = value;
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+        inputHistory,
+      });
+    }
+
+    const app = render(React.createElement(Harness), {
+      stdin: terminalIn as unknown as NodeJS.ReadStream,
+      stdout: terminalOut as unknown as NodeJS.WriteStream,
+      stderr: terminalOut as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    try {
+      await nextFrame();
+      terminalIn.write("\x1b[1;2A");
+      await nextFrame();
+      assert.equal(currentValue, "");
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("routes empty prompt arrows to message context without stealing input history", async () => {
+    const { terminalIn, terminalOut } = createTerminal();
+    const scrolls: Array<"up" | "down"> = [];
+    const inputHistory = new TerminalInputHistory();
+    inputHistory.add("previous prompt");
+    let currentValue = "";
+
+    function Harness(): React.ReactElement {
+      const [value, setValue] = useState("");
+      currentValue = value;
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+        inputHistory,
+        onScrollContext: (direction) => scrolls.push(direction),
+      });
+    }
+
+    const app = render(React.createElement(Harness), {
+      stdin: terminalIn as unknown as NodeJS.ReadStream,
+      stdout: terminalOut as unknown as NodeJS.WriteStream,
+      stderr: terminalOut as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    try {
+      await nextFrame();
+      terminalIn.write("\x1b[B");
+      await nextFrame();
+      assert.deepEqual(scrolls, ["down"]);
+      assert.equal(currentValue, "");
+
+      terminalIn.write("\x1b[A");
+      await nextFrame();
+      assert.equal(currentValue, "previous prompt");
+      assert.deepEqual(scrolls, ["down"]);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("does not route multiline vertical editing to message context", async () => {
+    const { terminalIn, terminalOut } = createTerminal();
+    const scrolls: string[] = [];
+
+    function Harness(): React.ReactElement {
+      const [value, setValue] = useState("top\nbottom");
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+        onScrollContext: (direction) => scrolls.push(direction),
+      });
+    }
+
+    const app = render(React.createElement(Harness), {
+      stdin: terminalIn as unknown as NodeJS.ReadStream,
+      stdout: terminalOut as unknown as NodeJS.WriteStream,
+      stderr: terminalOut as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    try {
+      await nextFrame();
+      terminalIn.write("\x1b[A");
+      await nextFrame();
+      assert.deepEqual(scrolls, []);
     } finally {
       app.unmount();
     }

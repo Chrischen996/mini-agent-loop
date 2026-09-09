@@ -22,6 +22,10 @@ export type PromptInputProps = {
   attachments?: string[];
   /** Optional history instance for ↑/↓ history navigation in single-line mode */
   inputHistory?: TerminalInputHistory;
+  /** Prevent prompt editing from consuming arrows owned by an overlay. */
+  disableArrowNavigation?: boolean;
+  /** Called when an empty single-line prompt has no history entry to navigate. */
+  onScrollContext?: (direction: "up" | "down") => void;
 };
 
 const MAX_VISIBLE_LINES = 10;
@@ -99,6 +103,8 @@ export function PromptInput({
   placeholder = "",
   attachments,
   inputHistory,
+  disableArrowNavigation = false,
+  onScrollContext,
 }: PromptInputProps): React.ReactElement {
   const parts = useMemo(() => splitGraphemes(value), [value]);
   const [cursor, setCursor] = useState(() => parts.length);
@@ -179,6 +185,9 @@ export function PromptInput({
       }
 
       if (key.upArrow || key.downArrow) {
+        // Modifier shortcuts and active overlays own vertical navigation.
+        // Do not let prompt history or multiline editing consume arrows.
+        if (disableArrowNavigation || key.shift) return;
         const isMultiLine = valueRef.current.includes("\n");
         if (isMultiLine) {
           // In multi-line mode: only use history navigation when cursor is
@@ -195,10 +204,14 @@ export function PromptInput({
             onChange(next);
             // Move cursor to end of the restored text
             setCursor(splitGraphemes(next).length);
+            return;
           }
-          return;
         }
-        if (!isMultiLine) return;
+        // An empty single-line prompt has no editing action left to consume.
+        // Let the parent use the arrow for transcript/context navigation.
+        if (!isMultiLine && valueRef.current === "") {
+          onScrollContext?.(key.upArrow ? "up" : "down");
+        }
         return;
       }
 

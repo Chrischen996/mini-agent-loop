@@ -18,7 +18,7 @@ import { noticeText, noticeTitle, toolArgumentSummary } from "./claude-style.ts"
 import { buildStatusSegments } from "./status-line.ts";
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import { isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from "./subagent-lines.ts";
-import { activityPresentation, formatActivity, loadingGlyph } from "./activity.ts";
+import { activityPresentation, formatActivity, loadingGlyph, loadingMarkerBright } from "./activity.ts";
 import { TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "./brand.ts";
 import { welcomePanelRenderLines, type WelcomePanelData } from "./welcome-panel.ts";
 import { compactStreamingText } from "./text-utils.ts";
@@ -89,13 +89,12 @@ export function buildTerminalRenderLines(
     : Math.max(0, state.messages.length - (options.maxMessages ?? 200));
   const header = options.header?.show === false ? [] : options.header ? headerRenderLines(state, options.header, width) : [];
 
-  // Fullscreen keeps the task panel above the message feed. In main-screen
-  // mode it belongs to the live tail so Todo updates never require rewriting
-  // already committed transcript rows in terminal scrollback.
+  // Both the active Todo panel and completed task summaries belong to the
+  // bottom input chrome so task state stays adjacent to the next prompt.
   const taskTodos = resolveTodoItems({ plan: state.todoPlan, todos: state.todoItems });
   const taskViewMode = taskSummaryViewMode(state.taskStatus, state.todoViewMode);
   const showTaskSummary = state.taskStatus !== "running" && state.taskTitle.trim().length > 0 && taskTodos.length > 0;
-  const panelLines = (showTaskSummary
+  const taskSummaryLines = (showTaskSummary
     ? taskSummaryRenderLines({
       title: state.taskTitle,
       status: state.taskStatus,
@@ -106,15 +105,18 @@ export function buildTerminalRenderLines(
       maxVisibleItems: Math.max(3, Math.min(8, (options.height ?? 24) - 4)),
       width,
     })
-    : todoPanelRenderLines({
+    : []).map((line) => ({ ...line, key: `panel-${line.key}` }));
+  const panelLines = (showTaskSummary ? [] : todoPanelRenderLines({
       plan: state.todoPlan,
       todos: state.todoItems,
       viewMode: state.todoViewMode,
       maxVisibleItems: Math.max(3, Math.min(8, (options.height ?? 24) - 4)),
     }))
     .map((line) => ({ ...line, key: `panel-${line.key}` }));
-  const panelLinesAboveBody = scrollback ? [] : panelLines;
-  const panelLinesInLiveTail = scrollback ? panelLines.map(markEphemeral) : [];
+  // Keep both the active Todo panel and the completed task summary in the
+  // bottom input chrome. The transcript area is reserved for conversation.
+  const panelLinesAboveBody: RenderLine[] = [];
+  const panelLinesInFooter = scrollback ? panelLines.map(markEphemeral) : panelLines;
 
   for (let index = messageStart; index < state.messages.length; index++) {
     const message = state.messages[index]!;
@@ -229,7 +231,8 @@ export function buildTerminalRenderLines(
   const wrappedBody = width === undefined ? bodyLines : bodyLines.flatMap((line) => wrapRenderLine(line, width));
   const wrappedHeader = width === undefined ? header : header.flatMap((line) => wrapRenderLine(line, width));
   const footer: RenderLine[] = [];
-  footer.push(...panelLinesInLiveTail);
+  footer.push(...taskSummaryLines);
+  footer.push(...panelLinesInFooter);
   // Slot reserved for the picker or the Todo editor. The picker is filled in
   // once the rest of the frame is known: fullscreen modes reserve the welcome
   // panel and the prompt chrome first and hand the overlay what is left, so a
@@ -251,7 +254,7 @@ export function buildTerminalRenderLines(
   // The Todo tip is folded into the single activity row below; a second
   // spinner row above the prompt duplicated the same live state.
   const now = options.now ?? Date.now();
-  const activity = activityPresentation({ ...state, todoPanelVisible: panelLines.length > 0 }, { now });
+  const activity = activityPresentation({ ...state, todoPanelVisible: panelLines.length > 0 || taskSummaryLines.length > 0 }, { now });
   if (activity) {
     const activityPrefix = `${loadingGlyph(now, state.turnStartedAt)} `;
     const activityWidth = width === undefined ? undefined : Math.max(1, width - terminalStringWidth(activityPrefix));
@@ -259,6 +262,7 @@ export function buildTerminalRenderLines(
       key: "activity",
       text: activityWidth === undefined ? formatActivity(activity) : truncateEnd(formatActivity(activity), activityWidth),
       prefix: activityPrefix,
+      prefixTone: activity.stalled ? "error" : loadingMarkerBright(now, state.turnStartedAt) ? "running" : "default",
       style: "muted",
       tone: activity.stalled ? "error" : "running",
       bold: true,
