@@ -1,4 +1,10 @@
-import { findExactModelReferenceMatch, getAllModels, type LlmGatewayProtocol, type ModelRef } from "../models.ts";
+import {
+  findExactModelReferenceMatch,
+  getAllModels,
+  searchModels,
+  type LlmGatewayProtocol,
+  type ModelRef,
+} from "../models.ts";
 import type { ModelSwitchOverrides } from "../llm/index.ts";
 
 function parseGatewayProtocol(value: string | undefined): LlmGatewayProtocol | undefined {
@@ -113,15 +119,9 @@ export function modelCommandFromPickerInput(rawInput: string): string {
   return /^\/model(?:\s|$)/i.test(value) ? value : `/model ${value}`;
 }
 
-/** Previous picker logic: simple substring match on `provider/id`. */
+/** Search model-picker candidates using the shared catalog search semantics. */
 export function filterModelsByQuery(query: string, models: ModelRef[]): ModelRef[] {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return models;
-  const normalizedNeedle = needle.replaceAll(".", "-");
-  return models.filter((model) => {
-    const haystack = `${model.provider}/${model.id}`.toLowerCase();
-    return haystack.includes(needle) || haystack.replaceAll(".", "-").includes(normalizedNeedle);
-  });
+  return searchModels(query, models);
 }
 
 export function modelChoices(query = "", models = getAllModels()): {

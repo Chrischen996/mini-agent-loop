@@ -132,6 +132,11 @@ describe("filterModelsByQuery", () => {
     assert.ok(results.some((model) => model.id === "claude-sonnet-4-6"));
   });
 
+  it("fuzzy-matches provider typos in the model picker", () => {
+    const results = filterModelsByQuery("agens", models);
+    assert.ok(results.some((model) => model.provider === "agnes-ai"));
+  });
+
   it("does not AND extra url/key tokens into the query", () => {
     const parsed = parseModelCommand("xai/grok-3 https://api.sparkcode.top/v1 sk-test-key");
     const results = filterModelsByQuery(parsed.reference, models);
