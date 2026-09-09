@@ -332,10 +332,22 @@ describe("model selection", () => {
   it("registers Agnes AI with its documented OpenAI-compatible capabilities", () => {
     const models = getAvailableModels({ AGNES_API_KEY: "test" })
       .filter((model) => model.provider === "agnes-ai");
-    assert.deepEqual(models.map((model) => model.id), ["agnes-2.0-flash", "agnes-2.5-flash"]);
+    assert.deepEqual(models.map((model) => model.id), ["agnes-2.0-flash", "agnes-2.5-flash", "agnes-3.0-flash"]);
     assert.ok(models.every((model) => model.baseUrl === "https://apihub.agnes-ai.com/v1"));
     assert.ok(models.every((model) => model.capabilities.tools && model.capabilities.input.includes("image")));
     assert.ok(models.every((model) => model.contextWindow === 524288 && model.maxTokens === 65536));
+    const flash = models.find((model) => model.id === "agnes-3.0-flash");
+    assert.equal(flash?.name, "Agnes 3.0 Flash");
+    assert.deepEqual(flash?.compat, {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      maxTokensField: "max_tokens",
+      thinkingFormat: "chat-template",
+      chatTemplateKwargs: {
+        enable_thinking: { $var: "thinking.enabled" },
+      },
+    });
   });
 
   it("matches qualified and unqualified model references case-insensitively", () => {
