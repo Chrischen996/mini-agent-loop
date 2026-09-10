@@ -219,6 +219,8 @@ import {
   estimateViewportContentHeight,
 } from "../src/tui/message-viewport.ts";
 import { countMarkdownRenderRows } from "../src/tui/markdown-lines.ts";
+import { estimateThinkingRows } from "../src/tui/thinking-lines.ts";
+import { subagentRenderLineCount } from "../src/tui/subagent-lines.ts";
 
 describe("actual viewport heights", () => {
   const wideColumns = Array.from({ length: 20 }, (_, i) => `column-name-${i}`);
@@ -268,6 +270,126 @@ describe("actual viewport heights", () => {
   it("keeps actual rows per truncated markdown kind at one", () => {
     assert.equal(countMarkdownRenderRows("```js\nx = 1\ny = 2\n```", 40), 4);
     assert.equal(countMarkdownRenderRows(table, 80), 3);
+    // width - 4 body (paddingX 2 + marker 2): 120 / 36 still wraps to 4 rows.
     assert.equal(countMarkdownRenderRows("a".repeat(120), 40), 4);
+  });
+});
+
+describe("streaming reasoning sizing", () => {
+  const streamingBase = {
+    messages: [] as ChatMessage[],
+    streamingText: "",
+    busy: true,
+    expandedThinking: [] as number[],
+    scrollOffset: 0,
+    availableHeight: 40,
+    width: 80,
+  };
+
+  it("counts a ≤3-line summary-mode streaming block as one collapsed row (F1)", () => {
+    const reasoning = "step one\nstep two\nstep three";
+    const viewport = selectMessageViewport({
+      ...streamingBase,
+      streamingReasoning: reasoning,
+      thinkingMode: "summary",
+    });
+    const item = viewport.items.find((candidate) => candidate.kind === "streaming_reasoning");
+    assert.ok(item && "visibleHeight" in item, "streaming_reasoning block missing");
+    const block = item as { visibleHeight: number; actualHeight: number };
+    // ThinkingBlock (isStreaming=busy) renders only the single `∴ Thinking ▸` hint.
+    assert.equal(block.visibleHeight, 1);
+    assert.equal(block.actualHeight, 1);
+    assert.equal(estimateThinkingRows(reasoning, { mode: "summary", isStreaming: true, width: 80 }), 1);
+  });
+
+  it("keeps >3-line summary-mode streaming blocks collapsed like the render", () => {
+    const reasoning = Array.from({ length: 5 }, (_, index) => `thought-${index}`).join("\n");
+    const viewport = selectMessageViewport({
+      ...streamingBase,
+      streamingReasoning: reasoning,
+      thinkingMode: "summary",
+    });
+    const item = viewport.items.find((candidate) => candidate.kind === "streaming_reasoning");
+    assert.ok(item && "visibleHeight" in item);
+    const block = item as { visibleHeight: number; actualHeight: number };
+    // Streaming + summary without forceExpanded collapses regardless of length.
+    assert.equal(block.visibleHeight, 1);
+    assert.equal(block.actualHeight, 1);
+  });
+
+  it("matches the expanded ThinkingBlock row count when the block is expanded", () => {
+    // 35 lines in full mode: `∴ Thinking…` header + 30 capped body rows + truncation hint.
+    const reasoning = Array.from({ length: 35 }, (_, index) => `thought-${index}`).join("\n");
+    const viewport = selectMessageViewport({
+      ...streamingBase,
+      streamingReasoning: reasoning,
+      thinkingMode: "full",
+    });
+    const item = viewport.items.find((candidate) => candidate.kind === "streaming_reasoning");
+    assert.ok(item && "visibleHeight" in item);
+    const block = item as { visibleHeight: number; actualHeight: number };
+    assert.equal(block.visibleHeight, 1 + 30 + 1);
+    assert.equal(block.actualHeight, 1 + 30 + 1);
+    assert.equal(estimateThinkingRows(reasoning, { mode: "full", isStreaming: true, width: 80 }), 32);
+    // forceExpanded summary path: header + 5 body rows.
+    const short = Array.from({ length: 5 }, (_, index) => `thought-${index}`).join("\n");
+    assert.equal(estimateThinkingRows(short, { mode: "summary", isStreaming: true, forceExpanded: true, width: 80 }), 6);
+  });
+});
+
+describe("subagent_call sizing", () => {
+  it("estimates and clamps subagent_call at subagentRenderLineCount + 1 marginTop row (F3)", () => {
+    const msg: ChatMessage = {
+      kind: "subagent_call",
+      id: "sa-1",
+      task: "summarize the docs",
+      profile: "researcher",
+      depth: 1,
+      status: "done",
+      innerEvents: [],
+      toolCallCount: 0,
+      startedAt: 0,
+      expanded: false,
+    };
+    // Title row + `Done (…)` row under the SubagentCard marginTop={1} row.
+    const expected = subagentRenderLineCount(msg, { width: 80 }) + 1;
+    assert.equal(expected, 3);
+
+    const viewport = selectMessageViewport({
+      messages: [msg],
+      streamingText: "",
+      streamingReasoning: "",
+      busy: false,
+      thinkingMode: "hidden",
+      expandedThinking: [],
+      scrollOffset: 0,
+      availableHeight: 20,
+      width: 80,
+    });
+    const item = viewport.items.find((candidate) => candidate.kind === "message");
+    assert.ok(item && "visibleHeight" in item);
+    const block = item as { visibleHeight: number; actualHeight: number };
+    assert.equal(block.visibleHeight, expected);
+    assert.equal(block.actualHeight, expected);
+    assert.equal(viewport.totalHeight, expected);
+  });
+});
+
+describe("wrap width parity with the rendered feed", () => {
+  it("wraps thinking and markdown bodies at width - 4, not width - 2 (F2)", () => {
+    // 39 CJK characters = 78 terminal columns: they fit in the old width - 2
+    // body (78 columns → 1 row) but wrap to 2 rows at the rendered width - 4
+    // body (76 columns). This is the N → N+1 discriminator for the fix.
+    const cjk = "中".repeat(39);
+    // ThinkingBlock body: feed paddingX={1} (2 columns) + body paddingLeft={2}.
+    assert.equal(estimateThinkingRows(cjk, { mode: "full", width: 80 }), 1 + 2);
+    // Markdown body: feed paddingX (2 columns) + "⏺ " marker (2 columns).
+    assert.equal(countMarkdownRenderRows(cjk, 80), 2);
+  });
+
+  it("keeps list rows inside the same width - 4 budget", () => {
+    // "- " + 37 CJK (74 columns): rendered as "• " marker after the indent,
+    // 74 + 3 marker budget = 77 > 76, so the list row wraps to 2 rows.
+    assert.equal(countMarkdownRenderRows(`- ${"中".repeat(37)}`, 80), 2);
   });
 });

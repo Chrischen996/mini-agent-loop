@@ -36,8 +36,9 @@ function thinkingRows(
   mode: ThinkingDisplayMode,
   forceExpanded: boolean,
   width: number,
+  isStreaming = false,
 ): number {
-  return estimateThinkingRows(content, { mode, forceExpanded, width });
+  return estimateThinkingRows(content, { mode, forceExpanded, width, isStreaming });
 }
 
 export function estimateMessageHeight(
@@ -78,7 +79,8 @@ export function estimateMessageHeight(
         ? Math.min(TOOL_PREVIEW_LINES + 1, message.result.split("\n").length)
         : message.status === "running" ? 1 : 0);
     case "subagent_call":
-      return subagentRenderLineCount(message, { width });
+      // +1 for the marginTop={1} SubagentCard renders above the card rows.
+      return 1 + subagentRenderLineCount(message, { width });
     case "error":
       return Math.max(1, countTerminalRows(message.text, Math.max(10, width - 2)));
   }
@@ -122,10 +124,16 @@ function buildBlocks(options: {
     blocks.push({ item: { kind: "message", index, message }, height: estimated, actual });
   }
   if (options.streamingReasoning) {
+    // MessageFeed renders the live block as <ThinkingBlock isStreaming={busy} />
+    // with no forceExpanded, so both height and actual must estimate it as
+    // streaming: in summary mode that collapses to 1 hint row even at ≤3 lines,
+    // matching thinkingVisibleLines' render decision. Without isStreaming the
+    // estimate wrongly expanded short blocks and over-sized the frame.
+    const streamingThinkingRows = thinkingRows(options.streamingReasoning, options.thinkingMode, false, options.width, true);
     blocks.push({
       item: { kind: "streaming_reasoning" },
-      height: thinkingRows(options.streamingReasoning, options.thinkingMode, false, options.width),
-      actual: thinkingRows(options.streamingReasoning, options.thinkingMode, false, options.width),
+      height: streamingThinkingRows,
+      actual: streamingThinkingRows,
     });
   }
   if (options.streamingText) {

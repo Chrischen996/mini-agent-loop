@@ -53,7 +53,15 @@ export function thinkingRenderLines(content: string, options: ThinkingLineOption
   return lines;
 }
 
-/** Keep viewport sizing tied to the exact same visibility decision as render. */
+/**
+ * Keep viewport sizing tied to the exact same visibility decision as render.
+ *
+ * `isStreaming` flows through to `thinkingVisibleLines`, so it must mirror
+ * what MessageFeed passes to `ThinkingBlock` (`isStreaming={busy}` for the
+ * live block): in summary mode a streaming block collapses to the single
+ * `∴ Thinking ▸` hint even when it holds ≤3 lines; the body only mounts when
+ * expanded (forceExpanded or full mode).
+ */
 export function estimateThinkingRows(content: string | undefined, options: ThinkingLineOptions & { width: number }): number {
   if (!content || (options.mode === "hidden" && !options.forceExpanded)) return 0;
   const visible = thinkingVisibleLines(content, options);
@@ -61,5 +69,9 @@ export function estimateThinkingRows(content: string | undefined, options: Think
   // Ink feed. The body is only mounted for expanded/full thinking.
   if (!visible.expanded) return 1;
   const body = visible.lines.join("\n");
-  return 1 + countTerminalRows(body, Math.max(10, options.width - 2)) + (visible.truncated > 0 ? 1 : 0);
+  // The body rows wrap inside ThinkingBlock's <Box paddingLeft={2}>, which
+  // itself sits in the feed's <Box paddingX={1}>: 2 columns for paddingX
+  // (left + right = 1 each) plus 2 for the body paddingLeft, so the wrap
+  // width is width - 4, matching the renderer instead of the old width - 2.
+  return 1 + countTerminalRows(body, Math.max(10, options.width - 4)) + (visible.truncated > 0 ? 1 : 0);
 }

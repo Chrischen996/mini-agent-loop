@@ -219,7 +219,11 @@ export function parseMarkdownLines(source: string): MarkdownLine[] {
  */
 export function countMarkdownRenderRows(source: string, width: number): number {
   if (!source) return 0;
-  const available = Math.max(10, width - 2);
+  // MessageFeed renders each assistant body next to a 2-column "⏺ " marker,
+  // inside the feed's <Box paddingX={1}>: 2 columns for paddingX (left +
+  // right = 1 each) plus 2 for the marker, so wrapped body rows have
+  // width - 4 columns, matching the renderer instead of the old width - 2.
+  const available = Math.max(10, width - 4);
   let rows = 0;
   for (const line of parseMarkdownLines(source)) {
     switch (line.kind) {
@@ -234,11 +238,16 @@ export function countMarkdownRenderRows(source: string, width: number): number {
       case "text":
         rows += Math.max(1, Math.ceil(terminalStringWidth(stripInlineMarkdown(line.text)) / available));
         break;
-      case "list":
+      case "list": {
+        // A list row renders as an indent*2-column indent followed by a
+        // "• "/"N. " marker (~3 columns incl. space) inside the same
+        // width - 4 body; the +3 keeps that marker inside the per-row budget.
+        const textWidth = terminalStringWidth(stripInlineMarkdown(line.text));
         rows += Math.max(1, Math.ceil(
-          (terminalStringWidth(stripInlineMarkdown(line.text)) || 1) + 3,
-        ) / Math.max(10, available - line.indent * 2));
+          ((textWidth || 1) + 3) / Math.max(10, available - line.indent * 2),
+        ));
         break;
+      }
     }
   }
   return rows;

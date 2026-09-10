@@ -11,6 +11,7 @@ import { isTodoRevisionNewer, nextTodoRevision, TODO_WRITE_TOOL_NAME, type TodoI
 import { executionPlanToTodoItems } from "./todo-format.ts";
 import { permissionModeLabel, toolArgumentSummary } from "./claude-style.ts";
 import { toolVisualName } from "./tool-lines.ts";
+import { subagentRenderLineCount } from "./subagent-lines.ts";
 import { compactText } from "./text-utils.ts";
 
 export type { PermissionMode } from "../permissions.ts";
@@ -330,6 +331,13 @@ function estimateNewMessageRows(previous: readonly ChatMessage[], next: readonly
   let rows = 0;
   for (let i = previous.length; i < next.length; i++) {
     const msg = next[i]!;
+    if (msg.kind === "subagent_call") {
+      // SubagentCard draws subagentRenderLineCount rows beneath a marginTop=1
+      // gap. subagent_call carries no `text` field, so the newline-count
+      // fallback below would always undercount it as 2 rows.
+      rows += 1 + subagentRenderLineCount(msg);
+      continue;
+    }
     const text = ("text" in msg ? msg.text : "") || "";
     // +1 for the mandatory margin row above each message, then count text lines.
     rows += 1 + Math.max(1, text.split("\n").length);
