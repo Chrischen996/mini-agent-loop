@@ -153,14 +153,20 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const allToolsRef = useRef<ToolProvider>(allTools ?? createAllTools(cwd));
   const agentToolsRef = useRef<ToolProvider>(agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
 
-  // Create the subagent tool — dispatches SubagentEvents to the TUI reducer
-  const subagentFactory = new SubagentToolsFactory();
+  // Create the subagent tool — dispatches SubagentEvents to the TUI reducer.
+  // Memoized so the factory survives re-renders instead of rebuilding every
+  // render, and the vision preprocessor keeps its image cache across turns.
+  const subagentFactory = useMemo(() => new SubagentToolsFactory(), []);
   const subagentRuntimeRef = useRef<AgentRuntimeRef>({});
+  const visionPreprocessors = useMemo(
+    () => (vision ? [createVisionPreprocessor(vision)] : []),
+    [vision],
+  );
   const getSubagentTools = useCallback((parentLlm = llm): Tool[] => {
     return subagentFactory.getTools({
       parentLlm,
       parentTools: agentToolsRef.current,
-      visionPreprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+      visionPreprocessors,
       onSubagentEvent: (event: SubagentEvent) => {
         dispatch({ type: "SUBAGENT_EVENT", event });
       },
@@ -169,7 +175,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       globalTokenBudget,
       globalConcurrencyLimit,
     });
-  }, [llm, vision]);
+  }, [llm, subagentFactory, visionPreprocessors]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
   const stateRef = useRef(state);
@@ -1025,7 +1031,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             llm: { ...turnLlm, sessionId: conversationId },
             tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools(turnLlm)],
             autoSubagent,
-            preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+            preprocessors: visionPreprocessors,
             userContent: currentUserContent,
             permissionTurn,
             runtimeContext: {
@@ -1143,13 +1149,18 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     }
   }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit, persistSession, restoreSession]);
 
-  // Start the next queued prompt only after the current turn has emitted done/error/aborted.
+  // Start the next queued prompt only after the current turn has emitted
+  // done/error/aborted. handleSubmit's identity changes on every render
+  // (its dep list includes `state`), so the effect reads it through a ref
+  // and only re-runs on the busy transition that unblocks the queue.
+  const handleSubmitRef = useRef(handleSubmit);
+  handleSubmitRef.current = handleSubmit;
   useEffect(() => {
     if (state.busy || promptQueueRef.current.length === 0) return;
     const next = promptQueueRef.current.shift();
     setQueuedCount(promptQueueRef.current.length);
-    if (next) void handleSubmit(next);
-  }, [state.busy, handleSubmit]);
+    if (next) void handleSubmitRef.current(next);
+  }, [state.busy]);
 
   // ── render ────────────────────────────────────────────────────────────────
 
