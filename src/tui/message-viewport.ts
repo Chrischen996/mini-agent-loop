@@ -1,14 +1,14 @@
 import type { ChatMessage, ThinkingDisplayMode } from "./state.ts";
 import { countTerminalRows } from "./terminal-width.ts";
 import { estimateThinkingRows } from "./thinking-lines.ts";
-import { compactStreamingText } from "./text-utils.ts";
+import { compactStreamingText, stripLeadingBlankLines } from "./text-utils.ts";
 import { stripInlineMarkdown } from "./markdown-lines.ts";
 import { countMarkdownRenderRows } from "./markdown-lines.ts";
 import { isSubagentProtocolText, isSubagentToolName, subagentRenderLineCount } from "./subagent-lines.ts";
 
 const TOOL_PREVIEW_LINES = 15;
 
-type ClippedItem = { clipTop: number; visibleHeight: number; actualHeight: number };
+type ClippedItem = { clipTop: number; clipTopActual: number; visibleHeight: number; actualHeight: number };
 type RawViewportItem =
   | { kind: "message"; index: number; message: ChatMessage }
   | { kind: "streaming_reasoning" }
@@ -59,6 +59,10 @@ export function estimateMessageHeight(
       return 1 + Math.max(1, countTerminalRows(message.displayText ?? message.text, Math.max(10, width - 2))) + (message.images?.length ? 1 : 0);
     case "assistant":
       if (isSubagentProtocolText(message.text)) return 0;
+      // Tool-only turns draw no rows: MessageFeed skips the block entirely
+      // when an assistant message has neither reasoning nor text, so no
+      // lone "⏺ " marker row is reserved.
+      if (!message.reasoning && !message.text) return 0;
       // +1 for the marginTop={1} rendered above the assistant block in MessageFeed.
       return 1 + Math.max(
         1,
@@ -66,23 +70,25 @@ export function estimateMessageHeight(
           countTerminalRows(message.text, Math.max(10, width - 2)),
       );
     case "notice":
-      // Divider-style notice: optional title row + one text row (no border box).
-      return (message.title ? 1 : 0) + Math.max(1, countTerminalRows(message.text, Math.max(10, width - 2)));
+      // +1 for the marginTop={1} row. Divider-style notice: optional title
+      // row + one text row (no border box).
+      return 1 + (message.title ? 1 : 0) + Math.max(1, countTerminalRows(message.text, Math.max(10, width - 2)));
     case "tool_call":
       if (isSubagentToolName(message.name)) return 0;
-      // Ink's Claude-style tool row is no longer a bordered card: one title
-      // row plus the nested MessageResponse result (or Running... while the
-      // call is active). Keep this estimate in lockstep with ToolCallRow.
+      // +1 for the marginTop={1} row, plus the title row and the nested
+      // MessageResponse result (or Working... while the call is active).
+      // Keep this estimate in lockstep with ToolCallRow.
       // ToolCallRow renders each \n-split line with wrap="truncate-end" (no
       // reflowing), so count newlines rather than terminal-width-wrapped rows.
-      return 1 + (message.result
+      return 2 + (message.result
         ? Math.min(TOOL_PREVIEW_LINES + 1, message.result.split("\n").length)
         : message.status === "running" ? 1 : 0);
     case "subagent_call":
       // +1 for the marginTop={1} SubagentCard renders above the card rows.
       return 1 + subagentRenderLineCount(message, { width });
     case "error":
-      return Math.max(1, countTerminalRows(message.text, Math.max(10, width - 2)));
+      // +1 for the marginTop={1} row.
+      return 1 + Math.max(1, countTerminalRows(message.text, Math.max(10, width - 2)));
   }
 }
 
@@ -112,7 +118,7 @@ function buildBlocks(options: {
     // rows than `countTerminalRows` estimates. The viewport clamps slice
     // boxes to the smaller number to avoid blank padding above the prompt.
     let actual = estimated;
-    if (message.kind === "assistant" && !isSubagentProtocolText(message.text)) {
+    if (message.kind === "assistant" && !isSubagentProtocolText(message.text) && (message.reasoning || message.text)) {
       actual = 1 +
         estimateThinkingRows(message.reasoning, {
           mode: options.thinkingMode,
@@ -123,35 +129,49 @@ function buildBlocks(options: {
     }
     blocks.push({ item: { kind: "message", index, message }, height: estimated, actual });
   }
+  // Live stack (streaming_reasoning → streaming_text → busy_status) previews
+  // the next history assistant, which renders with a 1-row gap above it.
+  // Only the first live row carries that gap; later live rows follow with 0
+  // so the replacement by the history block is seamless. Mirror these
+  // margins in MessageFeed's streaming/busy slices.
   if (options.streamingReasoning) {
     // MessageFeed renders the live block as <ThinkingBlock isStreaming={busy} />
     // with no forceExpanded, so both height and actual must estimate it as
     // streaming: in summary mode that collapses to 1 hint row even at ≤3 lines,
     // matching thinkingVisibleLines' render decision. Without isStreaming the
     // estimate wrongly expanded short blocks and over-sized the frame.
+    // +1 for the live-stack top margin rendered above the slice.
     const streamingThinkingRows = thinkingRows(options.streamingReasoning, options.thinkingMode, false, options.width, true);
     blocks.push({
       item: { kind: "streaming_reasoning" },
-      height: streamingThinkingRows,
-      actual: streamingThinkingRows,
+      height: 1 + streamingThinkingRows,
+      actual: 1 + streamingThinkingRows,
     });
   }
+  const textTopMargin = options.streamingReasoning ? 0 : 1;
   if (options.streamingText) {
-    const displayText = options.busy
-      ? compactStreamingText(stripInlineMarkdown(options.streamingText))
-      : stripInlineMarkdown(options.streamingText);
+    // Mirror the renderers: strip inline markdown, compact to the live tail
+    // while busy, and drop leading blank lines so the first row is never a
+    // lone "⏺ " marker row. Height and actual share the same display text,
+    // differing only in the wrap-width budget.
+    const displayText = stripLeadingBlankLines(
+      options.busy
+        ? compactStreamingText(stripInlineMarkdown(options.streamingText))
+        : stripInlineMarkdown(options.streamingText),
+    );
     blocks.push({
       item: { kind: "streaming_text" },
-      height: Math.max(1, countTerminalRows(options.busy ? compactStreamingText(options.streamingText) : options.streamingText, Math.max(10, options.width - 2))),
-      actual: Math.max(1, countTerminalRows(displayText, Math.max(10, options.width - 4))),
+      height: textTopMargin + Math.max(1, countTerminalRows(displayText, Math.max(10, options.width - 2))),
+      actual: textTopMargin + Math.max(1, countTerminalRows(displayText, Math.max(10, options.width - 4))),
     });
   }
-  if (options.busy) blocks.push({ item: { kind: "busy_status" }, height: 1, actual: 1 });
+  const busyTopMargin = options.streamingReasoning || options.streamingText ? 0 : 1;
+  if (options.busy) blocks.push({ item: { kind: "busy_status" }, height: 1 + busyTopMargin, actual: 1 + busyTopMargin });
   return blocks;
 }
 
 export function estimateViewportContentHeight(options: Omit<Parameters<typeof selectMessageViewport>[0], "scrollOffset" | "availableHeight">): number {
-  return buildBlocks({ ...options, maxMessages: options.maxMessages ?? 200 }).reduce((sum, block) => sum + block.height, 0);
+  return buildBlocks({ ...options, maxMessages: options.maxMessages ?? Number.MAX_SAFE_INTEGER }).reduce((sum, block) => sum + block.height, 0);
 }
 
 /**
@@ -161,7 +181,7 @@ export function estimateViewportContentHeight(options: Omit<Parameters<typeof se
  * prompt. Never exceeds `estimateViewportContentHeight` for the same input.
  */
 export function estimateViewportActualHeight(options: Omit<Parameters<typeof selectMessageViewport>[0], "scrollOffset" | "availableHeight">): number {
-  return buildBlocks({ ...options, maxMessages: options.maxMessages ?? 200 }).reduce((sum, block) => sum + Math.min(block.height, block.actual), 0);
+  return buildBlocks({ ...options, maxMessages: options.maxMessages ?? Number.MAX_SAFE_INTEGER }).reduce((sum, block) => sum + Math.min(block.height, block.actual), 0);
 }
 
 /** Build a bottom-anchored, row-addressable viewport. */
@@ -181,7 +201,7 @@ export function selectMessageViewport(options: {
 }): ViewportSelection {
   const heightBudget = Math.max(3, options.availableHeight);
   const showHistoryHints = options.showHistoryHints ?? true;
-  const blocks = buildBlocks({ ...options, maxMessages: options.maxMessages ?? 200 });
+  const blocks = buildBlocks({ ...options, maxMessages: options.maxMessages ?? Number.MAX_SAFE_INTEGER });
   const totalHeight = blocks.reduce((sum, block) => sum + block.height, 0);
   const maxScrollOffset = Math.max(0, totalHeight - Math.max(1, heightBudget - 1));
   const scrollOffset = Math.max(0, Math.min(options.scrollOffset, maxScrollOffset));
@@ -204,14 +224,37 @@ export function selectMessageViewport(options: {
   let blockStart = 0;
   for (const block of blocks) {
     const blockEnd = blockStart + block.height;
+    // The block's own rows Ink will actually draw. `block.height` is the
+    // wrap-aware estimate used for scroll accounting (startRow/endRow are in
+    // that estimated space); `clippedActual` is the real row budget so the
+    // rendered slice never exceeds it and never leaves a blank band when an
+    // estimate over-counts (e.g. truncated table rows, clipped code fences).
+    const clippedActual = Math.min(block.actual, block.height);
     const visibleStart = Math.max(blockStart, startRow);
     const visibleEnd = Math.min(blockEnd, endRow);
     if (visibleStart < visibleEnd) {
+      // Estimated-space clip offset, clamped so the inner `marginTop={-clipTop}`
+      // can never push the block's real content entirely out of the box when an
+      // estimate over-counts the block's drawn rows.
+      const clipTop = Math.min(
+        Math.max(0, visibleStart - blockStart),
+        Math.max(0, clippedActual - 1),
+      );
+      // Real rows the slice actually clips: the estimated-space clip scaled to
+      // the block's drawn-row budget. `block.height` is the wrap-aware estimate
+      // (e.g. truncate-end table rows over-count), so the box must shrink by the
+      // real clipped rows, not the estimated ones, to avoid a blank band above
+      // the prompt when a clipped block draws fewer rows than it occupies.
+      const clipTopActual = Math.max(0, Math.min(
+        Math.round(clipTop * clippedActual / Math.max(1, block.height)),
+        clippedActual - 1,
+      ));
       items.push({
         ...block.item,
-        clipTop: visibleStart - blockStart,
+        clipTop,
+        clipTopActual,
         visibleHeight: visibleEnd - visibleStart,
-        actualHeight: Math.min(block.actual, block.height),
+        actualHeight: clippedActual,
       } as ViewportItem);
     }
     blockStart = blockEnd;

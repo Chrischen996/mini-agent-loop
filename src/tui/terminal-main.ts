@@ -24,6 +24,7 @@ import { createInitialState, createTuiStore, type TuiState } from "./state.ts";
 import { buildTerminalRenderLines } from "./terminal-render-model.ts";
 import { thinkingLevelStatusText } from "./status-line.ts";
 import { IncrementalTerminalRenderer, resolveTerminalDisplayMode, ScrollbackTerminalRenderer } from "./incremental-renderer.ts";
+import { disableMouseTracking, enableMouseTracking } from "./mouse-tracking.ts";
 import { TerminalInputController, type TerminalInputAction } from "./terminal-input-controller.ts";
 import { TerminalAgentService } from "./terminal-agent-service.ts";
 import { TerminalAutocompleteController } from "./terminal-autocomplete-controller.ts";
@@ -442,6 +443,9 @@ export async function runTerminalMain(): Promise<void> {
         if (process.stdin.isRaw) process.stdin.setRawMode(false);
         process.stdin.pause();
       }
+      if (fullscreen || piRuntime) {
+        disableMouseTracking(process.stdout);
+      }
       if (fullscreen) {
         process.stdout.write(`\x1b[?25h${MAIN_SCREEN}`);
       } else if (scrollback) {
@@ -462,6 +466,7 @@ export async function runTerminalMain(): Promise<void> {
 
     if (piRuntime || fullscreen) {
       process.stdout.write(`${ALTERNATE_SCREEN}\x1b[?25l\x1b[H`);
+      enableMouseTracking(process.stdout);
     } else {
       // Start a clean transcript row in the user's main screen. Do not clear
       // the terminal: previous shell output must remain in scrollback.

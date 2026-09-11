@@ -8,7 +8,7 @@ import { MarkdownText } from "./MarkdownText.tsx";
 import { toMessageRenderModel } from "../render-model.ts";
 import { toolResultPrefix, toolVisualName, toolVisualStatusIcon } from "../tool-lines.ts";
 import { thinkingRenderLines, thinkingVisibleLines } from "../thinking-lines.ts";
-import { compactStreamingText } from "../text-utils.ts";
+import { compactStreamingText, stripLeadingBlankLines } from "../text-utils.ts";
 import { noticeText, noticeTitle, statusLabel, toolArgumentSummary } from "../claude-style.ts";
 import { isSubagentProtocolText, isSubagentToolName } from "../subagent-lines.ts";
 import { activityPresentation, formatActivity, loadingGlyph, loadingMarkerBright, LOADING_FRAME_MS } from "../activity.ts";
@@ -113,7 +113,7 @@ function ToolCallRow({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }>
   // Match Claude Code's AssistantToolUseMessage/MessageResponse pair:
   // one compact tool-use row followed by a single nested result gutter.
   return (
-    <Box flexDirection="column" marginTop={0} marginBottom={0}>
+    <Box flexDirection="column" marginTop={1} marginBottom={0}>
       <Box flexDirection="row">
         <Text color={markerColor} bold>{toolVisualStatusIcon(msg.status)} </Text>
         <Text color={isError ? C.error : C.info} bold>{toolVisualName(msg.name)}</Text>
@@ -189,12 +189,15 @@ function ViewportSlice({
 /**
  * Clamp a slice box to the rows its content actually draws. Scroll clipping
  * still runs in estimated-row space (`visibleHeight`), but the box itself
- * shrinks so estimate surplus never pads the gap between the transcript and
- * the prompt.
+ * shrinks by the real clipped rows (`clipTopActual`) so estimate surplus never
+ * pads the gap between the transcript and the prompt.
  */
-type ClippedViewportItem = Extract<ViewportItem, { clipTop: number; visibleHeight: number }>;
+type ClippedViewportItem = Extract<ViewportItem, { clipTop: number; clipTopActual: number; visibleHeight: number }>;
 function sliceHeightFor(item: ClippedViewportItem): number {
-  return Math.min(item.visibleHeight, item.actualHeight ?? item.visibleHeight);
+  return Math.min(
+    item.visibleHeight,
+    (item.actualHeight ?? item.visibleHeight) - (item.clipTopActual ?? 0),
+  );
 }
 
 
@@ -269,7 +272,7 @@ export function MessageFeed({
   lastStreamAt,
   spinnerMessage,
   todoPanelVisible = false,
-  maxMessages = 200,
+  maxMessages = Number.MAX_SAFE_INTEGER,
   availableHeight = 20,
   width = 80,
   scrollOffset = 0,
@@ -303,6 +306,16 @@ export function MessageFeed({
           an empty band between the transcript and the prompt. */}
       <Box flexGrow={1} minHeight={0} />
       {viewport.items.map((item) => {
+        {/* Spacing convention — keep in lockstep with estimateMessageHeight /
+            buildBlocks in message-viewport.ts and estimateNewMessageRows in
+            state.ts:
+            - every history block (user/assistant/notice/tool_call/
+              subagent_call/error) renders with a 1-row gap above it;
+            - the live stack (streaming_reasoning → streaming_text →
+              busy_status) previews the next history assistant, so only its
+              FIRST row carries the 1-row gap; later live rows follow with 0,
+              keeping the replacement seamless;
+            - subagent tool rows and protocol text render nothing. */}
         if (item.kind === "history_hint") {
           // Keep viewport accounting intact, but do not replace transcript
           // rows with a numeric history hint. Claude Code leaves the clipped
@@ -311,25 +324,28 @@ export function MessageFeed({
         }
         if (item.kind === "streaming_reasoning") {
           return (
-            <ViewportSlice key="streaming-reasoning" clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}>
-              <ThinkingBlock content={streamingReasoning} isStreaming={busy} mode={effectiveMode} />
+            <ViewportSlice key="streaming-reasoning" clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
+              <Box marginBottom={0} flexDirection="column" marginTop={1}>
+                <ThinkingBlock content={streamingReasoning} isStreaming={busy} mode={effectiveMode} />
+              </Box>
             </ViewportSlice>
           );
         }
         if (item.kind === "streaming_text") {
           return (
-            <ViewportSlice key="streaming-text" clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}>
-              <Box flexDirection="row">
+            <ViewportSlice key="streaming-text" clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
+              <Box flexDirection="row" marginTop={streamingReasoning ? 0 : 1}>
                 <Text color={C.primary} bold>⏺ </Text>
-                <Text color={C.assistant} wrap="wrap">{busy ? compactStreamingText(stripInlineMarkdown(streamingText)) : stripInlineMarkdown(streamingText)}</Text>
+                <Text color={C.assistant} wrap="wrap">{stripLeadingBlankLines(busy ? compactStreamingText(stripInlineMarkdown(streamingText)) : stripInlineMarkdown(streamingText))}</Text>
               </Box>
             </ViewportSlice>
           );
         }
         if (item.kind === "busy_status") {
           return (
-            <ViewportSlice key="busy-status" clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}>
-              <ActivityRow
+            <ViewportSlice key="busy-status" clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
+              <Box flexDirection="column" marginTop={streamingReasoning || streamingText ? 0 : 1}>
+                <ActivityRow
                 status={status}
                 streamingText={streamingText}
                 streamingReasoning={streamingReasoning}
@@ -340,6 +356,7 @@ export function MessageFeed({
                 spinnerMessage={spinnerMessage}
                 todoPanelVisible={todoPanelVisible}
               />
+              </Box>
             </ViewportSlice>
           );
         }
@@ -349,7 +366,7 @@ export function MessageFeed({
         const visual = toMessageRenderModel(msg);
         if (msg.kind === "user") {
           return (
-            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}>
+            <ViewportSlice key={absoluteIndex} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
               <Box
                 marginBottom={0}
                 flexDirection="column"
@@ -373,9 +390,14 @@ export function MessageFeed({
         }
         if (msg.kind === "assistant") {
           if (isSubagentProtocolText(msg.text)) return null;
+          // Tool-only turns draw no lone "⏺ " marker row: with no reasoning
+          // and no text the block would render a bare dot plus a 1-row gap.
+          // The tool rows that follow carry the conversation flow (the ANSI
+          // render model already draws empty assistant messages as 0 rows).
+          if (!msg.reasoning && !msg.text) return null;
           const focused = focusedMessageIndex === absoluteIndex;
           return (
-            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}>
+            <ViewportSlice key={absoluteIndex} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
               <Box marginBottom={0} flexDirection="column" marginTop={1}>
                 <Box flexDirection="row">
                   <Text color={focused ? C.running : C.assistant} bold>{focused ? "◆" : visual.marker} </Text>
@@ -397,12 +419,12 @@ export function MessageFeed({
         }
         if (msg.kind === "tool_call") {
           if (isSubagentToolName(msg.name)) return null;
-          return <ViewportSlice key={msg.id} clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}><ToolCallRow msg={msg} /></ViewportSlice>;
+          return <ViewportSlice key={msg.id} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}><ToolCallRow msg={msg} /></ViewportSlice>;
         }
         if (msg.kind === "notice") {
           return (
-            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}>
-              <Box flexDirection="column" paddingX={1}>
+            <ViewportSlice key={absoluteIndex} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
+              <Box flexDirection="column" paddingX={1} marginTop={1}>
                 {msg.title && (
                   <Text color={C.info} dimColor>
                     {"─".repeat(6)} {noticeTitle(msg.title)} {"─".repeat(6)}
@@ -414,12 +436,12 @@ export function MessageFeed({
           );
         }
         if (msg.kind === "subagent_call") {
-          return <ViewportSlice key={msg.id} clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}><SubagentCard msg={msg} width={width} /></ViewportSlice>;
+          return <ViewportSlice key={msg.id} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}><SubagentCard msg={msg} width={width} /></ViewportSlice>;
         }
         if (msg.kind === "error") {
           return (
-            <ViewportSlice key={absoluteIndex} clipTop={item.clipTop} visibleHeight={sliceHeightFor(item)}>
-              <Box flexDirection="row" minWidth={0}>
+            <ViewportSlice key={absoluteIndex} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
+              <Box flexDirection="row" minWidth={0} marginTop={1}>
                 <Text color={C.error} bold>✗ </Text>
                 <Text color={C.assistant} wrap="wrap">{msg.text}</Text>
               </Box>

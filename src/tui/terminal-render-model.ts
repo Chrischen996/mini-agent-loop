@@ -21,7 +21,7 @@ import { isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from 
 import { activityPresentation, formatActivity, loadingGlyph, loadingMarkerBright } from "./activity.ts";
 import { TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "./brand.ts";
 import { welcomePanelRenderLines, type WelcomePanelData } from "./welcome-panel.ts";
-import { compactStreamingText } from "./text-utils.ts";
+import { compactStreamingText, stripLeadingBlankLines } from "./text-utils.ts";
 
 export type TerminalRenderOptions = {
   maxMessages?: number;
@@ -86,7 +86,7 @@ export function buildTerminalRenderLines(
   // emit the preceding history again as a new segment.
   const messageStart = scrollback
     ? 0
-    : Math.max(0, state.messages.length - (options.maxMessages ?? 200));
+    : Math.max(0, state.messages.length - (options.maxMessages ?? Number.MAX_SAFE_INTEGER));
   const header = options.header?.show === false ? [] : options.header ? headerRenderLines(state, options.header, width) : [];
 
   // Both the active Todo panel and completed task summaries belong to the
@@ -122,13 +122,9 @@ export function buildTerminalRenderLines(
     const message = state.messages[index]!;
     if (message.kind === "assistant" && isSubagentProtocolText(message.text)) continue;
     const visual = toMessageRenderModel(message);
-    // Keep the transcript airy at conversation boundaries, while tool and
-    // subagent progress rows stay attached to the assistant turn that caused
-    // them. This removes the staircase of blank rows visible during a busy
-    // run without changing any message ordering.
-    if (message.kind !== "tool_call" && (index === messageStart || state.messages[index - 1]?.kind !== "tool_call")) {
-      addMessageGap(lines, index);
-    }
+    // Messages are rendered compactly with no inter-message blank rows. Tool
+    // and subagent progress rows stay attached to the assistant turn that
+    // caused them, matching Claude Code's dense main-screen transcript.
     if (message.kind === "user") {
       // Claude Code keeps the prompt body white on a muted gray row. The
       // prompt marker is intentionally quiet; user text should not inherit
@@ -208,7 +204,6 @@ export function buildTerminalRenderLines(
   }
 
   if (state.streamingReasoning) {
-    addMessageGap(lines, state.messages.length);
     lines.push(...thinkingHeaderLines(state.streamingReasoning, state.thinkingMode, state.busy, "streaming", false).map((line) => scrollback ? markEphemeral(line) : line));
     lines.push(...thinkingRenderLines(state.streamingReasoning, {
       mode: state.thinkingMode,
@@ -220,10 +215,11 @@ export function buildTerminalRenderLines(
     }));
   }
   if (state.streamingText) {
-    addMessageGap(lines, state.messages.length + 1);
-    const streamingText = state.busy
+    // Strip leading blank lines so the first live row is content, not a lone
+    // "⏺ " marker (mirrors the Ink feed and the viewport estimates).
+    const streamingText = stripLeadingBlankLines(state.busy
       ? compactStreamingText(stripInlineMarkdown(state.streamingText))
-      : stripInlineMarkdown(state.streamingText);
+      : stripInlineMarkdown(state.streamingText));
     lines.push({ key: "streaming-text", text: streamingText, prefix: "⏺ ", style: "assistant", ...(scrollback ? { ephemeral: true } : {}) });
   }
   const wrappedPanel = width === undefined ? panelLinesAboveBody : panelLinesAboveBody.flatMap((line) => wrapRenderLine(line, width));
@@ -344,8 +340,11 @@ export function buildTerminalRenderLines(
   const end = Math.max(0, wrappedBody.length - offset);
   const cropStart = Math.max(0, end - bodyHeight);
   const clipped = wrappedBody.slice(cropStart, end);
-  // Spare rows are placed above the message body so that the transcript and
-  // the prompt chrome stay visually anchored at the bottom of the frame.
+  // Spare rows fill the unused body area. When the transcript is bottom-pinned
+  // (offset === 0) the spare rows go *below* the messages so the conversation
+  // starts at the top and the gap is absorbed between content and the prompt
+  // chrome. When the user has scrolled up (offset > 0) the spare rows stay
+  // above the visible window so the viewport remains bottom-anchored.
   const padding = Math.max(0, bodyHeight - clipped.length);
   const spacers = padding > 0
     ? Array.from({ length: padding }, (_, index) => ({
@@ -354,7 +353,9 @@ export function buildTerminalRenderLines(
         style: "muted" as const,
       }))
     : [];
-  return [...visibleHeader, ...visiblePanel, ...spacers, ...clipped, ...clippedFooter];
+  return offset === 0
+    ? [...visibleHeader, ...visiblePanel, ...clipped, ...spacers, ...clippedFooter]
+    : [...visibleHeader, ...visiblePanel, ...spacers, ...clipped, ...clippedFooter];
 }
 
 function truncateEnd(value: string, maxWidth: number): string {
@@ -369,11 +370,6 @@ function truncateEnd(value: string, maxWidth: number): string {
     used += glyphWidth;
   }
   return `${visible}…`;
-}
-
-function addMessageGap(lines: RenderLine[], messageIndex: number | string): void {
-  if (lines.length === 0 || lines.at(-1)?.text === "") return;
-  lines.push({ key: `message-gap-${messageIndex}`, text: "", style: "muted" });
 }
 
 function markEphemeral(line: RenderLine): RenderLine {

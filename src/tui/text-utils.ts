@@ -29,3 +29,12 @@ export function compactText(
     : max;
   return `${oneLine.slice(0, available)}${ellipsis}`;
 }
+
+/**
+ * Drop leading blank (whitespace-only) lines so a streamed reply that
+ * starts with newlines does not draw a lone marker row ("⏺ ") before the
+ * first visible content. Used by the live streaming-text renderers.
+ */
+export function stripLeadingBlankLines(value: string): string {
+  return value.replace(/^([ \t]*\n)+/, "");
+}

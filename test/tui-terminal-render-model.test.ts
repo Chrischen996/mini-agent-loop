@@ -122,6 +122,16 @@ describe("standalone terminal render model", () => {
     assert.equal(lines.some((line) => line.text.includes("**")), false);
   });
 
+  it("strips leading blank rows from live streaming text", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "assistant_delta", text: "\n\nhello", kind: "answer" } });
+    const lines = buildTerminalRenderLines(state);
+    const streaming = lines.find((line) => line.key === "streaming-text");
+    // A reply that starts with newlines must not draw a lone "⏺ " marker row.
+    assert.equal(streaming?.text, "hello");
+    assert.equal(streaming?.prefix, "⏺ ");
+  });
+
   it("keeps a stable key for unchanged line identities", () => {
     const state = createInitialState("test-model");
     const first = buildTerminalRenderLines(state);
@@ -318,7 +328,8 @@ describe("standalone terminal render model", () => {
     assert.equal(lines.find((line) => line.key.startsWith("message-0"))?.prefix, "❯ ");
     assert.equal(lines.find((line) => line.key.startsWith("message-0"))?.background, "user");
     assert.equal(lines.find((line) => line.key.startsWith("message-1"))?.prefix, "⏺ ");
-    assert.ok(lines.some((line) => line.key.startsWith("message-gap-")));
+    // Messages are rendered compactly: no inter-message blank rows are emitted.
+    assert.equal(lines.some((line) => line.key.startsWith("message-gap-")), false);
     assert.equal(lines.find((line) => line.key === "prompt-rule")?.text.length, 100);
     // The activity row animates with the single shared spinner, so assert the
     // glyph comes from that set instead of pinning one time-dependent frame.

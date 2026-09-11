@@ -6,6 +6,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { RenderLine } from "./render-lines.ts";
 import { formatRenderLine } from "./render-line-format.ts";
+import { isSgrMouseEvent, parseSgrMouseWheel } from "./mouse-events.ts";
 
 export type PiTuiFrameBuilder = (width: number, height: number) => readonly RenderLine[];
 
@@ -32,11 +33,11 @@ export class PiTuiFrame implements Component {
   }
 
   handleInput(data: string): void {
-    // Ignore mouse selection / drag events (start with \x1b[M or contain mouse codes)
-    // so that selecting text in the terminal doesn't send it as user input.
-    if (data.startsWith("\x1b[M") || /\x1b\[[0-9;]*[Mm]/.test(data)) {
-      return;
-    }
+    // SGR wheel events are consumed by TerminalInputController and become
+    // transcript scroll actions. Ignore only legacy/SGR button events so
+    // mouse selection does not leak escape bytes into the prompt.
+    if (isSgrMouseEvent(data) && !parseSgrMouseWheel(data)) return;
+    if (data.startsWith("\x1b[M")) return;
     this.onInput(data);
   }
 

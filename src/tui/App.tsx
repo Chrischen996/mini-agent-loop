@@ -583,8 +583,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const allowEmptyModelSetup = acMode === "model-setup" && Boolean(modelSetup);
     const hasPendingImages = pendingImagesRef.current.length > 0;
     if (!trimmed && !allowEmptyModelSetup && !hasPendingImages) return;
-    // Record plain prompts (not slash commands) into the input history so ↑ can recall them
-    if (trimmed && !trimmed.startsWith("/")) {
+    // Record plain prompts (not slash commands) into the input history so ↑ can
+    // recall them. Model-setup entries are the base URL / API key — they must
+    // never be recorded, because recalling them with ↑ would print the key in
+    // plain text once setup finishes and the input mask is gone.
+    if (trimmed && !trimmed.startsWith("/") && !allowEmptyModelSetup) {
       promptInputHistoryRef.current.add(trimmed);
     }
     if (acMode === "resume-messages") {
@@ -1158,7 +1161,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     thinkingMode: state.thinkingMode,
     expandedThinking: state.expandedThinking,
     width: termWidth,
-    maxMessages: 200,
+    maxMessages: Number.MAX_SAFE_INTEGER,
   });
   // Rows the Ink renderer actually draws. Truncated markdown kinds (tables,
   // code, rules) hold one row per source line, so the estimate can exceed the
@@ -1173,7 +1176,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     thinkingMode: state.thinkingMode,
     expandedThinking: state.expandedThinking,
     width: termWidth,
-    maxMessages: 200,
+    maxMessages: Number.MAX_SAFE_INTEGER,
   });
   // Do not force a short session to occupy the entire alternate screen. The
   // fixed-height viewport is useful once the transcript reaches the terminal
@@ -1232,6 +1235,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           availableHeight={feedHeight}
           width={termWidth}
           scrollOffset={state.scrollOffset}
+          showHistoryHints
         />
         <Overlays
           acMode={acMode}
@@ -1315,8 +1319,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               inputHistory={promptInputHistoryRef.current}
               disableArrowNavigation={Boolean(acMode)}
               onScrollContext={(direction) => {
-                if (state.busy || acMode || state.pendingPermission || todoEditorState !== null || state.phase === "review") return;
-                dispatch({ type: "SCROLL_BY", delta: direction === "up" ? 1 : -1 });
+                // Scrolling the transcript remains available while a turn is
+                // running; only overlays that own the input block it.
+                if (acMode || state.pendingPermission || todoEditorState !== null) return;
+                dispatch({ type: "SCROLL_BY", delta: direction === "up" ? 3 : -3 });
               }}
               onSubmit={(val) => {
                 if (shouldAcceptAutocompleteOnEnter(acMode)) {

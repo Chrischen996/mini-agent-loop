@@ -7,6 +7,8 @@ import {
   ScrollbackTerminalRenderer,
 } from "../src/tui/incremental-renderer.ts";
 import { PiTuiFrame } from "../src/tui/pi-tui-frame.ts";
+import { disableMouseTracking, enableMouseTracking } from "../src/tui/mouse-tracking.ts";
+import { isSgrMouseEvent, parseSgrMouseWheel } from "../src/tui/mouse-events.ts";
 
 function sink(): { writes: string[]; target: { write(value: string): boolean } } {
   const writes: string[] = [];
@@ -14,9 +16,9 @@ function sink(): { writes: string[]; target: { write(value: string): boolean } }
 }
 
 describe("incremental terminal renderer", () => {
-  it("defaults to pi-tui alternate screen with older modes as explicit opt-ins", () => {
+  it("defaults to scrollback with older modes as explicit opt-ins", () => {
     const tty = { interactive: true };
-    assert.equal(resolveTerminalDisplayMode({}, tty), "pi");
+    assert.equal(resolveTerminalDisplayMode({}, tty), "scrollback");
     assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "pi" }, tty), "pi");
     assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "alternate" }, tty), "pi");
     assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "fullscreen" }, tty), "fullscreen");
@@ -34,6 +36,16 @@ describe("incremental terminal renderer", () => {
     assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_FULLSCREEN: "1" }, piped), "fullscreen");
   });
 
+  it("uses reversible terminal mouse-tracking sequences for alternate-screen scrolling", () => {
+    const writes: string[] = [];
+    const target = { write(value: string) { writes.push(value); return true; } };
+
+    enableMouseTracking(target);
+    disableMouseTracking(target);
+
+    assert.deepEqual(writes, ["\x1b[?1000h\x1b[?1006h", "\x1b[?1006l\x1b[?1000l"]);
+  });
+
   it("adapts shared RenderLine rows to pi-tui's width and height contract", () => {
     const input: string[] = [];
     const frame = new PiTuiFrame(
@@ -49,6 +61,29 @@ describe("incremental terminal renderer", () => {
     assert.ok(frame.render(5).every((line) => line.replace(/\x1b\[[0-9;]*m/g, "").length <= 5));
     frame.handleInput("x");
     assert.deepEqual(input, ["x"]);
+  });
+
+  it("forwards SGR wheel events to the input handler but swallows mouse button events", () => {
+    const input: string[] = [];
+    const frame = new PiTuiFrame({ rows: 5 }, () => [], (data) => input.push(data));
+
+    frame.handleInput("\x1b[<64;20;8M");
+    frame.handleInput("\x1b[<0;20;8M");
+    frame.handleInput("\x1b[M");
+    frame.handleInput("k");
+    assert.deepEqual(input, ["\x1b[<64;20;8M", "k"]);
+  });
+
+  it("recognizes SGR mouse reports in both raw and ESC-stripped form", () => {
+    assert.equal(parseSgrMouseWheel("\x1b[<64;20;8M"), "up");
+    assert.equal(parseSgrMouseWheel("\x1b[<65;20;8M"), "down");
+    assert.equal(parseSgrMouseWheel("\x1b[<0;20;8M"), undefined);
+    // Ink strips the leading ESC before its useInput handlers run.
+    assert.equal(isSgrMouseEvent("\x1b[<64;20;8M"), true);
+    assert.equal(isSgrMouseEvent("[<64;20;8M"), true);
+    assert.equal(isSgrMouseEvent("[<0;20;8M"), true);
+    assert.equal(isSgrMouseEvent("[<64;20;"), false);
+    assert.equal(isSgrMouseEvent("plain text"), false);
   });
 
   it("appends committed transcript rows and redraws only the live tail", () => {

@@ -74,4 +74,18 @@ describe("TUI store adapter", () => {
     ]);
     assert.deepEqual(messages, [{ kind: "user", text: "hello" }]);
   });
+
+  it("draws no lone marker row for tool-only assistant turns after restore", () => {
+    const messages = chatMessagesFromAgentHistory([
+      { role: "user", content: "inspect" },
+      { role: "assistant", content: "", toolCalls: [{ id: "call-1", name: "read", arguments: { path: "a.ts" } }] },
+      { role: "tool", toolCallId: "call-1", name: "read", content: "file contents" },
+    ]);
+    // Tool-only turns emit no empty assistant marker; the tool card carries
+    // the flow, matching the renderers that draw empty assistant messages as
+    // zero rows.
+    assert.ok(!messages.some((message) => message.kind === "assistant"));
+    const tool = messages.find((message) => message.kind === "tool_call");
+    assert.equal(tool?.status, "done");
+  });
 });

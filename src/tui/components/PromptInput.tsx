@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, useStdin } from "ink";
+import { isSgrMouseEvent, parseSgrMouseWheel } from "../mouse-events.ts";
 import { TUI_COLORS as C } from "../theme.ts";
 import type { TerminalInputHistory } from "../terminal-input-history.ts";
 
@@ -106,6 +107,7 @@ export function PromptInput({
   disableArrowNavigation = false,
   onScrollContext,
 }: PromptInputProps): React.ReactElement {
+  const { internal_eventEmitter } = useStdin();
   const parts = useMemo(() => splitGraphemes(value), [value]);
   const [cursor, setCursor] = useState(() => parts.length);
   const cursorRef = useRef(cursor);
@@ -134,8 +136,23 @@ export function PromptInput({
     if (next !== value) onChange(next);
   };
 
+  useEffect(() => {
+    const handleRawInput = (data: string) => {
+      const direction = parseSgrMouseWheel(data);
+      if (direction && onScrollContext) onScrollContext(direction);
+    };
+    internal_eventEmitter.on("input", handleRawInput);
+    return () => {
+      internal_eventEmitter.removeListener("input", handleRawInput);
+    };
+  }, [internal_eventEmitter, onScrollContext]);
+
   useInput(
     (input, key) => {
+      // Ink 5 does not expose wheel fields on Key. The raw listener above
+      // handles SGR wheel events; keep the complete mouse sequence out of
+      // the prompt value if Ink forwards it here as text.
+      if (isSgrMouseEvent(input)) return;
       const currentParts = partsRef.current;
       const currentCursor = clampCursor(cursorRef.current, currentParts.length);
 

@@ -261,7 +261,9 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
       return;
     }
 
-    // Scrolling
+    // Scrolling: mouse wheel is handled from the raw SGR sequence in
+    // PromptInput because Ink 5's Key type does not expose wheel fields.
+    // Keep the prompt and its history intact; only the message viewport moves.
     if (!acMode) {
       if (key.pageUp) {
         dispatch({ type: "SCROLL_BY", delta: Math.max(1, feedHeight - 2) });
@@ -269,14 +271,6 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
       }
       if (key.pageDown) {
         dispatch({ type: "SCROLL_BY", delta: -Math.max(1, feedHeight - 2) });
-        return;
-      }
-      if (key.ctrl && key.upArrow) {
-        dispatch({ type: "SCROLL_BY", delta: 1 });
-        return;
-      }
-      if (key.ctrl && key.downArrow) {
-        dispatch({ type: "SCROLL_BY", delta: -1 });
         return;
       }
       if (key.ctrl && (_ch === "g" || _ch === "G")) {

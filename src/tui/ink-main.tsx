@@ -6,6 +6,7 @@ import { createSandboxRunner } from "../sandbox/index.ts";
 import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
 import { createIncrementalStdout } from "./incremental-renderer.ts";
+import { disableMouseTracking, enableMouseTracking } from "./mouse-tracking.ts";
 import { openInspectorFromArgs } from "./inspect.ts";
 
 const cwd = process.cwd();
@@ -65,6 +66,7 @@ async function main(): Promise<void> {
       sandboxRunner,
     });
     process.stdout.write(ALTERNATE_SCREEN);
+    enableMouseTracking(process.stdout);
     const incrementalStdout = createIncrementalStdout(process.stdout);
     const app = render(
       <App
@@ -76,6 +78,7 @@ async function main(): Promise<void> {
     );
     await app.waitUntilExit();
   } finally {
+    disableMouseTracking(process.stdout);
     process.stdout.write(MAIN_SCREEN);
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close(), sandboxRunner?.cleanup() ?? Promise.resolve()]);
   }

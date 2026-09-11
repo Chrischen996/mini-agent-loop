@@ -47,7 +47,9 @@ export function resolveTerminalDisplayMode(
   // In VS Code sandbox / non-interactive terminals, default to scrollback
   // to avoid pi-tui alternate-screen redraw overhead.
   if (!capabilities.interactive) return "scrollback";
-  return "pi";
+  // Default to scrollback so ordinary terminals keep native scrollback for the
+  // full context, instead of capping content inside the pi-tui window.
+  return "scrollback";
 }
 
 /**

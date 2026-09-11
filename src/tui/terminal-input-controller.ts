@@ -1,4 +1,5 @@
 import { sanitizeInput } from "./input-utils.ts";
+import { parseSgrMouseWheel } from "./mouse-events.ts";
 import { TerminalInputHistory } from "./terminal-input-history.ts";
 
 export type TerminalInputAction =
@@ -105,6 +106,18 @@ export class TerminalInputController {
     let index = 0;
     while (index < input.length) {
       const rest = input.slice(index);
+      const mouseLength = mouseSequenceLength(rest);
+      if (mouseLength === -1) {
+        this.pendingEscape = rest;
+        break;
+      }
+      if (mouseLength > 0) {
+        const wheel = parseSgrMouseWheel(rest.slice(0, mouseLength));
+        if (wheel === "up") this.emit({ type: "scroll", delta: 3 });
+        else if (wheel === "down") this.emit({ type: "scroll", delta: -3 });
+        index += mouseLength;
+        continue;
+      }
       const protocolLength = protocolKeyLength(rest);
       if (protocolLength > 0) {
         const protocolKey = parseProtocolKey(rest.slice(0, protocolLength));
@@ -182,6 +195,11 @@ export class TerminalInputController {
     else if ((params === "1;3" || params === "1;9") && final === "B") this.emit({ type: "shortcut", name: "focus-message", direction: "increase" });
     else if (final === "A" && params === "1;2") this.emit({ type: "shortcut", name: "thinking-level", direction: "increase" });
     else if (final === "B" && params === "1;2") this.emit({ type: "shortcut", name: "thinking-level", direction: "decrease" });
+    else if ((final === "A" || final === "B") && params === "1;5") {
+      // Ctrl+Up/Down are intentionally not transcript navigation. Mouse
+      // wheel is the primary history interaction; PageUp/PageDown remain the
+      // explicit keyboard fallback.
+    }
     else if (final === "A") {
       if (this.hasNewline()) this.emit({ type: "cursor", direction: "up" });
       else this.emit({ type: "scroll", delta: 1 });
@@ -292,6 +310,13 @@ function protocolKeyLength(data: string): number {
   if (kitty) return kitty[0].length;
   const modified = /^\x1b\[27;\d+;\d+~/.exec(data);
   return modified?.[0].length ?? 0;
+}
+
+function mouseSequenceLength(data: string): number {
+  if (!data.startsWith("\x1b[<")) return 0;
+  const match = /^\x1b\[<\d+;\d+;\d+[Mm]/.exec(data);
+  if (match) return match[0].length;
+  return -1;
 }
 
 function kittySpecialKey(codepoint: number, modifier: number): ProtocolKey | undefined {

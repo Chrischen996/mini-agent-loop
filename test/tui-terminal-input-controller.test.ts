@@ -31,6 +31,50 @@ describe("terminal input controller", () => {
     ]);
   });
 
+  it("maps SGR mouse wheel events to transcript scrolling without inserting input", () => {
+    const actions: TerminalInputAction[] = [];
+    const controller = new TerminalInputController({ onAction: (action) => actions.push(action) });
+
+    controller.handle("\x1b[<64;20;8M\x1b[<65;20;8M");
+
+    assert.deepEqual(actions, [
+      { type: "scroll", delta: 3 },
+      { type: "scroll", delta: -3 },
+    ]);
+    assert.equal(controller.getValue(), "");
+  });
+
+  it("consumes non-wheel SGR mouse events without leaking escape bytes into the prompt", () => {
+    const actions: TerminalInputAction[] = [];
+    const controller = new TerminalInputController({ onAction: (action) => actions.push(action) });
+
+    controller.handle("\x1b[<0;20;8M\x1b[<0;20;8m");
+
+    assert.deepEqual(actions, []);
+    assert.equal(controller.getValue(), "");
+  });
+
+  it("handles a mouse wheel sequence split across input chunks", () => {
+    const actions: TerminalInputAction[] = [];
+    const controller = new TerminalInputController({ onAction: (action) => actions.push(action) });
+
+    controller.handle("\x1b[<64;20;");
+    controller.handle("8M");
+
+    assert.deepEqual(actions, [{ type: "scroll", delta: 3 }]);
+    assert.equal(controller.getValue(), "");
+  });
+
+  it("does not use Ctrl+Up or Ctrl+Down as transcript scrolling shortcuts", () => {
+    const actions: TerminalInputAction[] = [];
+    const controller = new TerminalInputController({ onAction: (action) => actions.push(action) });
+
+    controller.handle("\x1b[1;5A\x1b[1;5B");
+
+    assert.deepEqual(actions, []);
+    assert.equal(controller.getValue(), "");
+  });
+
   it("maps kitty Ctrl+Shift+T to the Todo editor shortcut", () => {
     const actions: TerminalInputAction[] = [];
     const controller = new TerminalInputController({ onAction: (action) => actions.push(action) });

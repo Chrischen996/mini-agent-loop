@@ -235,17 +235,24 @@ export function countMarkdownRenderRows(source: string, width: number): number {
         break;
       case "heading":
       case "quote":
-      case "text":
-        rows += Math.max(1, Math.ceil(terminalStringWidth(stripInlineMarkdown(line.text)) / available));
+      case "text": {
+        // Ink renders an empty <Text> as ZERO rows (verified empirically:
+        // a column of "A", <Text/>, "B" draws two rows), so blank markdown
+        // lines cost nothing. Non-blank lines wrap at the available width.
+        const w = terminalStringWidth(stripInlineMarkdown(line.text));
+        rows += w > 0 ? Math.ceil(w / available) : 0;
         break;
+      }
       case "list": {
-        // A list row renders as an indent*2-column indent followed by a
-        // "• "/"N. " marker (~3 columns incl. space) inside the same
-        // width - 4 body; the +3 keeps that marker inside the per-row budget.
+        // A list row renders as an indent*2-column indent, the marker, and a
+        // one-column gap before the content. The gutter is the marker width
+        // plus that gap; "•" takes 2 columns, ordered "1." takes 3. A list
+        // line with empty content still draws its marker row.
         const textWidth = terminalStringWidth(stripInlineMarkdown(line.text));
-        rows += Math.max(1, Math.ceil(
-          ((textWidth || 1) + 3) / Math.max(10, available - line.indent * 2),
-        ));
+        const gutter = terminalStringWidth(line.ordered ? line.marker : "•") + 1;
+        rows += textWidth > 0
+          ? Math.ceil((textWidth + gutter) / Math.max(10, available - line.indent * 2))
+          : 1;
         break;
       }
     }

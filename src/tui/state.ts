@@ -339,6 +339,9 @@ function estimateNewMessageRows(previous: readonly ChatMessage[], next: readonly
       continue;
     }
     const text = ("text" in msg ? msg.text : "") || "";
+    // Tool-only assistant turns draw no marker row (MessageFeed and the ANSI
+    // render model both skip empty assistant messages), so reserve no rows.
+    if (msg.kind === "assistant" && !msg.reasoning && !text) continue;
     // +1 for the mandatory margin row above each message, then count text lines.
     rows += 1 + Math.max(1, text.split("\n").length);
   }
@@ -366,11 +369,12 @@ export function chatMessagesFromAgentHistory(history: readonly AgentMessage[]): 
     if (message.role === "assistant") {
       const text = contentAsString(message.content);
       const toolCalls = message.toolCalls ?? [];
-      // Always emit an assistant ChatMessage when there is text content.
-      // For tool-only turns (empty text but with tool calls), emit a minimal
-      // assistant marker so the conversation flow is visible after resume.
-      if (text || toolCalls.length === 0) {
-        messages.push({ kind: "assistant", text: text || "" });
+      // Emit an assistant message only when it has text. Tool-only turns
+      // (and fully empty turns) draw no marker row in either renderer — the
+      // tool cards emitted below carry the conversation flow after resume,
+      // matching the dense transcript layout.
+      if (text) {
+        messages.push({ kind: "assistant", text });
       }
       for (const call of toolCalls) {
         const card: Extract<ChatMessage, { kind: "tool_call" }> = {
