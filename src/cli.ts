@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -1022,10 +1023,33 @@ async function main(): Promise<void> {
   }
 }
 
+/**
+ * Decide whether this module is the process entry point, tolerating the bin
+ * symlinks npm creates for global installs (`bin/mini-agent-loop-run` ->
+ * `dist/cli.js`). Without the realpath step the symlink path in argv[1] never
+ * equals `import.meta.url`, and the CLI silently no-ops when installed
+ * globally.
+ */
+export function isCliEntryPoint(argv1: string | undefined, selfUrl: string): boolean {
+  if (!argv1) return false;
+  const selfPath = path.resolve(fileURLToPath(selfUrl));
+  let invokedPath = path.resolve(argv1);
+  try {
+    invokedPath = realpathSync(invokedPath);
+  } catch {
+    // Unresolvable file: keep the plain resolved path.
+  }
+  let selfRealPath = selfPath;
+  try {
+    selfRealPath = realpathSync(selfPath);
+  } catch {
+    // Unresolvable file: keep the plain resolved path.
+  }
+  return invokedPath === selfRealPath;
+}
+
 // Only run when this module is the entry point (not when imported by tests)
-const isEntryPoint = Boolean(
-  process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url)),
-);
+const isEntryPoint = isCliEntryPoint(process.argv[1], import.meta.url);
 
 if (isEntryPoint) {
   main().catch((err) => {
