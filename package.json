@@ -1,12 +1,13 @@
 {
   "name": "@krischen99999/mini-agent-loop",
-  "version": "0.1.1",
+  "version": "0.1.5",
   "type": "module",
   "license": "MIT",
   "description": "Extensible AI agent runtime for terminal, CLI, and HTTP workflows",
   "bin": {
-    "mini-agent-loop": "dist/cli.js",
-    "mini-agent-loop-tui": "dist/tui.js"
+    "mini-agent-loop": "dist/tui.js",
+    "mini-agent-loop-tui": "dist/tui.js",
+    "mini-agent-loop-run": "dist/cli.js"
   },
   "files": [
     "dist",

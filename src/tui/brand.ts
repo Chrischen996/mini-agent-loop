@@ -6,6 +6,6 @@ export const TUI_BRAND_SPARK = "✦";
  * Version shown in the welcome panel. It must track `package.json`;
  * `test/tui-brand.test.ts` fails when the two drift apart.
  */
-export const TUI_BRAND_VERSION = "0.1.1";
+export const TUI_BRAND_VERSION = "0.1.5";
 export const TUI_BRAND_HEADER_HEIGHT = 3;
 export const TUI_WELCOME_PANEL_HEIGHT = 10;
