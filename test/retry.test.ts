@@ -25,6 +25,10 @@ describe("StreamTruncatedError", () => {
       "network",
     );
   });
+
+  it("classifies a missing-finish_reason stream error as network", () => {
+    assert.equal(classifyError(new Error("Stream ended without finish_reason")), "network");
+  });
 });
 
 describe("LlmTimeoutError", () => {

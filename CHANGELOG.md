@@ -74,6 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- OpenAI-compatible catalog streams that close without `finish_reason` now complete when text/tool JSON is intact, and retry as `StreamTruncatedError` when the payload is empty or tool-call arguments are truncated — so gateways that omit the field no longer surface `✗ Stream ended without finish_reason`.
 - Claude/Anthropic thinking blocks, signatures, and reasoning-token usage now
   round-trip through the LLM wire format, session snapshots, and context-budget
   estimates so multi-turn continuity survives compaction and resume.

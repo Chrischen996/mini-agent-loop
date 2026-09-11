@@ -140,6 +140,131 @@ describe("streamChat", () => {
     }
   });
 
+  it("completes a catalog stream that ends without finish_reason when content is intact", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      sseResponse([
+        JSON.stringify({ choices: [{ delta: { content: "你" } }] }),
+        JSON.stringify({ choices: [{ delta: { content: "好" } }] }),
+      ])) as typeof fetch;
+
+    try {
+      // The catalog's own baseUrl keeps `piModel`, routing streamChat through
+      // the pi-ai openai-completions stream (the path with the finish_reason
+      // completeness check) instead of the raw SSE parser.
+      const config = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "https://apihub.agnes-ai.com/v1",
+        model: "agnes-2.0-flash",
+      });
+      const events = [];
+      for await (const event of streamChat(config, [{ role: "user", content: "hi" }])) {
+        events.push(event);
+      }
+      assert.equal(events.some((event) => event.type === "error"), false);
+      const final = events.at(-1);
+      assert.equal(final?.type, "completed");
+      if (final?.type === "completed") assert.equal(final.message.content, "你好");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("treats an empty catalog stream without finish_reason as truncation", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => sseResponse([])) as typeof fetch;
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "https://apihub.agnes-ai.com/v1",
+        model: "agnes-2.0-flash",
+      });
+      const events = [];
+      for await (const event of streamChat(config, [{ role: "user", content: "hi" }])) {
+        events.push(event);
+      }
+      const error = events.find((event) => event.type === "error");
+      assert.ok(error?.type === "error");
+      assert.ok(error.error instanceof StreamTruncatedError);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("completes a catalog tool-call stream that ends without finish_reason when arguments are valid JSON", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      sseResponse([
+        JSON.stringify({
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: "call_1",
+                function: { name: "read", arguments: '{"path":"a.ts"}' },
+              }],
+            },
+          }],
+        }),
+      ])) as typeof fetch;
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "https://apihub.agnes-ai.com/v1",
+        model: "agnes-2.0-flash",
+      });
+      const events = [];
+      for await (const event of streamChat(config, [{ role: "user", content: "read" }])) {
+        events.push(event);
+      }
+      const final = events.at(-1);
+      assert.equal(final?.type, "completed");
+      if (final?.type === "completed") {
+        assert.equal(final.message.toolCalls?.length, 1);
+        assert.deepEqual(final.message.toolCalls?.[0]?.arguments, { path: "a.ts" });
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("treats a catalog tool-call stream without finish_reason as truncation when arguments are incomplete", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      sseResponse([
+        JSON.stringify({
+          choices: [{
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: "call_1",
+                function: { name: "read", arguments: '{"path":"a' },
+              }],
+            },
+          }],
+        }),
+      ])) as typeof fetch;
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test-key",
+        baseUrl: "https://apihub.agnes-ai.com/v1",
+        model: "agnes-2.0-flash",
+      });
+      const events = [];
+      for await (const event of streamChat(config, [{ role: "user", content: "read" }])) {
+        events.push(event);
+      }
+      const error = events.find((event) => event.type === "error");
+      assert.ok(error?.type === "error");
+      assert.ok(error.error instanceof StreamTruncatedError);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("recognizes a terminal assistant message without a finish marker", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>

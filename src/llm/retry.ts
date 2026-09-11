@@ -167,6 +167,9 @@ export function classifyError(error: unknown): RetryableErrorType | null {
   if (/stream ended before completion/i.test(message)) {
     return "network";
   }
+  if (/stream ended without finish_reason/i.test(message)) {
+    return "network";
+  }
 
   // Rate limit (429 or explicit rate limit messages)
   if (/rate limit|429|too many requests|quota exceeded/i.test(message)) {

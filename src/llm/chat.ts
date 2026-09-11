@@ -186,6 +186,9 @@ async function* streamPiChat(
       // Normalize Pi provider timeout errors to LlmTimeoutError for consistent handling
       if (/timed? ?out|timeout|request timed/i.test(errMsg)) {
         yield { type: "error", error: new LlmTimeoutError(undefined, undefined, { phase: "total" }) };
+      } else if (/stream ended without finish_reason/i.test(errMsg)) {
+        yield { type: "error", error: new StreamTruncatedError(fromPiAssistant(event.error).message.content) };
+        return;
       } else {
         yield { type: "error", error: new Error(errMsg) };
       }
