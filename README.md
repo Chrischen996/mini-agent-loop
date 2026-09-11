@@ -66,6 +66,7 @@ npm install
 | `GROQ_API_KEY` | no | — |
 | `OPENROUTER_API_KEY` | no | — |
 | `TOKENROUTER_API_KEY` | no | — |
+| `ORCAROUTER_API_KEY` | no | — |
 | `SILICONFLOW_API_KEY` | no | — |
 | `OPENAI_BASE_URL` | no | OpenAI or DeepSeek auto |
 | `OPENAI_MODEL` | no | `gpt-4o-mini` / `deepseek-chat` |
@@ -259,6 +260,27 @@ export OPENAI_MODEL=tokenrouter/kimi-k3-free
 In the TUI, select it with `/model tokenrouter/kimi-k3-free`. The project sends
 the fixed model id `kimi-k3-free` to
 `https://api.tokenrouter.io/v1/chat/completions`.
+
+#### OrcaRouter (Free Models)
+
+OrcaRouter is an OpenAI-compatible AI gateway; the catalog registers its free
+routes (see <https://www.orcarouter.ai/models?price=free>):
+
+```bash
+export ORCAROUTER_API_KEY=sk-orca-...
+export OPENAI_MODEL=orcarouter/deepseek/deepseek-v4-flash-free
+```
+
+In the TUI, select one of the registered free routes:
+
+```bash
+/model orcarouter/deepseek/deepseek-v4-flash-free   # DeepSeek V4 Flash free (1M context)
+/model orcarouter/tencent/hy3-free                  # Tencent Hy3 free (256K context)
+/model orcarouter/z-ai/glm-5.3-flash-free           # GLM 5.3 Flash free (1M context, text + image)
+/model orcarouter/orcarouter/free                  # OrcaRouter's free adaptive router
+```
+
+Requests go to `https://api.orcarouter.ai/v1/chat/completions`.
 
 #### Model providers
 

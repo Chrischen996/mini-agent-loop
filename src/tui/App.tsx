@@ -1,6 +1,6 @@
 import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from "react";
 import { randomUUID } from "node:crypto";
-import { Box, Text, useApp, useStdout } from "ink";
+import { Box, Text, useApp, useStdout, useInput } from "ink";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
@@ -131,9 +131,68 @@ import { formatAmbiguousSessionNotice, getResumeMessageCandidates, getStartupSes
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
 const DEFAULT_IMAGE_PROMPT = "Analyze the attached image.";
 
+import {
+  checkForUpdate,
+  runUpdateUpgrade,
+  type UpdateInfo,
+} from "../update-check.ts";
+import { UpdateNotice } from "./components/UpdateNotice.tsx";
+import type { Key } from "ink";
+
 export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  // ── Update-check state ────────────────────────────────────────────────────
+  // A background check may surface an upgrade offer; `u` runs the upgrade
+  // and Esc/N dismisses the notice. The check never blocks startup.
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [upgrading, setUpgrading] = useState(false);
+  const [upgradeResult, setUpgradeResult] = useState<string | null>(null);
+  const upgradeLockRef = useRef(false);
+  const startUpgrade = useCallback(async () => {
+    if (!update || upgradeLockRef.current || upgrading) return;
+    upgradeLockRef.current = true;
+    setUpgrading(true);
+    const outcome = await runUpdateUpgrade();
+    setUpgradeResult(outcome);
+    setUpgrading(false);
+    upgradeLockRef.current = false;
+  }, [update, upgrading]);
+  const dismissUpdate = useCallback(() => {
+    setUpdate(null);
+    setUpgradeResult(null);
+  }, []);
+  const handleUpdateKey = useCallback(
+    (input: string, key: Key) => {
+      if (update === null && upgradeResult === null) return false;
+      if (key.escape || input === "n" || input === "N") {
+        dismissUpdate();
+        return true;
+      }
+      if (!upgrading && (input === "u" || input === "U" || key.return)) {
+        void startUpgrade();
+        return true;
+      }
+      return true; // swallow remaining keys while the notice is on screen
+    },
+    [update, upgrading, upgradeResult, startUpgrade, dismissUpdate],
+  );
+  useEffect(() => {
+    let cancelled = false;
+    void checkForUpdate()
+      .then((info) => {
+        if (!cancelled && info?.isUpgrade) setUpdate(info);
+      })
+      .catch(() => { /* update check is best-effort */ });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  // Capture upgrade-notice keys (u upgrade · Esc/n dismiss) while the notice is
+  // on screen; a no-op otherwise, so it never interferes with normal typing.
+  useInput((input, key) => {
+    handleUpdateKey(input, key);
+  }, { isActive: update !== null || upgradeResult !== null });
   const termWidth = Math.max(10, stdout?.columns || 80);
   // Leave two terminal rows unused. Ink's renderer adds a trailing newline and
   // can gain a row from borders/wrapping; staying below the terminal height
@@ -493,6 +552,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const planApprovalRows = state.phase === "review" && state.currentPlan
     ? 6 + Math.min(4, state.currentPlan.steps.length) + (state.currentPlan.steps.length > 4 ? 1 : 0)
     : 0;
+  // The upgrade notice occupies two rows of the bottom chrome while active.
+  const updateRows = update !== null ? 2 : 0;
   const pickerLayout = getPickerLayout({
     termRows: stdout?.rows,
     hasHeader,
@@ -503,6 +564,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     extraRows: pickerChromeRows(acMode ?? undefined),
     permissionRows,
     planApprovalRows,
+    updateRows,
   });
   const feedHeight = getMessageFeedHeight({
     termRows: stdout?.rows,
@@ -513,6 +575,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     pickerRows: pickerLayout.totalRows,
     permissionRows,
     planApprovalRows,
+    updateRows,
   });
 
   const copyResolvedText = useCallback(async (target: import("./copy-text.ts").CopyTarget = "auto") => {
@@ -1200,6 +1263,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     permissionRows +
     planApprovalRows +
     (state.pendingImages.length > 0 ? 1 : 0) +
+    updateRows +
     2; // prompt + stable status row
   const naturalFrameHeight = Math.max(
     1,
@@ -1301,6 +1365,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           <PlanApprovalBar plan={state.currentPlan} width={termWidth} />
         )}
 
+        {update !== null && (
+          <UpdateNotice update={update} upgrading={upgrading} result={upgradeResult} width={termWidth} />
+        )}
+
         {state.pendingImages.length > 0 && (
           <Box paddingX={1} gap={1}>
             {state.pendingImages.map((img, idx) => (
@@ -1325,7 +1393,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               onPasteImage={handlePasteImageRef}
               onTab={handleTabAt}
               pasteEnabled={!state.pendingPermission && todoEditorState === null}
-              focus={!state.pendingPermission && todoEditorState === null}
+              focus={!state.pendingPermission && todoEditorState === null && update === null && upgradeResult === null}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               inputHistory={promptInputHistoryRef.current}
               disableArrowNavigation={Boolean(acMode)}

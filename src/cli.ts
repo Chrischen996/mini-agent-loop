@@ -69,6 +69,7 @@ import {
   type PermissionRequest,
   type PermissionTurnContext,
 } from "./permissions.ts";
+import { reportUpdateToStderr } from "./update-check.ts";
 
 const IMAGE_EXT: Record<string, ImageMimeType> = {
   ".png": "image/png",
@@ -450,6 +451,11 @@ async function main(): Promise<void> {
     console.error(err instanceof Error ? err.message : err);
     process.exit(1);
   }
+
+  // Best-effort upgrade notice: prints one multi-line notice to stderr when
+  // the registry reports a newer version (throttled to 24h per install).
+  // Never blocks or fails startup; opt out with MINI_AGENT_UPDATE_CHECK=0.
+  void reportUpdateToStderr();
 
   const {
     prompt: rawPrompt,

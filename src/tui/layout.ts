@@ -26,6 +26,8 @@ export function getMessageFeedHeight(options: {
   permissionRows?: number;
   /** Rows reserved for the plan approval bar during plan review. */
   planApprovalRows?: number;
+  /** Rows reserved for the upgrade notice while it is on screen. */
+  updateRows?: number;
 }): number {
   const viewport = getTuiViewportHeight(options.termRows);
   const chrome =
@@ -36,7 +38,8 @@ export function getMessageFeedHeight(options: {
     (options.todoRows ?? 0) +
     (options.pickerRows ?? 0) +
     (options.permissionRows ?? 0) +
-    (options.planApprovalRows ?? 0);
+    (options.planApprovalRows ?? 0) +
+    (options.updateRows ?? 0);
   return Math.max(3, viewport - chrome);
 }
 
@@ -50,11 +53,12 @@ export function getPickerLayout(options: {
   extraRows?: number;
   permissionRows?: number;
   planApprovalRows?: number;
+  updateRows?: number;
 }): { itemRows: number; totalRows: number } {
   const viewport = getTuiViewportHeight(options.termRows);
   const fixedChrome =
     (options.hasHeader === false ? 0 : options.headerRows ?? TUI_BRAND_HEADER_HEIGHT) + 2 + 1 + (options.hasPendingImages ? 1 : 0) + (options.todoRows ?? 0) +
-    (options.permissionRows ?? 0) + (options.planApprovalRows ?? 0);
+    (options.permissionRows ?? 0) + (options.planApprovalRows ?? 0) + (options.updateRows ?? 0);
   const extraRows = options.extraRows ?? 2;
   const maxTotal = Math.max(0, viewport - fixedChrome - 3);
   const itemRows = Math.max(0, Math.min(options.requestedItems, maxTotal - extraRows));

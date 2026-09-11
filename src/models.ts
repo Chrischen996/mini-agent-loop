@@ -5,6 +5,7 @@ import type { ToolCallFormat } from "./hermes/types.ts";
 import { KIMI_K3_MODELS } from "./kimi-k3-models.ts";
 import { GPT6_ASTRA_MODELS } from "./openai-gpt6-astra.ts";
 import { TOKENROUTER_MODELS, tokenrouterProvider } from "./tokenrouter-models.ts";
+import { ORCAROUTER_MODELS, orcarouterProvider } from "./orcarouter-models.ts";
 
 export type ModelCapabilities = {
   input: Array<"text" | "image">;
@@ -85,6 +86,7 @@ const PROVIDER_ENV_KEYS: Record<string, string[]> = {
   opencode: ["OPENCODE_API_KEY"],
   "opencode-go": ["OPENCODE_API_KEY"],
   openrouter: ["OPENROUTER_API_KEY"],
+  orcarouter: ["ORCAROUTER_API_KEY"],
   tokenrouter: ["TOKENROUTER_API_KEY"],
   together: ["TOGETHER_API_KEY"],
   "vercel-ai-gateway": ["AI_GATEWAY_API_KEY"],
@@ -213,12 +215,13 @@ function mergeBuiltInModels(
 
 const BUILT_IN_MODELS = mergeBuiltInModels(
   piRuntime.getModels(),
-  [...KIMI_K3_MODELS, ...TOKENROUTER_MODELS, ...GPT6_ASTRA_MODELS],
+  [...KIMI_K3_MODELS, ...TOKENROUTER_MODELS, ...ORCAROUTER_MODELS, ...GPT6_ASTRA_MODELS],
 ).map(toModelRef);
 
 // The project-owned fallback is outside pi-ai's generated provider catalog,
 // so register its OpenAI-compatible transport in the runtime as well.
 piRuntime.setProvider(tokenrouterProvider());
+piRuntime.setProvider(orcarouterProvider());
 
 export const MODEL_REGISTRY: Record<string, ModelRef> = {};
 for (const model of BUILT_IN_MODELS) {

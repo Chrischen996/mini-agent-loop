@@ -1,6 +1,6 @@
 {
   "name": "@krischen99999/mini-agent-loop",
-  "version": "0.1.5",
+  "version": "0.1.7",
   "type": "module",
   "license": "MIT",
   "description": "Extensible AI agent runtime for terminal, CLI, and HTTP workflows",

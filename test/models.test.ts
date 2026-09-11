@@ -49,10 +49,11 @@ describe("model selection", () => {
       GROQ_API_KEY: "test",
       OPENROUTER_API_KEY: "test",
       TOKENROUTER_API_KEY: "test",
+      ORCAROUTER_API_KEY: "test",
     };
     assert.deepEqual(
       [...new Set(getAvailableModels(env).map((model) => model.provider))],
-      ["agnes-ai", "deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai", "tokenrouter"],
+      ["agnes-ai", "deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai", "tokenrouter", "orcarouter"],
     );
     assert.ok(getAllModels().every((model) => model.contextWindow > 0 && model.maxTokens > 0));
   });
@@ -240,6 +241,77 @@ describe("model selection", () => {
     assert.equal(resolved.provider, "openrouter");
     assert.equal(resolved.id, "ox-alpha");
     assert.equal(resolved.baseUrl, "https://openrouter.ai/api/v1");
+  });
+
+  it("registers OrcaRouter's free routes with compatible metadata", () => {
+    const models = getAllModels().filter((model) => model.provider === "orcarouter");
+    assert.deepEqual(
+      models.map((model) => model.id),
+      ["orcarouter/free", "deepseek/deepseek-v4-flash-free", "tencent/hy3-free", "z-ai/glm-5.3-flash-free"],
+    );
+
+    for (const model of models) {
+      assert.equal(model.provider, "orcarouter");
+      assert.equal(model.baseUrl, "https://api.orcarouter.ai/v1");
+      assert.deepEqual(model.apiKeyEnv, ["ORCAROUTER_API_KEY"]);
+      assert.equal(model.capabilities.tools, true);
+      assert.equal(model.reasoning, false);
+      assert.deepEqual(model.cost, {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+      });
+      assert.deepEqual(model.compat, {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        maxTokensField: "max_tokens",
+        supportsStrictMode: false,
+        thinkingFormat: "openai",
+      });
+    }
+
+    assert.deepEqual(
+      models.find((model) => model.id === "orcarouter/free")?.capabilities.input,
+      ["text"],
+    );
+    assert.deepEqual(
+      models.find((model) => model.id === "deepseek/deepseek-v4-flash-free")?.capabilities.input,
+      ["text"],
+    );
+    assert.deepEqual(
+      models.find((model) => model.id === "tencent/hy3-free")?.capabilities.input,
+      ["text"],
+    );
+    assert.deepEqual(
+      models.find((model) => model.id === "z-ai/glm-5.3-flash-free")?.capabilities.input,
+      ["text", "image"],
+    );
+
+    const flashFree = models.find((model) => model.id === "deepseek/deepseek-v4-flash-free");
+    assert.equal(flashFree?.contextWindow, 1048576);
+    assert.equal(flashFree?.maxTokens, 16384);
+    assert.equal(
+      models.find((model) => model.id === "tencent/hy3-free")?.contextWindow,
+      262144,
+    );
+    assert.equal(
+      models.find((model) => model.id === "z-ai/glm-5.3-flash-free")?.contextWindow,
+      1048576,
+    );
+
+    const available = getAvailableModels({ ORCAROUTER_API_KEY: "test" });
+    for (const id of models.map((model) => model.id)) {
+      assert.ok(available.some((item) => item.provider === "orcarouter" && item.id === id), `Expected orcarouter/${id} to be available`);
+    }
+
+    const resolved = resolveModel("orcarouter/deepseek/deepseek-v4-flash-free");
+    assert.equal(resolved.provider, "orcarouter");
+    assert.equal(resolved.id, "deepseek/deepseek-v4-flash-free");
+    assert.equal(resolved.baseUrl, "https://api.orcarouter.ai/v1");
+
+    assert.ok(searchModels("orcarouter").some((item) => item.provider === "orcarouter"));
   });
 
   it("registers GPT-6 Astra on OpenAI API and OpenAI Codex", () => {
