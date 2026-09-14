@@ -19,6 +19,22 @@ const INHERITED_ENVIRONMENT = new Set([
   "CI",
 ]);
 
+// Windows environment variable names are case-insensitive, so keep this list
+// lowercased and match against lowercased host keys.
+const WINDOWS_INHERITED_ENVIRONMENT = new Set([
+  ...[...INHERITED_ENVIRONMENT].map((name) => name.toLowerCase()),
+  "systemroot",
+  "windir",
+  "pathext",
+  "comspec",
+  "username",
+  "userprofile",
+  "allusersprofile",
+  "appdata",
+  "localappdata",
+  "programdata",
+]);
+
 export class NodeSandboxRunner implements SandboxRunner {
   readonly type = "node" as const;
   readonly isolation = "process-isolation" as const;
@@ -154,8 +170,13 @@ export class NodeSandboxRunner implements SandboxRunner {
     
     // Process isolation is not a secure sandbox. Keep credentials out of the
     // child by default while preserving enough environment for common tools.
+    const onWindows = process.platform === "win32";
     for (const [key, value] of Object.entries(process.env)) {
-      if (!INHERITED_ENVIRONMENT.has(key) && !key.startsWith("LC_")) continue;
+      if (onWindows) {
+        if (!WINDOWS_INHERITED_ENVIRONMENT.has(key.toLowerCase()) && !key.startsWith("LC_")) continue;
+      } else if (!INHERITED_ENVIRONMENT.has(key) && !key.startsWith("LC_")) {
+        continue;
+      }
       if (value !== undefined) {
         env[key] = value;
       }

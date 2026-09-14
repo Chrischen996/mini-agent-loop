@@ -8,6 +8,14 @@ export type BashArgs = { command: string; timeout?: number };
 /** Maximum output size in bytes before truncation notice is appended. */
 const MAX_OUTPUT_BYTES = 100 * 1024;
 
+/** Resolve the platform shell: bash on Unix, cmd.exe on Windows. */
+function resolveShell(): { command: string; args: string[] } {
+  if (process.platform === "win32") {
+    return { command: process.env.ComSpec || "cmd.exe", args: ["/D", "/S", "/C"] };
+  }
+  return { command: "bash", args: ["-lc"] };
+}
+
 export function createBashTool(
   cwd: string,
   sandbox?: { runner: SandboxRunner; config?: Partial<SandboxConfig> },
@@ -18,7 +26,7 @@ export function createBashTool(
 
   return {
     name: "bash",
-    description: "Execute a bash command. Returns stdout/stderr. Optional timeout.",
+    description: "Execute a shell command (bash on Unix, cmd on Windows by default). Returns stdout/stderr. Optional timeout.",
     parameters: {
       type: "object",
       properties: {
@@ -46,9 +54,12 @@ export function createBashTool(
       // Sandbox mode: use the runner directly (command-level exec only)
       if (sandbox && sandbox.runner.type !== "none") {
         try {
+          // The Node runner executes on the host, so use the host shell. Docker
+          // runners execute inside a Linux container where bash is available.
+          const shell = sandbox.runner.type === "node" ? resolveShell() : { command: "bash", args: ["-lc"] };
           const result: SandboxResult = await sandbox.runner.execute({
-            command: "bash",
-            args: ["-lc", args.command],
+            command: shell.command,
+            args: [...shell.args, args.command],
             cwd,
             timeout: effectiveTimeoutMs,
             allowNetwork: sandboxConfig?.allowNetwork ?? false,
@@ -73,7 +84,8 @@ export function createBashTool(
 
       // Fallback: spawn directly (original behavior)
       return await new Promise((resolve, reject) => {
-        const child = spawn("bash", ["-lc", args.command], {
+        const shell = resolveShell();
+        const child = spawn(shell.command, [...shell.args, args.command], {
           cwd,
           stdio: ["ignore", "pipe", "pipe"],
           detached: process.platform !== "win32",
