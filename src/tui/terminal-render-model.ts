@@ -340,11 +340,11 @@ export function buildTerminalRenderLines(
   const end = Math.max(0, wrappedBody.length - offset);
   const cropStart = Math.max(0, end - bodyHeight);
   const clipped = wrappedBody.slice(cropStart, end);
-  // Spare rows fill the unused body area. When the transcript is bottom-pinned
-  // (offset === 0) the spare rows go *below* the messages so the conversation
-  // starts at the top and the gap is absorbed between content and the prompt
-  // chrome. When the user has scrolled up (offset > 0) the spare rows stay
-  // above the visible window so the viewport remains bottom-anchored.
+  // Unused body rows stay below the visible window, whether the transcript is
+  // bottom-pinned or the user scrolled up. Placing them above the slice left
+  // a black band between the header and the visible rows whenever the
+  // transcript did not fill the viewport, so the frame looked half-empty on
+  // scroll; bottom-anchoring the gap keeps the slice flush under the header.
   const padding = Math.max(0, bodyHeight - clipped.length);
   const spacers = padding > 0
     ? Array.from({ length: padding }, (_, index) => ({
@@ -353,9 +353,7 @@ export function buildTerminalRenderLines(
         style: "muted" as const,
       }))
     : [];
-  return offset === 0
-    ? [...visibleHeader, ...visiblePanel, ...clipped, ...spacers, ...clippedFooter]
-    : [...visibleHeader, ...visiblePanel, ...spacers, ...clipped, ...clippedFooter];
+  return [...visibleHeader, ...visiblePanel, ...clipped, ...spacers, ...clippedFooter];
 }
 
 function truncateEnd(value: string, maxWidth: number): string {

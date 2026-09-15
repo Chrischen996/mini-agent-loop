@@ -313,13 +313,13 @@ export function MessageFeed({
 
   return (
     <Box flexDirection="column" flexGrow={1} paddingX={1} width={width} minWidth={0} overflow="hidden">
-      {/* Bottom-anchor the transcript inside the feed box. The frame height is
-          derived from wrap-aware row estimates, which can exceed the rows the
-          Ink renderer actually draws (e.g. truncate-end table rows, clipped
-          code fences). Absorbing the surplus above the visible window keeps
-          the last message directly above the input chrome instead of leaving
-          an empty band between the transcript and the prompt. */}
-      <Box flexGrow={1} minHeight={0} />
+      {/* Pinned to the newest rows the transcript stays bottom-anchored: the
+          surplus rows the wrap-aware frame height may over-reserve are
+          absorbed above the visible window so the last message remains
+          directly above the input chrome. Scrolled-up windows instead carry
+          the surplus below the slice, otherwise it forms a black band
+          between the header and the visible rows. */}
+      {viewport.pinnedToBottom ? <Box flexGrow={1} minHeight={0} /> : null}
       {viewport.items.map((item) => {
         {/* Spacing convention — keep in lockstep with estimateMessageHeight /
             buildBlocks in message-viewport.ts and estimateNewMessageRows in
@@ -465,6 +465,9 @@ export function MessageFeed({
         }
         return null;
       })}
+      {/* Scrolled-up windows keep the surplus below the slice so the visible
+          rows start flush under the header instead of under a black band. */}
+      {viewport.pinnedToBottom ? null : <Box flexGrow={1} minHeight={0} />}
     </Box>
   );
 }
