@@ -1,6 +1,6 @@
 import type { Tool } from "../tools/types.ts";
 import { loadMcpConfigFromEnv } from "./config.ts";
-import { createStdioMcpClient } from "./client.ts";
+import { createStdioMcpClient, createStreamableHttpMcpClient } from "./client.ts";
 import { createMcpTools } from "./tool-adapter.ts";
 import type {
   LoadedMcpConfig,
@@ -90,7 +90,7 @@ export class McpRuntime {
         reconnectAttempt: 0,
         status: {
           id: config.id,
-          transport: "stdio",
+          transport: config.transport,
           required: config.required,
           state: config.enabled ? "connecting" : "disabled",
           toolCount: 0,
@@ -109,8 +109,11 @@ export class McpRuntime {
   }
 
   private secrets(config: McpServerConfig): string[] {
-    if (config.transport !== "stdio") return [];
-    return [config.command, config.cwd, ...config.args, ...Object.values(config.env ?? {})];
+    if (config.transport === "stdio") {
+      return [config.command, config.cwd, ...config.args, ...Object.values(config.env ?? {})];
+    }
+    // http: redact url and header values
+    return [config.url, ...Object.values(config.headers ?? {})];
   }
 
   private buildCatalog(override?: CatalogOverride): BuiltCatalog {
@@ -381,5 +384,14 @@ export async function createMcpRuntimeFromEnv(
   } = {},
 ): Promise<McpRuntime> {
   const loaded = await loadMcpConfigFromEnv(workspace, options.environment);
-  return McpRuntime.create(loaded, options);
+  const defaultFactory: McpClientFactory = (config, signal) => {
+    if (config.transport === "http") {
+      return createStreamableHttpMcpClient(
+        { url: new URL(config.url), timeoutMs: config.timeoutMs, headers: config.headers },
+        signal,
+      );
+    }
+    return createStdioMcpClient(config as McpStdioServerConfig, signal);
+  };
+  return McpRuntime.create(loaded, { ...options, clientFactory: options.clientFactory ?? defaultFactory });
 }

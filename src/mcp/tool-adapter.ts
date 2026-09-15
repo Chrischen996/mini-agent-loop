@@ -6,7 +6,6 @@ import type {
   McpClientConnection,
   McpContentBlock,
   McpServerConfig,
-  McpStdioServerConfig,
   McpToolDefinition,
 } from "./types.ts";
 
@@ -54,7 +53,7 @@ function blockToPart(block: McpContentBlock): ContentPart {
       return { type: "text", text: block.text };
     case "image":
       if (SUPPORTED_IMAGE_MIME.has(block.mimeType)) {
-        return { type: "image", data: block.data, mimeType: block.mimeType as import("../types.ts").ImageMimeType, source: "mcp" };
+        return { type: "image", data: block.data, mimeType: block.mimeType as ImageMimeType, source: "mcp" };
       }
       return { type: "text", text: `[Unsupported MCP image omitted: ${block.mimeType}]` };
     case "audio":
