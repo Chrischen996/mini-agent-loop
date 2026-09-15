@@ -10,7 +10,7 @@
  * REVIEW_VERDICT_MARKER in the prompt.
  */
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
@@ -28,6 +28,7 @@ import {
   PipelineOrchestrator,
   REVIEW_VERDICT_MARKER,
   topologicalBatches,
+  tsxImportProbe,
   type PipelineOrchestratorOptions,
 } from "../src/orchestration/pipeline/orchestrator.ts";
 import type {
@@ -879,6 +880,85 @@ describe("PipelineOrchestrator (M1)", () => {
       const summary = await orchestrator.run([makeSpec({ id: "T-61" })], { maxIter: 1 });
       assert.equal(summary.ok, true);
       assert.equal(summary.entries[0].result.status, "done");
+    });
+  });
+
+  // ─── import safety gate (design §6.2 hardening) ───────────────────
+
+  describe("import safety gate", () => {
+    const existingModule = "src/orchestration/pipeline/types.ts";
+
+    it("is off by default", async () => {
+      const { chat } = createPipelineChat({
+        workerText: workerResultText("T-70", { changed_files: [existingModule] }),
+        reviewerVerdicts: [verdictText(true)],
+      });
+      const orchestrator = makeOrchestrator(chat);
+      const spec = makeSpec({ id: "T-70", files_hint: [existingModule] });
+      const result = await orchestrator.dispatch(spec);
+      const verdict = await orchestrator.review(result, spec);
+      assert.equal(verdict.passed, true);
+    });
+
+    it("custom probe failure fails the review with an import-safety item", async () => {
+      const { chat } = createPipelineChat({
+        workerText: workerResultText("T-71", { changed_files: [existingModule] }),
+        reviewerVerdicts: [verdictText(true)],
+      });
+      const probeCalls: string[] = [];
+      const orchestrator = makeOrchestrator(chat, {
+        importSafetyProbe: async (file) => {
+          probeCalls.push(file);
+          return { ok: false, detail: "crash on import" };
+        },
+      });
+      const spec = makeSpec({ id: "T-71", files_hint: [existingModule] });
+      const result = await orchestrator.dispatch(spec);
+      const verdict = await orchestrator.review(result, spec);
+      assert.equal(verdict.passed, false);
+      assert.ok(
+        verdict.failed_items.some((item) => item.includes(`import safety: ${existingModule}`)),
+        `failed_items: ${verdict.failed_items.join("; ")}`,
+      );
+      assert.deepEqual(probeCalls, [existingModule]);
+    });
+
+    it("skips the probe for non-importable file types", async () => {
+      const { chat } = createPipelineChat({
+        workerText: workerResultText("T-72", { changed_files: ["package.json"] }),
+        reviewerVerdicts: [verdictText(true)],
+      });
+      let probeCalls = 0;
+      const orchestrator = makeOrchestrator(chat, {
+        importSafetyProbe: async () => {
+          probeCalls += 1;
+          return { ok: true };
+        },
+      });
+      const spec = makeSpec({ id: "T-72", files_hint: ["package.json"] });
+      const result = await orchestrator.dispatch(spec);
+      const verdict = await orchestrator.review(result, spec);
+      assert.equal(probeCalls, 0);
+      assert.equal(verdict.passed, true);
+    });
+
+    it("built-in tsxImportProbe passes for a clean module", async () => {
+      const outcome = await tsxImportProbe(process.cwd(), existingModule);
+      assert.equal(outcome.ok, true);
+    });
+
+    it("built-in tsxImportProbe reports a module that crashes on import", async () => {
+      const dirName = `.import-probe-${process.pid}`;
+      const dir = join(process.cwd(), dirName);
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "broken.ts"), "export const x = 1;\nthrow new Error('boom');\n");
+      try {
+        const outcome = await tsxImportProbe(process.cwd(), join(dirName, "broken.ts"));
+        assert.equal(outcome.ok, false);
+        assert.match(outcome.detail ?? "", /boom/);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     });
   });
 });

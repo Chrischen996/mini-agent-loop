@@ -23,9 +23,10 @@
  * so an injected chat can distinguish reviewer calls from worker calls.
  */
 
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 import { contentAsString } from "../../content.ts";
 import type { ChatFn, LlmConfig } from "../../llm/index.ts";
 import { createSubagentTool, defaultProfiles } from "../../subagent/index.ts";
@@ -94,6 +95,19 @@ export interface PipelineOrchestratorOptions {
   captureCheckpoint?: boolean;
   /** Disable the reviewer subagent gate (status/scope/validate gates still run). */
   skipReviewer?: boolean;
+  /**
+   * Enable the built-in import-safety gate (§6.2 hardening): every
+   * importable module in `changed_files` is probed with a bare dynamic
+   * import in a child process (`tsxImportProbe`, `npx tsx -e`). A crash
+   * fails the review (e.g. a non-defensive main-entry guard).
+   */
+  importSafety?: boolean;
+  /**
+   * Custom import-safety probe (takes precedence over `importSafety`):
+   * called once per importable changed file; a not-ok result fails the
+   * review with the detail attached to the failed item.
+   */
+  importSafetyProbe?: (file: string) => Promise<{ ok: boolean; detail?: string }>;
   /** Hard timeout (ms) for subagent execution. */
   timeout?: number;
   /** Cancellation signal propagated to subagents. */
@@ -378,6 +392,65 @@ export function enforceFileOwnership(specs: TaskSpec[]): TaskSpec[][] {
     flush();
   }
   return waves;
+}
+
+// ─── Import-safety gate (design §6.2 hardening) ────────────────────────────
+
+/** Extensions considered dynamically importable modules for the import-safety gate. */
+export const IMPORTABLE_MODULE_EXTENSIONS: ReadonlySet<string> = new Set([
+  "ts",
+  "tsx",
+  "js",
+  "jsx",
+  "mjs",
+  "cjs",
+]);
+
+/**
+ * Built-in import-safety probe: spawn a child process
+ * `npx tsx -e "import('<relativeFile>').catch(...)"` with `cwd` set to the
+ * workspace root. The child's `process.argv[1]` is undefined, so a
+ * non-defensive main-entry guard (e.g. `path.resolve(process.argv[1])`
+ * before the check) crashes exactly in this context — the defect class this
+ * gate targets. 60s timeout; a non-zero exit reports the stderr tail.
+ */
+export function tsxImportProbe(
+  workspaceRoot: string,
+  relativeFile: string,
+): Promise<{ ok: boolean; detail?: string }> {
+  const normalized = normalizeWorkspacePath(relativeFile);
+  // ESM relative specifiers must start with "./" or "../" — prepend when
+  // the path is a plain workspace-relative one.
+  const specifier =
+    normalized.startsWith("./") || normalized.startsWith("../")
+      ? normalized
+      : `./${normalized}`;
+  const quoted = specifier.replace(/"/g, '\\"');
+  const script = `import("${quoted}").catch((error) => { console.error(String(error)); process.exit(1); });`;
+  return new Promise((resolve) => {
+    const child = spawn(
+      process.platform === "win32" ? "npx.cmd" : "npx",
+      ["tsx", "-e", script],
+      { cwd: workspaceRoot, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({
+        ok: false,
+        detail: `probe spawn failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve({ ok: true });
+      else resolve({ ok: false, detail: stderr.trim().slice(-300) || `exit code ${code}` });
+    });
+  });
 }
 
 // ─── Orchestrator ───────────────────────────────────────────────────────────
@@ -753,7 +826,10 @@ export class PipelineOrchestrator {
    * 2. file-scope gate — every changed file must exist on disk under
    *    `workspaceRoot` and be within `files_hint` ∪ files declared in `notes`;
    * 3. validate gate — optional hard validation (test/typecheck/build);
-   * 4. reviewer gate — an independent reviewer subagent returns a verdict
+   * 4. import-safety gate — optional: every importable module in
+   *    `changed_files` must survive a bare dynamic import
+   *    (`importSafety` / `importSafetyProbe`);
+   * 5. reviewer gate — an independent reviewer subagent returns a verdict
    *    (skippable via `skipReviewer`; the gates above still apply).
    * All gates passing ⇒ `verdict.passed === true` with merged failed_items.
    */
@@ -792,6 +868,20 @@ export class PipelineOrchestrator {
         suggestions: validation.report,
       };
       this.emit(spec.id, "review_fail", { gate: "validate" }, result.attempt);
+      return verdict;
+    }
+
+    // Gate 3.5: import safety — every importable module in changed_files
+    // must survive a bare dynamic import (opt-in gate, §6.2 hardening).
+    const importIssues = await this.importSafetyIssues(spec, result);
+    if (importIssues.length > 0) {
+      const verdict: ReviewVerdict = { passed: false, failed_items: importIssues };
+      this.emit(
+        spec.id,
+        "review_fail",
+        { gate: "import_safety", failed_items: importIssues },
+        result.attempt,
+      );
       return verdict;
     }
 
@@ -904,6 +994,35 @@ export class PipelineOrchestrator {
         skipped: false,
       };
     }
+  }
+
+  /**
+   * Import-safety gate check (§6.2 hardening): every importable module in
+   * `changed_files` (by extension, {@link IMPORTABLE_MODULE_EXTENSIONS})
+   * must survive a bare dynamic import — catching non-defensive main-entry
+   * guards that crash in import/eval contexts. Opt-in: a custom
+   * `importSafetyProbe` takes precedence; `importSafety: true` enables the
+   * built-in child-process probe ({@link tsxImportProbe}). Disabled when
+   * neither option is set.
+   */
+  private async importSafetyIssues(spec: TaskSpec, result: WorkerResult): Promise<string[]> {
+    const probe = this.options.importSafetyProbe;
+    if (probe === undefined && this.options.importSafety !== true) return [];
+    const issues: string[] = [];
+    for (const file of result.changed_files) {
+      const rel = normalizeWorkspacePath(file);
+      const ext = extname(rel).replace(/^\./, "").toLowerCase();
+      if (!IMPORTABLE_MODULE_EXTENSIONS.has(ext)) continue;
+      if (!existsSync(join(this.workspaceRoot, rel))) continue; // missing files are reported by gate 2
+      const outcome =
+        probe !== undefined ? await probe(file) : await tsxImportProbe(this.workspaceRoot, rel);
+      if (!outcome.ok) {
+        issues.push(
+          `import safety: ${file} fails bare dynamic import${outcome.detail ? ` (${outcome.detail})` : ""}`,
+        );
+      }
+    }
+    return issues;
   }
 
   /**

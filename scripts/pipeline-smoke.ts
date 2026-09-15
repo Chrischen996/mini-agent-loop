@@ -202,6 +202,7 @@ async function runFullMode(
     modelMapping: { light: model, standard: model, flagship: model },
     workspaceRoot: process.cwd(),
     maxConcurrency: 2,
+    importSafety: true,
     onEvent: (event: PipelineLogEvent) => {
       const { ts, ...rest } = event;
       console.log(`[event] ${rest.task_id} ${rest.event} ${JSON.stringify({ ts, ...rest })}`);
