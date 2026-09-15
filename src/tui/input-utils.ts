@@ -75,6 +75,9 @@ export type AcMode =
   | "model-setup"
   | "profile-name"
   | "profile-list"
+  | "multi-agent-model"
+  | "multi-agent-mode"
+  | "multi-agent-task"
   | null;
 
 export type PromptPlaceholderContext = {
@@ -104,6 +107,12 @@ export function promptPlaceholder(context: PromptPlaceholderContext = {}): strin
       return "Enter a profile name (for example coding-fast)";
     case "profile-list":
       return "↑↓ select profile, Enter activate";
+    case "multi-agent-model":
+      return "输入模型 ID (如 deepseek/deepseek-v4-flash) 或直接 Enter 使用当前模型";
+    case "multi-agent-mode":
+      return "选择模式: 1) planner_worker_reviewer  2) agent_turn — 输入编号后按 Enter";
+    case "multi-agent-task":
+      return "描述你的任务，Enter 启动多智能体";
     default:
       return "Message, /command, or @file reference";
   }

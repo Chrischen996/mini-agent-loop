@@ -356,6 +356,9 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     listSessions,
   });
 
+  // Multi-agent wizard state
+  const [multiAgentSetup, setMultiAgentSetup] = useState<import("./types.ts").MultiAgentSetupState | null>(null);
+
   const resolvePendingPermission = useCallback((decision: PermissionDecision) => {
     const pending = state.pendingPermission;
     const permissionManager = permissionManagerRef.current;
@@ -753,6 +756,102 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
 
+    // Multi-agent wizard: model selection step
+    if (acMode === "multi-agent-model") {
+      const modelId = trimmed.trim() || llm.model;
+      setMultiAgentSetup({ step: "mode", orchestratorModel: modelId });
+      setAcMode("multi-agent-mode");
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "多智能体向导 — 选择模式",
+        text: "输入编号选择执行模式:\n  1) planner_worker_reviewer — 规划 → 执行 → 审查（推荐）\n  2) agent_turn             — 单轮 Agent，自动委托子 Agent",
+      });
+      setInput("");
+      return;
+    }
+
+    // Multi-agent wizard: mode selection step
+    if (acMode === "multi-agent-mode" && multiAgentSetup) {
+      const choice = trimmed.trim();
+      const mode: "planner_worker_reviewer" | "agent_turn" =
+        choice === "2" ? "agent_turn" : "planner_worker_reviewer";
+      setMultiAgentSetup({ ...multiAgentSetup, step: "task", mode });
+      setAcMode("multi-agent-task");
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "多智能体向导 — 输入任务",
+        text: `模式已选: ${mode}\n现在请描述你的任务，输入完成后按 Enter 启动。`,
+      });
+      setInput("");
+      return;
+    }
+
+    // Multi-agent wizard: task input step — submit the job
+    if (acMode === "multi-agent-task" && multiAgentSetup) {
+      const task = trimmed.trim();
+      if (!task) {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体向导",
+          text: "任务描述不能为空，请输入任务内容。",
+        });
+        setInput("");
+        return;
+      }
+      const finalSetup = { ...multiAgentSetup, task };
+      setMultiAgentSetup(null);
+      setAcMode(null);
+      setInput("");
+      // If a specific orchestrator model was chosen, switch to it first
+      if (finalSetup.orchestratorModel && finalSetup.orchestratorModel !== llm.model) {
+        selectModelRef(finalSetup.orchestratorModel, {});
+      }
+      // Submit the task as a normal turn with the chosen mode appended in system context
+      const modeLabel = finalSetup.mode === "planner_worker_reviewer"
+        ? "【多智能体模式: planner_worker_reviewer】"
+        : "【多智能体模式: agent_turn】";
+      const fullPrompt = `${modeLabel}\n\n${task}`;
+      dispatch({ type: "USER_MESSAGE", text: `${modeLabel}\n${task}` });
+      abortRef.current = new AbortController();
+      const permissionManager = getPermissionManager();
+      const permissionTurn = permissionManager.beginTurn(
+        permissionSessionId,
+        (request) => dispatch({ type: "LOOP_EVENT", event: { type: "permission_required", request } }),
+        abortRef.current.signal,
+      );
+      permissionTurnRef.current = permissionTurn;
+      const streamBuffer = streamBufferRef.current!;
+      const runId = streamBuffer.start();
+      try {
+        historyRef.current = await runAgentTurn(historyRef.current, task, {
+          llm: { ...llm, sessionId: conversationId },
+          tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools(llm)],
+          autoSubagent,
+          preprocessors: visionPreprocessors,
+          userContent: fullPrompt,
+          permissionTurn,
+          runtimeContext: { sessionId: conversationId, workspaceId: cwd } satisfies RuntimeExecutionContext,
+          globalTokenBudget,
+          thinkingMode: thinkingPolicyRef.current,
+          runtimeRef: subagentRuntimeRef.current,
+          skillNames: skillNamesRef.current,
+          skillRegistry: defaultSkillRegistry,
+          onEvent: (event: LoopEvent) => { streamBuffer.handle(runId, event); },
+        });
+        streamBuffer.finish(runId);
+      } catch (err) {
+        streamBuffer.finish(runId);
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体任务错误",
+          text: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        await persistSession(historyRef.current).catch(() => {});
+      }
+      return;
+    }
+
     clearAc();
 
     if (trimmed === "/exit" || trimmed === "/quit") { exit(); return; }
@@ -923,6 +1022,33 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       permissionManager: getPermissionManager(),
     });
     if (planTurnOverride === null) {
+      return;
+    }
+
+    // /multi-agent: launch the multi-agent setup wizard
+    if (/^\/multi-agent(?:\s+(.*))?$/i.test(trimmed)) {
+      const inlineTask = trimmed.replace(/^\/multi-agent\s*/i, "").trim();
+      if (inlineTask) {
+        // Inline task provided — skip wizard, go straight to task step with defaults
+        setMultiAgentSetup({ step: "task", orchestratorModel: llm.model, mode: "planner_worker_reviewer" });
+        setAcMode("multi-agent-task");
+        setInput(inlineTask);
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体向导",
+          text: `模型: ${llm.model}\n模式: planner_worker_reviewer\n\n任务已预填，按 Enter 启动，或修改后再按 Enter。`,
+        });
+      } else {
+        // Full wizard: start at model selection
+        setMultiAgentSetup({ step: "model" });
+        setAcMode("multi-agent-model");
+        setInput("");
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体向导 — 选择 Orchestrator 模型",
+          text: `当前模型: ${llm.model}\n\n直接按 Enter 使用当前模型，或输入其他模型 ID (如 openai/gpt-4o-mini)。`,
+        });
+      }
       return;
     }
 
