@@ -54,9 +54,13 @@ export function estimateMessageHeight(
   switch (message.kind) {
     case "user":
       // +1 for the marginTop={1} rendered above the user bubble in MessageFeed.
-      // The terminal renderer prefixes user messages with "❯ " (2 cols), so
-      // the available wrap width is width - 2, not width - 4.
-      return 1 + Math.max(1, countTerminalRows(message.displayText ?? message.text, Math.max(10, width - 2))) + (message.images?.length ? 1 : 0);
+      // MessageFeed has paddingX={1} (−2 cols) and the user Box adds another
+      // paddingX={1} (−2 cols), so the available wrap width is width − 4.
+      // The "❯ " marker shares the same Text node and is included in the fold,
+      // so we treat the full width−4 as the budget (first-line marker pushes
+      // text by 2 cols, but continuation lines recover them; using width−4
+      // keeps the estimate conservative and avoids under-counting).
+      return 1 + Math.max(1, countTerminalRows(message.displayText ?? message.text, Math.max(10, width - 4))) + (message.images?.length ? 1 : 0);
     case "assistant":
       if (isSubagentProtocolText(message.text)) return 0;
       // Tool-only turns draw no rows: MessageFeed skips the block entirely
@@ -67,12 +71,14 @@ export function estimateMessageHeight(
       return 1 + Math.max(
         1,
         thinkingRows(message.reasoning, thinkingMode, expandedThinking.has(index), width) +
-          countTerminalRows(message.text, Math.max(10, width - 2)),
+          // feed paddingX={1} (−2) + "⏺ " marker (−2) = width − 4 available.
+          countTerminalRows(message.text, Math.max(10, width - 4)),
       );
     case "notice":
       // +1 for the marginTop={1} row. Divider-style notice: optional title
       // row + one text row (no border box).
-      return 1 + (message.title ? 1 : 0) + Math.max(1, countTerminalRows(message.text, Math.max(10, width - 2)));
+      // feed paddingX={1} (−2) + notice Box paddingX={1} (−2) = width − 4.
+      return 1 + (message.title ? 1 : 0) + Math.max(1, countTerminalRows(message.text, Math.max(10, width - 4)));
     case "tool_call":
       if (isSubagentToolName(message.name)) return 0;
       // +1 for the marginTop={1} row, plus the title row and the nested
@@ -88,7 +94,8 @@ export function estimateMessageHeight(
       return 1 + subagentRenderLineCount(message, { width });
     case "error":
       // +1 for the marginTop={1} row.
-      return 1 + Math.max(1, countTerminalRows(message.text, Math.max(10, width - 2)));
+      // feed paddingX={1} (−2) + "✗ " marker (−2) = width − 4 available.
+      return 1 + Math.max(1, countTerminalRows(message.text, Math.max(10, width - 4)));
   }
 }
 
@@ -161,7 +168,9 @@ function buildBlocks(options: {
     );
     blocks.push({
       item: { kind: "streaming_text" },
-      height: textTopMargin + Math.max(1, countTerminalRows(displayText, Math.max(10, options.width - 2))),
+      // feed paddingX={1} (−2) + "⏺ " marker (−2) = width − 4 for both
+      // height and actual so clipTop scaling uses a consistent basis.
+      height: textTopMargin + Math.max(1, countTerminalRows(displayText, Math.max(10, options.width - 4))),
       actual: textTopMargin + Math.max(1, countTerminalRows(displayText, Math.max(10, options.width - 4))),
     });
   }

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { getTodoPanelRows, planToTodoItems, todoProgressMeter } from "../src/tui/todo-format.ts";
 import { todoPanelRenderLines } from "../src/tui/todo-lines.ts";
-import { TodoPanel } from "../src/tui/components/TodoPanel.tsx";
+import { TodoPanelStatic as TodoPanel } from "../src/tui/components/TodoPanel.tsx";
 import { createInitialState, tuiReducer } from "../src/tui/state.ts";
 import { getMessageFeedHeight, getPickerLayout } from "../src/tui/layout.ts";
 import type { TodoItem } from "../src/todo.ts";
@@ -165,7 +165,8 @@ describe("TodoPanel formatting", () => {
 
     // Unified panel renders item content with per-status icons/colors.
     assert.ok(rendered.includes("Read config"));
-    assert.ok(rendered.includes("Run tests"));
+    // in_progress items display activeForm instead of content
+    assert.ok(rendered.includes("Running tests"));
     assert.ok(rendered.includes("Review output"));
     // Summary header reports the completed/total line.
     assert.ok(rendered.includes("completed"));
@@ -219,5 +220,75 @@ describe("TodoPanel formatting", () => {
     const withTodos = getPickerLayout({ termRows: 20, requestedItems: 12, todoRows: 4, extraRows: 3 });
 
     assert.ok(withTodos.itemRows < withoutTodos.itemRows);
+  });
+
+  it("shows skipped count in header when skipped items exist", () => {
+    const lines = todoPanelRenderLines({
+      todos: [
+        { id: "a", content: "Done", activeForm: "Done", status: "completed", source: "model" as const },
+        { id: "b", content: "Skip me", activeForm: "Skip me", status: "skipped", source: "model" as const },
+        { id: "c", content: "Pending", activeForm: "Pending", status: "pending", source: "model" as const },
+      ],
+      viewMode: "expanded",
+    });
+    const header = lines.find((l) => l.key === "todo-header");
+    assert.ok(header, "header line should exist");
+    assert.match(header!.text, /1 skipped/);
+  });
+
+  it("shows activeForm (not content) for in_progress items when they differ", () => {
+    const lines = todoPanelRenderLines({
+      todos: [
+        { id: "a", content: "Run tests", activeForm: "Running all test suites", status: "in_progress", source: "model" as const },
+      ],
+      viewMode: "expanded",
+    });
+    const itemLine = lines.find((l) => l.key === "todo-a");
+    assert.ok(itemLine, "item line should exist");
+    assert.match(itemLine!.text, /Running all test suites/);
+    assert.doesNotMatch(itemLine!.text, /Run tests/);
+  });
+
+  it("compact mode header contains \u25b8 indicator", () => {
+    const lines = todoPanelRenderLines({
+      todos: [
+        { id: "a", content: "Task", activeForm: "Doing task", status: "in_progress", source: "model" as const },
+      ],
+      viewMode: "compact",
+    });
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!.text, /\u25b8/);
+  });
+
+  it("expanded mode header contains \u25be indicator", () => {
+    const lines = todoPanelRenderLines({
+      todos: [
+        { id: "a", content: "Task", activeForm: "Task", status: "pending", source: "model" as const },
+      ],
+      viewMode: "expanded",
+    });
+    const header = lines.find((l) => l.key === "todo-header");
+    assert.ok(header, "header line should exist");
+    assert.match(header!.text, /\u25be/);
+  });
+
+  it("expanded mode renders group separators between status groups", () => {
+    const lines = todoPanelRenderLines({
+      todos: [
+        { id: "a", content: "Done", activeForm: "Done", status: "completed", source: "model" as const },
+        { id: "b", content: "Active", activeForm: "Being active", status: "in_progress", source: "model" as const },
+        { id: "c", content: "Next", activeForm: "Next", status: "pending", source: "model" as const },
+      ],
+      viewMode: "expanded",
+    });
+    const sepLines = lines.filter((l) => l.key?.startsWith("todo-sep-"));
+    // in_progress \u2192 pending \u2192 done: 2 separators
+    assert.equal(sepLines.length, 2);
+    // in_progress item should appear before pending item
+    const activeIdx = lines.findIndex((l) => l.key === "todo-b");
+    const pendingIdx = lines.findIndex((l) => l.key === "todo-c");
+    const doneIdx = lines.findIndex((l) => l.key === "todo-a");
+    assert.ok(activeIdx < pendingIdx, "in_progress before pending");
+    assert.ok(pendingIdx < doneIdx, "pending before done");
   });
 });

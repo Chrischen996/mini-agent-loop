@@ -176,7 +176,19 @@ function ViewportSlice({
   clipTop: number;
   visibleHeight: number;
   children: React.ReactNode;
-}): React.ReactElement {
+}): React.ReactElement | null {
+  if (visibleHeight <= 0) return null;
+  // When the block is fully visible (no top clipping needed) skip the inner
+  // wrapper with marginTop={0}. Yoga has to re-layout every subtree that
+  // carries a negative marginTop; omitting it for the common case reduces
+  // layout work proportionally to the number of unclipped messages on screen.
+  if (clipTop === 0) {
+    return (
+      <Box height={visibleHeight} flexShrink={0} overflow="hidden">
+        {children}
+      </Box>
+    );
+  }
   return (
     <Box height={visibleHeight} flexShrink={0} overflow="hidden">
       <Box flexDirection="column" marginTop={-clipTop}>
@@ -194,9 +206,12 @@ function ViewportSlice({
  */
 type ClippedViewportItem = Extract<ViewportItem, { clipTop: number; clipTopActual: number; visibleHeight: number }>;
 function sliceHeightFor(item: ClippedViewportItem): number {
-  return Math.min(
-    item.visibleHeight,
-    (item.actualHeight ?? item.visibleHeight) - (item.clipTopActual ?? 0),
+  return Math.max(
+    0,
+    Math.min(
+      item.visibleHeight,
+      (item.actualHeight ?? item.visibleHeight) - (item.clipTopActual ?? 0),
+    ),
   );
 }
 
@@ -410,7 +425,7 @@ export function MessageFeed({
                         focused={focusedMessageIndex === absoluteIndex}
                       />
                     )}
-                    {msg.text && <MarkdownText text={msg.text} width={width} />}
+                    {msg.text && <MarkdownText text={msg.text} width={width - 4} />}
                   </Box>
                 </Box>
               </Box>

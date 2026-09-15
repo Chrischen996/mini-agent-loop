@@ -15,7 +15,7 @@ type HeaderProps = {
 };
 
 /** Claude Code-style welcome frame, with a compact identity after chat starts. */
-export function Header({ modelName, billingLabel, version, cwd, width = 80, showWelcome = false }: HeaderProps): React.ReactElement {
+export const Header = React.memo(function Header({ modelName, billingLabel, version, cwd, width = 80, showWelcome = false }: HeaderProps): React.ReactElement {
   if (showWelcome && width >= WELCOME_PANEL_MIN_WIDTH) {
     const rows = buildWelcomePanelRows(width, {
       title: TUI_BRAND_NAME,
@@ -54,4 +54,4 @@ export function Header({ modelName, billingLabel, version, cwd, width = 80, show
       <Text color={C.primary} bold>{`  ${TUI_BRAND_SPARK}`}</Text>
     </Box>
   );
-}
+});

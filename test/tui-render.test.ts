@@ -122,7 +122,7 @@ describe("legacy TUI renderer", () => {
     const rendered = lines.join("\n");
     assert.match(rendered, /Todos/);
     assert.match(rendered, /Read files/);
-    assert.match(rendered, /Edit code/);
+    assert.match(rendered, /Editing code/);
     assert.match(rendered, /\x1b\[9m/);
   });
 

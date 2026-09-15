@@ -27,7 +27,7 @@ type StatusBarProps = {
  * component only maps segments onto Ink text nodes, so the two clients can no
  * longer disagree about what the status row says.
  */
-export function StatusBar({ modelName, cwd, width = 80, tokenEstimate, contextWindow, busy, status = "Ready", queuedCount = 0, permissionMode, thinkingLevel, cacheReadTokens, promptTokens }: StatusBarProps): React.ReactElement {
+export const StatusBar = React.memo(function StatusBar({ modelName, cwd, width = 80, tokenEstimate, contextWindow, busy, status = "Ready", queuedCount = 0, permissionMode, thinkingLevel, cacheReadTokens, promptTokens }: StatusBarProps): React.ReactElement {
   const segments = buildStatusSegments({
     modelName,
     cwd,
@@ -58,4 +58,4 @@ export function StatusBar({ modelName, cwd, width = 80, tokenEstimate, contextWi
       ))}
     </Box>
   );
-}
+});

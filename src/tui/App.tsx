@@ -1227,31 +1227,43 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   // ── render ────────────────────────────────────────────────────────────────
 
-  const viewportContentHeight = estimateViewportContentHeight({
-    messages: state.messages,
-    streamingText: state.streamingText,
-    streamingReasoning: state.streamingReasoning,
-    busy: state.busy,
-    thinkingMode: state.thinkingMode,
-    expandedThinking: state.expandedThinking,
-    width: termWidth,
-    maxMessages: Number.MAX_SAFE_INTEGER,
-  });
+  // Both height estimates call buildBlocks() internally. Memoising them on the
+  // fields that actually change their output avoids rerunning the O(N) markdown
+  // row-count walk on every render that only updates unrelated state (e.g. the
+  // input field, autocomplete index, or permission panel visibility).
+  const viewportContentHeight = useMemo(
+    () => estimateViewportContentHeight({
+      messages: state.messages,
+      streamingText: state.streamingText,
+      streamingReasoning: state.streamingReasoning,
+      busy: state.busy,
+      thinkingMode: state.thinkingMode,
+      expandedThinking: state.expandedThinking,
+      width: termWidth,
+      maxMessages: Number.MAX_SAFE_INTEGER,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.messages, state.streamingText, state.streamingReasoning, state.busy, state.thinkingMode, state.expandedThinking, termWidth],
+  );
   // Rows the Ink renderer actually draws. Truncated markdown kinds (tables,
   // code, rules) hold one row per source line, so the estimate can exceed the
   // drawn content. Sizing the frame with the drawn count keeps estimate
   // surplus from pinning the frame at full terminal height and leaving a
   // blank band between the transcript and the prompt.
-  const viewportActualHeight = estimateViewportActualHeight({
-    messages: state.messages,
-    streamingText: state.streamingText,
-    streamingReasoning: state.streamingReasoning,
-    busy: state.busy,
-    thinkingMode: state.thinkingMode,
-    expandedThinking: state.expandedThinking,
-    width: termWidth,
-    maxMessages: Number.MAX_SAFE_INTEGER,
-  });
+  const viewportActualHeight = useMemo(
+    () => estimateViewportActualHeight({
+      messages: state.messages,
+      streamingText: state.streamingText,
+      streamingReasoning: state.streamingReasoning,
+      busy: state.busy,
+      thinkingMode: state.thinkingMode,
+      expandedThinking: state.expandedThinking,
+      width: termWidth,
+      maxMessages: Number.MAX_SAFE_INTEGER,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.messages, state.streamingText, state.streamingReasoning, state.busy, state.thinkingMode, state.expandedThinking, termWidth],
+  );
   // Do not force a short session to occupy the entire alternate screen. The
   // fixed-height viewport is useful once the transcript reaches the terminal
   // edge, but before that point it creates a large empty band above the prompt
@@ -1271,11 +1283,27 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   );
   const frameHeight = Math.min(termHeight, naturalFrameHeight);
   const previousViewportHeightRef = useRef(viewportContentHeight);
+  // Pending scroll-adjust accumulated while streaming so we only dispatch once
+  // per animation frame instead of once per 80 ms flush tick.
+  const pendingScrollDeltaRef = useRef(0);
+  const scrollAdjustScheduledRef = useRef(false);
   useLayoutEffect(() => {
     const previous = previousViewportHeightRef.current;
     previousViewportHeightRef.current = viewportContentHeight;
     if (state.scrollOffset > 0 && viewportContentHeight > previous) {
-      dispatch({ type: "SCROLL_BY", delta: viewportContentHeight - previous });
+      pendingScrollDeltaRef.current += viewportContentHeight - previous;
+      if (!scrollAdjustScheduledRef.current) {
+        scrollAdjustScheduledRef.current = true;
+        // Defer the dispatch to the next microtask so rapid back-to-back
+        // layout effects (e.g. streaming deltas arriving faster than 80 ms)
+        // are coalesced into a single SCROLL_BY action.
+        Promise.resolve().then(() => {
+          scrollAdjustScheduledRef.current = false;
+          const delta = pendingScrollDeltaRef.current;
+          pendingScrollDeltaRef.current = 0;
+          if (delta > 0) dispatch({ type: "SCROLL_BY", delta });
+        });
+      }
     }
   }, [viewportContentHeight, state.scrollOffset]);
 
