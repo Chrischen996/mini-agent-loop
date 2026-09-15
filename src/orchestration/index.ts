@@ -5,3 +5,4 @@ export * from "./job-manager.ts";
 export * from "./memory-store.ts";
 export * from "./workflow.ts";
 export * from "./session-gate.ts";
+export * from "./pipeline/index.ts";
