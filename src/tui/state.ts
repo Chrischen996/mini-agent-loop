@@ -671,6 +671,18 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             status: "Responding…",
           };
 
+        case "assistant_deltas":
+          // Coalesced by TurnEventBuffer.flush(): at most one reasoning chunk and
+          // one answer chunk per 80 ms window. Applied in this single state
+          // update so a flush never triggers multiple React renders.
+          return {
+            ...state,
+            streamingText: event.answer ? state.streamingText + event.answer : state.streamingText,
+            streamingReasoning: event.reasoning ? state.streamingReasoning + event.reasoning : state.streamingReasoning,
+            lastStreamAt: Date.now(),
+            status: "Responding…",
+          };
+
         case "assistant": {
           // Prefer streamed text; the final assistant event often has content=""
           const contentText = typeof event.message.content === "string"

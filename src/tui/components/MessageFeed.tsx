@@ -3,7 +3,7 @@ import { Box, Text } from "ink";
 import type { ChatMessage, PendingPermissionState, ThinkingDisplayMode } from "../state.ts";
 import { SubagentCard } from "./SubagentCard.tsx";
 import { TUI_COLORS as C } from "../theme.ts";
-import { selectMessageViewport, type ViewportItem } from "../message-viewport.ts";
+import { selectMessageViewport, type ViewportItem, MessageHeightCache } from "../message-viewport.ts";
 import { MarkdownText } from "./MarkdownText.tsx";
 import { toMessageRenderModel } from "../render-model.ts";
 import { toolResultPrefix, toolVisualName, toolVisualStatusIcon } from "../tool-lines.ts";
@@ -166,6 +166,8 @@ type MessageFeedProps = {
   scrollOffset?: number;
   /** Match Claude Code by leaving clipped history unobstructed. */
   showHistoryHints?: boolean;
+  /** Optional per-message height cache shared with the App-level estimates. */
+  heightCache?: MessageHeightCache;
 };
 
 function ViewportSlice({
@@ -272,6 +274,115 @@ function ActivityRow({
   );
 }
 
+type HistoryMessageContentProps = {
+  msg: ChatMessage;
+  index: number;
+  width: number;
+  thinkingMode: ThinkingDisplayMode;
+  /** Stable reference from TuiState; only changes when the user expands/collapses thinking. */
+  expandedThinking: number[];
+  focusedMessageIndex: number;
+};
+
+/**
+ * Inner content of one completed history block.
+ *
+ * Memoized on the immutable message reference plus the rare-changing render
+ * params (width / thinking mode / focus / expanded-thinking set), so a
+ * streaming flush — which only shifts the live stack and the slice clipping
+ * of already-estimated rows — skips re-rendering every finished message's
+ * markdown subtree instead of re-running `parseMarkdownLines` for the whole
+ * transcript on every 80 ms tick.
+ */
+const HistoryMessageContent = React.memo(function HistoryMessageContent({
+  msg,
+  index,
+  width,
+  thinkingMode,
+  expandedThinking,
+  focusedMessageIndex,
+}: HistoryMessageContentProps): React.ReactElement | null {
+  const visual = toMessageRenderModel(msg);
+  const expanded = expandedThinking.includes(index);
+  const focused = focusedMessageIndex === index;
+  if (msg.kind === "user") {
+    return (
+      <Box
+        marginBottom={0}
+        flexDirection="column"
+        paddingX={1}
+        marginTop={1}
+        width="100%"
+      >
+        <Text backgroundColor={C.userBg} color={C.assistant} wrap="wrap">
+          <Text color={C.muted}>{visual.marker}</Text>{" "}{msg.displayText ?? msg.text}
+        </Text>
+        {msg.images?.length ? (
+          <Box marginLeft={2} marginTop={0} gap={1}>
+            {msg.images.map((image) => (
+              <Text key={image.path} color={C.info}>[image: {image.path.split("/").pop()}]</Text>
+            ))}
+          </Box>
+        ) : null}
+      </Box>
+    );
+  }
+  if (msg.kind === "assistant") {
+    if (isSubagentProtocolText(msg.text)) return null;
+    // Tool-only turns draw no lone "⏺ " marker row: with no reasoning
+    // and no text the block would render a bare dot plus a 1-row gap.
+    // The tool rows that follow carry the conversation flow (the ANSI
+    // render model already draws empty assistant messages as 0 rows).
+    if (!msg.reasoning && !msg.text) return null;
+    return (
+      <Box marginBottom={0} flexDirection="column" marginTop={1}>
+        <Box flexDirection="row">
+          <Text color={focused ? C.running : C.assistant} bold>{focused ? "◆" : visual.marker} </Text>
+          <Box flexDirection="column" flexGrow={1}>
+            {msg.reasoning && (
+              <ThinkingBlock
+                content={msg.reasoning}
+                mode={thinkingMode}
+                forceExpanded={expanded}
+                focused={focused}
+              />
+            )}
+            {msg.text && <MarkdownText text={msg.text} width={width - 4} />}
+          </Box>
+        </Box>
+      </Box>
+    );
+  }
+  if (msg.kind === "tool_call") {
+    if (isSubagentToolName(msg.name)) return null;
+    return <ToolCallRow msg={msg} />;
+  }
+  if (msg.kind === "notice") {
+    return (
+      <Box flexDirection="column" paddingX={1} marginTop={1}>
+        {msg.title && (
+          <Text color={C.info} dimColor>
+            {"─".repeat(6)} {noticeTitle(msg.title)} {"─".repeat(6)}
+          </Text>
+        )}
+        <Text color={C.assistant}>{noticeText(msg.text)}</Text>
+      </Box>
+    );
+  }
+  if (msg.kind === "subagent_call") {
+    return <SubagentCard msg={msg} width={width} />;
+  }
+  if (msg.kind === "error") {
+    return (
+      <Box flexDirection="row" minWidth={0} marginTop={1}>
+        <Text color={C.error} bold>✗ </Text>
+        <Text color={C.assistant} wrap="wrap">{msg.text}</Text>
+      </Box>
+    );
+  }
+  return null;
+});
+
 export function MessageFeed({
   messages,
   streamingText,
@@ -292,10 +403,10 @@ export function MessageFeed({
   width = 80,
   scrollOffset = 0,
   showHistoryHints = false,
+  heightCache,
 }: MessageFeedProps): React.ReactElement {
   const effectiveMode: ThinkingDisplayMode =
     thinkingMode ?? (showThinking ? "summary" : "hidden");
-  const expandedSet = new Set(expandedThinking);
   
   const viewport = selectMessageViewport({
     messages,
@@ -309,6 +420,7 @@ export function MessageFeed({
     width,
     maxMessages,
     showHistoryHints,
+    cache: heightCache,
   });
 
   return (
@@ -376,94 +488,22 @@ export function MessageFeed({
           );
         }
 
-        const msg = item.message;
-        const absoluteIndex = item.index;
-        const visual = toMessageRenderModel(msg);
-        if (msg.kind === "user") {
-          return (
-            <ViewportSlice key={absoluteIndex} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
-              <Box
-                marginBottom={0}
-                flexDirection="column"
-                paddingX={1}
-                marginTop={1}
-                width="100%"
-              >
-                <Text backgroundColor={C.userBg} color={C.assistant} wrap="wrap">
-                  <Text color={C.muted}>{visual.marker}</Text>{" "}{msg.displayText ?? msg.text}
-                </Text>
-                {msg.images?.length ? (
-                  <Box marginLeft={2} marginTop={0} gap={1}>
-                    {msg.images.map((image) => (
-                      <Text key={image.path} color={C.info}>[image: {image.path.split("/").pop()}]</Text>
-                    ))}
-                  </Box>
-                ) : null}
-              </Box>
-            </ViewportSlice>
-          );
-        }
-        if (msg.kind === "assistant") {
-          if (isSubagentProtocolText(msg.text)) return null;
-          // Tool-only turns draw no lone "⏺ " marker row: with no reasoning
-          // and no text the block would render a bare dot plus a 1-row gap.
-          // The tool rows that follow carry the conversation flow (the ANSI
-          // render model already draws empty assistant messages as 0 rows).
-          if (!msg.reasoning && !msg.text) return null;
-          const focused = focusedMessageIndex === absoluteIndex;
-          return (
-            <ViewportSlice key={absoluteIndex} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
-              <Box marginBottom={0} flexDirection="column" marginTop={1}>
-                <Box flexDirection="row">
-                  <Text color={focused ? C.running : C.assistant} bold>{focused ? "◆" : visual.marker} </Text>
-                  <Box flexDirection="column" flexGrow={1}>
-                    {msg.reasoning && (
-                      <ThinkingBlock
-                        content={msg.reasoning}
-                        mode={effectiveMode}
-                        forceExpanded={expandedSet.has(absoluteIndex)}
-                        focused={focusedMessageIndex === absoluteIndex}
-                      />
-                    )}
-                    {msg.text && <MarkdownText text={msg.text} width={width - 4} />}
-                  </Box>
-                </Box>
-              </Box>
-            </ViewportSlice>
-          );
-        }
-        if (msg.kind === "tool_call") {
-          if (isSubagentToolName(msg.name)) return null;
-          return <ViewportSlice key={msg.id} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}><ToolCallRow msg={msg} /></ViewportSlice>;
-        }
-        if (msg.kind === "notice") {
-          return (
-            <ViewportSlice key={absoluteIndex} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
-              <Box flexDirection="column" paddingX={1} marginTop={1}>
-                {msg.title && (
-                  <Text color={C.info} dimColor>
-                    {"─".repeat(6)} {noticeTitle(msg.title)} {"─".repeat(6)}
-                  </Text>
-                )}
-                <Text color={C.assistant}>{noticeText(msg.text)}</Text>
-              </Box>
-            </ViewportSlice>
-          );
-        }
-        if (msg.kind === "subagent_call") {
-          return <ViewportSlice key={msg.id} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}><SubagentCard msg={msg} width={width} /></ViewportSlice>;
-        }
-        if (msg.kind === "error") {
-          return (
-            <ViewportSlice key={absoluteIndex} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
-              <Box flexDirection="row" minWidth={0} marginTop={1}>
-                <Text color={C.error} bold>✗ </Text>
-                <Text color={C.assistant} wrap="wrap">{msg.text}</Text>
-              </Box>
-            </ViewportSlice>
-          );
-        }
-        return null;
+        // Completed history blocks: the slice wrapper shifts clipping as the
+        // live stack grows, but the inner content (markdown, subagent cards,
+        // tool rows) is memoized in HistoryMessageContent so a flush never
+        // re-renders finished messages.
+        return (
+          <ViewportSlice key={item.index} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
+            <HistoryMessageContent
+              msg={item.message}
+              index={item.index}
+              width={width}
+              thinkingMode={effectiveMode}
+              expandedThinking={expandedThinking}
+              focusedMessageIndex={focusedMessageIndex}
+            />
+          </ViewportSlice>
+        );
       })}
       {/* Scrolled-up windows keep the surplus below the slice so the visible
           rows start flush under the header instead of under a black band. */}

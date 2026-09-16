@@ -233,6 +233,12 @@ export type AgentRuntimeRef = {
 
 export type LoopEvent =
   | { type: "assistant_delta"; text: string; kind: "reasoning" | "answer" }
+  /**
+   * Coalesced streaming update emitted by TurnEventBuffer.flush(): at most
+   * one reasoning chunk and one answer chunk per flush, so consumers apply
+   * both in a single state update instead of one update per raw delta.
+   */
+  | { type: "assistant_deltas"; reasoning?: string; answer?: string }
   | { type: "context_compacted"; beforeTokens: number; afterTokens: number; reason: string }
   | { type: "assistant"; message: AssistantMessage; usage?: StreamChatUsage }
   | { type: "error"; message: string }

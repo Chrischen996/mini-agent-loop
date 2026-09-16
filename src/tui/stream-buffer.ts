@@ -91,7 +91,24 @@ export class TurnEventBuffer {
     this.cancelTimer();
     const pending = this.pending;
     this.pending = [];
-    for (const event of pending) this.emit(event);
+    if (pending.length === 0) return;
+    // A single flush must produce at most one reasoning update and one
+    // answer update. Coalesce all pending deltas into a single
+    // `assistant_deltas` event so the consumer applies both chunks in
+    // one state update instead of one re-render per raw delta.
+    if (pending.length === 1) {
+      this.emit(pending[0]!);
+      return;
+    }
+    const byKind = new Map<DeltaKind, string>();
+    for (const delta of pending) {
+      byKind.set(delta.kind, (byKind.get(delta.kind) ?? "") + delta.text);
+    }
+    this.emit({
+      type: "assistant_deltas",
+      ...(byKind.has("reasoning") ? { reasoning: byKind.get("reasoning")! } : {}),
+      ...(byKind.has("answer") ? { answer: byKind.get("answer")! } : {}),
+    });
   }
 
   private cancelTimer(): void {

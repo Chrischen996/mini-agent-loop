@@ -79,7 +79,7 @@ import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./l
 import { pickerChromeRows, pickerRequestedItems } from "./picker-window.ts";
 import { thinkingLevelStatusText } from "./status-line.ts";
 import { promptPlaceholder, type AcMode } from "./input-utils.ts";
-import { estimateViewportContentHeight, estimateViewportActualHeight } from "./message-viewport.ts";
+import { estimateViewportContentHeight, estimateViewportActualHeight, MessageHeightCache } from "./message-viewport.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
 import { executeTodoCommand, parseLegacyTodoCommand, parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
@@ -283,6 +283,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     });
   }
 
+  // Shared per-message row-count cache: finished history messages are
+  // immutable, so a streaming flush turns the O(N) markdown row walk into
+  // cheap Map lookups. Survives the whole session; cleared on unmount.
+  const heightCacheRef = useRef<MessageHeightCache | null>(null);
+  if (!heightCacheRef.current) heightCacheRef.current = new MessageHeightCache();
+  const heightCache = heightCacheRef.current;
+
   const permissionSessionId = conversationId;
 
   const getPermissionManager = useCallback(() => {
@@ -301,6 +308,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   useEffect(() => {
     return () => {
       streamBufferRef.current?.dispose();
+      heightCacheRef.current?.clear();
     };
   }, []);
 
@@ -1357,6 +1365,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   // fields that actually change their output avoids rerunning the O(N) markdown
   // row-count walk on every render that only updates unrelated state (e.g. the
   // input field, autocomplete index, or permission panel visibility).
+  // Completed history blocks are served from the shared two-layer height
+  // cache: the full transcript walk is cached per messages-array reference,
+  // so a streaming flush (same array, new streaming text) costs O(1) — no
+  // off-screen message is reprocessed — while the live stack recomputes.
   const viewportContentHeight = useMemo(
     () => estimateViewportContentHeight({
       messages: state.messages,
@@ -1367,6 +1379,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       expandedThinking: state.expandedThinking,
       width: termWidth,
       maxMessages: Number.MAX_SAFE_INTEGER,
+      cache: heightCache,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [state.messages, state.streamingText, state.streamingReasoning, state.busy, state.thinkingMode, state.expandedThinking, termWidth],
@@ -1386,6 +1399,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       expandedThinking: state.expandedThinking,
       width: termWidth,
       maxMessages: Number.MAX_SAFE_INTEGER,
+      cache: heightCache,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [state.messages, state.streamingText, state.streamingReasoning, state.busy, state.thinkingMode, state.expandedThinking, termWidth],
@@ -1465,6 +1479,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           width={termWidth}
           scrollOffset={state.scrollOffset}
           showHistoryHints
+          heightCache={heightCache}
         />
         <Overlays
           acMode={acMode}

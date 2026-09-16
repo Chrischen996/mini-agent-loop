@@ -41,6 +41,113 @@ function thinkingRows(
   return estimateThinkingRows(content, { mode, forceExpanded, width, isStreaming });
 }
 
+const EMPTY_EXPANDED: ReadonlySet<number> = Object.freeze(new Set<number>());
+
+type HistoryBlock = { item: RawViewportItem; height: number; actual: number };
+
+type PerMessageEntry = { width: number; thinkingMode: ThinkingDisplayMode; expanded: boolean; height: number; actual: number };
+
+/** One cached walk of a specific messages array — the "window" layer. */
+type ArrayBlocksEntry = {
+  messages: ChatMessage[];
+  width: number;
+  thinkingMode: ThinkingDisplayMode;
+  expandedKey: string;
+  maxMessages: number;
+  blocks: HistoryBlock[];
+};
+
+// Keep a handful of recent arrays so session restore / rewind (which swap in
+// a brand-new messages array) does not thrash the cache, but do not retain
+// arrays forever.
+const ARRAY_ENTRIES_CAP = 8;
+
+/**
+ * Two-layer row-count cache for completed history blocks.
+ *
+ * Layer 1 (per message, WeakMap): a `ChatMessage` is immutable once appended
+ * (the TUI only grows or map-replaces the array, it never mutates entries),
+ * so the object reference is a safe key. `width` / `thinkingMode` /
+ * `expanded` act as validity guards: a resize, mode switch, or expand toggle
+ * recomputes exactly the affected entries. WeakMap keeps superseded message
+ * objects (tool_end / subagent_event replace them via `{...m}`) from
+ * leaking as the session grows.
+ *
+ * Layer 2 (per messages array): the FULL walk of the history is cached for
+ * the specific array reference. While streaming, `state.messages` is
+ * unchanged, so every 80 ms flush (and each of the three callers — the two
+ * App estimates and MessageFeed's viewport selection) serves the entire
+ * transcript from one stored blocks array in O(1). Off-screen messages are
+ * simply not processed on flush; the walk only re-runs when a new messages
+ * array appears (a message was added or replaced), and even then each entry
+ * is a cheap layer-1 lookup.
+ */
+export class MessageHeightCache {
+  private entries = new WeakMap<ChatMessage, PerMessageEntry>();
+  private arrayEntries: ArrayBlocksEntry[] = [];
+
+  get(
+    message: ChatMessage,
+    index: number,
+    options: { width: number; thinkingMode: ThinkingDisplayMode; expanded: boolean },
+  ): { height: number; actual: number } {
+    const { width, thinkingMode, expanded } = options;
+    const hit = this.entries.get(message);
+    if (hit && hit.width === width && hit.thinkingMode === thinkingMode && hit.expanded === expanded) {
+      return { height: hit.height, actual: hit.actual };
+    }
+    const block = computeHistoryBlock(message, index, options);
+    this.entries.set(message, { width, thinkingMode, expanded, height: block.height, actual: block.actual });
+    return block;
+  }
+
+  /**
+   * Cached history blocks for one messages array. O(1) when the same array
+   * reference is passed again with the same params (the streaming-flush hot
+   * path); a single layer-1 walk otherwise.
+   */
+  getHistoryBlocks(
+    messages: ChatMessage[],
+    options: { width: number; thinkingMode: ThinkingDisplayMode; expandedThinking: number[]; maxMessages: number },
+  ): HistoryBlock[] {
+    const expandedKey = options.expandedThinking.join(",");
+    for (const entry of this.arrayEntries) {
+      if (
+        entry.messages === messages &&
+        entry.width === options.width &&
+        entry.thinkingMode === options.thinkingMode &&
+        entry.expandedKey === expandedKey &&
+        entry.maxMessages === options.maxMessages
+      ) {
+        return entry.blocks;
+      }
+    }
+    const startIndex = Math.max(0, messages.length - options.maxMessages);
+    const expanded = new Set(options.expandedThinking);
+    const blocks: HistoryBlock[] = [];
+    for (let index = startIndex; index < messages.length; index++) {
+      const message = messages[index]!;
+      const block = this.get(message, index, { width: options.width, thinkingMode: options.thinkingMode, expanded: expanded.has(index) });
+      blocks.push({ item: { kind: "message", index, message }, height: block.height, actual: block.actual });
+    }
+    this.arrayEntries.push({
+      messages,
+      width: options.width,
+      thinkingMode: options.thinkingMode,
+      expandedKey,
+      maxMessages: options.maxMessages,
+      blocks,
+    });
+    if (this.arrayEntries.length > ARRAY_ENTRIES_CAP) this.arrayEntries.shift();
+    return blocks;
+  }
+
+  clear(): void {
+    this.entries = new WeakMap();
+    this.arrayEntries = [];
+  }
+}
+
 export function estimateMessageHeight(
   message: ChatMessage,
   options: {
@@ -99,6 +206,27 @@ export function estimateMessageHeight(
   }
 }
 
+function computeHistoryBlock(
+  message: ChatMessage,
+  index: number,
+  options: { width: number; thinkingMode: ThinkingDisplayMode; expanded: boolean },
+): { height: number; actual: number } {
+  const { width, thinkingMode, expanded } = options;
+  const expandedThinking = expanded ? new Set([index]) : EMPTY_EXPANDED;
+  const height = estimateMessageHeight(message, { width, thinkingMode, expandedThinking, index });
+  // Rows the Ink component actually draws. Markdown keeps one row per
+  // source line for truncated kinds, so wrapping text can render fewer
+  // rows than `countTerminalRows` estimates. The viewport clamps slice
+  // boxes to the smaller number to avoid blank padding above the prompt.
+  let actual = height;
+  if (message.kind === "assistant" && !isSubagentProtocolText(message.text) && (message.reasoning || message.text)) {
+    actual = 1 +
+      estimateThinkingRows(message.reasoning, { mode: thinkingMode, forceExpanded: expanded, width }) +
+      countMarkdownRenderRows(message.text, width);
+  }
+  return { height, actual };
+}
+
 function buildBlocks(options: {
   messages: ChatMessage[];
   streamingText: string;
@@ -108,33 +236,28 @@ function buildBlocks(options: {
   expandedThinking: number[];
   width: number;
   maxMessages: number;
+  cache?: MessageHeightCache;
 }): Array<{ item: RawViewportItem; height: number; actual: number }> {
   const startIndex = Math.max(0, options.messages.length - options.maxMessages);
   const expanded = new Set(options.expandedThinking);
   const blocks: Array<{ item: RawViewportItem; height: number; actual: number }> = [];
-  for (let index = startIndex; index < options.messages.length; index++) {
+  if (options.cache) {
+    // Window layer: the full history walk is cached per messages-array
+    // reference, so a streaming flush (same array, new streaming text)
+    // processes zero off-screen messages at all.
+    blocks.push(
+      ...options.cache.getHistoryBlocks(options.messages, {
+        width: options.width,
+        thinkingMode: options.thinkingMode,
+        expandedThinking: options.expandedThinking,
+        maxMessages: options.maxMessages,
+      }),
+    );
+  }
+  for (let index = startIndex; !options.cache && index < options.messages.length; index++) {
     const message = options.messages[index]!;
-    const estimated = estimateMessageHeight(message, {
-      width: options.width,
-      thinkingMode: options.thinkingMode,
-      expandedThinking: expanded,
-      index,
-    });
-    // Rows the Ink component actually draws. Markdown keeps one row per
-    // source line for truncated kinds, so wrapping text can render fewer
-    // rows than `countTerminalRows` estimates. The viewport clamps slice
-    // boxes to the smaller number to avoid blank padding above the prompt.
-    let actual = estimated;
-    if (message.kind === "assistant" && !isSubagentProtocolText(message.text) && (message.reasoning || message.text)) {
-      actual = 1 +
-        estimateThinkingRows(message.reasoning, {
-          mode: options.thinkingMode,
-          forceExpanded: expanded.has(index),
-          width: options.width,
-        }) +
-        countMarkdownRenderRows(message.text, options.width);
-    }
-    blocks.push({ item: { kind: "message", index, message }, height: estimated, actual });
+    const { height, actual } = computeHistoryBlock(message, index, { width: options.width, thinkingMode: options.thinkingMode, expanded: expanded.has(index) });
+    blocks.push({ item: { kind: "message", index, message }, height, actual });
   }
   // Live stack (streaming_reasoning → streaming_text → busy_status) previews
   // the next history assistant, which renders with a 1-row gap above it.
@@ -179,7 +302,7 @@ function buildBlocks(options: {
   return blocks;
 }
 
-export function estimateViewportContentHeight(options: Omit<Parameters<typeof selectMessageViewport>[0], "scrollOffset" | "availableHeight">): number {
+export function estimateViewportContentHeight(options: Omit<Parameters<typeof selectMessageViewport>[0], "scrollOffset" | "availableHeight"> & { cache?: MessageHeightCache }): number {
   return buildBlocks({ ...options, maxMessages: options.maxMessages ?? Number.MAX_SAFE_INTEGER }).reduce((sum, block) => sum + block.height, 0);
 }
 
@@ -189,7 +312,7 @@ export function estimateViewportContentHeight(options: Omit<Parameters<typeof se
  * pin the frame at full terminal height and leave a blank band above the
  * prompt. Never exceeds `estimateViewportContentHeight` for the same input.
  */
-export function estimateViewportActualHeight(options: Omit<Parameters<typeof selectMessageViewport>[0], "scrollOffset" | "availableHeight">): number {
+export function estimateViewportActualHeight(options: Omit<Parameters<typeof selectMessageViewport>[0], "scrollOffset" | "availableHeight"> & { cache?: MessageHeightCache }): number {
   return buildBlocks({ ...options, maxMessages: options.maxMessages ?? Number.MAX_SAFE_INTEGER }).reduce((sum, block) => sum + Math.min(block.height, block.actual), 0);
 }
 
@@ -207,6 +330,8 @@ export function selectMessageViewport(options: {
   maxMessages?: number;
   /** Renderers may hide the hint row while retaining scroll accounting. */
   showHistoryHints?: boolean;
+  /** Optional per-message height cache for completed history blocks. */
+  cache?: MessageHeightCache;
 }): ViewportSelection {
   const heightBudget = Math.max(3, options.availableHeight);
   const showHistoryHints = options.showHistoryHints ?? true;

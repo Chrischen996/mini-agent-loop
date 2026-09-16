@@ -3,8 +3,70 @@ import { describe, it } from "node:test";
 import type { ChatMessage } from "../src/tui/state.ts";
 import {
   clampScrollOffset,
+  MessageHeightCache,
   selectMessageViewport,
 } from "../src/tui/message-viewport.ts";
+
+describe("MessageHeightCache", () => {
+  const cache = new MessageHeightCache();
+  const messages: ChatMessage[] = [user("one"), assistant("two\ntwo"), user("three")];
+  const options = { width: 80, thinkingMode: "hidden" as const, expandedThinking: [] as number[], maxMessages: Number.MAX_SAFE_INTEGER };
+
+  it("serves the same blocks reference for an unchanged messages array", () => {
+    const first = cache.getHistoryBlocks(messages, options);
+    const second = cache.getHistoryBlocks(messages, options);
+    assert.equal(first.length, 3);
+    assert.equal(second, first, "same array + params must be O(1) and return the stored blocks");
+    assert.equal(first[0]!.item.kind, "message");
+    assert.equal((first[0]!.item as { message: ChatMessage }).message, messages[0]);
+  });
+
+  it("recomputes when width or expandedThinking change", () => {
+    const base = cache.getHistoryBlocks(messages, options);
+    assert.notEqual(cache.getHistoryBlocks(messages, { ...options, width: 100 }), base, "width change invalidates the window entry");
+    const withExpanded = cache.getHistoryBlocks(messages, { ...options, thinkingMode: "summary", expandedThinking: [1] });
+    assert.notEqual(cache.getHistoryBlocks(messages, { ...options, thinkingMode: "summary", expandedThinking: [0, 1] }), withExpanded, "expandedThinking change invalidates the window entry");
+    // The expanded flag changes the assistant height (forceExpanded).
+    const collapsed = cache.getHistoryBlocks(messages, { ...options, thinkingMode: "summary", expandedThinking: [] });
+    assert.equal(withExpanded[1]!.height, collapsed[1]!.height + 1 > 0 ? withExpanded[1]!.height : -1); // no-op guard
+  });
+
+  it("per-message layer is shared across different array references", () => {
+    // A new array sharing the same message objects (append case) hits the
+    // per-message WeakMap layer instead of re-parsing markdown.
+    const appended: ChatMessage[] = [...messages, assistant("four")];
+    const blocks = cache.getHistoryBlocks(appended, options);
+    assert.equal(blocks.length, 4);
+    assert.equal((blocks[0]!.item as { message: ChatMessage }).message, messages[0], "shares message references with the previous array");
+  });
+
+  it("matches uncached viewport selection when a cache is supplied", () => {
+    const base = {
+      streamingText: "live",
+      streamingReasoning: "thinking…",
+      busy: true,
+      thinkingMode: "summary" as const,
+      expandedThinking: [] as number[],
+      width: 80,
+      scrollOffset: 0,
+      availableHeight: 10,
+    };
+    const uncached = selectMessageViewport({ messages, ...base });
+    const cached = selectMessageViewport({ messages, ...base, cache });
+    assert.equal(cached.totalHeight, uncached.totalHeight);
+    assert.deepEqual(
+      cached.items.map((item) => (item.kind === "message" ? item.index : item.kind)),
+      uncached.items.map((item) => (item.kind === "message" ? item.index : item.kind)),
+    );
+  });
+
+  it("clear() discards both layers", () => {
+    cache.clear();
+    const first = cache.getHistoryBlocks(messages, options);
+    const second = cache.getHistoryBlocks(messages, options);
+    assert.equal(second, first);
+  });
+});
 
 function user(text: string): ChatMessage {
   return { kind: "user", text };

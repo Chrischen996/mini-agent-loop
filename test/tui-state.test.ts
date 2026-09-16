@@ -103,6 +103,27 @@ describe("TUI sidebar state", () => {
     assert.deepEqual(state.messages.at(-1), { kind: "error", text: "Clipboard has no image" });
   });
 
+  it("applies a coalesced assistant_deltas event in a single update", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Hello" });
+
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_deltas", reasoning: "think1", answer: "say1" },
+    });
+    assert.equal(state.streamingReasoning, "think1");
+    assert.equal(state.streamingText, "say1");
+
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_deltas", answer: "say2" },
+    });
+    assert.equal(state.streamingReasoning, "think1");
+    assert.equal(state.streamingText, "say1say2");
+    assert.equal(typeof state.lastStreamAt, "number");
+    assert.equal(state.status, "Responding…");
+  });
+
   it("tracks the completed task root and accumulates assistant usage", () => {
     let state = createInitialState("model");
     state = tuiReducer(state, { type: "USER_MESSAGE", text: "Review the workspace" });
