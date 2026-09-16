@@ -78,6 +78,7 @@ export type AcMode =
   | "multi-agent-model"
   | "multi-agent-mode"
   | "multi-agent-task"
+  | "role-setup"
   | null;
 
 export type PromptPlaceholderContext = {

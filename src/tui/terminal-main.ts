@@ -43,7 +43,7 @@ import { SessionManager } from "../session-manager.ts";
 import type { AgentMessage } from "../types.ts";
 import { formatAmbiguousSessionNotice, getResumeMessageCandidates, getStartupSessionRequest, messageBoundaryForSelection, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos, type ResumeMessageCandidate } from "./session-serialization.ts";
 import { adaptHistoryForModel } from "../message-adapter.ts";
-import { activateProfile, listProfiles, loadProfileStore, removeProfile, saveProfile } from "../profile-store.ts";
+import { activateProfile, listProfiles, loadProfileStore, loadProfileStoreSync, removeProfile, resolveSubagentRoleLlmConfigs, saveProfile, saveProfileStore, setSubagentRole } from "../profile-store.ts";
 import { modelCommandFromPickerInput, parseModelCommand, shouldSubmitTypedModelCommand } from "./model-command.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
 import { TUI_BRAND_NAME, TUI_BRAND_VERSION } from "./brand.ts";
@@ -52,6 +52,26 @@ import { createPiTuiRuntime, type PiTuiRuntime } from "./pi-tui-runtime.ts";
 
 const ALTERNATE_SCREEN = "\x1b[?1049h";
 const MAIN_SCREEN = "\x1b[?1049l";
+
+function buildRoleLlmConfigs(
+  parentLlm: import("../llm/index.ts").LlmConfig,
+): Record<string, import("../llm/index.ts").LlmConfig> {
+  const store = loadProfileStoreSync();
+  if (!store) return {};
+  const roleProfiles = resolveSubagentRoleLlmConfigs(store);
+  const result: Record<string, import("../llm/index.ts").LlmConfig> = {};
+  for (const [role, profile] of Object.entries(roleProfiles)) {
+    try {
+      result[role] = switchLlmModel(parentLlm, profile.model, {
+        baseUrl: profile.baseUrl,
+        apiKey: profile.apiKey,
+      });
+    } catch {
+      // profile invalid → skip, subagent falls back to parent model
+    }
+  }
+  return result;
+}
 
 /**
  * Claude Code-style standalone ANSI entrypoint. The reducer, Agent service,
@@ -182,6 +202,7 @@ export async function runTerminalMain(): Promise<void> {
         parentRuntime,
         globalTokenBudget: loadGlobalTokenBudgetFromEnv(),
         globalConcurrencyLimit: loadGlobalConcurrencyLimitFromEnv(),
+        roleLlmConfigs: buildRoleLlmConfigs(activeLlm),
       }),
     ];
     const persistSessionSnapshot = async (history: AgentMessage[]): Promise<void> => {
@@ -667,6 +688,7 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
     }
     if (action.type === "insert" || action.type === "backspace") deps.autocomplete.update(input.getValue());
     else if (action.type === "cursor" && action.direction === "right" && deps.autocomplete.handleKey({ rightArrow: true })) return;
+    else if (action.type === "cursor" && action.direction === "left" && deps.autocomplete.handleKey({ leftArrow: true })) return;
     else if (action.type === "cursor" && action.direction === "up" && deps.autocomplete.handleKey({ upArrow: true })) return;
     else if (action.type === "cursor" && action.direction === "down" && deps.autocomplete.handleKey({ downArrow: true })) return;
     else if (action.type === "cursor" && (action.direction === "up" || action.direction === "down")) {
@@ -741,7 +763,8 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
     // handler consumes the field (model setup or profile activation).
     if (autocompleteState.mode === "model-setup"
       || autocompleteState.mode === "profile-name"
-      || autocompleteState.mode === "profile-list") {
+      || autocompleteState.mode === "profile-list"
+      || autocompleteState.mode === "role-setup") {
       void submitInput(action.value, deps);
       return;
     }
@@ -892,7 +915,8 @@ async function submitInput(
   }
   const allowEmptyModelSetup = autocompleteState.mode === "model-setup" && Boolean(autocompleteState.modelSetup);
   const allowEmptyProfileSelection = autocompleteState.mode === "profile-list";
-  if (!text && !allowEmptyModelSetup && !allowEmptyProfileSelection) return;
+  const allowEmptyRoleSetup = autocompleteState.mode === "role-setup" && Boolean(autocompleteState.roleSetup);
+  if (!text && !allowEmptyModelSetup && !allowEmptyProfileSelection && !allowEmptyRoleSetup) return;
   if (store.getState().busy && /^(?:resume|\/(?:clear|resume|model|profiles?|plan(?:-|\s|$)))/i.test(text)) {
     store.dispatch({ type: "ADD_NOTICE", title: "Turn in progress", text: "The current turn is still running. This control command runs once it finishes; normal messages are queued." });
     input.clear();
@@ -950,6 +974,10 @@ async function submitInput(
   }
   if (autocompleteState.mode === "profile-list" && autocompleteState.profileListState) {
     await activateTerminalProfile(autocompleteState.profileListState.selectedIndex, deps);
+    return;
+  }
+  if (autocompleteState.mode === "role-setup" && autocompleteState.roleSetup) {
+    await submitRoleSetup(deps);
     return;
   }
   if (/^\/profiles?\s+delete\s+/i.test(text)) {
@@ -1273,6 +1301,8 @@ async function applyTerminalModel(
     deps.autocomplete.clear();
     deps.input.clear();
     deps.store.dispatch({ type: "ADD_NOTICE", title: "Model switched", text: `${next.provider}/${next.model}` });
+    // Offer the sub-agent role wizard right after a main model switch.
+    void openRoleSetupWizard(deps);
     return true;
   } catch (error) {
     deps.store.dispatch({ type: "ADD_NOTICE", title: "Model switch failed", text: error instanceof Error ? error.message : String(error) });
@@ -1355,6 +1385,78 @@ async function activateTerminalProfile(index: number, deps: InputDeps): Promise<
     deps.store.dispatch({ type: "ADD_NOTICE", title: "Model profiles", text: error instanceof Error ? error.message : String(error) });
   }
   deps.autocomplete.clear();
+  deps.input.clear();
+}
+
+/**
+ * Enter in the role-setup wizard: confirm the binding for the current role,
+ * then advance to the next role or close the wizard on the last one.
+ */
+async function submitRoleSetup(deps: InputDeps): Promise<void> {
+  const rs = deps.autocomplete.getState().roleSetup;
+  if (!rs) return;
+  const role = rs.roles[rs.currentRoleIndex];
+  // selectedIndex 0 = "inherit main model" (clear binding); 1..n = profileNames[i-1].
+  const profileName = rs.selectedIndex === 0 ? null : (rs.profileNames[rs.selectedIndex - 1] ?? null);
+  try {
+    const store = await loadProfileStore();
+    const updated = setSubagentRole(store, role, profileName);
+    await saveProfileStore(updated);
+    deps.store.dispatch({
+      type: "ADD_NOTICE",
+      title: "Sub-agent role",
+      text: profileName ? `${role} → ${profileName}` : `${role} → inherit main model`,
+    });
+    const chosen = { ...rs.chosen };
+    if (profileName) chosen[role] = profileName;
+    else delete chosen[role];
+    if (rs.currentRoleIndex < rs.roles.length - 1) {
+      deps.autocomplete.setRoleSetup({
+        ...rs,
+        currentRoleIndex: rs.currentRoleIndex + 1,
+        selectedIndex: 0,
+        chosen,
+      });
+    } else {
+      deps.autocomplete.clear();
+      deps.input.clear();
+      deps.store.dispatch({
+        type: "ADD_NOTICE",
+        title: "Sub-agent roles configured",
+        text: Object.keys(chosen).length > 0
+          ? Object.entries(chosen).map(([r, p]) => `${r} → ${p}`).join(", ")
+          : "all roles inherit the main model",
+      });
+    }
+  } catch (error) {
+    deps.store.dispatch({ type: "ADD_NOTICE", title: "Sub-agent roles", text: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+/**
+ * Open the sub-agent role wizard: assigns a dedicated saved model profile to
+ * researcher / coder / reviewer. Triggered automatically after a main model switch.
+ */
+async function openRoleSetupWizard(deps: InputDeps): Promise<void> {
+  let store;
+  try {
+    store = await loadProfileStore();
+  } catch {
+    return; // non-fatal: the model switch itself already succeeded
+  }
+  const profileNames = listProfiles(store).map((profile) => profile.name);
+  const existing = store.subagentRoles ?? {};
+  deps.autocomplete.openRoleSetup({
+    roles: ["researcher", "coder", "reviewer"],
+    currentRoleIndex: 0,
+    profileNames,
+    selectedIndex: 0,
+    chosen: {
+      researcher: existing.researcher,
+      coder: existing.coder,
+      reviewer: existing.reviewer,
+    },
+  });
   deps.input.clear();
 }
 

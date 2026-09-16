@@ -2,7 +2,7 @@ import { SLASH_COMMANDS, type CommandDef } from "./slash-commands.ts";
 import { extractFileAcTrigger, type AcMode, type FileAcTrigger } from "./input-utils.ts";
 import { modelSearchQuery, parseModelCommand } from "./model-command.ts";
 
-export const STICKY_AC_MODES = new Set<AcMode>(["model-setup", "profile-name", "profile-list"]);
+export const STICKY_AC_MODES = new Set<AcMode>(["model-setup", "profile-name", "profile-list", "role-setup"]);
 export const PICKER_AC_MODES = new Set<AcMode>(["file", "command", "model", "model-picker", "session-list", "resume-messages"]);
 
 export function isStickyAcMode(mode: AcMode): boolean {
@@ -132,6 +132,7 @@ export type AutocompleteNavKey = {
   tab?: boolean;
   shift?: boolean;
   rightArrow?: boolean;
+  leftArrow?: boolean;
   escape?: boolean;
 };
 

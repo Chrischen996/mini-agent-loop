@@ -53,6 +53,16 @@ export type ModelProfileStore = {
   version: 1;
   activeProfile: string | null;
   profiles: Record<string, ModelProfile>;
+  /**
+   * Maps subagent role names to a profile name in `profiles`.
+   * When set, the named profile's model/baseUrl/apiKey is used for that role.
+   *
+   * Built-in roles: "researcher", "coder", "reviewer"
+   * Custom roles: any string matching a subagent profile name
+   *
+   * @example { researcher: "agnes-ai-agnes-2-0-flash", coder: "anthropic-claude-opus-4-6" }
+   */
+  subagentRoles?: Record<string, string>;
 };
 
 // ─── Defaults & Path Resolution ───────────────────────────────────────────────
@@ -142,10 +152,27 @@ function validateStore(raw: unknown): ModelProfileStore {
   for (const [name, value] of Object.entries(obj.profiles as Record<string, unknown>)) {
     profiles[name] = validateProfile(name, value);
   }
+
+  // Validate subagentRoles if present
+  let subagentRoles: Record<string, string> | undefined;
+  if (obj.subagentRoles !== undefined) {
+    if (typeof obj.subagentRoles !== "object" || Array.isArray(obj.subagentRoles)) {
+      throw new ProfileStoreValidationError("subagentRoles must be an object");
+    }
+    subagentRoles = {};
+    for (const [role, profileName] of Object.entries(obj.subagentRoles as Record<string, unknown>)) {
+      if (typeof profileName !== "string") {
+        throw new ProfileStoreValidationError(`subagentRoles["${role}"] must be a string`);
+      }
+      subagentRoles[role] = profileName;
+    }
+  }
+
   return {
     version: 1,
     activeProfile: typeof obj.activeProfile === "string" ? obj.activeProfile : null,
     profiles,
+    ...(subagentRoles ? { subagentRoles } : {}),
   };
 }
 
@@ -338,6 +365,57 @@ export async function removeProfile(
 ): Promise<ModelProfileStore> {
   const store = await loadProfileStore(storePath);
   const updated = deleteProfile(store, name);
+  await saveProfileStore(updated, storePath);
+  return updated;
+}
+
+// ─── Subagent Role Bindings ───────────────────────────────────────────────────
+
+/**
+ * Bind a subagent role to an existing profile.
+ * role: "researcher" | "coder" | "reviewer" | any custom name
+ * profileName: must exist in store.profiles (pass null to clear)
+ */
+export function setSubagentRole(
+  store: ModelProfileStore,
+  role: string,
+  profileName: string | null,
+): ModelProfileStore {
+  const current = store.subagentRoles ?? {};
+  if (profileName === null) {
+    const { [role]: _removed, ...rest } = current;
+    return { ...store, subagentRoles: Object.keys(rest).length > 0 ? rest : undefined };
+  }
+  if (!(profileName in store.profiles)) {
+    throw new Error(`Profile "${profileName}" does not exist`);
+  }
+  return { ...store, subagentRoles: { ...current, [role]: profileName } };
+}
+
+/**
+ * Resolve subagent role configs from a store.
+ * Returns a map of role → { model, baseUrl, apiKey } for all bound roles.
+ */
+export function resolveSubagentRoleLlmConfigs(
+  store: ModelProfileStore,
+): Record<string, ModelProfile> {
+  const result: Record<string, ModelProfile> = {};
+  if (!store.subagentRoles) return result;
+  for (const [role, profileName] of Object.entries(store.subagentRoles)) {
+    const profile = store.profiles[profileName];
+    if (profile) result[role] = profile;
+  }
+  return result;
+}
+
+/** Load, set a subagent role binding, and persist. Returns the updated store. */
+export async function saveSubagentRole(
+  role: string,
+  profileName: string | null,
+  storePath = resolveProfileStorePath(),
+): Promise<ModelProfileStore> {
+  const store = await loadProfileStore(storePath);
+  const updated = setSubagentRole(store, role, profileName);
   await saveProfileStore(updated, storePath);
   return updated;
 }

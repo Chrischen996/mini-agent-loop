@@ -16,6 +16,7 @@ export type SubagentToolsFactoryDeps = {
   parentRuntime: AgentRuntimeRef;
   globalTokenBudget?: number;
   globalConcurrencyLimit?: number;
+  roleLlmConfigs?: Record<string, import("../llm/index.ts").LlmConfig>;
 };
 
 /**
@@ -29,7 +30,8 @@ export class SubagentToolsFactory {
     if (
       !this.tools ||
       this.lastDeps !== deps ||
-      this.lastDeps?.parentLlm.model !== deps.parentLlm.model
+      this.lastDeps?.parentLlm.model !== deps.parentLlm.model ||
+      JSON.stringify(Object.keys(this.lastDeps?.roleLlmConfigs ?? {})) !== JSON.stringify(Object.keys(deps.roleLlmConfigs ?? {}))
     ) {
       const sharedOptions = {
         parentLlm: deps.parentLlm,
@@ -41,6 +43,7 @@ export class SubagentToolsFactory {
         parentRuntime: deps.parentRuntime,
         globalTokenBudget: deps.globalTokenBudget,
         globalConcurrencyLimit: deps.globalConcurrencyLimit,
+        roleLlmConfigs: deps.roleLlmConfigs,
       };
       this.tools = [
         createSubagentTool(sharedOptions) as Tool,

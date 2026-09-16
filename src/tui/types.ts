@@ -38,3 +38,21 @@ export type MultiAgentSetupState = {
   /** Task description collected in the final step */
   task?: string;
 };
+
+/**
+ * State for the post-model-switch subagent role assignment wizard.
+ * Steps through each built-in role: researcher → coder → reviewer.
+ * User picks a profile name (from saved profiles) for each role, or skips.
+ */
+export type RoleSetupState = {
+  /** The three built-in roles, in order */
+  roles: Array<"researcher" | "coder" | "reviewer">;
+  /** Which role we are currently assigning (index into roles[]) */
+  currentRoleIndex: number;
+  /** All saved profile names the user can pick from */
+  profileNames: string[];
+  /** Currently highlighted index in profileNames list */
+  selectedIndex: number;
+  /** Bindings chosen so far: role → profileName */
+  chosen: Partial<Record<"researcher" | "coder" | "reviewer", string>>;
+};

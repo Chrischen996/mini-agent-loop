@@ -413,6 +413,7 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
     runtimeContext,
     toolExecutionBroker,
     onToolExecutionAudit,
+    roleLlmConfigs = {},
   } = options;
   const configuredGlobalBudgetState = resolveSharedGlobalBudgetState(options);
   const resolveGlobalBudgetState = (): { used: number; limit: number } | undefined =>
@@ -568,10 +569,18 @@ ${args.sharedContext}
       const effectiveMaxEscalations =
         args.maxThinkingEscalations ?? profile?.maxThinkingEscalations ?? effectiveParentMaxEscalations ?? 2;
 
-      // Model resolution: args.model > profile.llm > parentLlm
+      // Model resolution: args.model > profile.llm > roleLlmConfigs[role] > parentLlm
       // Track whether the model switch actually succeeded.
       let llm: LlmConfig = profile?.llm ?? effectiveParentLlm;
       let modelSwitchSucceeded = true;
+
+      // Per-role LlmConfig override from profile store
+      // Priority: args.model > profile.llm > roleLlmConfigs[role] > parentLlm
+      const roleLlmOverride = args.profile ? roleLlmConfigs[args.profile] : undefined;
+      if (roleLlmOverride && !profile?.llm && !args.model) {
+        llm = roleLlmOverride;
+      }
+
       if (args.model) {
         try {
           llm = switchLlmModel(effectiveParentLlm, args.model);

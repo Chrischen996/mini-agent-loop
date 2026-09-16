@@ -4,7 +4,7 @@ import { listCandidates } from "./file-completion.ts";
 import { modelChoices } from "./model-command.ts";
 import type { ModelRef } from "../models.ts";
 import type { PersistedSessionMeta } from "../session-store.ts";
-import type { ModelSetupState, PendingProfileSetup, ProfileListState } from "./types.ts";
+import type { ModelSetupState, PendingProfileSetup, ProfileListState, RoleSetupState } from "./types.ts";
 import type { ResumeMessageCandidate } from "./session-serialization.ts";
 import { type AcMode, type FileAcTrigger } from "./input-utils.ts";
 import {
@@ -30,6 +30,7 @@ export type TerminalAutocompleteState = {
   modelSetup?: ModelSetupState;
   pendingProfileSetup?: PendingProfileSetup;
   profileListState?: ProfileListState;
+  roleSetup?: RoleSetupState;
   /** Candidate arguments for commands such as /tasks, /todo, /copy, and /resume. */
   argumentCandidates?: string[];
   argumentPrefix?: string;
@@ -61,6 +62,7 @@ const EMPTY_STATE: TerminalAutocompleteState = {
   modelSetup: undefined,
   pendingProfileSetup: undefined,
   profileListState: undefined,
+  roleSetup: undefined,
   argumentCandidates: undefined,
   argumentPrefix: undefined,
   sessionCommand: undefined,
@@ -228,8 +230,48 @@ export class TerminalAutocompleteController {
     this.setState({ ...EMPTY_STATE, mode: "profile-list", profileListState });
   }
 
+  openRoleSetup(roleSetup: RoleSetupState): void {
+    this.setState({ ...EMPTY_STATE, mode: "role-setup", roleSetup });
+  }
+
+  setRoleSetup(roleSetup: RoleSetupState | undefined): void {
+    if (!roleSetup) {
+      this.clear();
+      return;
+    }
+    this.setState({ ...this.state, mode: "role-setup", roleSetup });
+  }
+
   handleKey(key: AutocompleteNavKey): boolean {
     const state = this.state;
+
+    // Role-setup wizard has its own 2D navigation (role × profile).
+    if (state.mode === "role-setup" && state.roleSetup) {
+      const rs = state.roleSetup;
+      const totalProfiles = rs.profileNames.length + 1; // +1 for "inherit main model"
+      if (key.upArrow) {
+        this.setState({ ...state, roleSetup: { ...rs, currentRoleIndex: Math.max(0, rs.currentRoleIndex - 1) } });
+        return true;
+      }
+      if (key.downArrow) {
+        this.setState({ ...state, roleSetup: { ...rs, currentRoleIndex: Math.min(rs.roles.length - 1, rs.currentRoleIndex + 1) } });
+        return true;
+      }
+      if (key.leftArrow || (key.tab && key.shift)) {
+        this.setState({ ...state, roleSetup: { ...rs, selectedIndex: Math.max(0, rs.selectedIndex - 1) } });
+        return true;
+      }
+      if (key.rightArrow || key.tab) {
+        this.setState({ ...state, roleSetup: { ...rs, selectedIndex: (rs.selectedIndex + 1) % totalProfiles } });
+        return true;
+      }
+      if (key.escape) {
+        this.clear();
+        return true;
+      }
+      return true;
+    }
+
     const navIndex = currentAutocompleteNavIndex(state.mode, state.index, state.profileListState?.selectedIndex ?? 0);
     const action = resolveAutocompleteNav(state.mode, key, navIndex, {
       commands: state.argumentCandidates?.length ?? state.commands.length,

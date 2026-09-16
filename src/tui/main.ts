@@ -31,6 +31,7 @@ import { PERMISSION_MODES, PermissionManager, type PermissionMode } from "../per
 import { isTodoRevisionNewer, nextTodoRevision, TODO_WRITE_TOOL_NAME } from "../todo.ts";
 import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 import { createSubagentTool, createSubagentBatchTool, defaultProfiles } from "../subagent/index.ts";
+import { loadProfileStoreSync, resolveSubagentRoleLlmConfigs } from "../profile-store.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
@@ -74,6 +75,26 @@ type TuiState = LegacyTuiState & {
 };
 
 let previousFrameRowCount = 0;
+
+function buildRoleLlmConfigs(
+  parentLlm: import("../llm/index.ts").LlmConfig,
+): Record<string, import("../llm/index.ts").LlmConfig> {
+  const store = loadProfileStoreSync();
+  if (!store) return {};
+  const roleProfiles = resolveSubagentRoleLlmConfigs(store);
+  const result: Record<string, import("../llm/index.ts").LlmConfig> = {};
+  for (const [role, profile] of Object.entries(roleProfiles)) {
+    try {
+      result[role] = switchLlmModel(parentLlm, profile.model, {
+        baseUrl: profile.baseUrl,
+        apiKey: profile.apiKey,
+      });
+    } catch {
+      // profile invalid → skip, subagent falls back to parent model
+    }
+  }
+  return result;
+}
 
 function render(state: TuiState): void {
   const columns = process.stdout.columns || 80;
@@ -377,6 +398,7 @@ async function main(): Promise<void> {
       parentRuntime,
       globalTokenBudget,
       globalConcurrencyLimit,
+      roleLlmConfigs: buildRoleLlmConfigs(activeLlm),
     });
     const subagentBatchTool = createSubagentBatchTool({
       parentLlm: activeLlm,
@@ -395,6 +417,7 @@ async function main(): Promise<void> {
       parentRuntime,
       globalTokenBudget,
       globalConcurrencyLimit,
+      roleLlmConfigs: buildRoleLlmConfigs(activeLlm),
     });
     tools = () => [
       ...baseTools(),

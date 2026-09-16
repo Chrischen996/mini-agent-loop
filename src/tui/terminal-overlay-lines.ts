@@ -321,6 +321,32 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState, conte
       : state.mode === "model" || state.mode === "model-picker"
         ? values.map((model) => `${formatContextWindow(state.modelContextWindows[model] ?? 0)} context`)
         : [];
+  if (state.mode === "role-setup" && state.roleSetup) {
+    const rs = state.roleSetup;
+    const currentRole = rs.roles[rs.currentRoleIndex];
+    // selectedIndex 0 = "(inherit main model)", 1..n = profileNames[0..n-1]
+    const selectedLabel = rs.selectedIndex === 0
+      ? "(inherit main model)"
+      : rs.profileNames[rs.selectedIndex - 1] ?? "(inherit main model)";
+    const roleLines = rs.roles.map((role, i) => {
+      const chosen = rs.chosen[role];
+      const isCurrent = i === rs.currentRoleIndex;
+      const label = isCurrent
+        ? (currentRole === role ? selectedLabel : "(not set)")
+        : (chosen ?? "(inherit main model)");
+      return {
+        key: `autocomplete-role-setup-role-${role}`,
+        text: `${isCurrent ? "▶" : "·"} ${role.padEnd(12)} ${label}`,
+        style: isCurrent ? "assistant" as const : "muted" as const,
+        tone: isCurrent ? "running" as const : "default" as const,
+      };
+    });
+    return [
+      { key: "autocomplete-role-setup-title", text: "Configure sub-agent models", prefix: "⚙ ", style: "assistant", tone: "running", bold: true },
+      ...roleLines,
+      { key: "autocomplete-role-setup-hint", text: "↑↓ pick role · ←→/Tab pick model · Enter confirm role · Esc skip all", style: "muted", dim: true },
+    ];
+  }
   if (state.mode === "model-setup" && state.modelSetup) {
     const setup = state.modelSetup;
     return [
