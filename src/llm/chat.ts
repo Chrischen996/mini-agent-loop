@@ -322,9 +322,8 @@ export async function completeChat(
   const rawText = await response.text();
   request.cleanup();
   if (!response.ok) {
-    throw new Error(
-      `LLM HTTP ${response.status}: ${rawText.slice(0, 500) || response.statusText}`,
-    );
+    const { createLlmHttpError } = await import("./http-error.ts");
+    throw createLlmHttpError(response.status, response.statusText, rawText);
   }
   throwIfHtmlGatewayResponse(config, response, rawText);
 
@@ -474,11 +473,10 @@ export async function* streamChat(
   }
 
   if (!response.ok) {
+    const { createLlmHttpError } = await import("./http-error.ts");
     const rawText = await response.text();
     request.cleanup();
-    throw new Error(
-      `LLM HTTP ${response.status}: ${rawText.slice(0, 500) || response.statusText}`,
-    );
+    throw createLlmHttpError(response.status, response.statusText, rawText);
   }
   const htmlHint = response.headers.get("content-type") ?? "";
   if (htmlHint.toLowerCase().includes("text/html")) {
