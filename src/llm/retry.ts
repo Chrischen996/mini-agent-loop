@@ -129,6 +129,10 @@ export class LlmTimeoutError extends Error {
 
 export function isContextOverflowError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
+  // Policy rejections are never context overflow, even if message contains token references.
+  if (/\b(sensitive_words_detected|content_filter|content_policy_violation)\b/i.test(message)) {
+    return false;
+  }
   return /(context length|context window|maximum context|max context|too many tokens|prompt is too long|token limit|input.*token)/i.test(message);
 }
 
@@ -172,12 +176,12 @@ export function classifyError(error: unknown): RetryableErrorType | null {
   }
 
   // Rate limit (429 or explicit rate limit messages)
-  if (/rate limit|429|too many requests|quota exceeded/i.test(message)) {
+  if (/rate limit|\b429\b|too many requests|quota exceeded/i.test(message)) {
     return "rate_limit";
   }
 
   // Server overload / temporary unavailability
-  if (/502|503|504|server (busy|overload|unavailable)|service unavailable/i.test(message)) {
+  if (/\b(502|503|504)\b|server (busy|overload|unavailable)|service unavailable/i.test(message)) {
     return "server_overload";
   }
 
