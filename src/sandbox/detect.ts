@@ -28,13 +28,21 @@ export async function detectPodman(): Promise<boolean> {
 
 export async function detectBestSandboxType(
   config: SandboxConfig,
+  discovery: {
+    platform?: NodeJS.Platform;
+    docker?: () => Promise<boolean>;
+    podman?: () => Promise<boolean>;
+  } = {},
 ): Promise<SandboxType> {
+  const platform = discovery.platform ?? process.platform;
+  const docker = discovery.docker ?? detectDocker;
+  const podman = discovery.podman ?? detectPodman;
   if (!config.enabled || config.mode === "disabled" || config.type === "none") {
     return "none";
   }
 
   if (config.type === "docker") {
-    const hasDocker = await detectDocker();
+    const hasDocker = await docker();
     if (!hasDocker) {
       throw new Error("Docker sandbox requested but Docker is not available");
     }
@@ -48,12 +56,17 @@ export async function detectBestSandboxType(
     return "node";
   }
 
-  // Auto detection
-  if (await detectDocker()) {
+  // Windows auto mode uses the host shell rather than implicitly switching
+  // execution into a Linux container just because Docker is installed.
+  // Process isolation is not a secure sandbox: required mode must fail closed.
+  if (platform === "win32" && config.mode === "required") {
+    throw new Error("Secure sandbox required: Windows auto mode cannot provide it; explicitly configure type 'docker' with a working Linux container runtime");
+  }
+  if (platform !== "win32" && (await docker())) {
     return "docker";
   }
 
-  if (await detectPodman()) {
+  if (platform !== "win32" && (await podman())) {
     return "docker"; // Podman is Docker-compatible
   }
 

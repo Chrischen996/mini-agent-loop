@@ -47,6 +47,44 @@ describe("sandbox detection", () => {
       /Secure sandbox required/,
     );
   });
+
+  it("prefers node isolation over docker on Windows in auto mode", async () => {
+    const sandboxType = await detectBestSandboxType(
+      { enabled: true, type: "auto" },
+      { platform: "win32", docker: async () => true, podman: async () => true },
+    );
+    assert.equal(sandboxType, "node");
+  });
+
+  it("fails closed on Windows auto mode with required sandbox", async () => {
+    await assert.rejects(
+      () =>
+        detectBestSandboxType(
+          { enabled: true, type: "auto", mode: "required" },
+          { platform: "win32", docker: async () => true, podman: async () => true },
+        ),
+      /Secure sandbox required/,
+    );
+  });
+
+  it("still prefers docker in auto mode off Windows", async () => {
+    const sandboxType = await detectBestSandboxType(
+      { enabled: true, type: "auto" },
+      { platform: "linux", docker: async () => true, podman: async () => false },
+    );
+    assert.equal(sandboxType, "docker");
+  });
+
+  it("keeps explicit docker on Windows fail-closed when unavailable", async () => {
+    await assert.rejects(
+      () =>
+        detectBestSandboxType(
+          { enabled: true, type: "docker" },
+          { platform: "win32", docker: async () => false, podman: async () => false },
+        ),
+      /Docker is not available/,
+    );
+  });
 });
 
 describe("NodeSandboxRunner", () => {

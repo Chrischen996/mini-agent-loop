@@ -497,6 +497,27 @@ All tools still use relative paths and reject paths that escape the configured
 workspace or resolve through an outside symlink. `.git` and `node_modules`
 remain protected by the workspace sandbox.
 
+### Shell execution on Windows
+
+The tool keeps the name `bash`, but local Windows execution discovers PowerShell
+7 (`pwsh.exe`) first, then Windows PowerShell (`powershell.exe`), then falls back
+to `ComSpec` / `cmd.exe`. Discovery checks absolute PATH entries and standard
+installation directories. PowerShell runs without profiles and non-interactively.
+The tool description advertises the selected shell syntax; commands are not
+translated between bash, PowerShell, and cmd. Unix execution remains `bash -lc`.
+
+With sandbox type `auto`, Windows uses the Node process runner rather than
+implicitly selecting Docker. `MINI_AGENT_SANDBOX_TYPE=docker` explicitly selects
+the container runner, which still executes Linux bash and requires a working
+Docker runtime and sandbox image. Other platforms retain their existing auto
+selection order. A `required` sandbox configuration never falls back to Node:
+Windows auto mode fails with guidance to explicitly configure Docker.
+
+**The Node runner is not an OS security sandbox.** It does not enforce arbitrary
+shell filesystem confinement or reliable network isolation. Permission checks
+remain in effect; use local execution only for trusted commands. Native Windows
+ACL sandboxing and interactive PTY sessions are not implemented by this change.
+
 ### MCP tools
 
 The agent can load tools from explicitly configured MCP servers over `stdio`.

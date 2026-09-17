@@ -2,19 +2,12 @@ import { spawn } from "node:child_process";
 import type { Tool, ToolResult } from "./types.ts";
 import { DEFAULT_SANDBOX_CONFIG, type SandboxConfig, type SandboxResult, type SandboxRunner } from "../sandbox/types.ts";
 import { terminateProcessTree } from "../process-tree.ts";
+import { describeShell, resolveShell } from "./shell.ts";
 
 export type BashArgs = { command: string; timeout?: number };
 
 /** Maximum output size in bytes before truncation notice is appended. */
 const MAX_OUTPUT_BYTES = 100 * 1024;
-
-/** Resolve the platform shell: bash on Unix, cmd.exe on Windows. */
-function resolveShell(): { command: string; args: string[] } {
-  if (process.platform === "win32") {
-    return { command: process.env.ComSpec || "cmd.exe", args: ["/D", "/S", "/C"] };
-  }
-  return { command: "bash", args: ["-lc"] };
-}
 
 export function createBashTool(
   cwd: string,
@@ -23,14 +16,19 @@ export function createBashTool(
   const sandboxConfig = sandbox
     ? { ...DEFAULT_SANDBOX_CONFIG, ...sandbox.config }
     : undefined;
+  // Resolve once so the advertised syntax matches the executor, including
+  // Linux containers launched from a Windows host.
+  const shell = sandbox?.runner.type === "docker"
+    ? { command: "bash", args: ["-lc"], kind: "bash" as const }
+    : resolveShell();
 
   return {
     name: "bash",
-    description: "Execute a shell command (bash on Unix, cmd on Windows by default). Returns stdout/stderr. Optional timeout.",
+    description: describeShell(shell),
     parameters: {
       type: "object",
       properties: {
-        command: { type: "string", description: "Bash command to execute" },
+        command: { type: "string", description: "Command in the shell syntax described by this tool" },
         timeout: { type: "number", minimum: 0.1, description: "Timeout in seconds" },
       },
       required: ["command"],
@@ -56,10 +54,12 @@ export function createBashTool(
         try {
           // The Node runner executes on the host, so use the host shell. Docker
           // runners execute inside a Linux container where bash is available.
-          const shell = sandbox.runner.type === "node" ? resolveShell() : { command: "bash", args: ["-lc"] };
+          const execShell = sandbox.runner.type === "docker"
+            ? { command: "bash", args: ["-lc"] }
+            : shell;
           const result: SandboxResult = await sandbox.runner.execute({
-            command: shell.command,
-            args: [...shell.args, args.command],
+            command: execShell.command,
+            args: [...execShell.args, args.command],
             cwd,
             timeout: effectiveTimeoutMs,
             allowNetwork: sandboxConfig?.allowNetwork ?? false,
@@ -84,7 +84,6 @@ export function createBashTool(
 
       // Fallback: spawn directly (original behavior)
       return await new Promise((resolve, reject) => {
-        const shell = resolveShell();
         const child = spawn(shell.command, [...shell.args, args.command], {
           cwd,
           stdio: ["ignore", "pipe", "pipe"],
