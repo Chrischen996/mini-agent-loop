@@ -36,7 +36,7 @@ import {
   type LoopEvent,
 } from "../loop.ts";
 import { LlmTimeoutError } from "../llm/retry.ts";
-import { loadLlmConfigFromEnv, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
+import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
 import {
   buildIntenseLlm,
   cycleThinkingLevel,
@@ -55,7 +55,9 @@ import {
 } from "./model-command.ts";
 import {
   activateProfile,
+  loadProfileStoreSync,
   removeProfile,
+  resolveSubagentRoleLlmConfigs,
   saveProfile,
 } from "../profile-store.ts";
 import {
@@ -222,6 +224,29 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     [vision],
   );
   const getSubagentTools = useCallback((parentLlm = llm): Tool[] => {
+    // Resolve per-role LlmConfigs from the persisted profile store so that
+    // /multi-agent role bindings (subagentRoles → ModelProfile) actually take
+    // effect at dispatch time. Missing store or invalid profile → empty map,
+    // which makes every role fall back to parentLlm (matches terminal-main.ts).
+    let roleLlmConfigs: Record<string, LlmConfig> = {};
+    try {
+      const store = loadProfileStoreSync();
+      if (store) {
+        const roleProfiles = resolveSubagentRoleLlmConfigs(store);
+        for (const [role, profile] of Object.entries(roleProfiles)) {
+          try {
+            roleLlmConfigs[role] = switchLlmModel(parentLlm, profile.model, {
+              baseUrl: profile.baseUrl,
+              apiKey: profile.apiKey,
+            });
+          } catch {
+            // profile invalid → skip, subagent falls back to parent model
+          }
+        }
+      }
+    } catch {
+      // non-fatal: role resolution must never break the main agent loop
+    }
     return subagentFactory.getTools({
       parentLlm,
       parentTools: agentToolsRef.current,
@@ -233,6 +258,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       parentRuntime: subagentRuntimeRef.current,
       globalTokenBudget,
       globalConcurrencyLimit,
+      roleLlmConfigs,
     });
   }, [llm, subagentFactory, visionPreprocessors]);
 
@@ -772,7 +798,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       dispatch({
         type: "ADD_NOTICE",
         title: "多智能体向导 — 选择模式",
-        text: "输入编号选择执行模式:\n  1) planner_worker_reviewer — 规划 → 执行 → 审查（推荐）\n  2) agent_turn             — 单轮 Agent，自动委托子 Agent",
+        text: "输入编号选择执行模式:\n  1) planner_worker_reviewer            — 规划 → 执行 → 审查（推荐，LLM 动态驱动）\n  2) agent_turn                       — 单轮 Agent，自动委托子 Agent\n  3) planner_worker_reviewer_forced — 100% 确定性：代码直接驱动 H3+H4 流水线，不经过 LLM 决策",
       });
       setInput("");
       return;
@@ -781,15 +807,142 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     // Multi-agent wizard: mode selection step
     if (acMode === "multi-agent-mode" && multiAgentSetup) {
       const choice = trimmed.trim();
-      const mode: "planner_worker_reviewer" | "agent_turn" =
-        choice === "2" ? "agent_turn" : "planner_worker_reviewer";
-      setMultiAgentSetup({ ...multiAgentSetup, step: "task", mode });
-      setAcMode("multi-agent-task");
+      const mode: "planner_worker_reviewer" | "agent_turn" | "planner_worker_reviewer_forced" =
+        choice === "2" ? "agent_turn"
+        : choice === "3" ? "planner_worker_reviewer_forced"
+        : "planner_worker_reviewer";
+      setMultiAgentSetup({ ...multiAgentSetup, step: "roles", mode });
+      setAcMode("multi-agent-roles");
       dispatch({
         type: "ADD_NOTICE",
-        title: "多智能体向导 — 输入任务",
-        text: `模式已选: ${mode}\n现在请描述你的任务，输入完成后按 Enter 启动。`,
+        title: "多智能体向导 — 子角色模型配置",
+        text: "为每个角色选择模型（0=继承主模型，1..n=已有 profile，n+1=新建）。",
       });
+      setInput("");
+      return;
+    }
+
+    // Multi-agent wizard: sub-role model matrix step
+    if (acMode === "multi-agent-roles" && multiAgentSetup) {
+      const choiceText = trimmed.trim();
+      const store = await import("../profile-store.ts").then(m => m.loadProfileStoreSync()).catch(() => null);
+      const profileNames: string[] = store ? Array.from(Object.keys(store.profiles ?? {})) : [];
+      const optionCount = profileNames.length;
+
+      // Build roleAssignments from sequential input: first role gets input 0..n, etc.
+      // Since terminal flow is single-line input, use numeric index for current role only.
+      const roleIndex = multiAgentSetup.roleIndex ?? 0;
+      const roles: Array<"researcher" | "coder" | "reviewer"> = ["researcher", "coder", "reviewer"];
+      const currentRole = roles[roleIndex];
+      const assignments: Record<string, import("./types.ts").MultiAgentRoleAssignment> = {
+        ...(multiAgentSetup.roleAssignments ?? {}),
+      };
+
+      if (choiceText === "" || choiceText === "0") {
+        // Inherit main model
+        assignments[currentRole] = { type: "inherit" };
+      } else if (choiceText === String(optionCount + 1)) {
+        // New model: enter sub-step and stop. The later "advance to next
+        // role" block would otherwise overwrite this step immediately.
+        setMultiAgentSetup({
+          ...multiAgentSetup,
+          step: "role-new",
+          roleIndex,
+          roleAssignments: assignments as Record<import("./types.ts").MultiAgentRoleName, import("./types.ts").MultiAgentRoleAssignment>,
+        });
+        setAcMode("multi-agent-role-new");
+        dispatch({
+          type: "ADD_NOTICE",
+          title: `多智能体向导 — 为 ${currentRole} 新建模型`,
+          text: "输入: <modelId> <baseUrl> <apiKey>（空格分隔）",
+        });
+        setInput("");
+        return;
+      } else if (choiceText.match(/^\d+$/)) {
+        const idx = parseInt(choiceText, 10);
+        if (idx >= 1 && idx <= optionCount) {
+          assignments[currentRole] = { type: "profile", profileName: profileNames[idx - 1]! };
+        } else {
+          dispatch({ type: "ADD_NOTICE", title: "多智能体向导", text: `无效编号，范围 0..${optionCount + 1}（0=继承，${optionCount + 1}=新建）` });
+          return;
+        }
+      } else {
+        dispatch({ type: "ADD_NOTICE", title: "多智能体向导", text: `输入 0..${optionCount + 1}：0=继承主模型，1..${optionCount}=已有 profile，${optionCount + 1}=新建` });
+        return;
+      }
+
+      // Advance to next role, or to task step if last role done
+      const nextRoleIndex = roleIndex + 1;
+      if (nextRoleIndex < roles.length) {
+        setMultiAgentSetup({
+          ...multiAgentSetup,
+          roleIndex: nextRoleIndex,
+          roleAssignments: assignments as Record<import("./types.ts").MultiAgentRoleName, import("./types.ts").MultiAgentRoleAssignment>,
+        });
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体向导 — 子角色模型配置",
+          text: `${currentRole} 已配置 → 下一角色: ${roles[nextRoleIndex]}\n输入 0=继承主模型，1..${optionCount}=已有 profile，${optionCount + 1}=新建`,
+        });
+      } else {
+        setMultiAgentSetup({
+          ...multiAgentSetup,
+          step: "task",
+          roleAssignments: assignments as Record<import("./types.ts").MultiAgentRoleName, import("./types.ts").MultiAgentRoleAssignment>,
+        });
+        setAcMode("multi-agent-task");
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体向导 — 输入任务",
+          text: `全部角色配置完成，模式: ${multiAgentSetup.mode}\n现在请描述你的任务，输入完成后按 Enter 启动。`,
+        });
+      }
+      setInput("");
+      return;
+    }
+
+    // Multi-agent wizard: new model sub-step for a sub-role
+    if (acMode === "multi-agent-role-new" && multiAgentSetup) {
+      const inputParts = trimmed.trim().split(/\s+/);
+      if (inputParts.length < 3 || !inputParts[0]) {
+        dispatch({ type: "ADD_NOTICE", title: "多智能体向导", text: "格式: <modelId> <baseUrl> <apiKey>" });
+        return;
+      }
+      const [modelId, baseUrl, apiKey] = inputParts;
+      const roleIndex = multiAgentSetup.roleIndex ?? 0;
+      const roles: Array<"researcher" | "coder" | "reviewer"> = ["researcher", "coder", "reviewer"];
+      const currentRole = roles[roleIndex];
+      const assignments: Record<string, import("./types.ts").MultiAgentRoleAssignment> = {
+        ...(multiAgentSetup.roleAssignments ?? {}),
+        [currentRole]: { type: "draft-new", modelId, baseUrl, apiKey },
+      };
+      const nextRoleIndex = roleIndex + 1;
+      if (nextRoleIndex < roles.length) {
+        setMultiAgentSetup({
+          ...multiAgentSetup,
+          roleIndex: nextRoleIndex,
+          step: "roles",
+          roleAssignments: assignments as Record<import("./types.ts").MultiAgentRoleName, import("./types.ts").MultiAgentRoleAssignment>,
+        });
+        setAcMode("multi-agent-roles");
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体向导 — 子角色模型配置",
+          text: `${currentRole} → 新建 ${modelId}\n下一角色: ${roles[nextRoleIndex]}`,
+        });
+      } else {
+        setMultiAgentSetup({
+          ...multiAgentSetup,
+          step: "task",
+          roleAssignments: assignments as Record<import("./types.ts").MultiAgentRoleName, import("./types.ts").MultiAgentRoleAssignment>,
+        });
+        setAcMode("multi-agent-task");
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体向导 — 输入任务",
+          text: `全部角色配置完成，模式: ${multiAgentSetup.mode}\n现在请描述你的任务。`,
+        });
+      }
       setInput("");
       return;
     }
@@ -814,26 +967,141 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       if (finalSetup.orchestratorModel && finalSetup.orchestratorModel !== llm.model) {
         selectModelRef(finalSetup.orchestratorModel, {});
       }
+      // Persist role assignments to profile store (MVP: save as default subagentRoles)
+      if (finalSetup.roleAssignments) {
+        try {
+          const { saveSubagentRole: saveSubagentRoleFunc } = await import("../profile-store.ts");
+          for (const [role, assignment] of Object.entries(finalSetup.roleAssignments)) {
+            if (assignment.type === "inherit") {
+              await saveSubagentRoleFunc(role, null);
+            } else if (assignment.type === "profile") {
+              await saveSubagentRoleFunc(role, assignment.profileName);
+            } else if (assignment.type === "draft-new" && assignment.modelId) {
+              const profileName = `${assignment.modelId.replace(/\//g, "-")}-${role}`;
+              const { saveProfile } = await import("../profile-store.ts");
+              await saveProfile(profileName, {
+                model: assignment.modelId,
+                baseUrl: assignment.baseUrl ?? "",
+                apiKey: assignment.apiKey ?? "",
+                thinkingLevel: llm.thinkingLevel,
+              }, false);
+              await saveSubagentRoleFunc(role, profileName);
+            }
+          }
+        } catch {
+          // Non-fatal: role binding save failure should not block task start
+        }
+      }
       // Submit the task as a normal turn with the chosen mode appended in system context
       const modeLabel = finalSetup.mode === "planner_worker_reviewer"
-        ? "【多智能体模式: planner_worker_reviewer】"
-        : "【多智能体模式: agent_turn】";
+        ? "Multi-agent mode: planner_worker_reviewer"
+        : "Multi-agent mode: agent_turn";
+      // Resolve the effective orchestrator LLM *before* creating the pipeline
+      // tool so the pipeline runs on the chosen model, not the previous one.
+      let effectiveLlm: LlmConfig = llm;
+      if (finalSetup.orchestratorModel && finalSetup.orchestratorModel !== llm.model) {
+        try {
+          effectiveLlm = switchLlmModel(llm, finalSetup.orchestratorModel, {});
+          setLlm(effectiveLlm);
+        } catch {
+          // model switch failed — fall back to the current model with a notice
+          dispatch({
+            type: "ADD_NOTICE",
+            title: "Multi-agent pipeline",
+            text: `Could not switch to ${finalSetup.orchestratorModel}; using current model ${llm.model}.`,
+          });
+        }
+      }
+      // Persist role assignments to profile store (MVP: save as default subagentRoles)
+      if (finalSetup.roleAssignments) {
+        try {
+          const { saveSubagentRole: saveSubagentRoleFunc } = await import("../profile-store.ts");
+          for (const [role, assignment] of Object.entries(finalSetup.roleAssignments)) {
+            if (assignment.type === "inherit") {
+              await saveSubagentRoleFunc(role, null);
+            } else if (assignment.type === "profile") {
+              await saveSubagentRoleFunc(role, assignment.profileName);
+            } else if (assignment.type === "draft-new" && assignment.modelId) {
+              const profileName = `${assignment.modelId.replace(/\//g, "-")}-${role}`;
+              const { saveProfile } = await import("../profile-store.ts");
+              await saveProfile(profileName, {
+                model: assignment.modelId,
+                baseUrl: assignment.baseUrl ?? "",
+                apiKey: assignment.apiKey ?? "",
+                thinkingLevel: llm.thinkingLevel,
+              }, false);
+              await saveSubagentRoleFunc(role, profileName);
+            }
+          }
+        } catch {
+          // Non-fatal: role binding save failure should not block task start
+        }
+      }
+      // Resolve roleLlmConfigs after persisting so the new bindings are visible.
+      let roleLlmConfigs: Record<string, LlmConfig> = {};
+      try {
+        const store = loadProfileStoreSync();
+        if (store) {
+          const roleProfiles = resolveSubagentRoleLlmConfigs(store);
+          for (const [role, profile] of Object.entries(roleProfiles)) {
+            try {
+              roleLlmConfigs[role] = switchLlmModel(effectiveLlm, profile.model, {
+                baseUrl: profile.baseUrl,
+                apiKey: profile.apiKey,
+              });
+            } catch {
+              // profile invalid → skip, subagent falls back to effectiveLlm
+            }
+          }
+        }
+      } catch {
+        // non-fatal
+      }
+      // In planner_worker_reviewer mode, expose the full H3+H4 pipeline tool
+      // (analyzeRequirement → topological dispatch → review → iterate) so the
+      // main agent can drive the real planning/review engine instead of only
+      // delegating to generic subagents.
+      const pipelineTools: Tool[] = [];
+      if (finalSetup.mode === "planner_worker_reviewer") {
+        try {
+          const { createAnalyzePipelineTool } = await import("../orchestration/pipeline/planning-engine.ts");
+          pipelineTools.push(
+            createAnalyzePipelineTool({
+              parentLlm: effectiveLlm,
+              parentTools: agentToolsRef.current,
+              workspaceRoot: cwd,
+              roleLlmConfigs,
+              onEvent: (event) =>
+                dispatch({ type: "ADD_NOTICE", title: "Pipeline", text: `[${event.event}] ${event.task_id}` }),
+            }) as Tool,
+          );
+        } catch {
+          // Pipeline tool unavailable — fall back to subagent-only mode.
+        }
+      }
       const fullPrompt = `${modeLabel}\n\n${task}`;
       dispatch({ type: "USER_MESSAGE", text: `${modeLabel}\n${task}` });
       abortRef.current = new AbortController();
+      const abortSignal = abortRef.current.signal;
       const permissionManager = getPermissionManager();
       const permissionTurn = permissionManager.beginTurn(
         permissionSessionId,
         (request) => dispatch({ type: "LOOP_EVENT", event: { type: "permission_required", request } }),
-        abortRef.current.signal,
+        abortSignal,
       );
       permissionTurnRef.current = permissionTurn;
       const streamBuffer = streamBufferRef.current!;
       const runId = streamBuffer.start();
+      // If the turn is aborted mid-pipeline, the pipeline tool receives the
+      // same signal via the broker and cancels in-flight subagent dispatches.
       try {
         historyRef.current = await runAgentTurn(historyRef.current, task, {
-          llm: { ...llm, sessionId: conversationId },
-          tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools(llm)],
+          llm: { ...effectiveLlm, sessionId: conversationId },
+          tools: () => [
+            ...resolveToolProvider(agentToolsRef.current),
+            ...getSubagentTools(effectiveLlm),
+            ...pipelineTools,
+          ],
           autoSubagent,
           preprocessors: visionPreprocessors,
           userContent: fullPrompt,

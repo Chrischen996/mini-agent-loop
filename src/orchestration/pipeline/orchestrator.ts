@@ -76,6 +76,13 @@ export interface PipelineOrchestratorOptions {
   /** Max turns for worker subagent dispatches. Default 12. */
   workerMaxTurns?: number;
   /**
+   * Per-role LLM configs: the researcher (H3 planner), coder (worker) and
+   * reviewer (H4) subagents honor /multi-agent role bindings through this map
+   * (researcher / coder / reviewer → LlmConfig), falling back to parentLlm when
+   * a role is absent. Priority: args.model > profile.llm > roleLlmConfigs[role] > parentLlm.
+   */
+  roleLlmConfigs?: Record<string, LlmConfig>;
+  /**
    * Within-wave parallelism (M3): how many tasks of one planned wave may
    * run concurrently. Default 1 (M1 serial behavior). Waves always run
    * sequentially; parallelism only applies inside a wave.
@@ -121,6 +128,20 @@ export interface PipelineOrchestratorOptions {
   /** Per-reviewer subagent token budget. Omit for unlimited. */
   reviewerTokenBudget?: number;
   /**
+   * Replace the built-in reviewer subagent (gate 4) with a custom function,
+   * e.g. one built from `review-engine.ts`'s `reviewAndMerge` for external
+   * verdicts. Receives the worker result and spec, returns the verdict.
+   *
+   * Contract:
+   *  - `passed: false` with an empty `failed_items` array is treated as a
+   *    failure (the orchestrator fills in a generic item so the retry loop
+   *    has actionable feedback); callers SHOULD list the concrete failures.
+   *  - Throwing exceptions are caught and converted into a failed verdict
+   *    (`"external reviewer failed: …"`), so a flaky external reviewer can
+   *    never break the whole pipeline.
+   */
+  externalReviewer?: (result: WorkerResult, spec: TaskSpec) => Promise<ReviewVerdict> | ReviewVerdict;
+  /**
    * Global token budget shared across every worker/reviewer dispatch of
    * this orchestrator (and any sub-subagents they spawn). When a dispatch
    * would exceed it, the subagent tool refuses to start and the task is
@@ -135,6 +156,13 @@ export interface PipelineOrchestratorOptions {
 export interface RunOptions {
   /** Max dispatch→review iterations per task. Default 3. */
   maxIter?: number;
+  /**
+   * Cancellation signal applied for the duration of this run. When provided,
+   * in-flight subagent dispatches are aborted as soon as the signal fires;
+   * tasks not yet dispatched are reported as `blocked` so a run can be
+   * interrupted cleanly without leaving workers behind.
+   */
+  signal?: AbortSignal;
 }
 
 /** One entry of a {@link RunSummary}: a spec's dispatch/review outcome. */
@@ -471,6 +499,8 @@ export class PipelineOrchestrator {
   readonly events: PipelineLogEvent[] = [];
   /** Serialised JSONL write chain — keeps event order in the log file. */
   private logChain: Promise<void> = Promise.resolve();
+  /** Per-run cancellation signal, set by {@link run} and consulted on every dispatch/review call. */
+  private runSignal?: AbortSignal;
 
   constructor(options: PipelineOrchestratorOptions) {
     this.options = options;
@@ -487,6 +517,7 @@ export class PipelineOrchestrator {
       ...(options.globalTokenBudget !== undefined
         ? { globalTokenBudget: options.globalTokenBudget }
         : {}),
+      ...(options.roleLlmConfigs !== undefined ? { roleLlmConfigs: options.roleLlmConfigs } : {}),
       ...(options.onSubagentEvent !== undefined
         ? { onSubagentEvent: options.onSubagentEvent }
         : {}),
@@ -607,7 +638,7 @@ export class PipelineOrchestrator {
             ? { tokenBudget: this.options.workerTokenBudget }
             : {}),
         },
-        this.options.signal,
+        this.runSignal ?? this.options.signal,
       );
       const text = contentAsString(toolResult.content);
       if (toolResult.isError) {
@@ -714,12 +745,44 @@ export class PipelineOrchestrator {
     const batches = this.planBatches(specs);
     const completed = new Set<string>();
     const entries: RunEntry[] = [];
+    const signal = options.signal ?? this.options.signal;
+    if (signal !== undefined) {
+      this.runSignal = signal;
+    }
 
     for (const batch of batches) {
+      // Respect cancellation between waves so no further work is scheduled.
+      if (this.runSignal?.aborted) {
+        const blocked: WorkerResult = {
+          id: "__cancelled__",
+          status: "blocked",
+          message: "run aborted before dispatch",
+          changed_files: [],
+          summary: "",
+        };
+        for (const spec of batch) {
+          if (!entries.some((entry) => entry.spec.id === spec.id)) {
+            entries.push({ spec, result: blocked, attempts: 0 });
+            this.emit(spec.id, "fail", { status: "blocked", blocked_by: ["run aborted"] }, 0);
+          }
+        }
+        continue;
+      }
       const wave = await this.mapWithConcurrency(
         batch,
         this.maxConcurrency(),
         async (spec): Promise<RunEntry> => {
+          if (this.runSignal?.aborted) {
+            const blocked: WorkerResult = {
+              id: spec.id,
+              status: "blocked",
+              message: "run aborted before dispatch",
+              changed_files: [],
+              summary: "",
+            };
+            this.emit(spec.id, "fail", { status: "blocked", blocked_by: ["run aborted"] }, 0);
+            return { spec, result: blocked, attempts: 0 };
+          }
           const blockedBy = (spec.depends_on ?? []).filter(
             (dep) => !completed.has(dep),
           );
@@ -739,6 +802,8 @@ export class PipelineOrchestrator {
       );
       entries.push(...wave);
     }
+
+    this.runSignal = undefined;
 
     return {
       ok: entries.every(
@@ -766,16 +831,29 @@ export class PipelineOrchestrator {
     let verdict: ReviewVerdict | undefined;
     let attempts = 0;
     let checkpoint: string | undefined;
+    // Capture a rollback point BEFORE the first dispatch so a failed attempt's
+    // workspace changes can be discarded without polluting the next task
+    // (design §7.1).
+    if (this.options.captureCheckpoint !== false) {
+      const preCheckpoint = await this.captureCheckpoint(spec.id);
+      if (preCheckpoint !== undefined) {
+        checkpoint = preCheckpoint;
+      }
+    }
     for (let iter = 1; iter <= maxIter; iter += 1) {
       attempts = iter;
       result = await this.dispatch(current);
       verdict = await this.review(result, current);
       if (verdict.passed) {
-        // Capture a rollback point before accepting the changes (§7.1).
-        checkpoint =
+        // Refresh the checkpoint so a later rollback targets the accepted state
+        // rather than the pre-task state.
+        const acceptedCheckpoint =
           this.options.captureCheckpoint === false
             ? undefined
             : await this.captureCheckpoint(spec.id);
+        if (acceptedCheckpoint !== undefined) {
+          checkpoint = acceptedCheckpoint;
+        }
         this.emit(spec.id, "merge", checkpoint !== undefined ? { checkpoint } : {}, iter);
         break;
       }
@@ -885,12 +963,33 @@ export class PipelineOrchestrator {
       return verdict;
     }
 
-    // Gate 4: independent reviewer subagent.
-    const reviewerVerdict = this.options.skipReviewer
-      ? { passed: true, failed_items: [] as string[] }
-      : await this.dispatchReviewer(spec, result);
+    // Gate 4: independent reviewer — externalReviewer takes precedence over
+    // the built-in reviewer subagent; skipReviewer disables the gate entirely.
+    let reviewerVerdict: ReviewVerdict;
+    if (this.options.externalReviewer) {
+      try {
+        reviewerVerdict = await this.options.externalReviewer(result, spec);
+        // Normalise: `passed: false` with empty failed_items is still a
+        // failure; surface a generic item so the retry loop has actionable
+        // feedback.
+        if (!reviewerVerdict.passed && reviewerVerdict.failed_items.length === 0) {
+          reviewerVerdict = { ...reviewerVerdict, failed_items: ["reviewer reported failure (no details)"] };
+        }
+      } catch (error) {
+        reviewerVerdict = {
+          passed: false,
+          failed_items: [
+            `external reviewer failed: ${error instanceof Error ? error.message : String(error)}`,
+          ],
+        };
+      }
+    } else {
+      reviewerVerdict = this.options.skipReviewer
+        ? { passed: true, failed_items: [] as string[] }
+        : await this.dispatchReviewer(spec, result);
+    }
     const verdict: ReviewVerdict = {
-      passed: reviewerVerdict.failed_items.length === 0,
+      passed: reviewerVerdict.passed && reviewerVerdict.failed_items.length === 0,
       failed_items: [...reviewerVerdict.failed_items],
       ...(reviewerVerdict.suggestions !== undefined
         ? { suggestions: reviewerVerdict.suggestions }
@@ -983,7 +1082,7 @@ export class PipelineOrchestrator {
     try {
       const toolResult = await tool.execute(
         { steps: this.options.validationSteps ?? DEFAULT_VALIDATION_STEPS },
-        this.options.signal,
+        this.runSignal ?? this.options.signal,
       );
       const report = contentAsString(toolResult.content);
       return { ok: !toolResult.isError, report, skipped: false };
@@ -1038,7 +1137,7 @@ export class PipelineOrchestrator {
     try {
       const toolResult = await tool.execute(
         { label: `pre-${taskId}` },
-        this.options.signal,
+        this.runSignal ?? this.options.signal,
       );
       const text = contentAsString(toolResult.content).trim();
       if (!text) return undefined;
@@ -1064,7 +1163,7 @@ export class PipelineOrchestrator {
             ? { tokenBudget: this.options.reviewerTokenBudget }
             : {}),
         },
-        this.options.signal,
+        this.runSignal ?? this.options.signal,
       );
       return parseReviewVerdict(contentAsString(toolResult.content));
     } catch (error) {

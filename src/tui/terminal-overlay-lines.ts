@@ -324,10 +324,14 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState, conte
   if (state.mode === "role-setup" && state.roleSetup) {
     const rs = state.roleSetup;
     const currentRole = rs.roles[rs.currentRoleIndex];
-    // selectedIndex 0 = "(inherit main model)", 1..n = profileNames[0..n-1]
+    // selectedIndex 0 = "(inherit main model)", 1..n = profileNames[0..n-1],
+    // n+1 = "(new model)" — opens the model-setup wizard
+    const newModelIndex = rs.profileNames.length + 1;
     const selectedLabel = rs.selectedIndex === 0
       ? "(inherit main model)"
-      : rs.profileNames[rs.selectedIndex - 1] ?? "(inherit main model)";
+      : rs.selectedIndex === newModelIndex
+        ? "(new model)"
+        : rs.profileNames[rs.selectedIndex - 1] ?? "(inherit main model)";
     const roleLines = rs.roles.map((role, i) => {
       const chosen = rs.chosen[role];
       const isCurrent = i === rs.currentRoleIndex;

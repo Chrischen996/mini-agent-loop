@@ -44,6 +44,8 @@ export interface SplitOptions {
   timeout?: number;
   /** Cancellation signal. */
   signal?: AbortSignal;
+  /** Per-role LLM configs; lets the bound researcher profile override the parent model. */
+  roleLlmConfigs?: Record<string, LlmConfig>;
   /** Emit split events (`split` on success, `fail` on per-round errors). */
   onEvent?: (event: PipelineLogEvent) => void;
 }
@@ -246,6 +248,7 @@ export async function analyzeRequirement(
     ...(options.chat !== undefined ? { chat: options.chat } : {}),
     ...(options.timeout !== undefined ? { timeout: options.timeout } : {}),
     ...(options.signal !== undefined ? { signal: options.signal } : {}),
+    ...(options.roleLlmConfigs !== undefined ? { roleLlmConfigs: options.roleLlmConfigs } : {}),
   });
   const maxTasks = options.maxTasks ?? DEFAULT_MAX_TASKS;
   const maxRounds = Math.max(0, options.maxResplitRounds ?? DEFAULT_MAX_RESPLIT_ROUNDS);

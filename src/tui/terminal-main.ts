@@ -5,7 +5,7 @@ import { createSandboxRunner } from "../sandbox/index.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
 import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createAllTools, createTools } from "../tools/index.ts";
-import { resolveToolProvider, type ToolProvider } from "../tools/types.ts";
+import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
 import { loadLlmConfigFromEnv, switchLlmModel } from "../llm/index.ts";
 import { findExactModelReferenceMatch, getAllModels, resolveModel, type LlmGatewayProtocol } from "../models.ts";
 import { createVisionPreprocessor, loadVisionConfigFromEnv } from "../preprocessors/index.ts";
@@ -29,6 +29,7 @@ import { TerminalInputController, type TerminalInputAction } from "./terminal-in
 import { TerminalAgentService } from "./terminal-agent-service.ts";
 import { TerminalAutocompleteController } from "./terminal-autocomplete-controller.ts";
 import { SubagentToolsFactory } from "./subagent-tools-factory.ts";
+import { createAnalyzePipelineTool } from "../orchestration/pipeline/planning-engine.ts";
 import { loadPlanDocument } from "../plan/index.ts";
 import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
 import { isTuiFeatureEnabled } from "./execution-policy.ts";
@@ -191,6 +192,8 @@ export async function runTerminalMain(): Promise<void> {
     }));
     const allTools = mcpRuntime.toolProvider(createAllTools(cwd, { sandboxRunner }));
     const subagentFactory = new SubagentToolsFactory();
+    const multiAgentPipelineToolRef: { current: Tool | undefined } = { current: undefined };
+    const multiAgentTaskPendingRef: { current: boolean } = { current: false };
     const parentTools = () => [
       ...resolveToolProvider(baseTools),
       ...subagentFactory.getTools({
@@ -204,6 +207,7 @@ export async function runTerminalMain(): Promise<void> {
         globalConcurrencyLimit: loadGlobalConcurrencyLimitFromEnv(),
         roleLlmConfigs: buildRoleLlmConfigs(activeLlm),
       }),
+      ...(multiAgentPipelineToolRef.current ? [multiAgentPipelineToolRef.current] : []),
     ];
     const persistSessionSnapshot = async (history: AgentMessage[]): Promise<void> => {
       try {
@@ -297,7 +301,7 @@ export async function runTerminalMain(): Promise<void> {
     let animationTimer: ReturnType<typeof setInterval> | undefined;
     const directAbortRef: { current?: AbortController } = {};
     const input = new TerminalInputController({
-      onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); }, persistSession: persistSessionSnapshot, onSessionRestore: () => { if (scrollback) scrollbackRenderer.forceNewSegment(); } }),
+      onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, multiAgentPipelineToolRef, multiAgentTaskPendingRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); }, persistSession: persistSessionSnapshot, onSessionRestore: () => { if (scrollback) scrollbackRenderer.forceNewSegment(); } }),
       getScrollPageSize: () => Math.max(1, (process.stdout.rows || 24) - 8),
     });
     autocomplete = new TerminalAutocompleteController({
@@ -557,6 +561,12 @@ export type InputDeps = {
   /** Called when a session restore resets the transcript so the renderer can
    *  flush stale committed rows before the new content is rendered. */
   onSessionRestore?: () => void;
+  /** Shared holder for the H3+H4 pipeline tool, injected during a
+   *  `planner_worker_reviewer` turn and removed afterwards. */
+  multiAgentPipelineToolRef?: { current: Tool | undefined };
+  /** Set when `/multi-agent` was launched without an inline task; the next
+   *  plain-text submission is routed through the H3+H4 pipeline. */
+  multiAgentTaskPendingRef?: { current: boolean };
   resumePickerRef?: { current: { session: PersistedSession; candidates: ResumeMessageCandidate[] } | undefined };
   /** Persist the Todo snapshot after a local `/todo` mutation. */
   persistTodoState?: (todos: TodoItem[]) => void | Promise<void>;
@@ -646,9 +656,16 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
     }
   }
   if (action.type === "cancel") {
-    if (deps.autocomplete.getState().mode || deps.autocomplete.getState().argumentPrefix) {
+    const autoCompleteState = deps.autocomplete.getState();
+    if (autoCompleteState.mode || autoCompleteState.argumentPrefix) {
+      const wasRoleSetup = autoCompleteState.mode === "role-setup";
       deps.autocomplete.handleKey({ escape: true });
       if (deps.autocomplete.getState().argumentPrefix) deps.autocomplete.clear();
+      // Esc cancels the role-setup wizard; clear the pending multi-agent
+      // task flag so the next message is not mis-routed into the pipeline.
+      if (wasRoleSetup && deps.multiAgentTaskPendingRef) {
+        deps.multiAgentTaskPendingRef.current = false;
+      }
       return;
     }
     if (state.pendingPermission) {
@@ -723,6 +740,7 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
     if (state.busy && autocompleteState.mode && autocompleteState.mode !== "file") {
       input.clear();
       deps.autocomplete.clear();
+      if (deps.multiAgentTaskPendingRef) deps.multiAgentTaskPendingRef.current = false;
       store.dispatch({ type: "ADD_NOTICE", title: "Turn in progress", text: "The current turn is still running. Model and profile switches apply once it finishes; normal messages are queued." });
       return;
     }
@@ -1081,6 +1099,35 @@ async function submitInput(
     }
     return;
   }
+  // /multi-agent wizard launch: pick the Orchestrator model, then fall through
+  // to the existing role-setup wizard (inherit / existing profile / new model)
+  // when the user confirms, matching App.tsx's step order.
+  if (text.trim().match(/^\/multi-agent/i)) {
+    const inlineTask = text.trim().replace(/^\/multi-agent\s*/i, "").trim();
+    input.recordSubmission(text);
+    input.clear();
+    if (inlineTask) {
+      // Inline task: skip the model/role steps, submit immediately with the
+      // role bindings already persisted (or inherited from the main model).
+      store.dispatch({
+        type: "ADD_NOTICE",
+        title: "Multi-agent pipeline",
+        text: `Task pre-filled: ${inlineTask}\nStarting the planner → worker → reviewer pipeline…`,
+      });
+      void submitMultiAgentTask(inlineTask, deps);
+      return;
+    }
+    // No inline task: open the role wizard and mark that the next plain-text
+    // submission should be routed through the H3+H4 pipeline.
+    if (deps.multiAgentTaskPendingRef) deps.multiAgentTaskPendingRef.current = true;
+    store.dispatch({
+      type: "ADD_NOTICE",
+      title: "Multi-agent pipeline — configure sub-role models",
+      text: `Current model: ${deps.service.getLlm().model}\nConfigure each sub-role (0 = inherit, 1..n = saved profile, n+1 = new model), then describe your task and press Enter.`,
+    });
+    void openRoleSetupWizard(deps);
+    return;
+  }
   if (slashCommand) {
     input.recordSubmission(text);
     input.clear();
@@ -1226,6 +1273,14 @@ async function submitInput(
   }
   input.recordSubmission(planOverride?.displayText ?? value);
   input.clear();
+  // When /multi-agent was launched without an inline task, the next plain-text
+  // submission (the task description) is routed through the H3+H4 pipeline.
+  const multiAgentPending = deps.multiAgentTaskPendingRef?.current === true;
+  if (multiAgentPending && planOverride === undefined) {
+    deps.multiAgentTaskPendingRef!.current = false;
+    void submitMultiAgentTask(text, deps);
+    return;
+  }
   const pendingImages = planOverride ? undefined : store.getState().pendingImages;
   const resultPromise = service.submit(planOverride?.prompt ?? value, {
     ...(planOverride?.displayText !== undefined ? { displayText: planOverride.displayText } : {}),
@@ -1344,6 +1399,48 @@ async function submitModelSetup(value: string, deps: InputDeps): Promise<void> {
       ...(next.firstResponseTimeoutMs !== undefined ? { firstResponseTimeoutMs: next.firstResponseTimeoutMs } : {}),
       ...(next.streamIdleTimeoutMs !== undefined ? { streamIdleTimeoutMs: next.streamIdleTimeoutMs } : {}),
     });
+    // If the model-setup was entered from the subagent role wizard, bind the
+    // freshly saved profile to the pending role and resume the wizard.
+    const pendingRoleIndex = current.roleSetup?.pendingNewModelRoleIndex;
+    if (pendingRoleIndex !== undefined && current.roleSetup) {
+      try {
+        const store = await loadProfileStore();
+        const role = current.roleSetup.roles[pendingRoleIndex];
+        const updated = setSubagentRole(store, role, profileName);
+        await saveProfileStore(updated);
+        const chosen = { ...current.roleSetup.chosen };
+        chosen[role] = profileName;
+        deps.store.dispatch({
+          type: "ADD_NOTICE",
+          title: "Sub-agent role",
+          text: `${role} → ${profileName}`,
+        });
+        const rs = current.roleSetup;
+        if (pendingRoleIndex < rs.roles.length - 1) {
+          deps.autocomplete.setRoleSetup({
+            ...rs,
+            currentRoleIndex: pendingRoleIndex + 1,
+            selectedIndex: 0,
+            pendingNewModelRoleIndex: undefined,
+            chosen,
+          });
+          deps.input.clear();
+          return;
+        }
+        deps.autocomplete.clear();
+        deps.input.clear();
+        deps.store.dispatch({
+          type: "ADD_NOTICE",
+          title: "Sub-agent roles configured",
+          text: Object.keys(chosen).length > 0
+            ? Object.entries(chosen).map(([r, p]) => `${r} → ${p}`).join(", ")
+            : "all roles inherit the main model",
+        });
+        return;
+      } catch (error) {
+        deps.store.dispatch({ type: "ADD_NOTICE", title: "Sub-agent roles", text: error instanceof Error ? error.message : String(error) });
+      }
+    }
   } catch (error) {
     deps.autocomplete.setModelSetup({ ...setup, apiKey: value, error: error instanceof Error ? error.message : String(error) });
     deps.input.setValue(value);
@@ -1391,13 +1488,41 @@ async function activateTerminalProfile(index: number, deps: InputDeps): Promise<
 /**
  * Enter in the role-setup wizard: confirm the binding for the current role,
  * then advance to the next role or close the wizard on the last one.
+ *
+ * Option indices: 0 = inherit; 1..n = saved profile; n+1 = "new model"
+ * (opens the main model-setup wizard, then binds the freshly-saved profile
+ * to the pending role when it completes).
  */
 async function submitRoleSetup(deps: InputDeps): Promise<void> {
   const rs = deps.autocomplete.getState().roleSetup;
   if (!rs) return;
   const role = rs.roles[rs.currentRoleIndex];
-  // selectedIndex 0 = "inherit main model" (clear binding); 1..n = profileNames[i-1].
-  const profileName = rs.selectedIndex === 0 ? null : (rs.profileNames[rs.selectedIndex - 1] ?? null);
+  const totalOptions = rs.profileNames.length + 1; // +1 for "inherit"
+  const newModelIndex = totalOptions; // "n+1" = new model sub-flow
+  let profileName: string | null;
+  if (rs.selectedIndex === 0) {
+    profileName = null;
+  } else if (rs.selectedIndex === newModelIndex) {
+    // Defer binding: open model-setup; the pending role is bound after the
+    // profile is saved in submitModelSetup.
+    deps.autocomplete.setRoleSetup({ ...rs, pendingNewModelRoleIndex: rs.currentRoleIndex, selectedIndex: 0 });
+    const model = deps.service.getLlm();
+    const modelRef = resolveModel(model.model, model.baseUrl);
+    deps.autocomplete.openModelSetup({
+      model: modelRef,
+      baseUrl: model.baseUrl,
+      apiKey: "",
+      field: "baseUrl",
+    });
+    deps.store.dispatch({
+      type: "ADD_NOTICE",
+      title: "Sub-agent role",
+      text: `New model for ${role} — enter Base URL / API Key, then it is saved as a profile and bound to ${role}`,
+    });
+    return;
+  } else {
+    profileName = rs.profileNames[rs.selectedIndex - 1] ?? null;
+  }
   try {
     const store = await loadProfileStore();
     const updated = setSubagentRole(store, role, profileName);
@@ -1420,6 +1545,7 @@ async function submitRoleSetup(deps: InputDeps): Promise<void> {
     } else {
       deps.autocomplete.clear();
       deps.input.clear();
+      if (deps.multiAgentTaskPendingRef) deps.multiAgentTaskPendingRef.current = true;
       deps.store.dispatch({
         type: "ADD_NOTICE",
         title: "Sub-agent roles configured",
@@ -1427,9 +1553,57 @@ async function submitRoleSetup(deps: InputDeps): Promise<void> {
           ? Object.entries(chosen).map(([r, p]) => `${r} → ${p}`).join(", ")
           : "all roles inherit the main model",
       });
+      deps.store.dispatch({
+        type: "ADD_NOTICE",
+        title: "Multi-agent pipeline",
+        text: "Describe the task, then press Enter to run it through the planner → worker → reviewer pipeline.",
+      });
     }
   } catch (error) {
     deps.store.dispatch({ type: "ADD_NOTICE", title: "Sub-agent roles", text: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+/**
+ * Submit a task through the full H3+H4 pipeline (planner_worker_reviewer
+ * mode): injects `createAnalyzePipelineTool` into the tool set so the main
+ * agent can drive analyzeRequirement → topological dispatch → review → iterate,
+ * then runs a normal agent turn on the task text.
+ */
+async function submitMultiAgentTask(task: string, deps: InputDeps): Promise<void> {
+  const ref = deps.multiAgentPipelineToolRef;
+  const activeLlm = deps.service.getLlm();
+  // Resolve per-role LLM configs so the pipeline's researcher/coder/reviewer
+  // subagents honor /multi-agent role bindings, not just the parent model.
+  const roleLlmConfigs = buildRoleLlmConfigs(activeLlm);
+  try {
+    if (ref) {
+      ref.current = createAnalyzePipelineTool({
+        parentLlm: activeLlm,
+        parentTools: deps.allTools,
+        workspaceRoot: deps.cwd,
+        roleLlmConfigs,
+        onEvent: (event) =>
+          deps.store.dispatch({ type: "ADD_NOTICE", title: "Pipeline", text: `[${event.event}] ${event.task_id}` }),
+      });
+    }
+  } catch {
+    if (ref) ref.current = undefined;
+  }
+  const modeLabel = "Multi-agent mode: planner_worker_reviewer";
+  const fullPrompt = `${modeLabel}\n\n${task}`;
+  const resultPromise = deps.service.submit(fullPrompt, {
+    userContent: fullPrompt,
+    displayText: task,
+  });
+  const result = await resultPromise;
+  if (ref) ref.current = undefined;
+  if (!result.succeeded && result.errorMessage) {
+    deps.store.dispatch({
+      type: "ADD_NOTICE",
+      title: "Multi-agent pipeline",
+      text: result.errorMessage,
+    });
   }
 }
 

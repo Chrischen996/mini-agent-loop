@@ -77,6 +77,8 @@ export type AcMode =
   | "profile-list"
   | "multi-agent-model"
   | "multi-agent-mode"
+  | "multi-agent-roles"
+  | "multi-agent-role-new"
   | "multi-agent-task"
   | "role-setup"
   | null;
@@ -112,6 +114,10 @@ export function promptPlaceholder(context: PromptPlaceholderContext = {}): strin
       return "输入模型 ID (如 deepseek/deepseek-v4-flash) 或直接 Enter 使用当前模型";
     case "multi-agent-mode":
       return "选择模式: 1) planner_worker_reviewer  2) agent_turn — 输入编号后按 Enter";
+    case "multi-agent-roles":
+      return "为每个子角色选择模型（0=继承主模型，1..n=已有 profile，n+1=新建）";
+    case "multi-agent-role-new":
+      return "新建模型配置：输入 modelId → baseUrl → apiKey";
     case "multi-agent-task":
       return "描述你的任务，Enter 启动多智能体";
     default:

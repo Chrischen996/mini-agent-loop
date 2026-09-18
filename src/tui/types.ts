@@ -28,13 +28,39 @@ export type ProfileListState = {
  * State for the /multi-agent interactive setup wizard.
  * Advances through steps: model selection → mode selection → task input.
  */
+export type MultiAgentRoleName = "researcher" | "coder" | "reviewer";
+
+export type MultiAgentRoleAssignment =
+  | { type: "inherit" }
+  | { type: "profile"; profileName: string }
+  | {
+      type: "draft-new";
+      modelId: string;
+      baseUrl?: string;
+      apiKey?: string;
+      field?: "modelId" | "baseUrl" | "apiKey";
+      error?: string;
+    };
+
 export type MultiAgentSetupState = {
   /** Which step the wizard is on */
-  step: "model" | "mode" | "task";
+  step: "model" | "mode" | "roles" | "role-new" | "task";
   /** Selected orchestrator model id (e.g. "deepseek/deepseek-v4-flash") */
   orchestratorModel?: string;
-  /** Selected job kind */
-  mode?: "planner_worker_reviewer" | "agent_turn";
+  /**
+   * Selected job kind:
+   * - `planner_worker_reviewer` — exposes the `multi_agent_pipeline` tool to
+   *   the LLM, which decides whether/how to drive the H3+H4 pipeline.
+   * - `agent_turn` — a single agent turn with subagent delegation.
+   * - `planner_worker_reviewer_forced` — 100%-deterministic code path: the
+   *   H3+H4 pipeline is invoked directly in code (no LLM decision) and its
+   *   structured outcome is appended to the conversation.
+   */
+  mode?: "planner_worker_reviewer" | "agent_turn" | "planner_worker_reviewer_forced";
+  /** Sub-role configurations (step C) */
+  roleAssignments?: Record<MultiAgentRoleName, MultiAgentRoleAssignment>;
+  /** Index of role being edited when step === "roles" */
+  roleIndex?: number;
   /** Task description collected in the final step */
   task?: string;
 };
@@ -55,4 +81,10 @@ export type RoleSetupState = {
   selectedIndex: number;
   /** Bindings chosen so far: role → profileName */
   chosen: Partial<Record<"researcher" | "coder" | "reviewer", string>>;
+  /**
+   * When set, the user chose "new model" for the role at this index. The main
+   * model-setup wizard is opened to collect `baseUrl` / `apiKey`; on submit the
+   * new profile is saved and bound to this role, then the wizard resumes.
+   */
+  pendingNewModelRoleIndex?: number;
 };

@@ -211,7 +211,16 @@ export class TerminalAutocompleteController {
   }
 
   openModelSetup(setup: ModelSetupState): void {
-    this.setState({ ...EMPTY_STATE, mode: "model-setup", modelSetup: setup });
+    // Preserve the subagent-role wizard state if we entered model-setup from
+    // it (the "new model" path); roleSetup.pendingNewModelRoleIndex tells
+    // submitModelSetup which role to bind the freshly-saved profile to.
+    const preservedRoleSetup = this.state.roleSetup ?? undefined;
+    this.setState({
+      ...EMPTY_STATE,
+      mode: "model-setup",
+      modelSetup: setup,
+      ...(preservedRoleSetup !== undefined ? { roleSetup: preservedRoleSetup } : {}),
+    });
   }
 
   setModelSetup(setup: ModelSetupState | undefined): void {
@@ -245,10 +254,11 @@ export class TerminalAutocompleteController {
   handleKey(key: AutocompleteNavKey): boolean {
     const state = this.state;
 
-    // Role-setup wizard has its own 2D navigation (role × profile).
+    // Role-setup wizard has its own 2D navigation (role × profile + "new model").
     if (state.mode === "role-setup" && state.roleSetup) {
       const rs = state.roleSetup;
-      const totalProfiles = rs.profileNames.length + 1; // +1 for "inherit main model"
+      // totalOptions = inherit(1) + saved profiles(n) + new model(1)
+      const totalOptions = rs.profileNames.length + 2;
       if (key.upArrow) {
         this.setState({ ...state, roleSetup: { ...rs, currentRoleIndex: Math.max(0, rs.currentRoleIndex - 1) } });
         return true;
@@ -262,7 +272,7 @@ export class TerminalAutocompleteController {
         return true;
       }
       if (key.rightArrow || key.tab) {
-        this.setState({ ...state, roleSetup: { ...rs, selectedIndex: (rs.selectedIndex + 1) % totalProfiles } });
+        this.setState({ ...state, roleSetup: { ...rs, selectedIndex: (rs.selectedIndex + 1) % totalOptions } });
         return true;
       }
       if (key.escape) {
