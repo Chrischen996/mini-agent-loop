@@ -44,12 +44,10 @@ export function resolveTerminalDisplayMode(
   const scrollback = env.MINI_AGENT_TUI_SCROLLBACK?.trim().toLowerCase();
   if (scrollback === "1" || scrollback === "true" || scrollback === "yes") return "scrollback";
   if (scrollback === "0" || scrollback === "false" || scrollback === "no") return "fullscreen";
-  // In VS Code sandbox / non-interactive terminals, default to scrollback
-  // to avoid pi-tui alternate-screen redraw overhead.
+  // Interactive terminals need a fixed frame so application-owned scrolling
+  // can move the transcript without rewriting rows already in scrollback.
   if (!capabilities.interactive) return "scrollback";
-  // Default to scrollback so ordinary terminals keep native scrollback for the
-  // full context, instead of capping content inside the pi-tui window.
-  return "scrollback";
+  return "fullscreen";
 }
 
 /**

@@ -1691,14 +1691,25 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   );
   const frameHeight = Math.min(termHeight, naturalFrameHeight);
   const previousViewportHeightRef = useRef(viewportContentHeight);
+  const previousMessagesRef = useRef(state.messages);
   // Pending scroll-adjust accumulated while streaming so we only dispatch once
   // per animation frame instead of once per 80 ms flush tick.
   const pendingScrollDeltaRef = useRef(0);
   const scrollAdjustScheduledRef = useRef(false);
   useLayoutEffect(() => {
     const previous = previousViewportHeightRef.current;
+    const messagesUnchanged = previousMessagesRef.current === state.messages;
     previousViewportHeightRef.current = viewportContentHeight;
-    if (state.scrollOffset > 0 && viewportContentHeight > previous) {
+    previousMessagesRef.current = state.messages;
+    // Reducer append actions already preserve the offset for completed message
+    // blocks. Only compensate here for streaming growth inside the same
+    // messages array; doing this after an append moves the viewport twice.
+    if (!messagesUnchanged) {
+      // A queued streaming adjustment belongs to the previous message array;
+      // never carry it across a completed-message append.
+      pendingScrollDeltaRef.current = 0;
+    }
+    if (messagesUnchanged && state.scrollOffset > 0 && viewportContentHeight > previous) {
       pendingScrollDeltaRef.current += viewportContentHeight - previous;
       if (!scrollAdjustScheduledRef.current) {
         scrollAdjustScheduledRef.current = true;

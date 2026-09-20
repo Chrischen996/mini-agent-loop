@@ -538,6 +538,29 @@ describe("standalone terminal render model", () => {
     assert.equal(lines.at(-1)?.key, "input-0");
   });
 
+  it("uses scrollOffset to move the visible transcript window", () => {
+    let state = createInitialState("test-model");
+    for (const text of ["one", "two", "three", "four", "five"]) {
+      state = tuiReducer(state, { type: "USER_MESSAGE", text });
+    }
+    const bottom = buildTerminalRenderLines(state, {
+      width: 30,
+      height: 6,
+      scrollOffset: 0,
+      input: "",
+    });
+    const scrolled = buildTerminalRenderLines(state, {
+      width: 30,
+      height: 6,
+      scrollOffset: 2,
+      input: "",
+    });
+    assert.ok(bottom.some((line) => line.text === "five"));
+    assert.equal(scrolled.some((line) => line.text === "five"), false);
+    assert.equal(bottom.at(-1)?.key, "input-0");
+    assert.equal(scrolled.at(-1)?.key, "input-0");
+  });
+
   it("does not replace clipped conversation rows with a row-count hint", () => {
     let state = createInitialState("test-model");
     for (const text of ["one", "two", "three", "four"]) {

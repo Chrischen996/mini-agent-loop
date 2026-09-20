@@ -16,9 +16,9 @@ function sink(): { writes: string[]; target: { write(value: string): boolean } }
 }
 
 describe("incremental terminal renderer", () => {
-  it("defaults to scrollback with older modes as explicit opt-ins", () => {
+  it("defaults interactive terminals to a fixed frame so transcript scrolling works", () => {
     const tty = { interactive: true };
-    assert.equal(resolveTerminalDisplayMode({}, tty), "scrollback");
+    assert.equal(resolveTerminalDisplayMode({}, tty), "fullscreen");
     assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "pi" }, tty), "pi");
     assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "alternate" }, tty), "pi");
     assert.equal(resolveTerminalDisplayMode({ MINI_AGENT_TUI_MODE: "fullscreen" }, tty), "fullscreen");
