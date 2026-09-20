@@ -60,6 +60,51 @@ describe("MessageHeightCache", () => {
     );
   });
 
+  it("stores aggregate history rows and reuses the live display text", () => {
+    const entry = cache.getHistoryEntry(messages, options);
+    assert.equal(entry.prefixHeights.at(-1), entry.totalHeight);
+    assert.equal(entry.totalActual, entry.blocks.reduce((sum, block) => sum + Math.min(block.height, block.actual), 0));
+    const first = cache.getStreamingDisplayText("**live**", true);
+    const second = cache.getStreamingDisplayText("**live**", true);
+    assert.equal(second, first);
+    assert.equal(cache.getStreamingDisplayText("**live**", false), "live");
+  });
+
+  it("repairs one changed subagent block without rebuilding the history window", () => {
+    const card: ChatMessage = {
+      kind: "subagent_call",
+      id: "agent-1",
+      task: "inspect",
+      depth: 0,
+      status: "running",
+      innerEvents: [],
+      toolCallCount: 0,
+      startedAt: 0,
+      expanded: false,
+    };
+    const normalized = { "agent-1": card as Extract<ChatMessage, { kind: "subagent_call" }> };
+    const history: ChatMessage[] = [...messages, card];
+    const first = cache.getHistoryEntry(history, {
+      ...options,
+      subagentById: normalized,
+      subagentRevision: 1,
+      subagentChange: { id: "agent-1", index: history.length - 1, revision: 1 },
+    });
+    const nextCard = {
+      ...card,
+      innerEvents: [{ type: "tool_start", label: "▶ read", detail: "x" }],
+    } as Extract<ChatMessage, { kind: "subagent_call" }>;
+    const second = cache.getHistoryEntry(history, {
+      ...options,
+      subagentById: { "agent-1": nextCard },
+      subagentRevision: 2,
+      subagentChange: { id: "agent-1", index: history.length - 1, revision: 2 },
+    });
+    assert.equal(second, first);
+    assert.equal(second.blocks, first.blocks);
+    assert.equal((second.blocks.at(-1)?.item as { message: ChatMessage }).message, nextCard);
+  });
+
   it("clear() discards both layers", () => {
     cache.clear();
     const first = cache.getHistoryBlocks(messages, options);

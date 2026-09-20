@@ -1,4 +1,4 @@
-import type { ChatMessage, ThinkingDisplayMode } from "./state.ts";
+import { resolveTranscriptMessage, type ChatMessage, type ThinkingDisplayMode } from "./state.ts";
 import { countTerminalRows } from "./terminal-width.ts";
 import { estimateThinkingRows } from "./thinking-lines.ts";
 import { compactStreamingText, stripLeadingBlankLines } from "./text-utils.ts";
@@ -48,13 +48,50 @@ type HistoryBlock = { item: RawViewportItem; height: number; actual: number };
 type PerMessageEntry = { width: number; thinkingMode: ThinkingDisplayMode; expanded: boolean; height: number; actual: number };
 
 /** One cached walk of a specific messages array — the "window" layer. */
+type DynamicChange = { id: string; index: number; revision: number; kind?: "subagent" | "tool" };
+
 type ArrayBlocksEntry = {
   messages: ChatMessage[];
   width: number;
   thinkingMode: ThinkingDisplayMode;
   expandedKey: string;
   maxMessages: number;
+  subagentById?: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>>;
+  toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>;
+  subagentRevision: number;
+  toolRevision: number;
   blocks: HistoryBlock[];
+  /** Prefix sums let the viewport locate the visible tail without walking N blocks. */
+  prefixHeights: number[];
+  totalHeight: number;
+  totalActual: number;
+};
+
+type LiveBlocksKey = {
+  streamingText: string;
+  streamingReasoning: string;
+  busy: boolean;
+  thinkingMode: ThinkingDisplayMode;
+  width: number;
+};
+
+type LiveBlocksEntry = {
+  key: LiveBlocksKey;
+  blocks: HistoryBlock[];
+};
+
+type LiveTextEntry = {
+  text: string;
+  busy: boolean;
+  display: string;
+};
+
+type BlockCollection = {
+  historyBlocks: HistoryBlock[];
+  historyPrefixHeights: number[];
+  liveBlocks: HistoryBlock[];
+  totalHeight: number;
+  totalActual: number;
 };
 
 // Keep a handful of recent arrays so session restore / rewind (which swap in
@@ -65,26 +102,28 @@ const ARRAY_ENTRIES_CAP = 8;
 /**
  * Two-layer row-count cache for completed history blocks.
  *
- * Layer 1 (per message, WeakMap): a `ChatMessage` is immutable once appended
- * (the TUI only grows or map-replaces the array, it never mutates entries),
- * so the object reference is a safe key. `width` / `thinkingMode` /
- * `expanded` act as validity guards: a resize, mode switch, or expand toggle
- * recomputes exactly the affected entries. WeakMap keeps superseded message
- * objects (tool_end / subagent_event replace them via `{...m}`) from
- * leaking as the session grows.
+ * Layer 1 (per message, WeakMap): ordinary `ChatMessage` entries are
+ * immutable once appended, so the object reference is a safe key. Dynamic
+ * subagent cards are resolved from the normalized overlay before reaching
+ * this layer; lifecycle updates replace that snapshot and the targeted window
+ * entry is repaired separately. `width` / `thinkingMode` / `expanded` act as
+ * validity guards: a resize, mode switch, or expand toggle recomputes exactly
+ * the affected entries. WeakMap keeps superseded message objects from leaking
+ * as the session grows.
  *
- * Layer 2 (per messages array): the FULL walk of the history is cached for
- * the specific array reference. While streaming, `state.messages` is
- * unchanged, so every 80 ms flush (and each of the three callers — the two
- * App estimates and MessageFeed's viewport selection) serves the entire
- * transcript from one stored blocks array in O(1). Off-screen messages are
- * simply not processed on flush; the walk only re-runs when a new messages
- * array appears (a message was added or replaced), and even then each entry
- * is a cheap layer-1 lookup.
+ * Layer 2 (per messages array): the history walk, prefix sums, and aggregate
+ * heights are cached for the specific array reference. While streaming,
+ * `state.messages` is unchanged, so the two App estimates are O(1), and the
+ * MessageFeed selects its visible tail with a binary search plus only the
+ * visible blocks. The walk re-runs when a new messages array appears (a
+ * message was added or replaced), and even then each entry is a cheap
+ * layer-1 lookup.
  */
 export class MessageHeightCache {
   private entries = new WeakMap<ChatMessage, PerMessageEntry>();
   private arrayEntries: ArrayBlocksEntry[] = [];
+  private liveEntry: LiveBlocksEntry | undefined;
+  private liveTextEntry: LiveTextEntry | undefined;
 
   get(
     message: ChatMessage,
@@ -102,33 +141,96 @@ export class MessageHeightCache {
   }
 
   /**
-   * Cached history blocks for one messages array. O(1) when the same array
-   * reference is passed again with the same params (the streaming-flush hot
-   * path); a single layer-1 walk otherwise.
+   * Cached history blocks and aggregate rows for one messages array. O(1) when
+   * the same array reference is passed again with the same params (the
+   * streaming-flush hot path); a single layer-1 walk otherwise.
    */
-  getHistoryBlocks(
+  getHistoryEntry(
     messages: ChatMessage[],
-    options: { width: number; thinkingMode: ThinkingDisplayMode; expandedThinking: number[]; maxMessages: number },
-  ): HistoryBlock[] {
+    options: { width: number; thinkingMode: ThinkingDisplayMode; expandedThinking: number[]; maxMessages: number; subagentById?: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>>; toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>; subagentRevision?: number; toolRevision?: number; subagentChange?: DynamicChange; toolChange?: DynamicChange; },
+  ): ArrayBlocksEntry {
     const expandedKey = options.expandedThinking.join(",");
+    const currentSubagentRevision = options.subagentRevision ?? options.subagentChange?.revision ?? 0;
+    const currentToolRevision = options.toolRevision ?? options.toolChange?.revision ?? 0;
     for (const entry of this.arrayEntries) {
       if (
-        entry.messages === messages &&
-        entry.width === options.width &&
-        entry.thinkingMode === options.thinkingMode &&
-        entry.expandedKey === expandedKey &&
-        entry.maxMessages === options.maxMessages
+        entry.messages !== messages ||
+        entry.width !== options.width ||
+        entry.thinkingMode !== options.thinkingMode ||
+        entry.expandedKey !== expandedKey ||
+        entry.maxMessages !== options.maxMessages
+      ) continue;
+      if (
+        entry.subagentById === options.subagentById &&
+        entry.toolById === options.toolById &&
+        entry.subagentRevision === currentSubagentRevision &&
+        entry.toolRevision === currentToolRevision
+      ) return entry;
+      const change = entry.subagentRevision + 1 === currentSubagentRevision
+        ? options.subagentChange
+        : entry.toolRevision + 1 === currentToolRevision
+          ? options.toolChange
+          : undefined;
+      const changeKind = change === options.toolChange ? "tool" : "subagent";
+      const expectedRevision = changeKind === "tool" ? currentToolRevision : currentSubagentRevision;
+      const startIndex = Math.max(0, messages.length - options.maxMessages);
+      if (
+        change &&
+        change.revision === expectedRevision &&
+        ((changeKind === "subagent" && entry.subagentRevision + 1 === change.revision && entry.toolRevision === currentToolRevision) ||
+          (changeKind === "tool" && entry.toolRevision + 1 === change.revision && entry.subagentRevision === currentSubagentRevision)) &&
+        change.index >= 0 &&
+        change.index < messages.length
       ) {
-        return entry.blocks;
+        if (change.index < startIndex) {
+          entry.subagentById = options.subagentById;
+          entry.toolById = options.toolById;
+          entry.subagentRevision = currentSubagentRevision;
+          entry.toolRevision = currentToolRevision;
+          return entry;
+        }
+        const localIndex = change.index - startIndex;
+        const previous = entry.blocks[localIndex];
+        const message = resolveTranscriptMessage(messages[change.index]!, options.subagentById ?? {}, options.toolById ?? {});
+        const block = this.get(message, change.index, {
+          width: options.width,
+          thinkingMode: options.thinkingMode,
+          expanded: options.expandedThinking.includes(change.index),
+        });
+        const next: HistoryBlock = { item: { kind: "message", index: change.index, message }, height: block.height, actual: block.actual };
+        if (previous) {
+          entry.blocks[localIndex] = next;
+          const heightDelta = next.height - previous.height;
+          const actualDelta = Math.min(next.height, next.actual) - Math.min(previous.height, previous.actual);
+          entry.totalHeight += heightDelta;
+          entry.totalActual += actualDelta;
+          for (let index = localIndex; index < entry.prefixHeights.length; index++) {
+            entry.prefixHeights[index] = (entry.prefixHeights[index] ?? 0) + heightDelta;
+          }
+        }
+        entry.subagentById = options.subagentById;
+        entry.toolById = options.toolById;
+        entry.subagentRevision = currentSubagentRevision;
+        entry.toolRevision = currentToolRevision;
+        return entry;
       }
+      break;
     }
     const startIndex = Math.max(0, messages.length - options.maxMessages);
     const expanded = new Set(options.expandedThinking);
     const blocks: HistoryBlock[] = [];
     for (let index = startIndex; index < messages.length; index++) {
-      const message = messages[index]!;
+      const message = resolveTranscriptMessage(messages[index]!, options.subagentById ?? {}, options.toolById ?? {});
       const block = this.get(message, index, { width: options.width, thinkingMode: options.thinkingMode, expanded: expanded.has(index) });
       blocks.push({ item: { kind: "message", index, message }, height: block.height, actual: block.actual });
+    }
+    const prefixHeights: number[] = [];
+    let totalHeight = 0;
+    let totalActual = 0;
+    for (const block of blocks) {
+      totalHeight += block.height;
+      totalActual += Math.min(block.height, block.actual);
+      prefixHeights.push(totalHeight);
     }
     this.arrayEntries.push({
       messages,
@@ -136,15 +238,56 @@ export class MessageHeightCache {
       thinkingMode: options.thinkingMode,
       expandedKey,
       maxMessages: options.maxMessages,
+      subagentById: options.subagentById,
+      toolById: options.toolById,
+      subagentRevision: currentSubagentRevision,
+      toolRevision: currentToolRevision,
       blocks,
+      prefixHeights,
+      totalHeight,
+      totalActual,
     });
     if (this.arrayEntries.length > ARRAY_ENTRIES_CAP) this.arrayEntries.shift();
+    return this.arrayEntries.at(-1)!;
+  }
+
+  getHistoryBlocks(
+    messages: ChatMessage[],
+    options: { width: number; thinkingMode: ThinkingDisplayMode; expandedThinking: number[]; maxMessages: number; subagentById?: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>>; toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>; subagentRevision?: number; toolRevision?: number; subagentChange?: DynamicChange; toolChange?: DynamicChange; },
+  ): HistoryBlock[] {
+    return this.getHistoryEntry(messages, options).blocks;
+  }
+
+  getStreamingDisplayText(text: string, busy: boolean): string {
+    const previous = this.liveTextEntry;
+    if (previous && previous.text === text && previous.busy === busy) return previous.display;
+    const display = stripLeadingBlankLines(
+      busy ? compactStreamingText(stripInlineMarkdown(text)) : stripInlineMarkdown(text),
+    );
+    this.liveTextEntry = { text, busy, display };
+    return display;
+  }
+
+  getLiveBlocks(key: LiveBlocksKey, build: () => HistoryBlock[]): HistoryBlock[] {
+    const previous = this.liveEntry?.key;
+    if (
+      previous &&
+      previous.streamingText === key.streamingText &&
+      previous.streamingReasoning === key.streamingReasoning &&
+      previous.busy === key.busy &&
+      previous.thinkingMode === key.thinkingMode &&
+      previous.width === key.width
+    ) return this.liveEntry!.blocks;
+    const blocks = build();
+    this.liveEntry = { key, blocks };
     return blocks;
   }
 
   clear(): void {
     this.entries = new WeakMap();
     this.arrayEntries = [];
+    this.liveEntry = undefined;
+    this.liveTextEntry = undefined;
   }
 }
 
@@ -237,73 +380,99 @@ function buildBlocks(options: {
   width: number;
   maxMessages: number;
   cache?: MessageHeightCache;
-}): Array<{ item: RawViewportItem; height: number; actual: number }> {
+  subagentById?: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>>;
+  toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>;
+  subagentRevision?: number;
+  toolRevision?: number;
+  subagentChange?: DynamicChange;
+  toolChange?: DynamicChange;
+}): BlockCollection {
   const startIndex = Math.max(0, options.messages.length - options.maxMessages);
   const expanded = new Set(options.expandedThinking);
-  const blocks: Array<{ item: RawViewportItem; height: number; actual: number }> = [];
+  let historyBlocks: HistoryBlock[];
+  let historyPrefixHeights: number[];
+  let historyTotalHeight = 0;
+  let historyTotalActual = 0;
   if (options.cache) {
-    // Window layer: the full history walk is cached per messages-array
-    // reference, so a streaming flush (same array, new streaming text)
-    // processes zero off-screen messages at all.
-    blocks.push(
-      ...options.cache.getHistoryBlocks(options.messages, {
-        width: options.width,
-        thinkingMode: options.thinkingMode,
-        expandedThinking: options.expandedThinking,
-        maxMessages: options.maxMessages,
-      }),
-    );
-  }
-  for (let index = startIndex; !options.cache && index < options.messages.length; index++) {
-    const message = options.messages[index]!;
-    const { height, actual } = computeHistoryBlock(message, index, { width: options.width, thinkingMode: options.thinkingMode, expanded: expanded.has(index) });
-    blocks.push({ item: { kind: "message", index, message }, height, actual });
+    const entry = options.cache.getHistoryEntry(options.messages, {
+      width: options.width,
+      thinkingMode: options.thinkingMode,
+      expandedThinking: options.expandedThinking,
+      maxMessages: options.maxMessages,
+      subagentById: options.subagentById,
+      toolById: options.toolById,
+      subagentRevision: options.subagentRevision,
+      toolRevision: options.toolRevision,
+      subagentChange: options.subagentChange,
+      toolChange: options.toolChange,
+    });
+    historyBlocks = entry.blocks;
+    historyPrefixHeights = entry.prefixHeights;
+    historyTotalHeight = entry.totalHeight;
+    historyTotalActual = entry.totalActual;
+  } else {
+    historyBlocks = [];
+    historyPrefixHeights = [];
+    for (let index = startIndex; index < options.messages.length; index++) {
+      const message = resolveTranscriptMessage(options.messages[index]!, options.subagentById ?? {}, options.toolById ?? {});
+      const { height, actual } = computeHistoryBlock(message, index, { width: options.width, thinkingMode: options.thinkingMode, expanded: expanded.has(index) });
+      historyBlocks.push({ item: { kind: "message", index, message }, height, actual });
+      historyTotalHeight += height;
+      historyTotalActual += Math.min(height, actual);
+      historyPrefixHeights.push(historyTotalHeight);
+    }
   }
   // Live stack (streaming_reasoning → streaming_text → busy_status) previews
-  // the next history assistant, which renders with a 1-row gap above it.
-  // Only the first live row carries that gap; later live rows follow with 0
-  // so the replacement by the history block is seamless. Mirror these
-  // margins in MessageFeed's streaming/busy slices.
-  if (options.streamingReasoning) {
-    // MessageFeed renders the live block as <ThinkingBlock isStreaming={busy} />
-    // with no forceExpanded, so both height and actual must estimate it as
-    // streaming: in summary mode that collapses to 1 hint row even at ≤3 lines,
-    // matching thinkingVisibleLines' render decision. Without isStreaming the
-    // estimate wrongly expanded short blocks and over-sized the frame.
-    // +1 for the live-stack top margin rendered above the slice.
-    const streamingThinkingRows = thinkingRows(options.streamingReasoning, options.thinkingMode, false, options.width, true);
-    blocks.push({
-      item: { kind: "streaming_reasoning" },
-      height: 1 + streamingThinkingRows,
-      actual: 1 + streamingThinkingRows,
-    });
-  }
-  const textTopMargin = options.streamingReasoning ? 0 : 1;
-  if (options.streamingText) {
-    // Mirror the renderers: strip inline markdown, compact to the live tail
-    // while busy, and drop leading blank lines so the first row is never a
-    // lone "⏺ " marker row. Height and actual share the same display text,
-    // differing only in the wrap-width budget.
-    const displayText = stripLeadingBlankLines(
-      options.busy
-        ? compactStreamingText(stripInlineMarkdown(options.streamingText))
-        : stripInlineMarkdown(options.streamingText),
-    );
-    blocks.push({
-      item: { kind: "streaming_text" },
-      // feed paddingX={1} (−2) + "⏺ " marker (−2) = width − 4 for both
-      // height and actual so clipTop scaling uses a consistent basis.
-      height: textTopMargin + Math.max(1, countTerminalRows(displayText, Math.max(10, options.width - 4))),
-      actual: textTopMargin + Math.max(1, countTerminalRows(displayText, Math.max(10, options.width - 4))),
-    });
-  }
-  const busyTopMargin = options.streamingReasoning || options.streamingText ? 0 : 1;
-  if (options.busy) blocks.push({ item: { kind: "busy_status" }, height: 1 + busyTopMargin, actual: 1 + busyTopMargin });
-  return blocks;
+  // the next history assistant. Cache it by immutable string references so the
+  // App height estimates and MessageFeed selection share the same O(S) scan.
+  const buildLiveBlocks = (): HistoryBlock[] => {
+    const live: HistoryBlock[] = [];
+    if (options.streamingReasoning) {
+      const streamingThinkingRows = thinkingRows(options.streamingReasoning, options.thinkingMode, false, options.width, true);
+      live.push({
+        item: { kind: "streaming_reasoning" },
+        height: 1 + streamingThinkingRows,
+        actual: 1 + streamingThinkingRows,
+      });
+    }
+    const textTopMargin = options.streamingReasoning ? 0 : 1;
+    if (options.streamingText) {
+      const displayText = options.cache
+        ? options.cache.getStreamingDisplayText(options.streamingText, options.busy)
+        : stripLeadingBlankLines(
+          options.busy
+            ? compactStreamingText(stripInlineMarkdown(options.streamingText))
+            : stripInlineMarkdown(options.streamingText),
+        );
+      const rows = textTopMargin + Math.max(1, countTerminalRows(displayText, Math.max(10, options.width - 4)));
+      live.push({ item: { kind: "streaming_text" }, height: rows, actual: rows });
+    }
+    const busyTopMargin = options.streamingReasoning || options.streamingText ? 0 : 1;
+    if (options.busy) live.push({ item: { kind: "busy_status" }, height: 1 + busyTopMargin, actual: 1 + busyTopMargin });
+    return live;
+  };
+  const liveBlocks = options.cache
+    ? options.cache.getLiveBlocks({
+      streamingText: options.streamingText,
+      streamingReasoning: options.streamingReasoning,
+      busy: options.busy,
+      thinkingMode: options.thinkingMode,
+      width: options.width,
+    }, buildLiveBlocks)
+    : buildLiveBlocks();
+  const liveTotalHeight = liveBlocks.reduce((sum, block) => sum + block.height, 0);
+  const liveTotalActual = liveBlocks.reduce((sum, block) => sum + Math.min(block.height, block.actual), 0);
+  return {
+    historyBlocks,
+    historyPrefixHeights,
+    liveBlocks,
+    totalHeight: historyTotalHeight + liveTotalHeight,
+    totalActual: historyTotalActual + liveTotalActual,
+  };
 }
 
 export function estimateViewportContentHeight(options: Omit<Parameters<typeof selectMessageViewport>[0], "scrollOffset" | "availableHeight"> & { cache?: MessageHeightCache }): number {
-  return buildBlocks({ ...options, maxMessages: options.maxMessages ?? Number.MAX_SAFE_INTEGER }).reduce((sum, block) => sum + block.height, 0);
+  return buildBlocks({ ...options, maxMessages: options.maxMessages ?? Number.MAX_SAFE_INTEGER }).totalHeight;
 }
 
 /**
@@ -313,7 +482,18 @@ export function estimateViewportContentHeight(options: Omit<Parameters<typeof se
  * prompt. Never exceeds `estimateViewportContentHeight` for the same input.
  */
 export function estimateViewportActualHeight(options: Omit<Parameters<typeof selectMessageViewport>[0], "scrollOffset" | "availableHeight"> & { cache?: MessageHeightCache }): number {
-  return buildBlocks({ ...options, maxMessages: options.maxMessages ?? Number.MAX_SAFE_INTEGER }).reduce((sum, block) => sum + Math.min(block.height, block.actual), 0);
+  return buildBlocks({ ...options, maxMessages: options.maxMessages ?? Number.MAX_SAFE_INTEGER }).totalActual;
+}
+
+function upperBound(values: readonly number[], target: number): number {
+  let low = 0;
+  let high = values.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (values[middle]! <= target) low = middle + 1;
+    else high = middle;
+  }
+  return low;
 }
 
 /** Build a bottom-anchored, row-addressable viewport. */
@@ -332,11 +512,17 @@ export function selectMessageViewport(options: {
   showHistoryHints?: boolean;
   /** Optional per-message height cache for completed history blocks. */
   cache?: MessageHeightCache;
+  subagentById?: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>>;
+  toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>;
+  subagentRevision?: number;
+  toolRevision?: number;
+  subagentChange?: DynamicChange;
+  toolChange?: DynamicChange;
 }): ViewportSelection {
   const heightBudget = Math.max(3, options.availableHeight);
   const showHistoryHints = options.showHistoryHints ?? true;
-  const blocks = buildBlocks({ ...options, maxMessages: options.maxMessages ?? Number.MAX_SAFE_INTEGER });
-  const totalHeight = blocks.reduce((sum, block) => sum + block.height, 0);
+  const collection = buildBlocks({ ...options, maxMessages: options.maxMessages ?? Number.MAX_SAFE_INTEGER });
+  const totalHeight = collection.totalHeight;
   const maxScrollOffset = Math.max(0, totalHeight - Math.max(1, heightBudget - 1));
   const scrollOffset = Math.max(0, Math.min(options.scrollOffset, maxScrollOffset));
 
@@ -355,43 +541,48 @@ export function selectMessageViewport(options: {
   const items: ViewportItem[] = [];
   if (showHistoryHints && startRow > 0) items.push({ kind: "history_hint", direction: "above", hiddenRows: startRow });
 
-  let blockStart = 0;
-  for (const block of blocks) {
+  const appendVisibleBlock = (block: HistoryBlock, blockStart: number): void => {
     const blockEnd = blockStart + block.height;
     // The block's own rows Ink will actually draw. `block.height` is the
-    // wrap-aware estimate used for scroll accounting (startRow/endRow are in
-    // that estimated space); `clippedActual` is the real row budget so the
-    // rendered slice never exceeds it and never leaves a blank band when an
-    // estimate over-counts (e.g. truncated table rows, clipped code fences).
+    // wrap-aware estimate used for scroll accounting; `clippedActual` is the
+    // real row budget so the rendered slice never exceeds it.
     const clippedActual = Math.min(block.actual, block.height);
     const visibleStart = Math.max(blockStart, startRow);
     const visibleEnd = Math.min(blockEnd, endRow);
-    if (visibleStart < visibleEnd) {
-      // Estimated-space clip offset, clamped so the inner `marginTop={-clipTop}`
-      // can never push the block's real content entirely out of the box when an
-      // estimate over-counts the block's drawn rows.
-      const clipTop = Math.min(
-        Math.max(0, visibleStart - blockStart),
-        Math.max(0, clippedActual - 1),
-      );
-      // Real rows the slice actually clips: the estimated-space clip scaled to
-      // the block's drawn-row budget. `block.height` is the wrap-aware estimate
-      // (e.g. truncate-end table rows over-count), so the box must shrink by the
-      // real clipped rows, not the estimated ones, to avoid a blank band above
-      // the prompt when a clipped block draws fewer rows than it occupies.
-      const clipTopActual = Math.max(0, Math.min(
-        Math.round(clipTop * clippedActual / Math.max(1, block.height)),
-        clippedActual - 1,
-      ));
-      items.push({
-        ...block.item,
-        clipTop,
-        clipTopActual,
-        visibleHeight: visibleEnd - visibleStart,
-        actualHeight: clippedActual,
-      } as ViewportItem);
-    }
-    blockStart = blockEnd;
+    if (visibleStart >= visibleEnd) return;
+    const clipTop = Math.min(
+      Math.max(0, visibleStart - blockStart),
+      Math.max(0, clippedActual - 1),
+    );
+    const clipTopActual = Math.max(0, Math.min(
+      Math.round(clipTop * clippedActual / Math.max(1, block.height)),
+      clippedActual - 1,
+    ));
+    items.push({
+      ...block.item,
+      clipTop,
+      clipTopActual,
+      visibleHeight: visibleEnd - visibleStart,
+      actualHeight: clippedActual,
+    } as ViewportItem);
+  };
+
+  // History blocks are indexed by prefix sums. Locate the visible tail with
+  // binary search, then visit only the blocks that can contribute rows.
+  const historyPrefix = collection.historyPrefixHeights;
+  const firstHistory = upperBound(historyPrefix, startRow);
+  const endHistory = endRow <= 0
+    ? 0
+    : Math.min(historyPrefix.length, upperBound(historyPrefix, endRow - 1) + 1);
+  for (let index = firstHistory; index < endHistory; index++) {
+    const blockStart = index === 0 ? 0 : historyPrefix[index - 1]!;
+    appendVisibleBlock(collection.historyBlocks[index]!, blockStart);
+  }
+
+  let liveStart = historyPrefix.at(-1) ?? 0;
+  for (const block of collection.liveBlocks) {
+    appendVisibleBlock(block, liveStart);
+    liveStart += block.height;
   }
 
   if (showHistoryHints && endRow < totalHeight) items.push({ kind: "history_hint", direction: "below", hiddenRows: totalHeight - endRow });

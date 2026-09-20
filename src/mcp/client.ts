@@ -136,12 +136,9 @@ async function connectMcpClient(
   signal?: AbortSignal,
 ): Promise<McpClientConnection> {
   let connection: SdkMcpClientConnection;
-  const client = new Client(
-    { name: "mini-agent", version: "0.1.0" },
-    {
-      capabilities: { tools: {} },
-    },
-  );
+  // `tools` is a server capability in the current MCP SDK; advertising it
+  // from the client is rejected by the SDK's strict capabilities type.
+  const client = new Client({ name: "mini-agent", version: "0.1.0" }, {});
   connection = new SdkMcpClientConnection(client, timeoutMs);
   client.onerror = (error) => connection.handleError(error);
   client.onclose = () => connection.handleClose();

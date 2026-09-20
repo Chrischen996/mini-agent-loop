@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { ChatMessage, PendingPermissionState, ThinkingDisplayMode } from "../state.ts";
+import { resolveSubagentMessage, type ChatMessage, type PendingPermissionState, type ThinkingDisplayMode } from "../state.ts";
 import { SubagentCard } from "./SubagentCard.tsx";
 import { TUI_COLORS as C } from "../theme.ts";
 import { selectMessageViewport, type ViewportItem, MessageHeightCache } from "../message-viewport.ts";
@@ -168,6 +168,13 @@ type MessageFeedProps = {
   showHistoryHints?: boolean;
   /** Optional per-message height cache shared with the App-level estimates. */
   heightCache?: MessageHeightCache;
+  subagentById?: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>>;
+  subagentRevision?: number;
+  subagentChange?: { id: string; index: number; revision: number };
+  toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>;
+  toolRevision?: number;
+  toolChange?: { id: string; index: number; revision: number };
+  activeToolId?: string;
 };
 
 function ViewportSlice({
@@ -223,6 +230,8 @@ function ActivityRow({
   streamingText,
   streamingReasoning,
   messages,
+  toolById,
+  activeToolId,
   pendingPermission,
   turnStartedAt,
   lastStreamAt,
@@ -233,6 +242,8 @@ function ActivityRow({
   streamingText: string;
   streamingReasoning: string;
   messages: ChatMessage[];
+  toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>;
+  activeToolId?: string;
   pendingPermission?: PendingPermissionState;
   turnStartedAt?: number;
   lastStreamAt?: number;
@@ -250,6 +261,8 @@ function ActivityRow({
     streamingText,
     streamingReasoning,
     messages,
+    toolById,
+    activeToolId,
     pendingPermission,
     turnStartedAt,
     lastStreamAt,
@@ -404,12 +417,20 @@ export function MessageFeed({
   scrollOffset = 0,
   showHistoryHints = false,
   heightCache,
+  subagentById,
+  subagentRevision,
+  subagentChange,
+  toolById,
+  toolRevision,
+  toolChange,
+  activeToolId,
 }: MessageFeedProps): React.ReactElement {
   const effectiveMode: ThinkingDisplayMode =
     thinkingMode ?? (showThinking ? "summary" : "hidden");
   
   const viewport = selectMessageViewport({
     messages,
+    subagentById,
     streamingText,
     streamingReasoning,
     busy,
@@ -421,6 +442,11 @@ export function MessageFeed({
     maxMessages,
     showHistoryHints,
     cache: heightCache,
+    subagentRevision,
+    subagentChange,
+    toolById,
+    toolRevision,
+    toolChange,
   });
 
   return (
@@ -463,7 +489,9 @@ export function MessageFeed({
             <ViewportSlice key="streaming-text" clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
               <Box flexDirection="row" marginTop={streamingReasoning ? 0 : 1}>
                 <Text color={C.primary} bold>⏺ </Text>
-                <Text color={C.assistant} wrap="wrap">{stripLeadingBlankLines(busy ? compactStreamingText(stripInlineMarkdown(streamingText)) : stripInlineMarkdown(streamingText))}</Text>
+                <Text color={C.assistant} wrap="wrap">{heightCache
+                  ? heightCache.getStreamingDisplayText(streamingText, busy)
+                  : stripLeadingBlankLines(busy ? compactStreamingText(stripInlineMarkdown(streamingText)) : stripInlineMarkdown(streamingText))}</Text>
               </Box>
             </ViewportSlice>
           );
@@ -477,6 +505,8 @@ export function MessageFeed({
                 streamingText={streamingText}
                 streamingReasoning={streamingReasoning}
                 messages={messages}
+                toolById={toolById}
+                activeToolId={activeToolId}
                 pendingPermission={pendingPermission}
                 turnStartedAt={turnStartedAt}
                 lastStreamAt={lastStreamAt}
@@ -495,7 +525,7 @@ export function MessageFeed({
         return (
           <ViewportSlice key={item.index} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
             <HistoryMessageContent
-              msg={item.message}
+              msg={resolveSubagentMessage(item.message, subagentById ?? {})}
               index={item.index}
               width={width}
               thinkingMode={effectiveMode}

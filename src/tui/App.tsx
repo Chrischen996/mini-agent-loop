@@ -1648,9 +1648,15 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       width: termWidth,
       maxMessages: Number.MAX_SAFE_INTEGER,
       cache: heightCache,
+      subagentById: state.subagentById,
+      subagentRevision: state.subagentRevision,
+      subagentChange: state.subagentChange,
+      toolById: state.toolById,
+      toolRevision: state.toolRevision,
+      toolChange: state.toolChange,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [state.messages, state.streamingText, state.streamingReasoning, state.busy, state.thinkingMode, state.expandedThinking, termWidth],
+    [state.messages, state.subagentById, state.subagentRevision, state.subagentChange, state.toolById, state.toolRevision, state.toolChange, state.activeToolId, state.streamingText, state.streamingReasoning, state.busy, state.thinkingMode, state.expandedThinking, termWidth],
   );
   // Rows the Ink renderer actually draws. Truncated markdown kinds (tables,
   // code, rules) hold one row per source line, so the estimate can exceed the
@@ -1668,9 +1674,15 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       width: termWidth,
       maxMessages: Number.MAX_SAFE_INTEGER,
       cache: heightCache,
+      subagentById: state.subagentById,
+      subagentRevision: state.subagentRevision,
+      subagentChange: state.subagentChange,
+      toolById: state.toolById,
+      toolRevision: state.toolRevision,
+      toolChange: state.toolChange,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [state.messages, state.streamingText, state.streamingReasoning, state.busy, state.thinkingMode, state.expandedThinking, termWidth],
+    [state.messages, state.subagentById, state.subagentRevision, state.subagentChange, state.toolById, state.toolRevision, state.toolChange, state.activeToolId, state.streamingText, state.streamingReasoning, state.busy, state.thinkingMode, state.expandedThinking, termWidth],
   );
   // Do not force a short session to occupy the entire alternate screen. The
   // fixed-height viewport is useful once the transcript reaches the terminal
@@ -1759,6 +1771,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           scrollOffset={state.scrollOffset}
           showHistoryHints
           heightCache={heightCache}
+          subagentById={state.subagentById}
+          subagentRevision={state.subagentRevision}
+          subagentChange={state.subagentChange}
+          toolById={state.toolById}
+          toolRevision={state.toolRevision}
+          toolChange={state.toolChange}
+          activeToolId={state.activeToolId}
         />
         <Overlays
           acMode={acMode}

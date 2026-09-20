@@ -160,6 +160,98 @@ describe("TUI sidebar state", () => {
     assert.equal(state.taskStatus, "cancelled");
   });
 
+  it("keeps a bounded streaming preview while preserving the full assistant text", () => {
+    let state = createInitialState("test-model");
+    const first = "a".repeat(12_000);
+    const second = "b".repeat(12_000);
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "assistant_delta", kind: "answer", text: first } });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "assistant_delta", kind: "answer", text: second } });
+    assert.ok(state.streamingText.length <= 16_000);
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant", message: { role: "assistant", content: "" } },
+    });
+    const assistant = state.messages.at(-1);
+    assert.equal(assistant?.kind, "assistant");
+    if (assistant?.kind === "assistant") assert.equal(assistant.text, first + second);
+    assert.deepEqual(state.streamingTextParts, []);
+  });
+
+  it("records context compaction events for the context notice", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "context_compacted", beforeTokens: 12_000, afterTokens: 4_000, reason: "token budget" },
+    });
+    assert.equal(state.contextTokens, 4_000);
+    assert.deepEqual(state.contextCompactions, [{ before: 12_000, after: 4_000, reason: "token budget", turn: 1 }]);
+  });
+
+  it("ignores high-frequency subagent answer deltas in the transcript", () => {
+    const state = createInitialState("test-model");
+    const card = {
+      kind: "subagent_call" as const,
+      id: "sub-1",
+      task: "inspect",
+      depth: 0,
+      status: "running" as const,
+      innerEvents: [],
+      toolCallCount: 0,
+      startedAt: 0,
+      expanded: false,
+    };
+    state.messages = [card];
+    state.subagentIndexById = { "sub-1": 0 };
+    const next = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_event",
+        id: "sub-1",
+        depth: 0,
+        inner: { type: "assistant_delta", kind: "answer", text: "token" },
+      },
+    });
+    assert.equal(next, state);
+    assert.equal(next.messages[0], card);
+  });
+
+  it("bounds retained subagent progress events and uses the lifecycle index", () => {
+    let state = createInitialState("test-model");
+    const card = {
+      kind: "subagent_call" as const,
+      id: "sub-1",
+      task: "inspect",
+      depth: 0,
+      status: "running" as const,
+      innerEvents: [],
+      toolCallCount: 0,
+      startedAt: 0,
+      expanded: false,
+    };
+    state.messages = Array.from({ length: 500 }, (_, index) => ({ kind: "notice" as const, text: `history-${index}` }));
+    state.messages.push(card);
+    state.subagentIndexById = { "sub-1": state.messages.length - 1 };
+    const messagesReference = state.messages;
+    for (let index = 0; index < 150; index++) {
+      state = tuiReducer(state, {
+        type: "SUBAGENT_EVENT",
+        event: {
+          type: "subagent_event",
+          id: "sub-1",
+          depth: 0,
+          inner: { type: "tool_start", call: { id: `tool-${index}`, name: "read", arguments: { path: "x" } } },
+        },
+      });
+    }
+    assert.equal(state.messages, messagesReference, "subagent lifecycle updates must not copy the transcript array");
+    const updated = state.messages.at(-1);
+    assert.equal(updated?.kind, "subagent_call");
+    if (updated?.kind === "subagent_call") {
+      assert.equal(updated.innerEvents.length, 100);
+      assert.equal(updated.innerEvents[0]?.label, "▶ read");
+    }
+  });
+
   it("tracks the goal, workflow step, file path, and tool card", () => {
     let state = createInitialState("test-model");
     state = tuiReducer(state, { type: "USER_MESSAGE", text: "Inspect the workspace" });
@@ -189,6 +281,38 @@ describe("TUI sidebar state", () => {
     assert.equal(state.toolCards[0]?.status, "done");
     assert.equal(state.toolCards[0]?.preview, "export const answer = 42;");
     assert.ok((state.toolCards[0]?.durationMs ?? -1) >= 0);
+  });
+
+  it("tracks active tool lookups without copying the transcript on tool_end", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Inspect the workspace" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "tool_start",
+        call: { id: "call-1", name: "read", arguments: { path: "src/index.ts" } },
+      },
+    });
+    assert.equal(state.activeToolId, "call-1");
+    const messagesReference = state.messages;
+
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "tool_end",
+        call: { id: "call-1", name: "read", arguments: { path: "src/index.ts" } },
+        result: { content: "export const answer = 42;", isError: false },
+      },
+    });
+
+    assert.equal(state.activeToolId, undefined, "finished tool must clear the active pointer");
+    assert.equal(state.messages, messagesReference, "tool completion must not copy the transcript array");
+    const tool = state.messages.at(-1);
+    assert.equal(tool?.kind, "tool_call");
+    if (tool?.kind === "tool_call") {
+      assert.equal(tool.status, "done");
+      assert.equal(tool.result, "export const answer = 42;");
+    }
   });
 
   it("clears sidebar state when the conversation is reset", () => {

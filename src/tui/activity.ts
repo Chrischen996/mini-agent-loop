@@ -38,6 +38,9 @@ export type ActivityState = {
   streamingText: string;
   streamingReasoning: string;
   messages: ChatMessage[];
+  /** Normalized parent-tool lookup avoids scanning the full transcript per frame. */
+  toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>;
+  activeToolId?: string;
   pendingPermission?: PendingPermissionState;
   turnStartedAt?: number;
   lastStreamAt?: number;
@@ -84,12 +87,16 @@ export function activityPresentation(
   const lastProgressAt = state.lastStreamAt ?? startedAt;
   const stalledForMs = streamLength > 0 ? Math.max(0, now - lastProgressAt) : 0;
   const stalled = stalledForMs >= STREAM_STALL_NOTICE_MS;
-  let runningTool: Extract<ChatMessage, { kind: "tool_call" }> | undefined;
-  for (let index = state.messages.length - 1; index >= 0; index--) {
-    const message = state.messages[index];
-    if (message?.kind === "tool_call" && message.status === "running") {
-      runningTool = message;
-      break;
+  let runningTool = state.activeToolId ? state.toolById?.[state.activeToolId] : undefined;
+  // Compatibility fallback for callers that provide the older ActivityState
+  // shape directly; production TuiState takes the O(1) branch above.
+  if (!runningTool) {
+    for (let index = state.messages.length - 1; index >= 0; index--) {
+      const message = state.messages[index];
+      if (message?.kind === "tool_call" && message.status === "running") {
+        runningTool = message;
+        break;
+      }
     }
   }
 

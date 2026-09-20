@@ -1,4 +1,4 @@
-import type { ChatMessage, TuiState } from "./state.ts";
+import { resolveTranscriptMessage, type ChatMessage, type TuiState } from "./state.ts";
 import { markdownRowText, markdownRuleText, parseMarkdownLines, stripInlineMarkdown } from "./markdown-lines.ts";
 import { toMessageRenderModel } from "./render-model.ts";
 import type { RenderLine } from "./render-lines.ts";
@@ -119,7 +119,7 @@ export function buildTerminalRenderLines(
   const panelLinesInFooter = scrollback ? panelLines.map(markEphemeral) : panelLines;
 
   for (let index = messageStart; index < state.messages.length; index++) {
-    const message = state.messages[index]!;
+    const message = resolveTranscriptMessage(state.messages[index]!, state.subagentById, state.toolById);
     if (message.kind === "assistant" && isSubagentProtocolText(message.text)) continue;
     const visual = toMessageRenderModel(message);
     // Messages are rendered compactly with no inter-message blank rows. Tool

@@ -76,6 +76,21 @@ export type ChatMessage =
 
 export type TuiState = {
   messages: ChatMessage[];
+  /** Dynamic subagent card snapshots are normalized beside the transcript. */
+  subagentById: Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>;
+  /** Dynamic tool snapshots are normalized beside the transcript. */
+  toolById: Record<string, Extract<ChatMessage, { kind: "tool_call" }>>;
+  /** O(1) lookup for lifecycle updates targeting transcript entries. */
+  subagentIndexById: Record<string, number>;
+  toolIndexById: Record<string, number>;
+  /** Monotonic revisions for normalized dynamic transcript overlays. */
+  subagentRevision: number;
+  toolRevision: number;
+  /** The most recent overlay update, used for targeted viewport cache repair. */
+  subagentChange?: { id: string; index: number; revision: number };
+  toolChange?: { id: string; index: number; revision: number };
+  /** Most recently started parent tool, for O(1) activity rendering. */
+  activeToolId?: string;
   /** First user prompt in the active conversation. */
   goal: string;
   /** Root task metadata used by the completed checklist projection. */
@@ -92,8 +107,11 @@ export type TuiState = {
   toolCards: ToolCardState[];
   /** Independent task checklist maintained by the agent. */
   todos: TodoItem[];
+  /** Bounded text shown by the live renderer; full output stays in chunks. */
   streamingText: string;
   streamingReasoning: string;
+  streamingTextParts: string[];
+  streamingReasoningParts: string[];
   /** Wall-clock start of the active user turn; presentation-only. */
   turnStartedAt?: number;
   /** Last streamed reasoning/answer delta; used to surface a stalled stream. */
@@ -259,6 +277,12 @@ function resultContent(content: unknown, max = 4000): string {
 export function createInitialState(modelName: string): TuiState {
   return {
     messages: [],
+    subagentById: {},
+    toolById: {},
+    subagentIndexById: {},
+    toolIndexById: {},
+    subagentRevision: 0,
+    toolRevision: 0,
     goal: "",
     taskTitle: "",
     taskStatus: "completed",
@@ -271,6 +295,8 @@ export function createInitialState(modelName: string): TuiState {
     todos: [],
     streamingText: "",
     streamingReasoning: "",
+    streamingTextParts: [],
+    streamingReasoningParts: [],
     turnStartedAt: undefined,
     lastStreamAt: undefined,
     busy: false,
@@ -431,8 +457,103 @@ function resultPreviewForChat(content: MessageContent): string {
   return "";
 }
 
+const MAX_STREAMING_PREVIEW_CHARS = 16_000;
+
+function appendStreamingPreview(previous: string, chunk: string): string {
+  if (!chunk) return previous;
+  const combined = previous + chunk;
+  if (combined.length <= MAX_STREAMING_PREVIEW_CHARS) return combined;
+  return `… ${combined.slice(-(MAX_STREAMING_PREVIEW_CHARS - 2))}`;
+}
+
 function taskDuration(startedAt?: number): number | undefined {
   return startedAt === undefined ? undefined : Math.max(0, Date.now() - startedAt);
+}
+
+const MAX_SUBAGENT_INNER_EVENTS = 100;
+
+function messageIndices(messages: readonly ChatMessage[]): {
+  subagent: Record<string, number>;
+  tools: Record<string, number>;
+} {
+  const subagent: Record<string, number> = {};
+  const tools: Record<string, number> = {};
+  for (let position = 0; position < messages.length; position++) {
+    const message = messages[position];
+    if (message?.kind === "subagent_call") subagent[message.id] = position;
+    else if (message?.kind === "tool_call") tools[message.id] = position;
+  }
+  return { subagent, tools };
+}
+
+export function resolveSubagentMessage(
+  message: ChatMessage,
+  subagentById: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>>,
+): ChatMessage {
+  return message.kind === "subagent_call" ? subagentById[message.id] ?? message : message;
+}
+
+export function resolveTranscriptMessage(
+  message: ChatMessage,
+  subagentById: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>> = {},
+  toolById: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>> = {},
+): ChatMessage {
+  if (message.kind === "subagent_call") return subagentById[message.id] ?? message;
+  if (message.kind === "tool_call") return toolById[message.id] ?? message;
+  return message;
+}
+
+function updateSubagentMessage(
+  state: TuiState,
+  id: string,
+  update: (message: Extract<ChatMessage, { kind: "subagent_call" }>) => Extract<ChatMessage, { kind: "subagent_call" }>,
+): TuiState {
+  const position = state.subagentIndexById[id];
+  if (position === undefined) return state;
+  const base = state.messages[position];
+  if (!base || base.kind !== "subagent_call") return state;
+  const current = state.subagentById[id] ?? base;
+  const next = update(current);
+  if (next === current) return state;
+  // The transcript keeps a stable card object for compatibility with callers
+  // that inspect `state.messages` directly. Only the normalized overlay map is
+  // replaced, so the large transcript array is never copied on this hot path.
+  Object.assign(base, next);
+  const revision = state.subagentRevision + 1;
+  return {
+    ...state,
+    subagentById: { ...state.subagentById, [id]: next },
+    subagentRevision: revision,
+    subagentChange: { id, index: position, revision },
+  };
+}
+
+function updateToolMessage(
+  state: TuiState,
+  id: string,
+  update: (message: Extract<ChatMessage, { kind: "tool_call" }>) => Extract<ChatMessage, { kind: "tool_call" }>,
+): TuiState {
+  const position = state.toolIndexById[id];
+  if (position === undefined) return state;
+  const base = state.messages[position];
+  if (!base || base.kind !== "tool_call") return state;
+  const current = state.toolById[id] ?? base;
+  const next = update(current);
+  if (next === current) return state;
+  // Preserve direct `state.messages` readers while avoiding a transcript copy.
+  Object.assign(base, next);
+  const revision = state.toolRevision + 1;
+  return {
+    ...state,
+    toolById: { ...state.toolById, [id]: next },
+    toolRevision: revision,
+    toolChange: { id, index: position, revision },
+    activeToolId: next.status === "running" ? id : state.activeToolId === id ? undefined : state.activeToolId,
+  };
+}
+
+function isHighFrequencySubagentEvent(type: string): boolean {
+  return type === "assistant_delta" || type === "assistant_deltas";
 }
 
 export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
@@ -456,6 +577,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         status: "Thinking…",
         streamingText: "",
         streamingReasoning: "",
+        streamingTextParts: [],
+        streamingReasoningParts: [],
         turnStartedAt: Date.now(),
         lastStreamAt: undefined,
         // New user turns always re-pin the feed to the latest content.
@@ -470,6 +593,10 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         thinkingMode: action.thinkingMode ?? state.thinkingMode,
         permissionMode: action.permissionMode,
         messages,
+        subagentById: Object.fromEntries(messages.filter((message): message is Extract<ChatMessage, { kind: "subagent_call" }> => message.kind === "subagent_call").map((message) => [message.id, message])),
+        toolById: Object.fromEntries(messages.filter((message): message is Extract<ChatMessage, { kind: "tool_call" }> => message.kind === "tool_call").map((message) => [message.id, message])),
+        subagentIndexById: messageIndices(messages).subagent,
+        toolIndexById: messageIndices(messages).tools,
         goal: firstUser?.text ?? "",
         taskTitle: firstUser?.text ?? "",
         taskStatus: "completed",
@@ -547,6 +674,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         busy: false,
         streamingText: "",
         streamingReasoning: "",
+        streamingTextParts: [],
+        streamingReasoningParts: [],
         turnStartedAt: undefined,
         lastStreamAt: undefined,
         status: "Generation cancelled (ESC)",
@@ -560,6 +689,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         busy: true,
         streamingText: "",
         streamingReasoning: "",
+        streamingTextParts: [],
+        streamingReasoningParts: [],
         lastStreamAt: undefined,
         status: `Continuing… (${action.count}/${action.max})`,
       };
@@ -658,41 +789,55 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             spinnerMessage: nextTodoTask ? `▶ ${nextTodoTask.activeForm}` : undefined,
           };
 
-        case "assistant_delta":
+        case "assistant_delta": {
+          const answer = event.kind === "answer" ? event.text : "";
+          const reasoning = event.kind === "reasoning" ? event.text : "";
           return {
             ...state,
-            streamingText: event.kind === "answer"
-              ? state.streamingText + event.text
-              : state.streamingText,
-            streamingReasoning: event.kind === "reasoning"
-              ? state.streamingReasoning + event.text
-              : state.streamingReasoning,
+            streamingText: appendStreamingPreview(state.streamingText, answer),
+            streamingReasoning: appendStreamingPreview(state.streamingReasoning, reasoning),
+            streamingTextParts: answer ? [...state.streamingTextParts, answer] : state.streamingTextParts,
+            streamingReasoningParts: reasoning ? [...state.streamingReasoningParts, reasoning] : state.streamingReasoningParts,
             lastStreamAt: Date.now(),
             status: "Responding…",
           };
+        }
 
-        case "assistant_deltas":
+        case "assistant_deltas": {
           // Coalesced by TurnEventBuffer.flush(): at most one reasoning chunk and
-          // one answer chunk per 80 ms window. Applied in this single state
-          // update so a flush never triggers multiple React renders.
+          // one answer chunk per 80 ms window. Keep the hot preview bounded;
+          // full chunks are joined only when the assistant message is finalized.
+          const answer = event.answer ?? "";
+          const reasoning = event.reasoning ?? "";
           return {
             ...state,
-            streamingText: event.answer ? state.streamingText + event.answer : state.streamingText,
-            streamingReasoning: event.reasoning ? state.streamingReasoning + event.reasoning : state.streamingReasoning,
+            streamingText: appendStreamingPreview(state.streamingText, answer),
+            streamingReasoning: appendStreamingPreview(state.streamingReasoning, reasoning),
+            streamingTextParts: answer ? [...state.streamingTextParts, answer] : state.streamingTextParts,
+            streamingReasoningParts: reasoning ? [...state.streamingReasoningParts, reasoning] : state.streamingReasoningParts,
             lastStreamAt: Date.now(),
             status: "Responding…",
           };
+        }
 
         case "assistant": {
           // Prefer streamed text; the final assistant event often has content=""
           const contentText = typeof event.message.content === "string"
             ? event.message.content
             : "";
-          const text = contentText || state.streamingText;
-          const reasoning = state.streamingReasoning || undefined;
+          const streamedText = state.streamingTextParts.join("") || state.streamingText;
+          const streamedReasoning = state.streamingReasoningParts.join("") || state.streamingReasoning;
+          const text = contentText || streamedText;
+          const reasoning = streamedReasoning || undefined;
           const hasTools = (event.message.toolCalls?.length ?? 0) > 0;
           // Only skip if we genuinely have nothing to show
-          if (!text && !reasoning && !hasTools) return { ...state, streamingText: "", streamingReasoning: "" };
+          if (!text && !reasoning && !hasTools) return {
+            ...state,
+            streamingText: "",
+            streamingReasoning: "",
+            streamingTextParts: [],
+            streamingReasoningParts: [],
+          };
           const assistantMsg: ChatMessage = { kind: "assistant", text: text || "", ...(reasoning ? { reasoning } : {}) };
           const newMessages: ChatMessage[] = (text || reasoning)
             ? [...state.messages, assistantMsg]
@@ -705,6 +850,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             messages: newMessages,
             streamingText: "",
             streamingReasoning: "",
+            streamingTextParts: [],
+            streamingReasoningParts: [],
             status: hasTools ? "Running tool…" : "Finalizing response…",
             usedTokens,
             taskTokens: state.taskTokens + (event.usage?.totalTokens ?? 0),
@@ -725,6 +872,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             messages: newMessages,
             streamingText: "",
             streamingReasoning: "",
+            streamingTextParts: [],
+            streamingReasoningParts: [],
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
@@ -743,6 +892,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             streamingText: "",
             streamingReasoning: "",
+            streamingTextParts: [],
+            streamingReasoningParts: [],
             lastStreamAt: undefined,
             status: event.reason === "stream_truncated"
               ? `Connection lost, retrying (${event.attempt})…`
@@ -754,6 +905,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             streamingText: "",
             streamingReasoning: "",
+            streamingTextParts: [],
+            streamingReasoningParts: [],
             lastStreamAt: undefined,
             status: event.errorType === "timeout"
               ? `Request timed out, retrying (${event.attempt}/${event.maxRetries})…`
@@ -765,15 +918,27 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             streamingText: "",
             streamingReasoning: "",
+            streamingTextParts: [],
+            streamingReasoningParts: [],
             status: `Turn limit reached (${event.maxTurns}), continuing…`,
           };
 
-        case "context_compacted":
+        case "context_compacted": {
+          const compaction = {
+            before: event.beforeTokens,
+            after: event.afterTokens,
+            reason: event.reason,
+            // LoopEvent currently does not expose the model turn number. Keep
+            // a stable ordinal until that event contract gains one.
+            turn: state.contextCompactions.length + 1,
+          };
           return {
             ...state,
             contextTokens: event.afterTokens,
+            contextCompactions: [...state.contextCompactions, compaction],
             status: `Context compacted ${event.beforeTokens} → ${event.afterTokens} tokens`,
           };
+        }
 
         case "plan_act_event":
           // Keep plan lifecycle events on the same reducer path regardless of
@@ -834,9 +999,15 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             status: "running",
           };
           const newMessages: ChatMessage[] = [...state.messages, card];
+          const toolRevision = state.toolRevision + 1;
           return {
             ...state,
             messages: newMessages,
+            toolById: { ...state.toolById, [event.call.id]: card },
+            toolIndexById: { ...state.toolIndexById, [event.call.id]: newMessages.length - 1 },
+            toolRevision,
+            toolChange: { id: event.call.id, index: newMessages.length - 1, revision: toolRevision },
+            activeToolId: event.call.id,
             steps: [...state.steps.filter((item) => item.id !== step.id), step],
             touchedFiles: [...state.touchedFiles, ...paths.filter((path) => !state.touchedFiles.includes(path))].slice(-50),
             toolCards: [...state.toolCards.filter((item) => item.id !== sidebarCard.id), sidebarCard],
@@ -866,17 +1037,12 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           const now = Date.now();
           const result = resultPreview(event.result.content);
           const transcriptResult = resultContent(event.result.content);
-          const updatedMessages = state.messages.map((m) => {
-            if (m.kind === "tool_call" && m.id === event.call.id) {
-              return {
-                ...m,
-                status: (event.result.isError ? "error" : "done") as ToolState,
-                result: transcriptResult,
-                durationMs: now - m.startedAt,
-              };
-            }
-            return m;
-          });
+          const nextState = updateToolMessage(state, event.call.id, (message) => ({
+            ...message,
+            status: (event.result.isError ? "error" : "done") as ToolState,
+            result: transcriptResult,
+            durationMs: now - message.startedAt,
+          }));
           const updatedCards = state.toolCards.map((card) => {
             if (card.id !== event.call.id) return card;
             return {
@@ -892,8 +1058,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               : step,
           );
           return {
-            ...state,
-            messages: updatedMessages,
+            ...nextState,
             steps: updatedSteps,
             toolCards: updatedCards,
             status: event.result.isError ? `${event.call.name} failed` : `${event.call.name} completed`,
@@ -920,6 +1085,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             busy: false,
             streamingText: "",
             streamingReasoning: "",
+            streamingTextParts: [],
+            streamingReasoningParts: [],
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
@@ -934,6 +1101,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             busy: false,
             streamingText: "",
             streamingReasoning: "",
+            streamingTextParts: [],
+            streamingReasoningParts: [],
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
@@ -1069,9 +1238,14 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             expanded: false,
           };
           const newMessages: ChatMessage[] = [...state.messages, card];
+          const revision = state.subagentRevision + 1;
           return {
             ...state,
             messages: newMessages,
+            subagentById: { ...state.subagentById, [evt.id]: card },
+            subagentIndexById: { ...state.subagentIndexById, [evt.id]: newMessages.length - 1 },
+            subagentRevision: revision,
+            subagentChange: { id: evt.id, index: newMessages.length - 1, revision },
             status: `Delegating (depth ${evt.depth})…`,
             scrollOffset: preserveScrollOnAppend(
               state.scrollOffset,
@@ -1081,6 +1255,10 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         }
         case "subagent_event": {
           const inner = evt.inner;
+          // Child answer deltas are useful to the parent model, but they are
+          // too frequent and too verbose for the transcript. The child result
+          // and concrete tool lifecycle events remain visible below.
+          if (isHighFrequencySubagentEvent(inner.type)) return state;
           const label =
             inner.type === "tool_start" ? `▶ ${inner.call.name}`
             : inner.type === "tool_end" ? `${inner.result.isError ? "✗" : "✓"} ${inner.call.name}`
@@ -1098,80 +1276,47 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
                 return `${toolVisualName(inner.call.name)}${summary ? `(${summary})` : ""}`;
               })()
             : undefined;
-          return {
-            ...state,
-            messages: state.messages.map((m) => {
-              if (m.kind === "subagent_call" && m.id === evt.id) {
-                return {
-                  ...m,
-                  innerEvents: [...m.innerEvents, { type: inner.type, label, detail }],
-                  toolCallCount: m.toolCallCount + (isToolEnd ? 1 : 0),
-                  ...(lastToolInfo ? { lastToolInfo } : {}),
-                };
-              }
-              return m;
-            }),
-          };
+          return updateSubagentMessage(state, evt.id, (message) => ({
+            ...message,
+            innerEvents: [...message.innerEvents, { type: inner.type, label, detail }].slice(-MAX_SUBAGENT_INNER_EVENTS),
+            toolCallCount: message.toolCallCount + (isToolEnd ? 1 : 0),
+            ...(lastToolInfo ? { lastToolInfo } : {}),
+          }));
         }
         case "budget_warning": {
-          return {
-            ...state,
-            status: `Budget warning ${evt.percentage}%`,
-            messages: state.messages.map((m) => {
-              if (m.kind === "subagent_call" && m.id === evt.id) {
-                return {
-                  ...m,
-                  innerEvents: [
-                    ...m.innerEvents,
-                    {
-                      type: "budget_warning",
-                      label: `⚠ budget ${evt.percentage}% (${evt.used}/${evt.limit})`,
-                    },
-                  ],
-                };
-              }
-              return m;
-            }),
-          };
+          const next = updateSubagentMessage(state, evt.id, (message) => ({
+            ...message,
+            innerEvents: [...message.innerEvents, {
+              type: "budget_warning",
+              label: `⚠ budget ${evt.percentage}% (${evt.used}/${evt.limit})`,
+            }].slice(-MAX_SUBAGENT_INNER_EVENTS),
+          }));
+          return next === state ? state : { ...next, status: `Budget warning ${evt.percentage}%` };
         }
         case "subagent_end": {
           const now = Date.now();
-          return {
-            ...state,
-            messages: state.messages.map((m) => {
-              if (m.kind === "subagent_call" && m.id === evt.id) {
-                return {
-                  ...m,
-                  status: evt.success ? "done" as const : "error" as const,
-                  result: evt.result,
-                  turns: evt.turns,
-                  totalTokens: evt.totalTokens || undefined,
-                  tokenBreakdown: evt.tokenBreakdown,
-                  estimatedCost: evt.estimatedCost,
-                  durationMs: now - m.startedAt,
-                };
-              }
-              return m;
-            }),
-            status: evt.success ? "Subagent done" : "Subagent failed",
-          };
+          const next = updateSubagentMessage(state, evt.id, (message) => ({
+            ...message,
+            status: evt.success ? "done" as const : "error" as const,
+            result: evt.result,
+            turns: evt.turns,
+            totalTokens: evt.totalTokens || undefined,
+            tokenBreakdown: evt.tokenBreakdown,
+            estimatedCost: evt.estimatedCost,
+            durationMs: now - message.startedAt,
+          }));
+          return next === state ? state : { ...next, status: evt.success ? "Subagent done" : "Subagent failed" };
         }
         default:
           return state;
       }
     }
 
-    case "TOGGLE_SUBAGENT_EXPAND": {
-      return {
-        ...state,
-        messages: state.messages.map((m) => {
-          if (m.kind === "subagent_call" && m.id === action.id) {
-            return { ...m, expanded: !m.expanded };
-          }
-          return m;
-        }),
-      };
-    }
+    case "TOGGLE_SUBAGENT_EXPAND":
+      return updateSubagentMessage(state, action.id, (message) => ({
+        ...message,
+        expanded: !message.expanded,
+      }));
 
     case "ADD_PENDING_IMAGE": {
       const exists = state.pendingImages.some((img) => img.path === action.image.path);
