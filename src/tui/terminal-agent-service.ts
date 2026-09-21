@@ -1,22 +1,12 @@
 import type { ChatFn, LlmConfig } from "../llm/index.ts";
-import { LlmTimeoutError } from "../llm/retry.ts";
-import {
-  createAgentHistory,
-  MaxTurnsExceededError,
-  runAgentTurn,
-  type AgentRuntimeRef,
-  type LoopEvent,
-} from "../loop.ts";
-import { PermissionModeChangedError, type PermissionManager, type PermissionTurnContext } from "../permissions.ts";
+import type { PermissionManager, PermissionTurnContext } from "../permissions.ts";
 import type { AgentMessage, MessageContent, ToolCall } from "../types.ts";
 import type { MessagePreprocessor } from "../preprocessors/index.ts";
 import type { ToolProvider, ToolResult } from "../tools/types.ts";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import type { AutoSubagentOptions } from "../subagent/auto.ts";
-import { TurnEventBuffer } from "./stream-buffer.ts";
-import type { TuiAction, TuiStore } from "./state.ts";
-import { resolveAtRefs } from "./at-refs-resolver.ts";
-import { imageAttachmentToPart } from "./image-attachments.ts";
+import type { TuiStore } from "./state.ts";
+import { TurnRunner, type TerminalTurnResult as _KernelTurnResult } from "./tui-core/turn-runner.ts";
 
 export type TerminalAgentServiceOptions = {
   store: TuiStore;
@@ -28,7 +18,7 @@ export type TerminalAgentServiceOptions = {
   history?: AgentMessage[];
   autoSubagent?: AutoSubagentOptions;
   preprocessors?: MessagePreprocessor[];
-  runtimeRef?: AgentRuntimeRef;
+  runtimeRef?: import("../loop.ts").AgentRuntimeRef;
   runtimeContext?: RuntimeExecutionContext;
   globalTokenBudget?: number;
   cwd?: string;
@@ -62,329 +52,110 @@ export type TerminalTurnResult = {
  * Owns the single mutable AgentMessage history for the standalone terminal
  * entrypoint. UI code only dispatches actions; it never reimplements the
  * agent loop or appends model/tool messages itself.
+ *
+ * P1: this is now a thin wrapper around the kernel `TurnRunner`
+ * (src/tui/tui-core/turn-runner.ts). The public API is unchanged so the
+ * existing call sites in terminal-main.ts keep working; the wrapper will
+ * be deleted in P4 once both entrypoints are constructed through
+ * `createAgentSession` directly.
  */
 export class TerminalAgentService {
-  private history: AgentMessage[];
-  private activeLlm: LlmConfig;
-  private activeThinkingMode: "fixed" | "adaptive";
-  private activeSessionId: string | undefined;
-  private activeTurn: Promise<TerminalTurnResult> | undefined;
-  private readonly queuedSubmissions: Array<{
-    prompt: string;
-    options: TerminalSubmitOptions;
-    resolve: (result: TerminalTurnResult) => void;
-  }> = [];
-  private readonly options: TerminalAgentServiceOptions;
-  private readonly streamBuffer: TurnEventBuffer;
+  private readonly runner: TurnRunner;
 
   constructor(options: TerminalAgentServiceOptions) {
-    this.options = options;
-    this.activeLlm = options.llm;
-    this.activeThinkingMode = options.thinkingMode ?? "fixed";
-    this.activeSessionId = options.sessionId;
-    this.history = options.history ?? createAgentHistory(undefined, options.permissionManager.getMode());
-    this.streamBuffer = new TurnEventBuffer((event) => this.dispatch({ type: "LOOP_EVENT", event }));
+    this.runner = new TurnRunner({
+      store: options.store,
+      llm: options.llm,
+      tools: options.tools,
+      permissionManager: options.permissionManager,
+      ...(options.permissionSessionId !== undefined ? { permissionSessionId: options.permissionSessionId } : {}),
+      ...(options.getPermissionSessionId !== undefined ? { getPermissionSessionId: options.getPermissionSessionId } : {}),
+      ...(options.history !== undefined ? { history: options.history } : {}),
+      ...(options.autoSubagent !== undefined ? { autoSubagent: options.autoSubagent } : {}),
+      ...(options.preprocessors !== undefined ? { preprocessors: options.preprocessors } : {}),
+      ...(options.runtimeRef !== undefined ? { runtimeRef: options.runtimeRef } : {}),
+      ...(options.runtimeContext !== undefined ? { runtimeContext: options.runtimeContext } : {}),
+      ...(options.globalTokenBudget !== undefined ? { globalTokenBudget: options.globalTokenBudget } : {}),
+      ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+      ...(options.thinkingMode !== undefined ? { thinkingMode: options.thinkingMode } : {}),
+      ...(options.autoValidate !== undefined ? { autoValidate: options.autoValidate } : {}),
+      ...(options.autoCheckpoint !== undefined ? { autoCheckpoint: options.autoCheckpoint } : {}),
+      ...(options.skillNames !== undefined ? { skillNames: options.skillNames } : {}),
+      ...(options.skillRegistry !== undefined ? { skillRegistry: options.skillRegistry } : {}),
+      ...(options.sessionId !== undefined ? { sessionId: options.sessionId } : {}),
+      ...(options.chat !== undefined ? { chat: options.chat } : {}),
+      onLlmChange: options.onLlmChange,
+      onPermissionTurnChange: options.onPermissionTurnChange,
+      onTurnStarted: options.onTurnStarted,
+      onTurnFinished: options.onTurnFinished,
+    });
   }
 
   getHistory(): AgentMessage[] {
-    return this.history;
+    return this.runner.getHistory();
   }
 
   getLlm(): LlmConfig {
-    return this.activeLlm;
+    return this.runner.getLlm();
   }
 
   setLlm(llm: LlmConfig): void {
-    this.activeLlm = llm;
-    this.options.onLlmChange?.(llm);
+    this.runner.setLlm(llm);
   }
 
   getThinkingMode(): "fixed" | "adaptive" {
-    return this.activeThinkingMode;
+    return this.runner.getThinkingMode();
   }
 
   setThinkingMode(mode: "fixed" | "adaptive"): void {
-    this.activeThinkingMode = mode;
+    this.runner.setThinkingMode(mode);
   }
 
   getSkillNames(): string[] {
-    return [...(this.options.skillNames ?? [])];
+    return this.runner.getSkillNames();
   }
 
   setSkillNames(names: string[]): void {
-    if (!this.options.skillNames) this.options.skillNames = [];
-    this.options.skillNames.splice(0, this.options.skillNames.length, ...names);
+    this.runner.setSkillNames(names);
   }
 
-  resetHistory(mode = this.options.permissionManager.getMode()): void {
-    this.history = createAgentHistory(undefined, mode);
+  resetHistory(mode?: import("../permissions.ts").PermissionMode): void {
+    this.runner.resetHistory(mode ?? "plan");
   }
 
   replaceHistory(history: AgentMessage[]): void {
-    this.history = history;
+    this.runner.replaceHistory(history);
   }
 
-  /**
-   * Record a direct slash-tool invocation in the same history used by agent
-   * turns. Direct tools do not ask the model for an assistant message, but a
-   * synthetic tool call/result pair keeps `/resume` faithful to what the user
-   * actually ran and lets the normal persistence hook save it.
-   */
   async recordDirectToolTurn(prompt: string, call: ToolCall, result: ToolResult): Promise<TerminalTurnResult> {
-    this.history = [
-      ...this.history,
-      { role: "user", content: prompt },
-      { role: "assistant", content: "", toolCalls: [call] },
-      {
-        role: "tool",
-        toolCallId: call.id,
-        name: call.name,
-        content: result.content,
-        ...(result.isError ? { isError: true } : {}),
-      },
-    ];
-    const outcome: TerminalTurnResult = {
-      succeeded: !result.isError,
-      history: this.history,
-      ...(result.isError ? { errorMessage: String(result.content) } : {}),
-    };
-    try {
-      await this.options.onTurnFinished?.(outcome);
-    } catch {
-      // Persistence/finalization must not turn a completed direct tool into a
-      // failed chat action.
-    }
-    return outcome;
+    return this.runner.recordDirectToolTurn(prompt, call, result);
   }
 
   setSessionId(sessionId: string): void {
-    this.activeSessionId = sessionId;
+    this.runner.setSessionId(sessionId);
   }
 
   isBusy(): boolean {
-    return this.activeTurn !== undefined;
+    return this.runner.isBusy();
   }
 
-  /**
-   * Wait until the active turn has run its finalization hooks. This lets a
-   * terminal shutdown preserve the last history snapshot after cancellation.
-   */
   async waitForIdle(): Promise<void> {
-    const activeTurn = this.activeTurn;
-    if (!activeTurn) return;
-    await activeTurn.catch(() => undefined);
+    return this.runner.waitForIdle();
   }
 
   getQueuedCount(): number {
-    return this.queuedSubmissions.length;
+    return this.runner.getQueuedCount();
   }
 
-  /** Submit one user turn; concurrent prompts are drained FIFO after the active turn. */
   submit(prompt: string, submitOptions: TerminalSubmitOptions = {}): Promise<TerminalTurnResult> {
-    if (this.activeTurn) {
-      return new Promise((resolve) => {
-        this.queuedSubmissions.push({ prompt, options: submitOptions, resolve });
-      });
-    }
-    const run = this.run(prompt, submitOptions);
-    let tracked: Promise<TerminalTurnResult>;
-    tracked = run.finally(() => {
-      if (this.activeTurn !== tracked) return;
-      this.activeTurn = undefined;
-      const next = this.queuedSubmissions.shift();
-      if (!next) return;
-      this.submit(next.prompt, next.options).then(next.resolve, (error) => {
-        next.resolve({ succeeded: false, history: this.history, errorMessage: error instanceof Error ? error.message : String(error) });
-      });
-    });
-    this.activeTurn = tracked;
-    return tracked;
+    return this.runner.submit(prompt, submitOptions);
   }
 
   abort(): void {
-    this.abortController?.abort();
-    const queued = this.queuedSubmissions.splice(0);
-    for (const item of queued) item.resolve({ succeeded: false, history: this.history, errorMessage: "turn aborted" });
+    this.runner.abort();
   }
 
   resolvePermission(decision: "allow" | "deny"): boolean {
-    const pending = this.options.store.getState().pendingPermission;
-    if (!pending) return false;
-    const resolved = this.options.permissionManager.resolve(
-      pending.sessionId,
-      pending.requestId,
-      decision,
-    );
-    if (resolved) this.dispatch({ type: "CLEAR_PENDING_PERMISSION" });
-    return resolved;
+    return this.runner.resolvePermission(decision);
   }
-
-  private abortController?: AbortController;
-
-  private dispatch(action: TuiAction): void {
-    this.options.store.dispatch(action);
-  }
-
-  private async run(prompt: string, submitOptions: TerminalSubmitOptions): Promise<TerminalTurnResult> {
-    const text = prompt.trim();
-    if (!text) return { succeeded: false, history: this.history };
-    const state = this.options.store.getState();
-    if (state.busy) return { succeeded: false, history: this.history };
-
-    this.dispatch({
-      type: "USER_MESSAGE",
-      text: prompt,
-      ...(submitOptions.displayText !== undefined ? { displayText: submitOptions.displayText } : {}),
-      ...(submitOptions.images?.length ? { images: submitOptions.images } : {}),
-    });
-
-    const abortController = new AbortController();
-    this.abortController = abortController;
-    const permissionTurn = this.options.permissionManager.beginTurn(
-      this.options.getPermissionSessionId?.() ?? this.options.permissionSessionId ?? this.activeSessionId ?? "tui-session",
-      (request) => this.dispatch({ type: "LOOP_EVENT", event: { type: "permission_required", request } }),
-      abortController.signal,
-    );
-      this.options.onPermissionTurnChange?.(permissionTurn);
-      const runId = this.streamBuffer.start();
-    let currentPrompt = prompt;
-    let turnLlm = this.activeLlm;
-    let userContent = submitOptions.userContent;
-    let continueCount = 0;
-    let succeeded = false;
-    let errorMessage: string | undefined;
-    let aborted = false;
-
-    try {
-      await this.options.onTurnStarted?.({
-        prompt,
-        history: [
-          ...this.history,
-          { role: "user", content: submitOptions.userContent ?? prompt },
-        ],
-      });
-      if (userContent === undefined) {
-        userContent = await resolveAtRefs(text, permissionTurn, this.options.tools);
-      }
-      if (submitOptions.images?.length) {
-        const imageParts = await Promise.all(submitOptions.images.map((image) => imageAttachmentToPart(image)));
-        const textParts = typeof userContent === "string"
-          ? [{ type: "text" as const, text: userContent }]
-          : userContent;
-        userContent = [...textParts, ...imageParts];
-      }
-      while (true) {
-        try {
-          this.history = await runAgentTurn(this.history, currentPrompt, {
-            llm: { ...turnLlm, ...(this.activeSessionId ? { sessionId: this.activeSessionId } : {}) },
-            tools: this.options.tools,
-            chat: this.options.chat,
-            autoSubagent: this.options.autoSubagent,
-            preprocessors: this.options.preprocessors,
-            userContent,
-            permissionTurn,
-            runtimeRef: this.options.runtimeRef,
-            runtimeContext: this.options.runtimeContext,
-            globalTokenBudget: this.options.globalTokenBudget,
-            thinkingMode: this.activeThinkingMode,
-            autoValidate: this.options.autoValidate ?? false,
-            validationWorkspace: this.options.cwd,
-            autoCheckpoint: this.options.autoCheckpoint ?? false,
-            skillNames: this.options.skillNames,
-            skillRegistry: this.options.skillRegistry,
-            onEvent: (event) => {
-              if (event.type === "aborted") aborted = true;
-              if (event.type === "thinking_policy") {
-                // Adaptive escalation is local to this turn; keep the
-                // session-owned level unchanged for persistence and shortcuts.
-                turnLlm = { ...turnLlm, thinkingLevel: event.level };
-              }
-              this.handleEvent(runId, event);
-            },
-          });
-          succeeded = !aborted;
-          break;
-        } catch (error) {
-          if (error instanceof MaxTurnsExceededError) {
-            this.history = error.messages;
-            continueCount += 1;
-            const maxContinues = 5;
-            if (continueCount >= maxContinues || abortController.signal.aborted) {
-              if (abortController.signal.aborted) {
-                this.emitTerminalEvent(runId, this.abortEvent(this.history, abortController.signal.reason));
-                aborted = true;
-              } else {
-                errorMessage = `Auto-continue limit reached (${maxContinues} turns)`;
-                this.emitTerminalEvent(runId, { type: "error", message: errorMessage });
-              }
-              break;
-            }
-            currentPrompt = "Continue the remaining work.";
-            userContent = currentPrompt;
-            this.dispatch({ type: "AUTO_CONTINUE", count: continueCount, max: maxContinues });
-            continue;
-          }
-          if (error instanceof LlmTimeoutError && error.messages) {
-            this.history = error.messages;
-            errorMessage = formatTimeout(error);
-            this.emitTerminalEvent(runId, { type: "error", message: errorMessage });
-            break;
-          }
-          if (error instanceof PermissionModeChangedError || abortController.signal.aborted) {
-            aborted = true;
-            this.emitTerminalEvent(runId, this.abortEvent(this.history, abortController.signal.reason));
-            break;
-          }
-          errorMessage = error instanceof Error ? error.message : String(error);
-          this.emitTerminalEvent(runId, { type: "error", message: errorMessage });
-          break;
-        }
-      }
-    } finally {
-      this.streamBuffer.finish(runId);
-      permissionTurn.close();
-      this.options.onPermissionTurnChange?.(undefined);
-      this.abortController?.abort();
-      this.abortController = undefined;
-      const result = { succeeded, history: this.history, ...(errorMessage ? { errorMessage } : {}) } satisfies TerminalTurnResult;
-      try {
-        await this.options.onTurnFinished?.(result);
-      } catch {
-        // Finalization hooks are bookkeeping and must not break the turn.
-      }
-      return result;
-    }
-  }
-
-  private handleEvent(runId: number, event: LoopEvent): void {
-    // `runAgentTurn` emits terminal events itself. The service only forwards
-    // them, so it must not synthesize a second completion event in finally.
-    this.streamBuffer.handle(runId, event);
-  }
-
-  private emitTerminalEvent(runId: number, event: LoopEvent): void {
-    this.streamBuffer.handle(runId, event);
-  }
-
-  private abortEvent(history: AgentMessage[], reason: unknown): Extract<LoopEvent, { type: "aborted" }> {
-    if (reason instanceof PermissionModeChangedError) {
-      return {
-        type: "aborted",
-        messages: history,
-        reason: "permission_mode_changed",
-        previousMode: reason.previousMode,
-        permissionMode: reason.mode,
-      };
-    }
-    return { type: "aborted", messages: history };
-  }
-}
-
-function formatTimeout(error: LlmTimeoutError): string {
-  const phase = error.phase === "first_response" ? "first response" : error.phase === "stream_idle" ? "stream idle" : error.phase === "total" ? "total request" : "request";
-  const duration = error.timeoutMs === undefined ? "" : `, ${Math.ceil(error.timeoutMs / 1000)}s`;
-  const preview = error.partialContent?.replace(/\s+/g, " ").trim().slice(0, 80);
-  return preview
-    ? `LLM timeout (${phase}${duration}) - partial response saved: ${preview}`
-    : `LLM timeout (${phase}${duration}) - no partial response received`;
 }
