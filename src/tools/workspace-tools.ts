@@ -66,10 +66,13 @@ async function existingFile(cwd: string, relativePath: string) {
   return resolved;
 }
 
+/**
+ * Resolve a workspace path and verify the entry exists.
+ * Returns an error result if the path cannot be resolved.
+ * Unlike `existingFile`, this accepts both files and directories.
+ */
 async function existingEntry(cwd: string, relativePath: string) {
-  const resolved = await resolveWorkspacePath(cwd, relativePath);
-  if (!resolved.ok) return resolved;
-  return resolved;
+  return resolveWorkspacePath(cwd, relativePath);
 }
 
 async function walkFiles(
@@ -137,11 +140,12 @@ export function createLsTool(cwd: string): Tool<LsArgs> {
         const info = await stat(resolved.realTarget);
         if (!info.isDirectory()) return result(`Not a directory: ${relativePath}`, true);
         const limit = Math.max(1, args.limit ?? DEFAULT_LS_LIMIT);
-        const entries = (await readdir(resolved.realTarget, { withFileTypes: true }))
+        const allDirEntries = await readdir(resolved.realTarget, { withFileTypes: true });
+        const entries = allDirEntries
           .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()))
           .slice(0, limit)
           .map((entry) => entry.isDirectory() ? `${entry.name}/` : entry.name);
-        const notice = entries.length < (await readdir(resolved.realTarget)).length ? `\n\n[${limit} entries limit reached]` : "";
+        const notice = allDirEntries.length > limit ? `\n\n[${limit} entries limit reached]` : "";
         return result(entries.length ? entries.join("\n") + notice : "(empty directory)");
       } catch (error) {
         return result(`Failed to list ${relativePath}: ${error instanceof Error ? error.message : String(error)}`, true);

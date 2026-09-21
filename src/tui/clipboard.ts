@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { runChildProcess } from "./child-process.ts";
 
 export type ClipboardWriteResult = {
   ok: boolean;
@@ -15,39 +15,11 @@ export type ClipboardIo = {
 
 const CLIPBOARD_TIMEOUT_MS = 5_000;
 
+// OSC 52 base64 payload is limited to ~76 bytes per terminal command.
+const MAX_OSC52_BASE64_BYTES = 76;
+
 function encodeOsc52(text: string): string {
   return `\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`;
-}
-
-async function runClipboardCommand(command: string, args: string[], input: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: ["pipe", "ignore", "pipe"],
-      windowsHide: true,
-    });
-    let settled = false;
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error) reject(error);
-      else resolve();
-    };
-    const timeout = setTimeout(() => {
-      child.kill();
-      finish(new Error(`${command} timed out`));
-    }, CLIPBOARD_TIMEOUT_MS);
-
-    child.once("error", (error) => finish(error));
-    child.once("close", (code) => {
-      if (code === 0) finish();
-      else finish(new Error(`${command} exited with code ${code ?? "unknown"}`));
-    });
-    child.stdin?.once("error", () => {
-      /* The child may exit before stdin finishes flushing. */
-    });
-    child.stdin?.end(input);
-  });
 }
 
 function nativeCandidates(
@@ -72,33 +44,41 @@ export async function writeClipboardText(
   text: string,
   io: ClipboardIo = {},
 ): Promise<ClipboardWriteResult> {
-  if (!text) return { ok: false, method: "none", error: "没有可复制的内容" };
+  if (!text) return { ok: false, method: "none", error: "Nothing to copy" };
 
   const platform = io.platform ?? process.platform;
   const env = io.env ?? process.env;
-  const run = io.run ?? runClipboardCommand;
+  const run = io.run ?? ((command: string, args: string[], input: string) => runChildProcess(command, args, {
+    input,
+    timeoutMs: CLIPBOARD_TIMEOUT_MS,
+    stdio: ["pipe", "ignore", "pipe"],
+  }));
   const writeStdout = io.writeStdout ?? ((data: string) => process.stdout.write(data));
 
-  // ── 第一路径：OSC 52（首选，~0ms，终端原生支持）──────────────────────────
-  // 生成 OSC 52 序列并输出，让终端自行处理复制
+  // ── Path 1: OSC 52 (preferred, ~0ms, handled by the terminal itself) ─────
+  // Emit the OSC 52 sequence and let the terminal perform the copy.
   try {
     const osc52 = encodeOsc52(text);
-    writeStdout(osc52);
-    // OSC 52 成功后，fire-and-forget 原生工具作为安全网
-    // 这样即使终端不支持 OSC 52，原生工具仍能写入剪贴板
-    if (platform !== "win32") {
-      const candidates = nativeCandidates(platform, env);
-      for (const candidate of candidates) {
-        run(candidate.command, candidate.args, text).catch(() => {}); // fire-and-forget
-        break; // 只试第一个可用的
+    // Only use OSC 52 for text that fits within terminal limits
+    if (Buffer.byteLength(osc52, "utf8") <= MAX_OSC52_BASE64_BYTES) {
+      writeStdout(osc52);
+      // After OSC 52 succeeds, fire-and-forget a native tool as a safety net so
+      // the clipboard is still filled when the terminal ignores OSC 52.
+      if (platform !== "win32") {
+        const candidates = nativeCandidates(platform, env);
+        for (const candidate of candidates) {
+          run(candidate.command, candidate.args, text).catch(() => {}); // fire-and-forget
+          break; // only try the first available backend
+        }
       }
+      return { ok: true, method: "osc52" };
     }
-    return { ok: true, method: "osc52" };
+    // For large text, fall through to native tools
   } catch (error) {
-    // OSC 52 失败，回退到原生工具
+    // OSC 52 failed; fall back to the native tools.
   }
 
-  // ── 第二路径：原生工具（安全网）────────────────────────────────────────────
+  // ── Path 2: native clipboard tools (safety net) ───────────────────────────
   for (const candidate of nativeCandidates(platform, env)) {
     try {
       await run(candidate.command, candidate.args, text);
@@ -111,7 +91,7 @@ export async function writeClipboardText(
   return {
     ok: false,
     method: "none",
-    error: "所有复制方式均失败",
+    error: "Every clipboard method failed",
   };
 }
 

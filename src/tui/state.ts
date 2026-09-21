@@ -2,11 +2,17 @@
 
 import type { LoopEvent } from "../loop.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
+import { contentAsString } from "../content.ts";
+import type { AgentMessage, MessageContent } from "../types.ts";
 import { PERMISSION_MODES, type PermissionMode } from "../permissions.ts";
 import type { SessionPhase, ExecutionPlan, PlanActEvent } from "../plan-act/types.ts";
 import type { PlanDocument } from "../plan/document.ts";
 import { isTodoRevisionNewer, nextTodoRevision, TODO_WRITE_TOOL_NAME, type TodoItem, type TodoViewMode } from "../todo.ts";
 import { executionPlanToTodoItems } from "./todo-format.ts";
+import { permissionModeLabel, toolArgumentSummary } from "./claude-style.ts";
+import { toolVisualName } from "./tool-lines.ts";
+import { subagentRenderLineCount } from "./subagent-lines.ts";
+import { compactText } from "./text-utils.ts";
 
 export type { PermissionMode } from "../permissions.ts";
 export type { SessionPhase } from "../plan-act/types.ts";
@@ -17,6 +23,8 @@ export type ToolState = "running" | "done" | "error";
 
 /** Global thinking display mode for extended reasoning (DeepSeek / Claude). */
 export type ThinkingDisplayMode = "hidden" | "summary" | "full";
+
+export type TaskSummaryStatus = "running" | "completed" | "failed" | "cancelled";
 
 export const THINKING_MODE_ORDER: ThinkingDisplayMode[] = ["hidden", "summary", "full"];
 
@@ -34,6 +42,8 @@ export type PendingPermissionState = {
   requestId: string;
   sessionId: string;
   tool: string;
+  /** Read-only snapshot used by the presentation card; never used to decide permission. */
+  arguments?: Record<string, unknown>;
   risk: "safe" | "medium" | "high";
 };
 
@@ -61,13 +71,34 @@ export type ChatMessage =
   | { kind: "assistant"; text: string; reasoning?: string }
   | { kind: "notice"; title?: string; text: string }
   | { kind: "tool_call"; id: string; name: string; args: string; rawArgs: Record<string, unknown>; status: ToolState; result?: string; durationMs?: number; startedAt: number }
-  | { kind: "subagent_call"; id: string; task: string; profile?: string; depth: number; status: ToolState; result?: string; turns?: number; totalTokens?: number; tokenBreakdown?: import("../subagent/types.ts").SubagentTokenBreakdown; estimatedCost?: import("../subagent/types.ts").SubagentCost; innerEvents: SubagentInnerEvent[]; toolCallCount: number; startedAt: number; durationMs?: number; expanded: boolean }
+  | { kind: "subagent_call"; id: string; task: string; profile?: string; depth: number; status: ToolState; result?: string; turns?: number; totalTokens?: number; tokenBreakdown?: import("../subagent/types.ts").SubagentTokenBreakdown; estimatedCost?: import("../subagent/types.ts").SubagentCost; lastToolInfo?: string; innerEvents: SubagentInnerEvent[]; toolCallCount: number; startedAt: number; durationMs?: number; expanded: boolean }
   | { kind: "error"; text: string };
 
 export type TuiState = {
   messages: ChatMessage[];
+  /** Dynamic subagent card snapshots are normalized beside the transcript. */
+  subagentById: Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>;
+  /** Dynamic tool snapshots are normalized beside the transcript. */
+  toolById: Record<string, Extract<ChatMessage, { kind: "tool_call" }>>;
+  /** O(1) lookup for lifecycle updates targeting transcript entries. */
+  subagentIndexById: Record<string, number>;
+  toolIndexById: Record<string, number>;
+  /** Monotonic revisions for normalized dynamic transcript overlays. */
+  subagentRevision: number;
+  toolRevision: number;
+  /** The most recent overlay update, used for targeted viewport cache repair. */
+  subagentChange?: { id: string; index: number; revision: number };
+  toolChange?: { id: string; index: number; revision: number };
+  /** Most recently started parent tool, for O(1) activity rendering. */
+  activeToolId?: string;
   /** First user prompt in the active conversation. */
   goal: string;
+  /** Root task metadata used by the completed checklist projection. */
+  taskTitle: string;
+  taskStatus: TaskSummaryStatus;
+  taskStartedAt?: number;
+  taskDurationMs?: number;
+  taskTokens: number;
   /** Tool-backed steps shown in the workflow sidebar. */
   steps: WorkflowStep[];
   /** Workspace paths seen in tool arguments during this conversation. */
@@ -76,8 +107,15 @@ export type TuiState = {
   toolCards: ToolCardState[];
   /** Independent task checklist maintained by the agent. */
   todos: TodoItem[];
+  /** Bounded text shown by the live renderer; full output stays in chunks. */
   streamingText: string;
   streamingReasoning: string;
+  streamingTextParts: string[];
+  streamingReasoningParts: string[];
+  /** Wall-clock start of the active user turn; presentation-only. */
+  turnStartedAt?: number;
+  /** Last streamed reasoning/answer delta; used to surface a stalled stream. */
+  lastStreamAt?: number;
   /** Track context compaction events for /context command. */
   contextCompactions: { before: number; after: number; reason: string; turn: number }[];
   busy: boolean;
@@ -123,6 +161,17 @@ export type TuiState = {
 
 export type TuiAction =
   | { type: "USER_MESSAGE"; text: string; displayText?: string; images?: ImageAttachment[] }
+  | {
+      type: "RESTORE_SESSION";
+      history: AgentMessage[];
+      permissionMode: PermissionMode;
+      modelName?: string;
+      thinkingMode?: ThinkingDisplayMode;
+      phase?: SessionPhase;
+      currentPlan?: ExecutionPlan;
+      todos?: TodoItem[];
+      todoRevision?: number;
+    }
   | { type: "LOOP_EVENT"; event: LoopEvent }
   | { type: "PLAN_ACT_EVENT"; event: PlanActEvent }
   | { type: "AUTO_CONTINUE"; count: number; max: number }
@@ -155,11 +204,6 @@ export type TuiAction =
   | { type: "SCROLL_TO"; offset: number }
   | { type: "SCROLL_TO_BOTTOM" };
 
-function shortPreview(s: string, max = 200): string {
-  const oneLine = s.replace(/\s+/g, " ").trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
-}
-
 function toolTarget(args: Record<string, unknown>): string | undefined {
   for (const key of ["path", "file", "pattern", "command", "cmd"]) {
     const value = args[key];
@@ -170,7 +214,7 @@ function toolTarget(args: Record<string, unknown>): string | undefined {
 
 function toolLabel(name: string, args: Record<string, unknown>): string {
   const target = toolTarget(args);
-  return shortPreview(target ? `${name} ${target}` : name, 48);
+  return compactText(target ? `${name} ${target}` : name, 48, "…");
 }
 
 function toolPaths(args: Record<string, unknown>): string[] {
@@ -200,7 +244,7 @@ function updateExecutionTodo(
 }
 
 function resultPreview(content: unknown): string {
-  if (typeof content === "string") return shortPreview(content, 180);
+  if (typeof content === "string") return compactText(content, 180, "…");
   if (Array.isArray(content)) {
     const text = content
       .filter((part): part is { type: "text"; text: string } =>
@@ -208,23 +252,55 @@ function resultPreview(content: unknown): string {
       )
       .map((part) => part.text)
       .join(" ");
-    return text ? shortPreview(text, 180) : "[binary]";
+    return text ? compactText(text, 180, "…") : "[binary]";
   }
   return "";
+}
+
+/** Preserve line breaks for the transcript while keeping unbounded tool
+ * output from taking over the frame. Sidebar cards continue using preview(). */
+function resultContent(content: unknown, max = 4000): string {
+  let text = "";
+  if (typeof content === "string") text = content;
+  else if (Array.isArray(content)) {
+    text = content
+      .filter((part): part is { type: "text"; text: string } =>
+        typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string",
+      )
+      .map((part) => part.text)
+      .join("\n");
+  }
+  const normalized = text.trim();
+  return normalized.length > max ? `${normalized.slice(0, max - 1)}…` : normalized;
 }
 
 export function createInitialState(modelName: string): TuiState {
   return {
     messages: [],
+    subagentById: {},
+    toolById: {},
+    subagentIndexById: {},
+    toolIndexById: {},
+    subagentRevision: 0,
+    toolRevision: 0,
     goal: "",
+    taskTitle: "",
+    taskStatus: "completed",
+    taskStartedAt: undefined,
+    taskDurationMs: undefined,
+    taskTokens: 0,
     steps: [],
     touchedFiles: [],
     toolCards: [],
     todos: [],
     streamingText: "",
     streamingReasoning: "",
+    streamingTextParts: [],
+    streamingReasoningParts: [],
+    turnStartedAt: undefined,
+    lastStreamAt: undefined,
     busy: false,
-    status: "就绪",
+    status: "Ready",
     modelName,
     usedTokens: 0,
     contextTokens: 0,
@@ -241,7 +317,9 @@ export function createInitialState(modelName: string): TuiState {
     todoPlan: undefined,
     todoItems: undefined,
     todoRevision: 0,
-    todoViewMode: "expanded",
+    // Match Claude Code: keep the task list compact during normal work;
+    // users can expand it with Ctrl+T or /tasks expanded.
+    todoViewMode: "compact",
     spinnerMessage: undefined,
   };
 }
@@ -262,12 +340,220 @@ export function reasoningMessageIndices(messages: ChatMessage[]): number[] {
  */
 export function preserveScrollOnAppend(
   scrollOffset: number,
-  previousCount: number,
-  nextCount: number,
+  addedRows: number,
 ): number {
   // Stick to bottom when pinned; otherwise preserve visual position.
   if (scrollOffset === 0) return 0;
-  return Math.max(0, scrollOffset + (nextCount - previousCount));
+  return Math.max(0, scrollOffset + addedRows);
+}
+
+/**
+ * Estimate the rendered row count contributed by newly added messages.
+ * Cannot use estimateMessageHeight (circular dependency), so we count
+ * newline characters as a cheap proxy – accurate enough to keep the scroll
+ * position stable without knowing the terminal width.
+ */
+function estimateNewMessageRows(previous: readonly ChatMessage[], next: readonly ChatMessage[]): number {
+  let rows = 0;
+  for (let i = previous.length; i < next.length; i++) {
+    const msg = next[i]!;
+    if (msg.kind === "subagent_call") {
+      // SubagentCard draws subagentRenderLineCount rows beneath a marginTop=1
+      // gap. subagent_call carries no `text` field, so the newline-count
+      // fallback below would always undercount it as 2 rows.
+      rows += 1 + subagentRenderLineCount(msg);
+      continue;
+    }
+    const text = ("text" in msg ? msg.text : "") || "";
+    // Tool-only assistant turns draw no marker row (MessageFeed and the ANSI
+    // render model both skip empty assistant messages), so reserve no rows.
+    if (msg.kind === "assistant" && !msg.reasoning && !text) continue;
+    // +1 for the mandatory margin row above each message, then count text lines.
+    rows += 1 + Math.max(1, text.split("\n").length);
+  }
+  return rows;
+}
+
+/**
+ * Project persisted AgentMessage history into the reducer's chat feed.
+ *
+ * Agent history is the source of truth for the loop; this projection is only
+ * presentation state used by the TUI after a session resume. Tool calls are
+ * paired with their later tool results by id so resumed conversations retain
+ * the same compact activity cards as a live turn.
+ */
+export function chatMessagesFromAgentHistory(history: readonly AgentMessage[]): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  const toolCards = new Map<string, Extract<ChatMessage, { kind: "tool_call" }>>();
+
+  for (const message of history) {
+    if (message.role === "system") continue;
+    if (message.role === "user") {
+      messages.push({ kind: "user", text: contentAsString(message.content) });
+      continue;
+    }
+    if (message.role === "assistant") {
+      const text = contentAsString(message.content);
+      const toolCalls = message.toolCalls ?? [];
+      // Emit an assistant message only when it has text. Tool-only turns
+      // (and fully empty turns) draw no marker row in either renderer — the
+      // tool cards emitted below carry the conversation flow after resume,
+      // matching the dense transcript layout.
+      if (text) {
+        messages.push({ kind: "assistant", text });
+      }
+      for (const call of toolCalls) {
+        const card: Extract<ChatMessage, { kind: "tool_call" }> = {
+          kind: "tool_call",
+          id: call.id,
+          name: call.name,
+          args: JSON.stringify(call.arguments ?? {}),
+          rawArgs: call.arguments ?? {},
+          status: "running",
+          startedAt: Date.now(),
+        };
+        messages.push(card);
+        toolCards.set(call.id, card);
+      }
+      continue;
+    }
+    const card = toolCards.get(message.toolCallId);
+    const result = resultPreviewForChat(message.content);
+    if (card) {
+      card.status = message.isError ? "error" : "done";
+      card.result = result;
+      card.durationMs = 0;
+    } else {
+      messages.push({
+        kind: "tool_call",
+        id: message.toolCallId,
+        name: message.name,
+        args: "{}",
+        rawArgs: {},
+        status: message.isError ? "error" : "done",
+        result,
+        startedAt: Date.now(),
+        durationMs: 0,
+      });
+    }
+  }
+  return messages;
+}
+
+function resultPreviewForChat(content: MessageContent): string {
+  // Kept as a small local formatter to avoid importing reducer internals into
+  // the persistence layer. The actual content shape is handled defensively.
+  if (typeof content === "string") return content.trim().slice(0, 4000);
+  if (Array.isArray(content)) {
+    return content
+      .filter((part): part is { type: "text"; text: string } =>
+        typeof part === "object" && part !== null && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string",
+      )
+      .map((part) => part.text)
+      .join("\n")
+      .trim()
+      .slice(0, 4000);
+  }
+  return "";
+}
+
+const MAX_STREAMING_PREVIEW_CHARS = 16_000;
+
+function appendStreamingPreview(previous: string, chunk: string): string {
+  if (!chunk) return previous;
+  const combined = previous + chunk;
+  if (combined.length <= MAX_STREAMING_PREVIEW_CHARS) return combined;
+  return `… ${combined.slice(-(MAX_STREAMING_PREVIEW_CHARS - 2))}`;
+}
+
+function taskDuration(startedAt?: number): number | undefined {
+  return startedAt === undefined ? undefined : Math.max(0, Date.now() - startedAt);
+}
+
+const MAX_SUBAGENT_INNER_EVENTS = 100;
+
+function messageIndices(messages: readonly ChatMessage[]): {
+  subagent: Record<string, number>;
+  tools: Record<string, number>;
+} {
+  const subagent: Record<string, number> = {};
+  const tools: Record<string, number> = {};
+  for (let position = 0; position < messages.length; position++) {
+    const message = messages[position];
+    if (message?.kind === "subagent_call") subagent[message.id] = position;
+    else if (message?.kind === "tool_call") tools[message.id] = position;
+  }
+  return { subagent, tools };
+}
+
+export function resolveSubagentMessage(
+  message: ChatMessage,
+  subagentById: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>>,
+): ChatMessage {
+  return message.kind === "subagent_call" ? subagentById[message.id] ?? message : message;
+}
+
+export function resolveTranscriptMessage(
+  message: ChatMessage,
+  subagentById: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>> = {},
+  toolById: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>> = {},
+): ChatMessage {
+  if (message.kind === "subagent_call") return subagentById[message.id] ?? message;
+  if (message.kind === "tool_call") return toolById[message.id] ?? message;
+  return message;
+}
+
+function updateSubagentMessage(
+  state: TuiState,
+  id: string,
+  update: (message: Extract<ChatMessage, { kind: "subagent_call" }>) => Extract<ChatMessage, { kind: "subagent_call" }>,
+): TuiState {
+  const position = state.subagentIndexById[id];
+  if (position === undefined) return state;
+  const base = state.messages[position];
+  if (!base || base.kind !== "subagent_call") return state;
+  const current = state.subagentById[id] ?? base;
+  const next = update(current);
+  if (next === current) return state;
+  // The transcript keeps a stable card object for compatibility with callers
+  // that inspect `state.messages` directly. Only the normalized overlay map is
+  // replaced, so the large transcript array is never copied on this hot path.
+  Object.assign(base, next);
+  const revision = state.subagentRevision + 1;
+  return {
+    ...state,
+    subagentById: { ...state.subagentById, [id]: next },
+    subagentRevision: revision,
+    subagentChange: { id, index: position, revision },
+  };
+}
+
+function updateToolMessage(
+  state: TuiState,
+  id: string,
+  update: (message: Extract<ChatMessage, { kind: "tool_call" }>) => Extract<ChatMessage, { kind: "tool_call" }>,
+): TuiState {
+  const position = state.toolIndexById[id];
+  if (position === undefined) return state;
+  const base = state.messages[position];
+  if (!base || base.kind !== "tool_call") return state;
+  const current = state.toolById[id] ?? base;
+  const next = update(current);
+  if (next === current) return state;
+  // Preserve direct `state.messages` readers while avoiding a transcript copy.
+  Object.assign(base, next);
+  const revision = state.toolRevision + 1;
+  return {
+    ...state,
+    toolById: { ...state.toolById, [id]: next },
+    toolRevision: revision,
+    toolChange: { id, index: position, revision },
+    activeToolId: next.status === "running" ? id : state.activeToolId === id ? undefined : state.activeToolId,
+  };
+}
+
+function isHighFrequencySubagentEvent(type: string): boolean {
+  return type === "assistant_delta" || type === "assistant_deltas";
 }
 
 export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
@@ -282,19 +568,60 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           ...(action.images?.length ? { images: action.images } : {}),
         }],
         goal: state.goal || action.text,
+        taskTitle: action.text,
+        taskStatus: "running",
+        taskStartedAt: Date.now(),
+        taskDurationMs: undefined,
+        taskTokens: 0,
         busy: true,
-        status: "思考中...",
+        status: "Thinking…",
         streamingText: "",
         streamingReasoning: "",
+        streamingTextParts: [],
+        streamingReasoningParts: [],
+        turnStartedAt: Date.now(),
+        lastStreamAt: undefined,
         // New user turns always re-pin the feed to the latest content.
         scrollOffset: 0,
       };
+
+    case "RESTORE_SESSION": {
+      const messages = chatMessagesFromAgentHistory(action.history);
+      const firstUser = messages.find((message): message is Extract<ChatMessage, { kind: "user" }> => message.kind === "user");
+      return {
+        ...createInitialState(action.modelName ?? state.modelName),
+        thinkingMode: action.thinkingMode ?? state.thinkingMode,
+        permissionMode: action.permissionMode,
+        messages,
+        subagentById: Object.fromEntries(messages.filter((message): message is Extract<ChatMessage, { kind: "subagent_call" }> => message.kind === "subagent_call").map((message) => [message.id, message])),
+        toolById: Object.fromEntries(messages.filter((message): message is Extract<ChatMessage, { kind: "tool_call" }> => message.kind === "tool_call").map((message) => [message.id, message])),
+        subagentIndexById: messageIndices(messages).subagent,
+        toolIndexById: messageIndices(messages).tools,
+        goal: firstUser?.text ?? "",
+        taskTitle: firstUser?.text ?? "",
+        taskStatus: "completed",
+        taskStartedAt: undefined,
+        taskDurationMs: undefined,
+        taskTokens: 0,
+        phase: action.phase ?? "planning",
+        currentPlan: action.currentPlan,
+        todoPlan: state.todoPlan,
+        todoItems: action.todos && action.todos.length > 0 ? action.todos : undefined,
+        todoRevision: action.todoRevision ?? nextTodoRevision(),
+        status: "Session resumed",
+      };
+    }
 
     case "RESET":
       return {
         ...createInitialState(state.modelName),
         thinkingMode: state.thinkingMode,
         permissionMode: state.permissionMode,
+        taskTitle: "",
+        taskStatus: "completed",
+        taskStartedAt: undefined,
+        taskDurationMs: undefined,
+        taskTokens: 0,
         todoPlan: state.todoPlan,
         todoViewMode: state.todoViewMode,
         todoRevision: nextTodoRevision(),
@@ -328,13 +655,18 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     case "CLEAR_SPINNER_MESSAGE":
       return { ...state, spinnerMessage: undefined };
     case "MODEL_CHANGED":
-      return { ...state, modelName: action.modelName, status: "就绪", usedTokens: 0, contextTokens: 0 };
+      return { ...state, modelName: action.modelName, status: "Ready", usedTokens: 0, contextTokens: 0 };
 
     case "SET_STATUS":
       return { ...state, status: action.status };
 
     case "SET_TODOS":
-      return { ...state, todos: action.todos };
+      return {
+        ...state,
+        todos: action.todos,
+        todoItems: action.todos.length > 0 ? action.todos : undefined,
+        todoRevision: nextTodoRevision(),
+      };
 
     case "CANCEL_GENERATION":
       return {
@@ -342,7 +674,13 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         busy: false,
         streamingText: "",
         streamingReasoning: "",
+        streamingTextParts: [],
+        streamingReasoningParts: [],
+        turnStartedAt: undefined,
+        lastStreamAt: undefined,
         status: "Generation cancelled (ESC)",
+        taskStatus: "cancelled",
+        taskDurationMs: taskDuration(state.taskStartedAt),
       };
 
     case "AUTO_CONTINUE":
@@ -351,14 +689,19 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         busy: true,
         streamingText: "",
         streamingReasoning: "",
-        status: `自动续跑 (${action.count}/${action.max})...`,
+        streamingTextParts: [],
+        streamingReasoningParts: [],
+        lastStreamAt: undefined,
+        status: `Continuing… (${action.count}/${action.max})`,
       };
 
     case "CLEAR_PENDING_PERMISSION":
       return {
         ...state,
         pendingPermission: undefined,
-        status: state.pendingPermission ? `正在执行 ${state.pendingPermission.tool}...` : state.status,
+        // The request is resolved (allowed or denied), so the status moves on
+        // to the tool itself instead of repeating "Waiting for permission".
+        status: state.pendingPermission ? `Running ${state.pendingPermission.tool}…` : state.status,
       };
 
     case "TOGGLE_THINKING_MODE": {
@@ -369,30 +712,30 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         thinkingMode: next,
         expandedThinking: [],
         status:
-          next === "hidden" ? "思考过程: 隐藏"
-            : next === "summary" ? "思考过程: 摘要"
-              : "思考过程: 完整",
+          next === "hidden" ? "Thinking display: hidden"
+            : next === "summary" ? "Thinking display: summary"
+              : "Thinking display: full",
       };
     }
 
     case "TOGGLE_PERMISSION_MODE": {
       const current = PERMISSION_MODES.indexOf(state.permissionMode);
       const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
-      const modeLabel = next === "plan" ? "计划" : next === "approval" ? "审批" : "绕过";
+      const modeLabel = permissionModeLabel(next);
       return {
         ...state,
         permissionMode: next,
-        status: `权限模式: ${modeLabel}`,
+        status: `Permission mode: ${modeLabel}`,
       };
     }
 
     case "SET_PERMISSION_MODE": {
-      const modeLabel = action.mode === "plan" ? "计划" : action.mode === "approval" ? "审批" : "绕过";
+      const modeLabel = permissionModeLabel(action.mode);
       return {
         ...state,
         permissionMode: action.mode,
         pendingPermission: undefined,
-        status: `权限模式: ${modeLabel}`,
+        status: `Permission mode: ${modeLabel}`,
       };
     }
 
@@ -442,32 +785,59 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             todoItems: event.todos,
             todoRevision: event.revision,
-            status: "任务列表已更新",
+            status: "Todos updated",
             spinnerMessage: nextTodoTask ? `▶ ${nextTodoTask.activeForm}` : undefined,
           };
 
-        case "assistant_delta":
+        case "assistant_delta": {
+          const answer = event.kind === "answer" ? event.text : "";
+          const reasoning = event.kind === "reasoning" ? event.text : "";
           return {
             ...state,
-            streamingText: event.kind === "answer"
-              ? state.streamingText + event.text
-              : state.streamingText,
-            streamingReasoning: event.kind === "reasoning"
-              ? state.streamingReasoning + event.text
-              : state.streamingReasoning,
-            status: "输出中...",
+            streamingText: appendStreamingPreview(state.streamingText, answer),
+            streamingReasoning: appendStreamingPreview(state.streamingReasoning, reasoning),
+            streamingTextParts: answer ? [...state.streamingTextParts, answer] : state.streamingTextParts,
+            streamingReasoningParts: reasoning ? [...state.streamingReasoningParts, reasoning] : state.streamingReasoningParts,
+            lastStreamAt: Date.now(),
+            status: "Responding…",
           };
+        }
+
+        case "assistant_deltas": {
+          // Coalesced by TurnEventBuffer.flush(): at most one reasoning chunk and
+          // one answer chunk per 80 ms window. Keep the hot preview bounded;
+          // full chunks are joined only when the assistant message is finalized.
+          const answer = event.answer ?? "";
+          const reasoning = event.reasoning ?? "";
+          return {
+            ...state,
+            streamingText: appendStreamingPreview(state.streamingText, answer),
+            streamingReasoning: appendStreamingPreview(state.streamingReasoning, reasoning),
+            streamingTextParts: answer ? [...state.streamingTextParts, answer] : state.streamingTextParts,
+            streamingReasoningParts: reasoning ? [...state.streamingReasoningParts, reasoning] : state.streamingReasoningParts,
+            lastStreamAt: Date.now(),
+            status: "Responding…",
+          };
+        }
 
         case "assistant": {
           // Prefer streamed text; the final assistant event often has content=""
           const contentText = typeof event.message.content === "string"
             ? event.message.content
             : "";
-          const text = contentText || state.streamingText;
-          const reasoning = state.streamingReasoning || undefined;
+          const streamedText = state.streamingTextParts.join("") || state.streamingText;
+          const streamedReasoning = state.streamingReasoningParts.join("") || state.streamingReasoning;
+          const text = contentText || streamedText;
+          const reasoning = streamedReasoning || undefined;
           const hasTools = (event.message.toolCalls?.length ?? 0) > 0;
           // Only skip if we genuinely have nothing to show
-          if (!text && !reasoning && !hasTools) return { ...state, streamingText: "", streamingReasoning: "" };
+          if (!text && !reasoning && !hasTools) return {
+            ...state,
+            streamingText: "",
+            streamingReasoning: "",
+            streamingTextParts: [],
+            streamingReasoningParts: [],
+          };
           const assistantMsg: ChatMessage = { kind: "assistant", text: text || "", ...(reasoning ? { reasoning } : {}) };
           const newMessages: ChatMessage[] = (text || reasoning)
             ? [...state.messages, assistantMsg]
@@ -480,14 +850,16 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             messages: newMessages,
             streamingText: "",
             streamingReasoning: "",
-            status: hasTools ? "执行工具..." : "整理回复...",
+            streamingTextParts: [],
+            streamingReasoningParts: [],
+            status: hasTools ? "Running tool…" : "Finalizing response…",
             usedTokens,
+            taskTokens: state.taskTokens + (event.usage?.totalTokens ?? 0),
             contextTokens,
             cacheReadTokens,
             scrollOffset: preserveScrollOnAppend(
               state.scrollOffset,
-              state.messages.length,
-              newMessages.length,
+              estimateNewMessageRows(state.messages, newMessages),
             ),
           };
         }
@@ -500,12 +872,17 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             messages: newMessages,
             streamingText: "",
             streamingReasoning: "",
+            streamingTextParts: [],
+            streamingReasoningParts: [],
+            turnStartedAt: undefined,
+            lastStreamAt: undefined,
             pendingPermission: undefined,
-            status: "请求失败",
+            status: "Request failed",
+            taskStatus: "failed",
+            taskDurationMs: taskDuration(state.taskStartedAt),
             scrollOffset: preserveScrollOnAppend(
               state.scrollOffset,
-              state.messages.length,
-              newMessages.length,
+              estimateNewMessageRows(state.messages, newMessages),
             ),
           };
         }
@@ -515,7 +892,12 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             streamingText: "",
             streamingReasoning: "",
-            status: `思考结果不完整，正在重试 (${event.attempt})...`,
+            streamingTextParts: [],
+            streamingReasoningParts: [],
+            lastStreamAt: undefined,
+            status: event.reason === "stream_truncated"
+              ? `Connection lost, retrying (${event.attempt})…`
+              : `Incomplete reasoning, retrying (${event.attempt})…`,
           };
 
         case "retry_attempt":
@@ -523,9 +905,12 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             streamingText: "",
             streamingReasoning: "",
+            streamingTextParts: [],
+            streamingReasoningParts: [],
+            lastStreamAt: undefined,
             status: event.errorType === "timeout"
-              ? `请求超时，正在重试 (${event.attempt}/${event.maxRetries})...`
-              : `请求失败，正在重试 (${event.attempt}/${event.maxRetries})...`,
+              ? `Request timed out, retrying (${event.attempt}/${event.maxRetries})…`
+              : `Request failed, retrying (${event.attempt}/${event.maxRetries})…`,
           };
 
         case "max_turns":
@@ -533,46 +918,63 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             streamingText: "",
             streamingReasoning: "",
-            status: `已达到最大执行轮数 (${event.maxTurns})，准备续跑...`,
+            streamingTextParts: [],
+            streamingReasoningParts: [],
+            status: `Turn limit reached (${event.maxTurns}), continuing…`,
           };
 
-        case "context_compacted":
+        case "context_compacted": {
+          const compaction = {
+            before: event.beforeTokens,
+            after: event.afterTokens,
+            reason: event.reason,
+            // LoopEvent currently does not expose the model turn number. Keep
+            // a stable ordinal until that event contract gains one.
+            turn: state.contextCompactions.length + 1,
+          };
           return {
             ...state,
             contextTokens: event.afterTokens,
-            status: `上下文已压缩 ${event.beforeTokens} → ${event.afterTokens} tokens`,
+            contextCompactions: [...state.contextCompactions, compaction],
+            status: `Context compacted ${event.beforeTokens} → ${event.afterTokens} tokens`,
           };
+        }
+
+        case "plan_act_event":
+          // Keep plan lifecycle events on the same reducer path regardless of
+          // whether they arrive from Ink or the standalone terminal service.
+          return tuiReducer(state, { type: "PLAN_ACT_EVENT", event: event.event });
 
         case "auto_subagent":
           return {
             ...state,
             status: event.executed
-              ? `自动子 agent 已启动 (${event.profile}, score=${event.score})`
+              ? `Auto subagent started (${event.profile}, score=${event.score})`
               : event.shouldDelegate
-                ? `建议委托子 agent (${event.profile}, score=${event.score})`
-                : `不自动委托 (score=${event.score})`,
+                ? `Subagent delegation suggested (${event.profile}, score=${event.score})`
+                : `No auto delegation (score=${event.score})`,
           };
 
         case "coordinator_mode":
           return {
             ...state,
             status: event.active
-              ? `编排模式: ${event.profile} (探索 ${event.directExplorationUsed}/${event.maxDirectExploration})`
-              : "编排模式已关闭",
+              ? `Orchestration: ${event.profile} (exploration ${event.directExplorationUsed}/${event.maxDirectExploration})`
+              : "Orchestration disabled",
           };
 
         case "thinking_policy":
           return {
             ...state,
-            status: `自适应思考: ${event.level} (${event.reasons.join(", ")})`,
+            status: `Adaptive thinking: ${event.level} (${event.reasons.join(", ")})`,
           };
 
         case "tool_start": {
           if (event.call.name === TODO_WRITE_TOOL_NAME) {
-            return { ...state, status: "更新任务列表..." };
+            return { ...state, status: "Updating todos…" };
           }
           const rawArgs = (event.call.arguments ?? {}) as Record<string, unknown>;
-          const args = shortPreview(JSON.stringify(rawArgs), 120);
+          const args = compactText(JSON.stringify(rawArgs), 120, "…");
           const startedAt = Date.now();
           const paths = toolPaths(rawArgs);
           const card: ChatMessage = {
@@ -597,9 +999,15 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             status: "running",
           };
           const newMessages: ChatMessage[] = [...state.messages, card];
+          const toolRevision = state.toolRevision + 1;
           return {
             ...state,
             messages: newMessages,
+            toolById: { ...state.toolById, [event.call.id]: card },
+            toolIndexById: { ...state.toolIndexById, [event.call.id]: newMessages.length - 1 },
+            toolRevision,
+            toolChange: { id: event.call.id, index: newMessages.length - 1, revision: toolRevision },
+            activeToolId: event.call.id,
             steps: [...state.steps.filter((item) => item.id !== step.id), step],
             touchedFiles: [...state.touchedFiles, ...paths.filter((path) => !state.touchedFiles.includes(path))].slice(-50),
             toolCards: [...state.toolCards.filter((item) => item.id !== sidebarCard.id), sidebarCard],
@@ -607,8 +1015,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             spinnerMessage: undefined,
             scrollOffset: preserveScrollOnAppend(
               state.scrollOffset,
-              state.messages.length,
-              newMessages.length,
+              estimateNewMessageRows(state.messages, newMessages),
             ),
           };
         }
@@ -617,29 +1024,25 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           if (event.call.name === TODO_WRITE_TOOL_NAME) {
             return {
               ...state,
-              status: event.result.isError ? "任务列表更新失败" : "任务列表已更新",
+              status: event.result.isError ? "Todo update failed" : "Todos updated",
             };
           }
           if (event.call.name === "validate_workspace") {
             return {
               ...state,
-              status: event.result.isError ? "修改后验证失败，准备修复" : "修改后验证通过",
+              status: event.result.isError ? "Post-edit verification failed, repairing" : "Post-edit verification passed",
               spinnerMessage: undefined,
             };
           }
           const now = Date.now();
           const result = resultPreview(event.result.content);
-          const updatedMessages = state.messages.map((m) => {
-            if (m.kind === "tool_call" && m.id === event.call.id) {
-              return {
-                ...m,
-                status: (event.result.isError ? "error" : "done") as ToolState,
-                result,
-                durationMs: now - m.startedAt,
-              };
-            }
-            return m;
-          });
+          const transcriptResult = resultContent(event.result.content);
+          const nextState = updateToolMessage(state, event.call.id, (message) => ({
+            ...message,
+            status: (event.result.isError ? "error" : "done") as ToolState,
+            result: transcriptResult,
+            durationMs: now - message.startedAt,
+          }));
           const updatedCards = state.toolCards.map((card) => {
             if (card.id !== event.call.id) return card;
             return {
@@ -655,11 +1058,10 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               : step,
           );
           return {
-            ...state,
-            messages: updatedMessages,
+            ...nextState,
             steps: updatedSteps,
             toolCards: updatedCards,
-            status: event.result.isError ? `${event.call.name} 失败` : `${event.call.name} 完成`,
+            status: event.result.isError ? `${event.call.name} failed` : `${event.call.name} completed`,
             spinnerMessage: undefined,
           };
         }
@@ -671,9 +1073,10 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               requestId: event.request.id,
               sessionId: event.request.sessionId,
               tool: event.request.tool,
+              arguments: event.request.arguments,
               risk: event.request.risk,
             },
-            status: `等待权限确认: ${event.request.tool} (${event.request.risk}) [A 允许 / D 拒绝 / Enter 拒绝 / Esc 取消]`,
+            status: `Waiting for permission: ${event.request.tool} (${event.request.risk}) [A allow / D deny / Enter deny / Esc cancel]`,
           };
 
         case "aborted":
@@ -682,8 +1085,14 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             busy: false,
             streamingText: "",
             streamingReasoning: "",
+            streamingTextParts: [],
+            streamingReasoningParts: [],
+            turnStartedAt: undefined,
+            lastStreamAt: undefined,
             pendingPermission: undefined,
-            status: "已中止",
+            status: "Aborted",
+            taskStatus: "cancelled",
+            taskDurationMs: taskDuration(state.taskStartedAt),
           };
 
         case "done":
@@ -692,8 +1101,14 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             busy: false,
             streamingText: "",
             streamingReasoning: "",
+            streamingTextParts: [],
+            streamingReasoningParts: [],
+            turnStartedAt: undefined,
+            lastStreamAt: undefined,
             pendingPermission: undefined,
-            status: "就绪",
+            status: "Ready",
+            taskStatus: state.taskStatus === "failed" || state.taskStatus === "cancelled" ? state.taskStatus : "completed",
+            taskDurationMs: taskDuration(state.taskStartedAt),
           };
 
         default:
@@ -705,7 +1120,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       const event = action.event;
       switch (event.type) {
         case "planning_started":
-          return { ...state, phase: "planning", status: "规划中..." };
+          return { ...state, phase: "planning", status: "Planning…" };
         case "plan_generated":
           return {
             ...state,
@@ -713,7 +1128,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             currentPlan: event.plan,
             todoItems: executionPlanToTodoItems(event.plan),
             todoRevision: nextTodoRevision(),
-            status: "计划已生成，等待审批 (A=批准 / R=拒绝)",
+            status: "Plan ready for review (A approve / R reject)",
           };
         case "plan_approved":
           return {
@@ -724,38 +1139,38 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               : state.currentPlan
                 ? { ...state.currentPlan, status: "approved" as const }
                 : undefined,
-            status: "执行中...",
+            status: "Executing…",
           };
         case "plan_rejected":
           return {
             ...state,
             phase: "cancelled",
             currentPlan: undefined,
-            status: "计划已拒绝",
+            status: "Plan rejected",
           };
         case "plan_modified":
           return {
             ...state,
             phase: "review",
             currentPlan: event.plan,
-            status: "计划已修改，等待审批 (A=批准 / R=拒绝)",
+            status: "Plan revised, waiting for review (A approve / R reject)",
           };
         case "acting_started":
-          return { ...state, phase: "acting", status: "执行计划..." };
+          return { ...state, phase: "acting", status: "Executing plan…" };
         case "step_started":
           return {
             ...updateExecutionTodo(state, event.stepId, "in_progress"),
-            status: `执行: ${event.step.description.slice(0, 30)}...`,
+            status: `Running: ${event.step.description.slice(0, 30)}…`,
           };
         case "step_completed":
           return {
             ...updateExecutionTodo(state, event.stepId, "completed"),
-            status: "步骤完成",
+            status: "Step completed",
           };
         case "step_failed":
           return {
             ...updateExecutionTodo(state, event.stepId, "failed", event.error),
-            status: `步骤失败: ${event.error.slice(0, 50)}`,
+            status: `Step failed: ${event.error.slice(0, 50)}`,
           };
         case "all_steps_completed":
           return {
@@ -766,7 +1181,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               : undefined,
             todoItems: state.todoItems?.map((item) => ({ ...item, status: "completed" })),
             todoRevision: nextTodoRevision(),
-            status: "计划执行完成",
+            status: "Plan execution completed",
           };
         case "execution_failed":
           return {
@@ -777,7 +1192,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               : undefined,
             todoItems: state.todoItems?.map((item) => item.status === "completed" ? item : { ...item, status: "failed" }),
             todoRevision: nextTodoRevision(),
-            status: "执行失败",
+            status: "Execution failed",
           };
         default:
           return state;
@@ -791,7 +1206,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         ...state,
         currentPlan: { ...plan, status: "approved" as const },
         phase: "acting",
-        status: "计划已批准，开始执行...",
+        status: "Plan approved, executing…",
       };
     }
     
@@ -802,7 +1217,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         ...state,
         currentPlan: { ...plan, status: "rejected" as const },
         phase: "cancelled",
-        status: "计划已拒绝",
+        status: "Plan rejected",
       };
     }
 
@@ -823,19 +1238,27 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             expanded: false,
           };
           const newMessages: ChatMessage[] = [...state.messages, card];
+          const revision = state.subagentRevision + 1;
           return {
             ...state,
             messages: newMessages,
-            status: `子代理 (depth ${evt.depth})...`,
+            subagentById: { ...state.subagentById, [evt.id]: card },
+            subagentIndexById: { ...state.subagentIndexById, [evt.id]: newMessages.length - 1 },
+            subagentRevision: revision,
+            subagentChange: { id: evt.id, index: newMessages.length - 1, revision },
+            status: `Delegating (depth ${evt.depth})…`,
             scrollOffset: preserveScrollOnAppend(
               state.scrollOffset,
-              state.messages.length,
-              newMessages.length,
+              estimateNewMessageRows(state.messages, newMessages),
             ),
           };
         }
         case "subagent_event": {
           const inner = evt.inner;
+          // Child answer deltas are useful to the parent model, but they are
+          // too frequent and too verbose for the transcript. The child result
+          // and concrete tool lifecycle events remain visible below.
+          if (isHighFrequencySubagentEvent(inner.type)) return state;
           const label =
             inner.type === "tool_start" ? `▶ ${inner.call.name}`
             : inner.type === "tool_end" ? `${inner.result.isError ? "✗" : "✓"} ${inner.call.name}`
@@ -843,83 +1266,57 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             : inner.type === "error" ? `✗ ${inner.message}`
             : inner.type;
           const detail =
-            inner.type === "tool_start" ? shortPreview(JSON.stringify(inner.call.arguments), 80)
-            : inner.type === "tool_end" ? shortPreview(typeof inner.result.content === "string" ? inner.result.content : "[complex]", 80)
+            inner.type === "tool_start" ? compactText(JSON.stringify(inner.call.arguments), 80, "…")
+            : inner.type === "tool_end" ? compactText(typeof inner.result.content === "string" ? inner.result.content : "[complex]", 80, "…")
             : undefined;
           const isToolEnd = inner.type === "tool_end";
-          return {
-            ...state,
-            messages: state.messages.map((m) => {
-              if (m.kind === "subagent_call" && m.id === evt.id) {
-                return {
-                  ...m,
-                  innerEvents: [...m.innerEvents, { type: inner.type, label, detail }],
-                  toolCallCount: m.toolCallCount + (isToolEnd ? 1 : 0),
-                };
-              }
-              return m;
-            }),
-          };
+          const lastToolInfo = inner.type === "tool_start"
+            ? (() => {
+                const summary = toolArgumentSummary(inner.call.name, inner.call.arguments, JSON.stringify(inner.call.arguments)).replace(/^\$\s*/, "");
+                return `${toolVisualName(inner.call.name)}${summary ? `(${summary})` : ""}`;
+              })()
+            : undefined;
+          return updateSubagentMessage(state, evt.id, (message) => ({
+            ...message,
+            innerEvents: [...message.innerEvents, { type: inner.type, label, detail }].slice(-MAX_SUBAGENT_INNER_EVENTS),
+            toolCallCount: message.toolCallCount + (isToolEnd ? 1 : 0),
+            ...(lastToolInfo ? { lastToolInfo } : {}),
+          }));
         }
         case "budget_warning": {
-          return {
-            ...state,
-            status: `预算警告 ${evt.percentage}%`,
-            messages: state.messages.map((m) => {
-              if (m.kind === "subagent_call" && m.id === evt.id) {
-                return {
-                  ...m,
-                  innerEvents: [
-                    ...m.innerEvents,
-                    {
-                      type: "budget_warning",
-                      label: `⚠ budget ${evt.percentage}% (${evt.used}/${evt.limit})`,
-                    },
-                  ],
-                };
-              }
-              return m;
-            }),
-          };
+          const next = updateSubagentMessage(state, evt.id, (message) => ({
+            ...message,
+            innerEvents: [...message.innerEvents, {
+              type: "budget_warning",
+              label: `⚠ budget ${evt.percentage}% (${evt.used}/${evt.limit})`,
+            }].slice(-MAX_SUBAGENT_INNER_EVENTS),
+          }));
+          return next === state ? state : { ...next, status: `Budget warning ${evt.percentage}%` };
         }
         case "subagent_end": {
           const now = Date.now();
-          return {
-            ...state,
-            messages: state.messages.map((m) => {
-              if (m.kind === "subagent_call" && m.id === evt.id) {
-                return {
-                  ...m,
-                  status: evt.success ? "done" as const : "error" as const,
-                  result: evt.result,
-                  turns: evt.turns,
-                  totalTokens: evt.totalTokens || undefined,
-                  tokenBreakdown: evt.tokenBreakdown,
-                  estimatedCost: evt.estimatedCost,
-                  durationMs: now - m.startedAt,
-                };
-              }
-              return m;
-            }),
-            status: evt.success ? "子代理完成" : "子代理失败",
-          };
+          const next = updateSubagentMessage(state, evt.id, (message) => ({
+            ...message,
+            status: evt.success ? "done" as const : "error" as const,
+            result: evt.result,
+            turns: evt.turns,
+            totalTokens: evt.totalTokens || undefined,
+            tokenBreakdown: evt.tokenBreakdown,
+            estimatedCost: evt.estimatedCost,
+            durationMs: now - message.startedAt,
+          }));
+          return next === state ? state : { ...next, status: evt.success ? "Subagent done" : "Subagent failed" };
         }
         default:
           return state;
       }
     }
 
-    case "TOGGLE_SUBAGENT_EXPAND": {
-      return {
-        ...state,
-        messages: state.messages.map((m) => {
-          if (m.kind === "subagent_call" && m.id === action.id) {
-            return { ...m, expanded: !m.expanded };
-          }
-          return m;
-        }),
-      };
-    }
+    case "TOGGLE_SUBAGENT_EXPAND":
+      return updateSubagentMessage(state, action.id, (message) => ({
+        ...message,
+        expanded: !message.expanded,
+      }));
 
     case "ADD_PENDING_IMAGE": {
       const exists = state.pendingImages.some((img) => img.path === action.image.path);
@@ -927,7 +1324,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...state,
         pendingImages: [...state.pendingImages, action.image],
-        status: `已添加图片: ${action.image.path.split("/").pop() ?? action.image.path}`,
+        status: `Attached image: ${action.image.path.split("/").pop() ?? action.image.path}`,
       };
     }
 
@@ -939,12 +1336,11 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...state,
         messages: newMessages,
-        status: "图片添加失败",
+        status: "Unable to attach image",
         scrollOffset: preserveScrollOnAppend(
-          state.scrollOffset,
-          state.messages.length,
-          newMessages.length,
-        ),
+              state.scrollOffset,
+              estimateNewMessageRows(state.messages, newMessages),
+            ),
       };
     }
 
@@ -953,7 +1349,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         ...state.messages,
         { kind: "notice", text: action.text, ...(action.title ? { title: action.title } : {}) },
       ];
-      return { ...state, messages, status: "就绪", scrollOffset: 0 };
+      return { ...state, messages, status: "Ready", scrollOffset: 0 };
     }
 
     case "SCROLL_BY": {
@@ -972,4 +1368,29 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     default:
       return state;
   }
+}
+
+export type TuiStore = {
+  getState: () => TuiState;
+  dispatch: (action: TuiAction) => void;
+  subscribe: (listener: () => void) => () => void;
+};
+
+/** Store adapter shared by React Ink and the standalone terminal entrypoint. */
+export function createTuiStore(initialState: TuiState): TuiStore {
+  let current = initialState;
+  const listeners = new Set<() => void>();
+  return {
+    getState: () => current,
+    dispatch: (action) => {
+      const next = tuiReducer(current, action);
+      if (next === current) return;
+      current = next;
+      for (const listener of listeners) listener();
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
 }

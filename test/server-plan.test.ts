@@ -103,6 +103,46 @@ describe("server plan API", () => {
     }
   });
 
+  it("keeps the in-memory plan registry owned by the forked session", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-server-plan-fork-"));
+    const app = createAgentServer({
+      llm,
+      tools: [],
+      chat: async () => ({ role: "assistant", content: "unused" }),
+      dataDir,
+    });
+
+    try {
+      const created = await request(app).post("/api/sessions");
+      const parentId = (created.body as { id: string }).id;
+      const posted = await request(app)
+        .post(`/api/sessions/${parentId}/plans`)
+        .send({
+          output: JSON.stringify({
+            summary: "Forkable plan",
+            steps: [{ id: "step-1", order: 1, description: "Read", tool: "read", arguments: {}, risk: "safe", rationale: "inspect" }],
+          }),
+        });
+      assert.equal(posted.status, 201);
+      const parentPlan = (posted.body as { id: string; sessionId: string });
+
+      const forked = await request(app).post(`/api/sessions/${parentId}/fork`);
+      assert.equal(forked.status, 201);
+      const childId = (forked.body as { id: string }).id;
+      const childPlans = await request(app).get(`/api/sessions/${childId}/plans`);
+      assert.equal(childPlans.status, 200);
+      const childPlan = (childPlans.body as Array<{ id: string; sessionId: string }>)[0];
+      assert.ok(childPlan);
+      assert.notEqual(childPlan.id, parentPlan.id);
+      assert.equal(childPlan.sessionId, childId);
+
+      const parentPlans = await request(app).get(`/api/sessions/${parentId}/plans`);
+      assert.deepEqual((parentPlans.body as Array<{ id: string }>).map((plan) => plan.id), [parentPlan.id]);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("execute requires approval unless yes is set, and streams completion", async () => {
     const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-server-plan-exec-"));
     const chat = async (

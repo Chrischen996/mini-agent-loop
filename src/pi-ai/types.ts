@@ -92,6 +92,8 @@ export interface ThinkingBudgets {
 	low?: number;
 	medium?: number;
 	high?: number;
+	xhigh?: number;
+	max?: number;
 	ultra?: number;
 }
 

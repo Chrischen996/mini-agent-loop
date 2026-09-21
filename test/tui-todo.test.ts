@@ -1,12 +1,72 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { getTodoPanelRows, planToTodoItems } from "../src/tui/todo-format.ts";
-import { TodoPanel } from "../src/tui/components/TodoPanel.tsx";
+import { getTodoPanelRows, planToTodoItems, todoProgressMeter } from "../src/tui/todo-format.ts";
+import { todoPanelRenderLines } from "../src/tui/todo-lines.ts";
+import { TodoPanelStatic as TodoPanel } from "../src/tui/components/TodoPanel.tsx";
 import { createInitialState, tuiReducer } from "../src/tui/state.ts";
 import { getMessageFeedHeight, getPickerLayout } from "../src/tui/layout.ts";
 import type { TodoItem } from "../src/todo.ts";
+import { confirmTodoEditor, createTodoEditorState, reduceTodoEditor } from "../src/tui/todo-editor.ts";
 
 describe("TUI todo state", () => {
+  const editableTodos: TodoItem[] = [
+    { id: "a", content: "First", activeForm: "First", status: "pending", source: "model" },
+    { id: "b", content: "Running", activeForm: "Running", status: "in_progress", source: "model" },
+  ];
+
+  it("cycles status exclusively and clamps selection after delete", () => {
+    let editor = createTodoEditorState(editableTodos);
+    editor = reduceTodoEditor(editor, { type: "MOVE", delta: 1 });
+    editor = reduceTodoEditor(editor, { type: "CYCLE_STATUS" });
+    assert.deepEqual(editor.todos.map((todo) => todo.status), ["pending", "completed"]);
+    editor = reduceTodoEditor(editor, { type: "CYCLE_STATUS" });
+    assert.deepEqual(editor.todos.map((todo) => todo.status), ["pending", "pending"]);
+    editor = reduceTodoEditor(editor, { type: "CYCLE_STATUS" });
+    assert.deepEqual(editor.todos.map((todo) => todo.status), ["pending", "in_progress"]);
+    editor = reduceTodoEditor(editor, { type: "DELETE" });
+    assert.equal(editor.selectedIndex, 0);
+    assert.deepEqual(editor.todos, [editableTodos[0]]);
+  });
+
+  it("confirms add and edit drafts and cancels without changing the snapshot", () => {
+    let editor = createTodoEditorState(editableTodos);
+    editor = reduceTodoEditor(editor, { type: "BEGIN_ADD" });
+    editor = reduceTodoEditor(editor, { type: "INPUT", value: "New item" });
+    editor = reduceTodoEditor(editor, { type: "CONFIRM" });
+    assert.equal(editor.mode, "select");
+    assert.equal(editor.todos.at(-1)?.content, "New item");
+
+    editor = reduceTodoEditor(editor, { type: "MOVE", delta: -2 });
+    editor = reduceTodoEditor(editor, { type: "BEGIN_EDIT" });
+    editor = reduceTodoEditor(editor, { type: "INPUT", value: "Changed" });
+    editor = reduceTodoEditor(editor, { type: "CONFIRM" });
+    assert.equal(editor.todos[0]?.content, "Changed");
+
+    const beforeCancel = editor.todos;
+    editor = reduceTodoEditor(editor, { type: "BEGIN_EDIT" });
+    editor = reduceTodoEditor(editor, { type: "INPUT", value: "Discarded" });
+    editor = reduceTodoEditor(editor, { type: "CANCEL" });
+    assert.deepEqual(editor.todos, beforeCancel);
+    assert.equal(editor.mode, "select");
+  });
+
+  it("keeps the old snapshot when a draft confirmation is invalid", () => {
+    let editor = reduceTodoEditor(createTodoEditorState(editableTodos), { type: "BEGIN_ADD" });
+    editor = reduceTodoEditor(editor, { type: "INPUT", value: "   " });
+    const failed = reduceTodoEditor(editor, { type: "CONFIRM" });
+    assert.deepEqual(failed.todos, editableTodos);
+    assert.equal(failed.mode, "add");
+    assert.match(failed.error ?? "", /non-empty/i);
+  });
+
+  it("confirms the current editor snapshot for select-mode Enter", () => {
+    let editor = createTodoEditorState(editableTodos);
+    editor = reduceTodoEditor(editor, { type: "DELETE" });
+    const confirmed = confirmTodoEditor(editor);
+    assert.deepEqual(confirmed.todos, [editableTodos[1]]);
+    assert.equal(confirmed, editor);
+  });
+
   it("replaces the independent todo snapshot with a revision guard", () => {
     const todos: TodoItem[] = [{ id: "a", content: "Run tests", activeForm: "Running tests", status: "in_progress", source: "model" as const }];
     const next = tuiReducer(createInitialState("model"), {
@@ -64,11 +124,35 @@ describe("TUI todo state", () => {
     assert.deepEqual(state.messages, []);
     assert.deepEqual(state.steps, []);
     assert.deepEqual(state.toolCards, []);
-    assert.equal(state.status, "任务列表已更新");
+    assert.equal(state.status, "Todos updated");
   });
 });
 
 describe("TodoPanel formatting", () => {
+  it("shows a compact progress meter without adding a panel row", () => {
+    assert.equal(todoProgressMeter(2, 4), "▰▰▰▱▱▱");
+    assert.equal(todoProgressMeter(0, 0), "······");
+  });
+
+  it("renders compact mode as one current-task progress row", () => {
+    const lines = todoPanelRenderLines({ todos: [
+      { id: "done", content: "Read config", activeForm: "Reading config", status: "completed", source: "model" as const },
+      { id: "active", content: "Run tests", activeForm: "Running tests", status: "in_progress", source: "model" as const },
+      { id: "next", content: "Review output", activeForm: "Reviewing output", status: "pending", source: "model" as const },
+    ], viewMode: "compact" });
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!.text, /1\/3 completed/);
+    assert.match(lines[0]!.text, /Running tests/);
+    assert.doesNotMatch(lines[0]!.text, /Read config/);
+  });
+
+  it("renders completed compact lists without a stale active task", () => {
+    const lines = todoPanelRenderLines({ todos: [
+      { id: "done", content: "Read config", activeForm: "Reading config", status: "completed", source: "model" as const },
+    ], viewMode: "compact" });
+    assert.match(lines[0]!.text, /All tasks completed/);
+  });
+
   it("renders status symbols and active form text via the unified panel", () => {
     const todos: TodoItem[] = [
       { id: "done", content: "Read config", activeForm: "Reading config", status: "completed", source: "model" as const },
@@ -81,11 +165,12 @@ describe("TodoPanel formatting", () => {
 
     // Unified panel renders item content with per-status icons/colors.
     assert.ok(rendered.includes("Read config"));
-    assert.ok(rendered.includes("Run tests"));
+    // in_progress items display activeForm instead of content
+    assert.ok(rendered.includes("Running tests"));
     assert.ok(rendered.includes("Review output"));
     // Summary header reports the completed/total line.
-    assert.ok(rendered.includes("已完成"));
-    assert.ok(rendered.includes("执行中"));
+    assert.ok(rendered.includes("completed"));
+    assert.ok(rendered.includes("in progress"));
   });
 
   it("limits visible rows and reports overflow", () => {
@@ -103,7 +188,7 @@ describe("TodoPanel formatting", () => {
   it("uses no rows when both sources are absent or hidden", () => {
     assert.equal(getTodoPanelRows({}, "expanded"), 0);
     assert.equal(getTodoPanelRows({ todos: [{ id: "x", content: "x", activeForm: "x", status: "pending", source: "model" as const }] }, "hidden"), 0);
-    assert.equal(getTodoPanelRows({ todos: [{ id: "x", content: "x", activeForm: "x", status: "pending", source: "model" as const }] }, "compact"), 1);
+    assert.equal(getTodoPanelRows({ todos: [{ id: "x", content: "x", activeForm: "x", status: "pending", source: "model" as const }] }, "compact"), 2);
   });
 
   it("derives items from a plan document", () => {
@@ -135,5 +220,75 @@ describe("TodoPanel formatting", () => {
     const withTodos = getPickerLayout({ termRows: 20, requestedItems: 12, todoRows: 4, extraRows: 3 });
 
     assert.ok(withTodos.itemRows < withoutTodos.itemRows);
+  });
+
+  it("shows skipped count in header when skipped items exist", () => {
+    const lines = todoPanelRenderLines({
+      todos: [
+        { id: "a", content: "Done", activeForm: "Done", status: "completed", source: "model" as const },
+        { id: "b", content: "Skip me", activeForm: "Skip me", status: "skipped", source: "model" as const },
+        { id: "c", content: "Pending", activeForm: "Pending", status: "pending", source: "model" as const },
+      ],
+      viewMode: "expanded",
+    });
+    const header = lines.find((l) => l.key === "todo-header");
+    assert.ok(header, "header line should exist");
+    assert.match(header!.text, /1 skipped/);
+  });
+
+  it("shows activeForm (not content) for in_progress items when they differ", () => {
+    const lines = todoPanelRenderLines({
+      todos: [
+        { id: "a", content: "Run tests", activeForm: "Running all test suites", status: "in_progress", source: "model" as const },
+      ],
+      viewMode: "expanded",
+    });
+    const itemLine = lines.find((l) => l.key === "todo-a");
+    assert.ok(itemLine, "item line should exist");
+    assert.match(itemLine!.text, /Running all test suites/);
+    assert.doesNotMatch(itemLine!.text, /Run tests/);
+  });
+
+  it("compact mode header contains \u25b8 indicator", () => {
+    const lines = todoPanelRenderLines({
+      todos: [
+        { id: "a", content: "Task", activeForm: "Doing task", status: "in_progress", source: "model" as const },
+      ],
+      viewMode: "compact",
+    });
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!.text, /\u25b8/);
+  });
+
+  it("expanded mode header contains \u25be indicator", () => {
+    const lines = todoPanelRenderLines({
+      todos: [
+        { id: "a", content: "Task", activeForm: "Task", status: "pending", source: "model" as const },
+      ],
+      viewMode: "expanded",
+    });
+    const header = lines.find((l) => l.key === "todo-header");
+    assert.ok(header, "header line should exist");
+    assert.match(header!.text, /\u25be/);
+  });
+
+  it("expanded mode renders group separators between status groups", () => {
+    const lines = todoPanelRenderLines({
+      todos: [
+        { id: "a", content: "Done", activeForm: "Done", status: "completed", source: "model" as const },
+        { id: "b", content: "Active", activeForm: "Being active", status: "in_progress", source: "model" as const },
+        { id: "c", content: "Next", activeForm: "Next", status: "pending", source: "model" as const },
+      ],
+      viewMode: "expanded",
+    });
+    const sepLines = lines.filter((l) => l.key?.startsWith("todo-sep-"));
+    // in_progress \u2192 pending \u2192 done: 2 separators
+    assert.equal(sepLines.length, 2);
+    // in_progress item should appear before pending item
+    const activeIdx = lines.findIndex((l) => l.key === "todo-b");
+    const pendingIdx = lines.findIndex((l) => l.key === "todo-c");
+    const doneIdx = lines.findIndex((l) => l.key === "todo-a");
+    assert.ok(activeIdx < pendingIdx, "in_progress before pending");
+    assert.ok(pendingIdx < doneIdx, "pending before done");
   });
 });

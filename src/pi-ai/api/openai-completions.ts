@@ -150,6 +150,21 @@ function resolveCacheRetention(cacheRetention?: CacheRetention, env?: ProviderEn
 	return "short";
 }
 
+/**
+ * True when tool-call arguments are complete JSON. Uses JSON.parse, not
+ * parseStreamingJson, so truncated payloads are not repaired into success.
+ */
+function toolCallArgsAreComplete(partialArgs: string | undefined): boolean {
+	const raw = partialArgs?.trim() ?? "";
+	if (!raw) return false;
+	try {
+		JSON.parse(raw);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptions> = (
 	model: Model<"openai-completions">,
 	context: Context,
@@ -438,6 +453,18 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 				}
 			}
 
+			// Infer stopReason from intact payload when a gateway omits finish_reason.
+			// Check completeness before finishBlock deletes partialArgs.
+			if (!hasFinishReason) {
+				const incomplete =
+					blocks.length === 0 ||
+					blocks.some((block) => block.type === "toolCall" && !toolCallArgsAreComplete(block.partialArgs));
+				if (incomplete) {
+					throw new Error("Stream ended without finish_reason");
+				}
+				output.stopReason = blocks.some((block) => block.type === "toolCall") ? "toolUse" : "stop";
+			}
+
 			for (const block of blocks) {
 				finishBlock(block);
 			}
@@ -450,9 +477,6 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 			}
 			if (output.stopReason === "error") {
 				throw new Error(output.errorMessage || "Provider returned an error stop reason");
-			}
-			if (!hasFinishReason) {
-				throw new Error("Stream ended without finish_reason");
 			}
 
 			stream.push({ type: "done", reason: output.stopReason, message: output });

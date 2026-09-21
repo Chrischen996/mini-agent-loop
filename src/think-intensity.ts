@@ -106,8 +106,8 @@ export function supportsThinkingOff(
 export type ThinkingLlmConfig = LlmConfig & { thinkingLevel: ModelThinkingLevel };
 
 /**
- * Stable UI order used by the direct effort shortcuts. Provider/model catalogs
- * can explicitly mark unavailable levels with `thinkingLevelMap`.
+ * Stable UI order used by the direct effort shortcuts. Extended levels
+ * (`xhigh` / `max` / `ultra`) appear only when the model maps them.
  */
 export const THINKING_LEVEL_ORDER: readonly ModelThinkingLevel[] = THINKING_EFFORT_LEVELS;
 
@@ -124,11 +124,7 @@ export function getThinkingLevelChoices(
 ): ModelThinkingLevel[] {
   if (!config.reasoning) return ["off"];
   const mapped = THINKING_LEVEL_ORDER.filter((level) => modelSupportsLevel(config, level));
-  if (mapped.length === 0) return ["medium", "ultra"];
-  if (mapped.includes("ultra")) return [...mapped];
-  // Keep ultra available to the user-facing control; request construction still
-  // clamps it to the nearest mapped provider level when unsupported.
-  return [...mapped, "ultra"];
+  return mapped.length > 0 ? [...mapped] : ["medium"];
 }
 
 /** Move one effort step without changing provider or model. */
@@ -199,15 +195,11 @@ export function getIntensities(): ThinkingIntensity[] {
   return ["off", "low", "med", "high", "xhigh", "ultra"];
 }
 
+/** Derived from THINKING_INTENSITY_TO_MODEL_LEVEL to ensure single source of truth. */
+const VALID_INTENSITIES = new Set<string>(Object.keys(THINKING_INTENSITY_TO_MODEL_LEVEL));
+
 export function isValidIntensity(test: unknown): test is ThinkingIntensity {
-  return (
-    test === "off"
-    || test === "low"
-    || test === "med"
-    || test === "high"
-    || test === "xhigh"
-    || test === "ultra"
-  );
+  return typeof test === "string" && VALID_INTENSITIES.has(test);
 }
 
 /** Resolve the default intensity from the legacy environment variable. */

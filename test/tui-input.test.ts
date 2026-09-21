@@ -13,6 +13,11 @@ import {
   isPasteShortcut,
   PromptInput,
 } from "../src/tui/components/PromptInput.tsx";
+import { TerminalInputHistory } from "../src/tui/terminal-input-history.ts";
+import { useAutocomplete } from "../src/tui/hooks/useAutocomplete.ts";
+import type { AutocompleteNavKey } from "../src/tui/autocomplete.ts";
+import type { ResumeMessageCandidate } from "../src/tui/session-serialization.ts";
+import { shouldExitOnCtrlC } from "../src/tui/hooks/useKeyboardHandler.ts";
 
 const nextFrame = () => new Promise((resolve) => setTimeout(resolve, 25));
 
@@ -32,6 +37,11 @@ function createTerminal() {
 }
 
 describe("TUI input utils", () => {
+  it("does not treat Ctrl+Shift+C as the exit shortcut", () => {
+    assert.equal(shouldExitOnCtrlC("c", { ctrl: true, shift: true }), false);
+    assert.equal(shouldExitOnCtrlC("c", { ctrl: true, shift: false }), true);
+  });
+
   it("keeps newlines and tabs while stripping other control characters", () => {
     assert.equal(sanitizeInput("a\nb\tc\u0001d\u0014e\u007Ff"), "a\nb\tcdef");
   });
@@ -70,10 +80,16 @@ describe("TUI input utils", () => {
     assert.equal(trigger.replaceFn("src/App.tsx"), "/read src/App.tsx");
   });
 
-  it("recognizes a bare file fragment for direct completion", () => {
+  it("does not trigger file completion for a bare English word without path indicator", () => {
+    // Plain words like "app" must not open a file picker on every keystroke.
     const trigger = extractFileAcTrigger("app");
+    assert.equal(trigger, null);
+  });
+
+  it("recognizes a bare fragment that contains a path indicator", () => {
+    const trigger = extractFileAcTrigger("src/app");
     assert.ok(trigger);
-    assert.equal(trigger.fragment, "app");
+    assert.equal(trigger.fragment, "src/app");
     assert.equal(trigger.replaceFn("src/tui/App.tsx"), "src/tui/App.tsx");
   });
 
@@ -93,6 +109,7 @@ describe("TUI input utils", () => {
     assert.equal(shouldAcceptAutocompleteOnEnter("file"), true);
     assert.equal(shouldAcceptAutocompleteOnEnter("model"), true);
     assert.equal(shouldAcceptAutocompleteOnEnter("model-picker"), true);
+    assert.equal(shouldAcceptAutocompleteOnEnter("session-list"), true);
     assert.equal(shouldAcceptAutocompleteOnEnter(null), false);
     assert.equal(shouldAcceptAutocompleteOnEnter("model-setup"), false);
     assert.equal(shouldAcceptAutocompleteOnEnter("profile-list"), false);
@@ -150,6 +167,148 @@ describe("PromptInput", () => {
       terminalIn.write("\r");
       await nextFrame();
       assert.equal(submitted, currentValue);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("does not recall history when an autocomplete overlay owns arrows", async () => {
+    const { terminalIn, terminalOut } = createTerminal();
+    const inputHistory = new TerminalInputHistory();
+    inputHistory.add("previous prompt");
+    let currentValue = "";
+
+    function Harness(): React.ReactElement {
+      const [value, setValue] = useState("");
+      currentValue = value;
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+        inputHistory,
+        disableArrowNavigation: true,
+      });
+    }
+
+    const app = render(React.createElement(Harness), {
+      stdin: terminalIn as unknown as NodeJS.ReadStream,
+      stdout: terminalOut as unknown as NodeJS.WriteStream,
+      stderr: terminalOut as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    try {
+      await nextFrame();
+      terminalIn.write("\x1b[A");
+      await nextFrame();
+      assert.equal(currentValue, "");
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("does not recall history for Shift+Up thinking-level shortcut", async () => {
+    const { terminalIn, terminalOut } = createTerminal();
+    const inputHistory = new TerminalInputHistory();
+    inputHistory.add("previous prompt");
+    let currentValue = "";
+
+    function Harness(): React.ReactElement {
+      const [value, setValue] = useState("");
+      currentValue = value;
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+        inputHistory,
+      });
+    }
+
+    const app = render(React.createElement(Harness), {
+      stdin: terminalIn as unknown as NodeJS.ReadStream,
+      stdout: terminalOut as unknown as NodeJS.WriteStream,
+      stderr: terminalOut as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    try {
+      await nextFrame();
+      terminalIn.write("\x1b[1;2A");
+      await nextFrame();
+      assert.equal(currentValue, "");
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("routes empty prompt arrows to message context without stealing input history", async () => {
+    const { terminalIn, terminalOut } = createTerminal();
+    const scrolls: Array<"up" | "down"> = [];
+    const inputHistory = new TerminalInputHistory();
+    inputHistory.add("previous prompt");
+    let currentValue = "";
+
+    function Harness(): React.ReactElement {
+      const [value, setValue] = useState("");
+      currentValue = value;
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+        inputHistory,
+        onScrollContext: (direction) => scrolls.push(direction),
+      });
+    }
+
+    const app = render(React.createElement(Harness), {
+      stdin: terminalIn as unknown as NodeJS.ReadStream,
+      stdout: terminalOut as unknown as NodeJS.WriteStream,
+      stderr: terminalOut as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    try {
+      await nextFrame();
+      terminalIn.write("\x1b[B");
+      await nextFrame();
+      assert.deepEqual(scrolls, ["down"]);
+      assert.equal(currentValue, "");
+
+      terminalIn.write("\x1b[A");
+      await nextFrame();
+      assert.equal(currentValue, "previous prompt");
+      assert.deepEqual(scrolls, ["down"]);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("does not route multiline vertical editing to message context", async () => {
+    const { terminalIn, terminalOut } = createTerminal();
+    const scrolls: string[] = [];
+
+    function Harness(): React.ReactElement {
+      const [value, setValue] = useState("top\nbottom");
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+        onScrollContext: (direction) => scrolls.push(direction),
+      });
+    }
+
+    const app = render(React.createElement(Harness), {
+      stdin: terminalIn as unknown as NodeJS.ReadStream,
+      stdout: terminalOut as unknown as NodeJS.WriteStream,
+      stderr: terminalOut as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    try {
+      await nextFrame();
+      terminalIn.write("\x1b[A");
+      await nextFrame();
+      assert.deepEqual(scrolls, []);
     } finally {
       app.unmount();
     }
@@ -217,6 +376,181 @@ describe("PromptInput", () => {
       terminalIn.write("x");
       await nextFrame();
       assert.equal(currentValue, "draft");
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("uses asynchronously loaded session candidates for picker navigation", async () => {
+    const { terminalIn, terminalOut } = createTerminal();
+    const sessions = [
+      { id: "session-one", createdAt: 1, lastActiveAt: 2, messageCount: 1, preview: "one" },
+      { id: "session-two", createdAt: 1, lastActiveAt: 1, messageCount: 1, preview: "two" },
+    ];
+    let listCalls = 0;
+    const listSessions = async () => {
+      listCalls += 1;
+      return sessions;
+    };
+    let currentValue = "";
+    let currentMode: string | null = null;
+    let currentIndex = -1;
+    let handleKey: ((key: AutocompleteNavKey) => boolean) | undefined;
+
+    function Harness(): React.ReactElement {
+      const [value, setValue] = useState("/resume");
+      const autocomplete = useAutocomplete({
+        input: value,
+        cwd: process.cwd(),
+        setInput: setValue,
+        resetInputCursorToEnd: () => {},
+        listSessions,
+      });
+      currentValue = value;
+      currentMode = autocomplete.acMode;
+      currentIndex = autocomplete.acIndex;
+      handleKey = autocomplete.handleAutocompleteKey;
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+      });
+    }
+
+    const app = render(React.createElement(Harness), {
+      stdin: terminalIn as unknown as NodeJS.ReadStream,
+      stdout: terminalOut as unknown as NodeJS.WriteStream,
+      stderr: terminalOut as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    try {
+      await nextFrame();
+      assert.equal(currentMode, "session-list");
+      assert.equal(currentIndex, 0);
+      assert.equal(listCalls, 1, "opening the picker should issue one session listing request");
+      assert.equal(handleKey?.({ downArrow: true }), true);
+      await nextFrame();
+      assert.equal(currentIndex, 1);
+      assert.equal(handleKey?.({ tab: true }), true);
+      await nextFrame();
+      assert.equal(currentValue, "/resume session-two");
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("reuses an in-flight session listing while the same picker command changes", async () => {
+    const { terminalIn, terminalOut } = createTerminal();
+    const sessions = [
+      { id: "session-one", createdAt: 1, lastActiveAt: 2, messageCount: 1, preview: "one" },
+    ];
+    let listCalls = 0;
+    let releaseSessions: ((value: typeof sessions) => void) | undefined;
+    const listSessions = () => {
+      listCalls += 1;
+      return new Promise<typeof sessions>((resolve) => {
+        releaseSessions = resolve;
+      });
+    };
+    let changeInput: ((value: string) => void) | undefined;
+    let currentMode: string | null = null;
+    let currentSessions: typeof sessions = [];
+
+    function Harness(): React.ReactElement {
+      const [value, setValue] = useState("/resume");
+      changeInput = setValue;
+      const autocomplete = useAutocomplete({
+        input: value,
+        cwd: process.cwd(),
+        setInput: setValue,
+        resetInputCursorToEnd: () => {},
+        listSessions,
+      });
+      currentMode = autocomplete.acMode;
+      currentSessions = autocomplete.sessionCandidates;
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+      });
+    }
+
+    const app = render(React.createElement(Harness), {
+      stdin: terminalIn as unknown as NodeJS.ReadStream,
+      stdout: terminalOut as unknown as NodeJS.WriteStream,
+      stderr: terminalOut as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    try {
+      await nextFrame();
+      assert.equal(currentMode, "session-list");
+      assert.equal(listCalls, 1);
+
+      changeInput?.("/resume ");
+      await nextFrame();
+      assert.equal(currentMode, "session-list");
+      assert.equal(listCalls, 1, "editing the same picker command must reuse its in-flight request");
+
+      releaseSessions?.(sessions);
+      await nextFrame();
+      assert.deepEqual(currentSessions.map((session) => session.id), ["session-one"]);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("exits the rewind picker as soon as the user starts typing a prompt", async () => {
+    const { terminalIn, terminalOut } = createTerminal();
+    let openPicker: ((candidates: ResumeMessageCandidate[]) => void) | undefined;
+    let currentMode: string | null = null;
+    let currentValue = "";
+    let pickerOpened = false;
+
+    function Harness(): React.ReactElement {
+      const [value, setValue] = useState("");
+      const autocomplete = useAutocomplete({
+        input: value,
+        cwd: process.cwd(),
+        setInput: setValue,
+        resetInputCursorToEnd: () => {},
+        listSessions: async () => [],
+      });
+      openPicker = autocomplete.openResumeMessages;
+      // Open the picker once, on the first render after mount.
+      if (!pickerOpened && !autocomplete.acMode) {
+        pickerOpened = true;
+        autocomplete.openResumeMessages([
+          { role: "user", text: "first", boundary: 1 },
+          { role: "assistant", text: "done", boundary: 2 },
+        ]);
+      }
+      currentMode = autocomplete.acMode;
+      currentValue = value;
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+      });
+    }
+
+    const app = render(React.createElement(Harness), {
+      stdin: terminalIn as unknown as NodeJS.ReadStream,
+      stdout: terminalOut as unknown as NodeJS.WriteStream,
+      stderr: terminalOut as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    try {
+      await nextFrame();
+      assert.equal(currentMode, "resume-messages", "the picker must open after mount");
+
+      // Typing a fresh prompt abandons the picker.
+      terminalIn.write("h");
+      await nextFrame();
+      assert.equal(currentValue, "h");
+      assert.equal(currentMode, null, "typing a prompt must clear the rewind overlay");
     } finally {
       app.unmount();
     }

@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, useStdin } from "ink";
+import { isSgrMouseEvent, parseSgrMouseWheel } from "../mouse-events.ts";
 import { TUI_COLORS as C } from "../theme.ts";
+import type { TerminalInputHistory } from "../terminal-input-history.ts";
 
 export function isPasteShortcut(input: string, key?: { ctrl?: boolean; meta?: boolean }): boolean {
   return Boolean((key?.ctrl || key?.meta) && (input === "v" || input === "V" || input === "\u0016"));
@@ -19,9 +21,14 @@ export type PromptInputProps = {
   mask?: string;
   placeholder?: string;
   attachments?: string[];
+  /** Optional history instance for ↑/↓ history navigation in single-line mode */
+  inputHistory?: TerminalInputHistory;
+  /** Prevent prompt editing from consuming arrows owned by an overlay. */
+  disableArrowNavigation?: boolean;
+  /** Called when an empty single-line prompt has no history entry to navigate. */
+  onScrollContext?: (direction: "up" | "down") => void;
 };
 
-const COLLAPSE_THRESHOLD = 3;
 const MAX_VISIBLE_LINES = 10;
 
 const graphemeSegmenter = typeof Intl !== "undefined" && "Segmenter" in Intl
@@ -96,7 +103,11 @@ export function PromptInput({
   mask,
   placeholder = "",
   attachments,
+  inputHistory,
+  disableArrowNavigation = false,
+  onScrollContext,
 }: PromptInputProps): React.ReactElement {
+  const { internal_eventEmitter } = useStdin();
   const parts = useMemo(() => splitGraphemes(value), [value]);
   const [cursor, setCursor] = useState(() => parts.length);
   const cursorRef = useRef(cursor);
@@ -125,8 +136,23 @@ export function PromptInput({
     if (next !== value) onChange(next);
   };
 
+  useEffect(() => {
+    const handleRawInput = (data: string) => {
+      const direction = parseSgrMouseWheel(data);
+      if (direction && onScrollContext) onScrollContext(direction);
+    };
+    internal_eventEmitter.on("input", handleRawInput);
+    return () => {
+      internal_eventEmitter.removeListener("input", handleRawInput);
+    };
+  }, [internal_eventEmitter, onScrollContext]);
+
   useInput(
     (input, key) => {
+      // Ink 5 does not expose wheel fields on Key. The raw listener above
+      // handles SGR wheel events; keep the complete mouse sequence out of
+      // the prompt value if Ink forwards it here as text.
+      if (isSgrMouseEvent(input)) return;
       const currentParts = partsRef.current;
       const currentCursor = clampCursor(cursorRef.current, currentParts.length);
 
@@ -152,6 +178,7 @@ export function PromptInput({
           apply(inserted.next, inserted.cursor);
           return;
         }
+        inputHistory?.resetNavigation();
         onSubmit(valueRef.current);
         return;
       }
@@ -175,8 +202,33 @@ export function PromptInput({
       }
 
       if (key.upArrow || key.downArrow) {
-        if (!valueRef.current.includes("\n")) return;
-        setCursor(moveVertical(currentParts, currentCursor, key.upArrow ? -1 : 1));
+        // Modifier shortcuts and active overlays own vertical navigation.
+        // Do not let prompt history or multiline editing consume arrows.
+        if (disableArrowNavigation || key.shift) return;
+        const isMultiLine = valueRef.current.includes("\n");
+        if (isMultiLine) {
+          // In multi-line mode: only use history navigation when cursor is
+          // already at the very first character (can't go up further in text).
+          const newCursor = moveVertical(currentParts, currentCursor, key.upArrow ? -1 : 1);
+          if (newCursor !== currentCursor) {
+            setCursor(newCursor);
+            return;
+          }
+        }
+        if (inputHistory) {
+          const next = inputHistory.navigate(key.upArrow ? -1 : 1, valueRef.current);
+          if (next !== undefined) {
+            onChange(next);
+            // Move cursor to end of the restored text
+            setCursor(splitGraphemes(next).length);
+            return;
+          }
+        }
+        // An empty single-line prompt has no editing action left to consume.
+        // Let the parent use the arrow for transcript/context navigation.
+        if (!isMultiLine && valueRef.current === "") {
+          onScrollContext?.(key.upArrow ? "up" : "down");
+        }
         return;
       }
 
@@ -200,9 +252,6 @@ export function PromptInput({
   const displayParts = mask
     ? currentMaskedParts(parts.length, mask)
     : parts;
-  const lineCount = value.split("\n").length;
-  const collapsed = lineCount > COLLAPSE_THRESHOLD;
-  const charCount = parts.length;
   const safeCursor = clampCursor(cursor, displayParts.length);
 
   return (
@@ -214,19 +263,12 @@ export function PromptInput({
           ))}
         </Box>
       )}
-      {collapsed && (
-        <Text color={C.muted}>[已折叠 {lineCount} 行 / {charCount} 字]</Text>
-      )}
       <PromptLines
         parts={displayParts}
         cursor={safeCursor}
         focus={focus}
         placeholder={placeholder}
-        collapsed={collapsed}
       />
-      {collapsed && (
-        <Text dimColor>Enter 提交 · Alt+Enter 换行</Text>
-      )}
     </Box>
   );
 }
@@ -241,13 +283,11 @@ function PromptLines({
   cursor,
   focus,
   placeholder,
-  collapsed,
 }: {
   parts: string[];
   cursor: number;
   focus: boolean;
   placeholder: string;
-  collapsed: boolean;
 }): React.ReactElement {
   if (parts.length === 0) {
     if (!focus) return <Text dimColor>{placeholder}</Text>;
@@ -262,7 +302,14 @@ function PromptLines({
   }
 
   const lines = splitDisplayLines(parts, cursor);
-  const visible = collapsed ? lines.slice(-1) : lines.slice(0, MAX_VISIBLE_LINES);
+  // Keep the cursor in view when a multiline prompt grows beyond the fixed
+  // input viewport. The old head-only slice made editing the later lines feel
+  // broken because the active cell disappeared from the screen.
+  const cursorLine = Math.max(0, lines.findIndex((line) =>
+    line.cursorAtEnd || line.cells.some((cell) => cell.cursor),
+  ));
+  const start = Math.max(0, Math.min(cursorLine - MAX_VISIBLE_LINES + 1, lines.length - MAX_VISIBLE_LINES));
+  const visible = lines.slice(start, start + MAX_VISIBLE_LINES);
 
   return (
     <Box flexDirection="column">

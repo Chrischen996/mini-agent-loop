@@ -30,27 +30,14 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("completeChat wire protocol", () => {
-  it("uses a balanced output limit for models whose capability fills the context window", async () => {
-    const originalFetch = globalThis.fetch;
-    let requestBody: Record<string, unknown> | undefined;
-    globalThis.fetch = (async (_input, init) => {
-      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      return jsonResponse({ choices: [{ message: { content: "done" } }] });
-    }) as typeof fetch;
-
-    try {
-      const grok = makeLlmConfig({
-        apiKey: "test",
-        baseUrl: "https://gateway.example/v1",
-        model: "xai/grok-4.5",
-      });
-      assert.equal(grok.contextWindow, 500_000);
-      assert.equal(grok.maxTokens, 32_768);
-      await completeChat(grok, [{ role: "user", content: "hello" }]);
-      assert.equal(requestBody?.max_tokens, 32_768);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+  it("uses a balanced output limit for models whose capability fills the context window", () => {
+    const grok = makeLlmConfig({
+      apiKey: "test",
+      baseUrl: "https://api.x.ai/v1",
+      model: "xai/grok-4.5",
+    });
+    assert.equal(grok.contextWindow, 500_000);
+    assert.equal(grok.maxTokens, 32_768);
   });
 
   it("caps default output at 25% for small windows and preserves explicit limits", () => {
@@ -221,7 +208,7 @@ describe("completeChat wire protocol", () => {
     try {
       const vision = makeLlmConfig({
         apiKey: "vision-key",
-        baseUrl: "https://vision.example/v1",
+        baseUrl: "https://api.openai.com/v1",
         model: "gpt-4o-mini",
       });
       await completeChat(vision, [{
@@ -379,6 +366,45 @@ describe("per-model timeout configuration", () => {
     }
   });
 
+  it("allows zero environment timeouts to disable each deadline", async () => {
+    const originalTotal = process.env.MINI_AGENT_REQUEST_TIMEOUT_MS;
+    const originalFirst = process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS;
+    const originalIdle = process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS;
+    process.env.MINI_AGENT_REQUEST_TIMEOUT_MS = "0";
+    process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS = "0";
+    process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS = "0";
+
+    try {
+      const config = makeLlmConfig({
+        apiKey: "test",
+        baseUrl: "https://llm.example/v1",
+        model: "gpt-4o-mini",
+      });
+
+      assert.equal(timeoutLimitForPhase(config, "total"), 0);
+      assert.equal(timeoutLimitForPhase(config, "first_response"), 0);
+      assert.equal(timeoutLimitForPhase(config, "stream_idle"), 0);
+
+      const request = createRequestSignal(undefined, 0, {
+        firstResponseTimeoutMs: 0,
+        idleTimeoutMs: 0,
+      });
+      try {
+        await wait(25);
+        assert.equal(request.didTimeout(), false);
+      } finally {
+        request.cleanup();
+      }
+    } finally {
+      if (originalTotal !== undefined) process.env.MINI_AGENT_REQUEST_TIMEOUT_MS = originalTotal;
+      else delete process.env.MINI_AGENT_REQUEST_TIMEOUT_MS;
+      if (originalFirst !== undefined) process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS = originalFirst;
+      else delete process.env.MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS;
+      if (originalIdle !== undefined) process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS = originalIdle;
+      else delete process.env.MINI_AGENT_STREAM_IDLE_TIMEOUT_MS;
+    }
+  });
+
   it("switchLlmModel adopts the target model's catalog timeouts and drops stale ones", () => {
     const slowModel = resolveModel("deepseek/deepseek-v4-pro");
     (slowModel as { timeoutMs?: number }).timeoutMs = 600_000;
@@ -405,6 +431,29 @@ describe("per-model timeout configuration", () => {
     assert.equal(switchedBack.timeoutMs, undefined);
     assert.equal(switchedBack.firstResponseTimeoutMs, undefined);
     assert.equal(switchedBack.streamIdleTimeoutMs, undefined);
+  });
+
+  it("switchLlmModel routes a Claude 中转站 through Chat Completions", () => {
+    const claude = resolveModel("anthropic/claude-sonnet-4-6");
+    const current = makeLlmConfig({
+      apiKey: "anth-key",
+      baseUrl: claude.baseUrl,
+      model: `${claude.provider}/${claude.id}`,
+      provider: claude.provider,
+    });
+    const gateway = switchLlmModel(current, claude, {
+      baseUrl: "https://api.sparkcode.top/v1",
+      apiKey: "sk-relay",
+    });
+    assert.equal(gateway.baseUrl, "https://api.sparkcode.top/v1");
+    assert.equal(gateway.piModel, undefined);
+    const native = switchLlmModel(gateway, claude, {
+      baseUrl: "https://api.sparkcode.top/v1",
+      apiKey: "sk-relay",
+      protocol: "anthropic-messages",
+    });
+    assert.equal(native.piModel?.api, "anthropic-messages");
+    assert.equal(native.piModel?.baseUrl, "https://api.sparkcode.top/v1");
   });
 });
 

@@ -21,7 +21,7 @@ export function parseToolArgumentsJson(raw: string): Record<string, unknown> {
 }
 
 /**
- * Naive schema validation for teaching:
+ * Lightweight schema validation for the tool-call boundary:
  * - required keys must exist
  * - basic typeof checks for string / number / integer / boolean
  * - rejects unknown keys when additionalProperties === false

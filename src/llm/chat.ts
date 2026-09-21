@@ -42,7 +42,53 @@ import {
   LlmTimeoutError,
   ProtocolError,
   OutputTruncatedError,
+  StreamTruncatedError,
 } from "./retry.ts";
+
+// ─── Usage parsing ───────────────────────────────────────────────────────────────────
+
+/**
+ * Parse provider-specific usage fields into a normalised StreamChatUsage.
+ * Handles both non-streaming (prompt_tokens_details) and streaming (any-cast)
+ * field shapes from different providers (OpenAI, Anthropic, DeepSeek, etc.).
+ */
+function parseUsageTokens(raw: Record<string, unknown>): StreamChatUsage {
+  const promptTokens = (raw.prompt_tokens as number | undefined) ?? 0;
+  // prompt_tokens_details is typed on non-streaming responses; cast for streaming
+  const details = raw.prompt_tokens_details as Record<string, unknown> | undefined;
+  const cacheReadTokens: number | undefined =
+    (details?.cached_tokens as number | undefined)
+    ?? (raw.prompt_cache_hit_tokens as number | undefined)
+    ?? (raw.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens as number | undefined;
+  const cacheWriteTokens: number | undefined =
+    (details?.cache_write_tokens as number | undefined)
+    ?? (raw.prompt_tokens_details as Record<string, unknown> | undefined)?.cache_write_tokens as number | undefined;
+  const inputTokens = Math.max(
+    0,
+    promptTokens - (cacheReadTokens ?? 0) - (cacheWriteTokens ?? 0),
+  );
+  return {
+    promptTokens,
+    inputTokens,
+    completionTokens: (raw.completion_tokens as number | undefined) ?? 0,
+    totalTokens: (raw.total_tokens as number | undefined) ?? 0,
+    ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
+  };
+}
+
+function isHtmlGatewayResponse(contentType: string | null, body: string): boolean {
+  const type = (contentType ?? "").toLowerCase();
+  const trimmed = body.trimStart().slice(0, 32).toLowerCase();
+  return type.includes("text/html") || trimmed.startsWith("<!doctype") || trimmed.startsWith("<html");
+}
+
+function throwIfHtmlGatewayResponse(config: LlmConfig, response: Response, body: string): void {
+  if (!isHtmlGatewayResponse(response.headers.get("content-type"), body)) return;
+  throw new Error(
+    `LLM gateway returned HTML instead of a chat completion. Use a /v1 base URL (got ${config.baseUrl}).`,
+  );
+}
 
 function reasoningOption(config: LlmConfig): ThinkingLevel | undefined {
   const level = config.thinkingLevel ?? (config.reasoning ? "medium" : "off");
@@ -140,6 +186,9 @@ async function* streamPiChat(
       // Normalize Pi provider timeout errors to LlmTimeoutError for consistent handling
       if (/timed? ?out|timeout|request timed/i.test(errMsg)) {
         yield { type: "error", error: new LlmTimeoutError(undefined, undefined, { phase: "total" }) };
+      } else if (/stream ended without finish_reason/i.test(errMsg)) {
+        yield { type: "error", error: new StreamTruncatedError(fromPiAssistant(event.error).message.content) };
+        return;
       } else {
         yield { type: "error", error: new Error(errMsg) };
       }
@@ -273,10 +322,10 @@ export async function completeChat(
   const rawText = await response.text();
   request.cleanup();
   if (!response.ok) {
-    throw new Error(
-      `LLM HTTP ${response.status}: ${rawText.slice(0, 500) || response.statusText}`,
-    );
+    const { createLlmHttpError } = await import("./http-error.ts");
+    throw createLlmHttpError(response.status, response.statusText, rawText);
   }
+  throwIfHtmlGatewayResponse(config, response, rawText);
 
   let data: {
     choices?: Array<{
@@ -332,25 +381,11 @@ export async function completeChat(
     throw new IncompleteLlmResponseError("reasoning_only");
   }
 
-  // Extract usage from non-streaming response (mirrors streaming path in streamChat)
+  // Extract usage from non-streaming response (delegates to shared parseUsageTokens)
   const rawUsage = data.usage;
-  let usage: StreamChatUsage | undefined;
-  if (rawUsage) {
-    const promptTokens = rawUsage.prompt_tokens ?? 0;
-    const cacheReadTokens = (rawUsage.prompt_tokens_details?.cached_tokens as number | undefined)
-      ?? rawUsage.prompt_cache_hit_tokens;
-    const cacheWriteTokens = (rawUsage.prompt_tokens_details?.cache_write_tokens as number | undefined)
-      ?? rawUsage.prompt_cache_write_tokens;
-    const inputTokens = Math.max(0, promptTokens - (cacheReadTokens ?? 0) - (cacheWriteTokens ?? 0));
-    usage = {
-      promptTokens,
-      inputTokens,
-      completionTokens: rawUsage.completion_tokens ?? 0,
-      totalTokens: rawUsage.total_tokens ?? 0,
-      ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
-      ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
-    };
-  }
+  const usage: StreamChatUsage | undefined = rawUsage
+    ? parseUsageTokens(rawUsage as Record<string, unknown>)
+    : undefined;
 
   const assistant: AssistantMessage = {
     role: "assistant",
@@ -438,11 +473,16 @@ export async function* streamChat(
   }
 
   if (!response.ok) {
+    const { createLlmHttpError } = await import("./http-error.ts");
     const rawText = await response.text();
     request.cleanup();
-    throw new Error(
-      `LLM HTTP ${response.status}: ${rawText.slice(0, 500) || response.statusText}`,
-    );
+    throw createLlmHttpError(response.status, response.statusText, rawText);
+  }
+  const htmlHint = response.headers.get("content-type") ?? "";
+  if (htmlHint.toLowerCase().includes("text/html")) {
+    const rawText = await response.text();
+    request.cleanup();
+    throwIfHtmlGatewayResponse(config, response, rawText);
   }
 
   let content = "";
@@ -498,21 +538,7 @@ export async function* streamChat(
 
     // Capture usage whenever it appears (some providers send it mid-stream or at end)
     if (parsed.usage) {
-      const promptTokens = parsed.usage.prompt_tokens ?? 0;
-      const cacheReadTokens = (parsed.usage as any).prompt_tokens_details?.cached_tokens
-        ?? (parsed.usage as any).prompt_cache_hit_tokens
-        ?? undefined;
-      const cacheWriteTokens = (parsed.usage as any).prompt_tokens_details?.cache_write_tokens
-        ?? undefined;
-      const inputTokens = Math.max(0, promptTokens - (cacheReadTokens ?? 0) - (cacheWriteTokens ?? 0));
-      usage = {
-        promptTokens,
-        inputTokens,
-        completionTokens: parsed.usage.completion_tokens ?? 0,
-        totalTokens: parsed.usage.total_tokens ?? 0,
-        ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
-        ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
-      };
+      usage = parseUsageTokens(parsed.usage as Record<string, unknown>);
     }
 
     const choice = parsed.choices?.[0];
@@ -613,7 +639,10 @@ export async function* streamChat(
       yield { type: "error", error: new ProtocolError(`stream stopped with finish_reason=${finishReason}`) }; return;
     }
     if (!sawDoneMarker && !sawFinishReason && !sawTerminalMessage) {
-      throw new Error("LLM stream ended before completion (missing finish_reason, terminal message, or [DONE])");
+      // Stream was cut off mid-generation. Throw a typed error carrying the
+      // partial answer so the loop can replay the request (tool calls have
+      // not been executed yet, so replaying is side-effect free).
+      throw new StreamTruncatedError(content);
     }
   } catch (err) {
     if (request.didTimeout()) {

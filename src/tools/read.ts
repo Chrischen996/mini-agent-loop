@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { imagePart, textPart } from "../content.ts";
+import type { ImageMimeType } from "../types.ts";
 import { resolveWorkspacePath } from "../workspace.ts";
 import type { Tool, ToolResult } from "./types.ts";
 
@@ -16,7 +17,7 @@ const MAX_BYTES = 100 * 1024; // 100KB text
 const MAX_LINES = 2000;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4MB
 
-const IMAGE_EXT: Record<string, string> = {
+const IMAGE_EXT: Record<string, ImageMimeType> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -73,7 +74,7 @@ function truncateByBytes(text: string): { text: string; notice?: string } {
   };
 }
 
-function sniffImageMime(buf: Buffer): string | undefined {
+function sniffImageMime(buf: Buffer): ImageMimeType | undefined {
   if (buf.length >= 8) {
     // PNG
     if (
@@ -115,7 +116,7 @@ function sniffImageMime(buf: Buffer): string | undefined {
   return undefined;
 }
 
-function mimeFromPath(filePath: string): string | undefined {
+function mimeFromPath(filePath: string): ImageMimeType | undefined {
   const ext = path.extname(filePath).toLowerCase();
   return IMAGE_EXT[ext];
 }

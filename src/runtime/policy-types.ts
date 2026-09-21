@@ -1,6 +1,6 @@
 import type { JobId, SessionId, TaskId, WorkspaceId } from "./ids.ts";
 
-export type RuntimePermissionMode = "plan" | "approval" | "bypass" | "unsafe-host";
+export type RuntimePermissionMode = "plan" | "bypass" | "unsafe-host";
 export type SandboxMode = "required" | "preferred" | "disabled";
 export type NetworkPolicy = "none" | "allowlist" | "full";
 export type SandboxIsolation = "secure-sandbox" | "process-isolation" | "none";

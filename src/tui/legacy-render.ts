@@ -4,16 +4,22 @@ import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import type { AgentMessage } from "../types.ts";
 import type { PermissionMode } from "../permissions.ts";
 import type { PlanDocument } from "../plan/document.ts";
-import { todoSummary, type TodoItem, type TodoViewMode } from "../todo.ts";
-import {
-  resolveTodoItems,
-  todoColor,
-  todoIcon,
-  todoText,
-  TODO_PANEL_MAX_VISIBLE_ITEMS,
-  TODO_PLAN_STATUS_LABELS,
-} from "./todo-format.ts";
+import type { TodoItem, TodoViewMode } from "../todo.ts";
+import type { ThinkingMode } from "../thinking-policy.ts";
+import { compactText } from "./text-utils.ts";
+import { TODO_PANEL_MAX_VISIBLE_ITEMS, resolveTodoItems } from "./todo-format.ts";
 import { countTerminalRows, terminalStringWidth } from "./terminal-width.ts";
+import { todoPanelRenderLines } from "./todo-lines.ts";
+import { taskSummaryRenderLines, taskSummaryViewMode, type TaskSummaryStatus } from "./task-summary.ts";
+import { noticeText, noticeTitle, permissionModeLabel, statusLabel, thinkingLevelLabel } from "./claude-style.ts";
+import { isSubagentProtocolText, isSubagentToolName } from "./subagent-lines.ts";
+import { stripInlineMarkdown } from "./markdown-lines.ts";
+import { toolResultPrefix, toolVisualName } from "./tool-lines.ts";
+import type { RenderLine } from "./render-lines.ts";
+import { formatRenderLine } from "./render-line-format.ts";
+import { TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "./brand.ts";
+import { buildWelcomePanelRows, WELCOME_PANEL_MIN_WIDTH } from "./welcome-panel.ts";
+import { SESSION_PICKER_HINT, type SessionPickerState } from "./session-serialization.ts";
 
 export type LegacyToolView = {
   id: string;
@@ -49,13 +55,25 @@ export type LegacyTuiState = {
   status: string;
   permissionMode: PermissionMode;
   thinkingLevel: ModelThinkingLevel;
+  thinkingMode?: ThinkingMode;
   todoPlan?: PlanDocument;
   todoItems?: TodoItem[];
   todoRevision?: number;
   todoViewMode?: TodoViewMode;
+  taskTitle?: string;
+  taskStatus?: TaskSummaryStatus;
+  taskStartedAt?: number;
+  taskDurationMs?: number;
+  taskTokens?: number;
   notice?: LegacyNotice;
   /** Auto-memory updates from completed turns, rendered as inline cards. */
   memoryEvents?: MemoryUpdateEvent[];
+  cwd?: string;
+  modelName?: string;
+  billingLabel?: string;
+  version?: string;
+  showWelcome?: boolean;
+  sessionPicker?: SessionPickerState;
 };
 
 const ANSI = {
@@ -63,128 +81,197 @@ const ANSI = {
   eraseLine: "\x1b[2K",
   hideCursor: "\x1b[?25l",
   showCursor: "\x1b[?25h",
-  reset: "\x1b[0m",
-  dim: "\x1b[2m",
-  cyan: "\x1b[36m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  red: "\x1b[31m",
-  strike: "\x1b[9m",
   moveTo: (row: number, col: number) => `\x1b[${row};${col}H`,
 };
 
-function short(value: string, max = 160): string {
-  const oneLine = value.replace(/\s+/g, " ").trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max)}...` : oneLine;
-}
-
-function appendTodoLines(
-  lines: string[],
-  plan: PlanDocument | undefined,
-  todos: readonly TodoItem[] | undefined,
-  viewMode: TodoViewMode,
-): void {
-  if (viewMode === "hidden") return;
-  const items = resolveTodoItems({ plan, todos });
-  const summary = todoSummary(items);
-  const planStatus = plan ? ` [${TODO_PLAN_STATUS_LABELS[plan.status]}]` : "";
-  lines.push(
-    `${ANSI.cyan}TODO${ANSI.reset}${planStatus} ${summary.completed}/${summary.total}` +
-      (summary.inProgress > 0 ? ` ${ANSI.yellow}${summary.inProgress} 执行中${ANSI.reset}` : "") +
-      (summary.failed > 0 ? ` ${ANSI.red}${summary.failed} 失败${ANSI.reset}` : ""),
-  );
-  if (viewMode === "compact") {
-    const current = items.find((item) => item.status === "in_progress");
-    lines.push(`${ANSI.dim}${current?.activeForm ?? "任务列表已折叠"}${ANSI.reset}`);
-    return;
-  }
-  if (items.length === 0) {
-    lines.push(`${ANSI.dim}暂无结构化步骤${ANSI.reset}`);
-    return;
-  }
-  const visibleItems = items.slice(0, TODO_PANEL_MAX_VISIBLE_ITEMS);
-  for (const [index, item] of visibleItems.entries()) {
-    const color = {
-      green: ANSI.green,
-      red: ANSI.red,
-      yellow: ANSI.yellow,
-      gray: ANSI.dim,
-    }[todoColor(item.status)];
-    const strike = item.status === "completed" ? ANSI.strike : "";
-    const number = item.source === "plan" ? `${index + 1}. ` : "";
-    lines.push(`${color}${strike}${todoIcon(item.status)}${ANSI.reset} ${strike}${number}${todoText(item.content)}${ANSI.reset}`);
-  }
-  if (items.length > visibleItems.length) {
-    lines.push(`${ANSI.dim}... 还有 ${items.length - visibleItems.length} 项${ANSI.reset}`);
-  }
-}
-
-function appendMemoryCards(lines: string[], events: MemoryUpdateEvent[] | undefined): void {
+function appendMemoryCards(lines: RenderLine[], events: MemoryUpdateEvent[] | undefined): void {
   if (!events || events.length === 0) return;
-  for (const event of events.slice(-3)) {
+  for (const [eventIndex, event] of events.slice(-3).entries()) {
     const time = new Date(event.at).toLocaleTimeString("zh-CN", { hour12: false });
-    lines.push(`${ANSI.cyan}┌─ 🧠 记忆已更新 ${ANSI.dim}${time}${ANSI.reset}`);
-    const rows: string[] = [];
+    lines.push({ key: `memory-${eventIndex}-top`, text: `Memory updated ${time}`, prefix: "┌─ ", style: "border", bold: true });
     for (const key of event.added) {
-      const preview = event.previews?.[key] ? ` ${ANSI.dim}— ${short(event.previews[key]!, 60)}${ANSI.reset}` : "";
-      rows.push(`${ANSI.green}+${ANSI.reset} ${key}${preview}`);
+      const preview = event.previews?.[key] ? ` — ${compactText(event.previews[key]!, 60)}` : "";
+      lines.push({ key: `memory-${eventIndex}-add-${key}`, text: `${key}${preview}`, prefix: "+ ", style: "muted", tone: "success" });
     }
     for (const key of event.forgotten) {
-      rows.push(`${ANSI.red}−${ANSI.reset} ${key} ${ANSI.dim}(已遗忘)${ANSI.reset}`);
+      lines.push({ key: `memory-${eventIndex}-forget-${key}`, text: `${key} (forgotten)`, prefix: "− ", style: "muted", tone: "error", dim: true });
     }
-    if (rows.length === 0) rows.push(`${ANSI.dim}(无需更新)${ANSI.reset}`);
-    lines.push(...rows);
-    lines.push(`${ANSI.cyan}└${ANSI.reset}${ANSI.dim} 下轮对话自动生效 · /memory 查看${ANSI.reset}`);
+    if (event.added.length === 0 && event.forgotten.length === 0) {
+      lines.push({ key: `memory-${eventIndex}-empty`, text: "(no changes)", prefix: "│  ", style: "muted", dim: true });
+    }
+    lines.push({ key: `memory-${eventIndex}-bottom`, text: " active next turn · /memory to inspect", prefix: "└─", style: "border", dim: true });
   }
 }
 
-export function buildLegacyFrameLines(state: LegacyTuiState): string[] {
-  const lines: string[] = [
-    `${ANSI.cyan}mini-agent TUI${ANSI.reset} ${ANSI.dim}(Ctrl+R 快切思考，Shift+↑↓ 精调，Shift+Tab 切换权限，输入 /clear 清空会话)${ANSI.reset}`,
-    "",
-  ];
+function appendTextLines(
+  lines: RenderLine[],
+  key: string,
+  text: string,
+  options: Pick<RenderLine, "prefix" | "prefixTone" | "style" | "tone" | "bold" | "dim" | "background" | "fillWidth">,
+): void {
+  const source = text.replace(/\r\n?/g, "\n").split("\n");
+  source.forEach((value, index) => lines.push({
+    key: `${key}-${index}`,
+    text: value,
+    ...options,
+    prefix: index === 0 ? options.prefix : " ".repeat(terminalStringWidth(options.prefix ?? "")),
+  }));
+}
 
-  for (const message of state.history.filter((item) => item.role !== "system")) {
-    if (message.role === "user") lines.push(`${ANSI.green}> ${ANSI.reset}${contentAsString(message.content)}`);
-    if (message.role === "assistant" && message.content) lines.push(`${ANSI.cyan}assistant:${ANSI.reset} ${message.content}`);
-    if (message.role === "tool") lines.push(`${ANSI.dim}[${message.name}] ${short(contentAsString(message.content))}${ANSI.reset}`);
+function appendSessionPicker(lines: RenderLine[], picker: SessionPickerState): void {
+  lines.push({
+    key: "legacy-session-picker-title",
+    text: picker.command === "resume" ? "Resume sessions" : "Saved sessions",
+    prefix: "⌘ ",
+    style: "muted",
+    bold: true,
+  });
+  if (picker.loading) {
+    lines.push({ key: "legacy-session-picker-loading", text: "Loading saved sessions...", prefix: "  ", style: "muted", dim: true });
+  } else if (picker.sessions.length === 0) {
+    lines.push({ key: "legacy-session-picker-empty", text: "No saved sessions", prefix: "  ", style: "muted", dim: true, tone: "running" });
+  } else {
+    const pageSize = 8;
+    const start = Math.max(0, Math.min(picker.selectedIndex - pageSize + 1, picker.sessions.length - pageSize));
+    for (const [offset, session] of picker.sessions.slice(start, start + pageSize).entries()) {
+      const index = start + offset;
+      const preview = compactText(session.preview.replace(/\s+/g, " ").trim(), 64);
+      lines.push({
+        key: `legacy-session-picker-${session.id}`,
+        text: `${index === picker.selectedIndex ? "❯" : " "} ${session.id.slice(0, 12)}  ${session.messageCount} msgs${preview ? `  ${preview}` : ""}`,
+        prefix: "  ",
+        style: index === picker.selectedIndex ? "assistant" : "muted",
+        tone: index === picker.selectedIndex ? "running" : undefined,
+        bold: index === picker.selectedIndex,
+      });
+    }
+    if (picker.sessions.length > pageSize) {
+      lines.push({ key: "legacy-session-picker-more", text: `Showing ${picker.selectedIndex + 1} / ${picker.sessions.length}`, prefix: "  ", style: "muted", dim: true });
+    }
+  }
+  lines.push({
+    key: "legacy-session-picker-hint",
+    text: SESSION_PICKER_HINT,
+    prefix: "  ",
+    style: "muted",
+    dim: true,
+  });
+}
+
+/** Build the legacy frame from the same row model consumed by the ANSI path. */
+export function buildLegacyRenderLines(state: LegacyTuiState, width = 80): RenderLine[] {
+  const hasConversation = state.history.some((message) => message.role !== "system");
+  const showWelcome = state.showWelcome === true && !hasConversation && !state.pendingUser && !state.streamingText;
+  const lines: RenderLine[] = showWelcome && width >= WELCOME_PANEL_MIN_WIDTH
+    ? buildWelcomePanelRows(width, {
+      title: TUI_BRAND_NAME,
+      version: state.version,
+      model: state.modelName,
+      billing: state.billingLabel,
+      cwd: state.cwd,
+    }).map((row, index) => ({
+      key: `legacy-header-welcome-${index}`,
+      text: row.text,
+      style: row.kind === "border" ? "border" : row.kind === "heading" || row.kind === "art" ? "assistant" : "muted",
+      tone: row.kind === "border" || row.kind === "heading" || row.kind === "art" ? "running" : undefined,
+      bold: row.kind === "heading" || row.kind === "art",
+      dim: row.kind === "body",
+    }))
+    : [
+      { key: "legacy-header-spark-top", text: TUI_BRAND_SPARK, prefix: "  ", style: "assistant", bold: true, tone: "running" },
+      { key: "legacy-header", text: TUI_BRAND_NAME, prefix: `${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}  `, prefixTone: "running", style: "assistant", bold: true },
+      { key: "legacy-header-spark-bottom", text: TUI_BRAND_SPARK, prefix: "  ", style: "assistant", bold: true, tone: "running" },
+      { key: "legacy-header-gap", text: "", style: "muted" },
+    ];
+
+  for (const [messageIndex, message] of state.history.filter((item) => item.role !== "system").entries()) {
+    const content = contentAsString(message.content);
+    if (message.role === "user") {
+      // A child-agent prompt can be persisted in the parent history by
+      // gateways that flatten nested turns. Keep its protocol scaffold out of
+      // the user-facing transcript; the parent subagent progress row is the
+      // canonical representation.
+      if (/^\s*you are .*subagent\b/i.test(content)) continue;
+      appendTextLines(lines, `history-${messageIndex}`, content, {
+        prefix: "❯ ", style: "user", background: "user", fillWidth: width,
+      });
+    }
+    if (message.role === "assistant" && message.content
+      && !isSubagentProtocolText(message.content)
+      && !/^\s*you are .*subagent\b/i.test(message.content)) {
+      appendTextLines(lines, `history-${messageIndex}`, stripInlineMarkdown(message.content), { prefix: "⏺ ", style: "assistant" });
+    }
+    if (message.role === "tool" && !isSubagentToolName(message.name)) {
+      lines.push({ key: `history-${messageIndex}-tool`, text: toolVisualName(message.name), prefix: "⏺ ", style: "tool", bold: true, prefixTone: message.isError ? "error" : "success", tone: message.isError ? "error" : undefined });
+      lines.push({ key: `history-${messageIndex}-result-0`, text: compactText(content, 160), prefix: toolResultPrefix(0, 1), style: "muted", dim: true, tone: message.isError ? "error" : undefined });
+    }
   }
 
-  if (state.todoPlan || state.todoItems) {
-    appendTodoLines(lines, state.todoPlan, state.todoItems, state.todoViewMode ?? "expanded");
-    lines.push("");
-  }
+  const taskTodos = resolveTodoItems({ plan: state.todoPlan, todos: state.todoItems });
+  const showTaskSummary = !state.busy && Boolean(state.taskTitle?.trim()) && taskTodos.length > 0 && state.taskStatus !== "running";
+  const taskSummaryLines = showTaskSummary ? taskSummaryRenderLines({
+      title: state.taskTitle!,
+      status: state.taskStatus ?? "completed",
+      durationMs: state.taskDurationMs,
+      totalTokens: state.taskTokens,
+      todos: taskTodos,
+      viewMode: taskSummaryViewMode(state.taskStatus ?? "completed", state.todoViewMode ?? "expanded"),
+      maxVisibleItems: TODO_PANEL_MAX_VISIBLE_ITEMS,
+      width,
+    }) : [];
+  const todoPanelLines = !showTaskSummary && (state.todoPlan || state.todoItems)
+    ? todoPanelRenderLines({ plan: state.todoPlan, todos: state.todoItems, viewMode: state.todoViewMode ?? "expanded", maxVisibleItems: TODO_PANEL_MAX_VISIBLE_ITEMS })
+    : [];
 
   appendMemoryCards(lines, state.memoryEvents);
 
   if (state.notice) {
-    if (state.notice.title) lines.push(`${ANSI.cyan}${state.notice.title}:${ANSI.reset}`);
-    const noticeLines = state.notice.text.split("\n");
-    lines.push(...noticeLines.slice(0, 8).map((line) => `${ANSI.dim}${line}${ANSI.reset}`));
-    if (noticeLines.length > 8) lines.push(`${ANSI.dim}...${ANSI.reset}`);
+    const title = noticeTitle(state.notice.title);
+    if (title) lines.push({ key: "legacy-notice-title", text: title, prefix: "── ", style: "border", bold: true });
+    const noticeLines = noticeText(state.notice.text).split("\n");
+    noticeLines.slice(0, 8).forEach((line, index) => lines.push({ key: `legacy-notice-${index}`, text: line, prefix: "  ", style: "muted", dim: true }));
+    if (noticeLines.length > 8) lines.push({ key: "legacy-notice-more", text: "...", prefix: "  ", style: "muted", dim: true });
   }
+
+  if (state.sessionPicker) appendSessionPicker(lines, state.sessionPicker);
 
   if (state.pendingUser) {
-    const normalized = state.pendingUser.replace(/\r\n/g, '\n');
-    const lineCount = normalized.split('\n').length;
-    const isMultiLine = lineCount > 1;
-    const charCount = [...normalized].length;
-    const display = isMultiLine ? `${lineCount} 行 / ${charCount} 字` : normalized;
-    lines.push(`${ANSI.green}> ${ANSI.reset}${display}`);
+    appendTextLines(lines, "legacy-pending-user", state.pendingUser, { prefix: "❯ ", style: "user", background: "user", fillWidth: width });
   }
-  if (state.streamingText) lines.push(`${ANSI.cyan}assistant:${ANSI.reset} ${state.streamingText}`);
+  if (state.streamingText) appendTextLines(lines, "legacy-streaming", stripInlineMarkdown(state.streamingText), { prefix: "⏺ ", style: "assistant", prefixTone: "running" });
 
+  // A completed turn is present in both the persisted Agent history and the
+  // transient tool list until the next submission resets that list. Keep the
+  // history row as the canonical transcript and only draw tools that have not
+  // been committed yet, so a tool result cannot appear twice after completion.
+  const committedToolIds = new Set(
+    state.history
+      .filter((message): message is Extract<AgentMessage, { role: "tool" }> => message.role === "tool")
+      .map((message) => message.toolCallId),
+  );
   for (const tool of state.tools.slice(-4)) {
-    const icon = tool.status === "running" ? `${ANSI.yellow}*` : tool.status === "error" ? `${ANSI.red}!` : `${ANSI.green}ok`;
-    lines.push(`${icon}${ANSI.reset} ${tool.name}${tool.preview ? ` ${ANSI.dim}${short(tool.preview, 100)}${ANSI.reset}` : ""}`);
+    if (isSubagentToolName(tool.name)) continue;
+    if (committedToolIds.has(tool.id)) continue;
+    const tone = tool.status === "error" ? "error" : tool.status === "running" ? "running" : "success";
+    lines.push({ key: `legacy-tool-${tool.id}`, text: toolVisualName(tool.name), prefix: "⏺ ", style: "tool", bold: true, prefixTone: tone, tone: tool.status === "error" ? "error" : undefined });
+    if (tool.preview) lines.push({ key: `legacy-tool-${tool.id}-result-0`, text: compactText(tool.preview, 100), prefix: toolResultPrefix(0, 1), style: "muted", dim: true, tone: tool.status === "error" ? "error" : undefined });
   }
 
   lines.push(
-    "",
-    `${ANSI.dim}思考: ${thinkingLevelToDisplay(state.thinkingLevel)} · 权限: ${state.permissionMode} · ${state.status}${ANSI.reset}`,
-    `${state.busy ? "" : "> "}${state.input}`,
+    ...todoPanelLines,
+    ...(todoPanelLines.length > 0 ? [{ key: "legacy-todo-gap", text: "", style: "muted" as const }] : []),
+    ...taskSummaryLines,
+    ...(taskSummaryLines.length > 0 ? [{ key: "legacy-task-summary-gap", text: "", style: "muted" as const }] : []),
+    { key: "legacy-footer-gap", text: "", style: "muted" },
+    { key: "legacy-status", text: `${thinkingLevelLabel(thinkingLevelToDisplay(state.thinkingLevel))} · ${permissionModeLabel(state.permissionMode)} · ${statusLabel(state.status, state.busy)}`, prefix: state.busy ? "⟳ " : "· ", style: "muted", dim: true, prefixTone: state.busy ? "running" : "success" },
+    { key: "legacy-input", text: state.input, prefix: state.busy ? "" : "❯ ", style: "assistant", bold: !state.busy },
   );
   return lines;
+}
+
+/** Compatibility string API retained for the original legacy renderer. */
+export function buildLegacyFrameLines(state: LegacyTuiState, width = 80): string[] {
+  return buildLegacyRenderLines(state, width).map(formatRenderLine);
 }
 
 /**

@@ -1,8 +1,7 @@
 import process from "node:process";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { contentAsString } from "../content.ts";
-import { loadLlmConfigFromEnv } from "../llm/index.ts";
+import { loadLlmConfigFromEnv, switchLlmModel } from "../llm/index.ts";
 import {
   cycleThinkingLevel,
   buildIntenseLlm,
@@ -32,6 +31,7 @@ import { PERMISSION_MODES, PermissionManager, type PermissionMode } from "../per
 import { isTodoRevisionNewer, nextTodoRevision, TODO_WRITE_TOOL_NAME } from "../todo.ts";
 import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 import { createSubagentTool, createSubagentBatchTool, defaultProfiles } from "../subagent/index.ts";
+import { loadProfileStoreSync, resolveSubagentRoleLlmConfigs } from "../profile-store.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
@@ -55,17 +55,17 @@ import {
   parsePlanTurnOverride,
 } from "./plan-commands.ts";
 import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
-import { SessionStore, getDataRoot, type PersistedSessionMeta } from "../session-store.ts";
+import { thinkingLevelStatusText } from "./status-line.ts";
+import { getDataRoot, type PersistedSessionMeta } from "../session-store.ts";
+import { SessionManager } from "../session-manager.ts";
 import type { AgentMessage } from "../types.ts";
 import { MemoryStore } from "../orchestration/memory-store.ts";
 import { createAutoMemoryHook, isAutoMemoryEnabled } from "../memory/auto-memory.ts";
 import type { TuiAction } from "./state.ts";
 import { isTuiFeatureEnabled } from "./execution-policy.ts";
-
-function short(value: string, max = 160): string {
-  const oneLine = value.replace(/\s+/g, " ").trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max)}...` : oneLine;
-}
+import { createSessionPickerState, formatAmbiguousSessionNotice, getStartupSessionRequest, moveSessionPicker, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, selectedSessionFromPicker, toPersistedTodos } from "./session-serialization.ts";
+import { compactText } from "./text-utils.ts";
+import { TUI_BRAND_VERSION } from "./brand.ts";
 
 type TuiState = LegacyTuiState & {
   /** Stores the current pending permission request for keyboard resolution. */
@@ -76,9 +76,29 @@ type TuiState = LegacyTuiState & {
 
 let previousFrameRowCount = 0;
 
+function buildRoleLlmConfigs(
+  parentLlm: import("../llm/index.ts").LlmConfig,
+): Record<string, import("../llm/index.ts").LlmConfig> {
+  const store = loadProfileStoreSync();
+  if (!store) return {};
+  const roleProfiles = resolveSubagentRoleLlmConfigs(store);
+  const result: Record<string, import("../llm/index.ts").LlmConfig> = {};
+  for (const [role, profile] of Object.entries(roleProfiles)) {
+    try {
+      result[role] = switchLlmModel(parentLlm, profile.model, {
+        baseUrl: profile.baseUrl,
+        apiKey: profile.apiKey,
+      });
+    } catch {
+      // profile invalid → skip, subagent falls back to parent model
+    }
+  }
+  return result;
+}
+
 function render(state: TuiState): void {
-  const lines = buildLegacyFrameLines(state);
   const columns = process.stdout.columns || 80;
+  const lines = buildLegacyFrameLines(state, columns);
   process.stdout.write(buildLegacyFrameOutput(lines, previousFrameRowCount, columns));
   process.stdout.write(buildLegacyCursorOutput(lines, state, columns));
   previousFrameRowCount = buildLegacyFrameRowCount(lines, columns);
@@ -91,71 +111,84 @@ function handleEvent(state: TuiState, event: LoopEvent): void {
         state.todoItems = event.todos;
         state.todoRevision = event.revision;
       }
-      state.status = "任务列表已更新";
+      state.status = "Todos updated";
       break;
     case "assistant_delta":
       state.streamingText += event.text;
-      state.status = "模型输出中...";
+      state.status = "Responding…";
       break;
     case "assistant":
       state.streamingText = "";
-      state.status = event.message.toolCalls?.length ? "准备执行工具..." : "";
+      state.taskTokens = (state.taskTokens ?? 0) + (event.usage?.totalTokens ?? 0);
+      state.status = event.message.toolCalls?.length ? "Preparing tool…" : "";
+      break;
+    case "error":
+      state.busy = false;
+      state.taskStatus = "failed";
+      state.taskDurationMs = state.taskStartedAt === undefined ? undefined : Math.max(0, Date.now() - state.taskStartedAt);
+      state.status = `Error: ${event.message}`;
       break;
     case "context_compacted":
-      state.status = `上下文已压缩 ${event.beforeTokens} → ${event.afterTokens} tokens`;
+      state.status = `Context compacted ${event.beforeTokens} → ${event.afterTokens} tokens`;
       break;
     case "tool_start":
       if (event.call.name === TODO_WRITE_TOOL_NAME) {
-        state.status = "更新任务列表...";
+        state.status = "Updating todos…";
         break;
       }
       state.tools.push({ id: event.call.id, name: event.call.name, status: "running" });
-      state.status = `正在执行 ${event.call.name}...`;
+      state.status = `Running ${event.call.name}…`;
       break;
     case "tool_end": {
       if (event.call.name === TODO_WRITE_TOOL_NAME) {
-        state.status = event.result.isError ? "任务列表更新失败" : "任务列表已更新";
+        state.status = event.result.isError ? "Todo update failed" : "Todos updated";
         break;
       }
       const current = state.tools.find((tool) => tool.id === event.call.id);
       if (current) {
         current.status = event.result.isError ? "error" : "done";
-        current.preview = short(contentAsString(event.result.content), 100);
+        current.preview = compactText(contentAsString(event.result.content), 100);
       }
-      state.status = event.result.isError ? `${event.call.name} 执行失败` : `${event.call.name} 已完成`;
+      state.status = event.result.isError ? `${event.call.name} failed` : `${event.call.name} completed`;
       break;
     }
     case "auto_subagent":
       state.status = event.executed
-        ? `自动子 agent 已启动 (${event.profile}, score=${event.score})`
+        ? `Auto subagent started (${event.profile}, score=${event.score})`
         : event.shouldDelegate
-          ? `建议委托子 agent (${event.profile}, score=${event.score})`
-          : `不自动委托 (score=${event.score})`;
+          ? `Subagent delegation suggested (${event.profile}, score=${event.score})`
+          : `No auto delegation (score=${event.score})`;
       break;
     case "coordinator_mode":
       state.status = event.active
-        ? `编排模式: ${event.profile} (探索 ${event.directExplorationUsed}/${event.maxDirectExploration})`
-        : "编排模式已关闭";
+        ? `Orchestration: ${event.profile} (exploration ${event.directExplorationUsed}/${event.maxDirectExploration})`
+        : "Orchestration disabled";
       break;
     case "thinking_policy":
-      state.status = `自适应思考: ${thinkingLevelToDisplay(event.level)} (${event.reasons.join(", ")})`;
+      state.status = `Adaptive thinking: ${event.level} (${event.reasons.join(", ")})`;
       state.thinkingLevel = event.level;
       break;
     case "attempt_reset":
       state.streamingText = "";
-      state.status = `思考结果不完整，正在重试 (${event.attempt})...`;
+      state.status = event.reason === "stream_truncated"
+        ? `Connection lost, retrying (${event.attempt})…`
+        : `Incomplete reasoning, retrying (${event.attempt})…`;
       break;
     case "permission_required":
-      state.status = `等待权限确认: ${event.request.tool} (${event.request.risk})`;
+      state.status = `Waiting for permission: ${event.request.tool} (${event.request.risk})`;
       break;
     case "aborted":
       state.streamingText = "";
       state.busy = false;
-      state.status = "已停止";
+      state.taskStatus = "cancelled";
+      state.taskDurationMs = state.taskStartedAt === undefined ? undefined : Math.max(0, Date.now() - state.taskStartedAt);
+      state.status = "Cancelled";
       break;
     case "done":
       state.busy = false;
-      state.status = "就绪";
+      state.taskStatus = state.taskStatus === "failed" || state.taskStatus === "cancelled" ? state.taskStatus : "completed";
+      state.taskDurationMs = state.taskStartedAt === undefined ? undefined : Math.max(0, Date.now() - state.taskStartedAt);
+      state.status = "Ready";
       break;
   }
 }
@@ -167,17 +200,20 @@ async function main(): Promise<void> {
 
   const cwd = process.cwd();
   let activeLlm = loadLlmConfigFromEnv();
+  let activeThinkingMode = loadThinkingModeFromEnv();
   const vision = loadVisionConfigFromEnv();
   const autoSubagent = loadAutoSubagentOptionsFromEnv();
   await discoverWorkspaceSkills(cwd);
   let activeSkillNames = loadSkillNamesFromEnv();
 
   // ── Session persistence + auto memory (Claude Code-style) ─────────────────
-  const sessionStore = new SessionStore(path.join(getDataRoot(), "sessions"));
-  const sessionId = randomUUID();
+  const startup = getStartupSessionRequest();
+  const startupSessionId = startup.sessionId;
+  const sessionManager = new SessionManager({ workspaceId: cwd });
+  let activeSessionId = sessionManager.sessionId;
   const memoryStore = new MemoryStore(path.join(getDataRoot(), "memory", "records.json"));
-  const buildTuiHistory = async (): Promise<AgentMessage[]> => {
-    const base = createAgentHistory(undefined, state.permissionMode);
+  const buildTuiHistory = async (permissionMode: PermissionMode): Promise<AgentMessage[]> => {
+    const base = createAgentHistory(undefined, permissionMode);
     if (!isAutoMemoryEnabled()) return base;
     try {
       const section = await memoryStore.buildSystemMemoryPrompt();
@@ -194,52 +230,90 @@ async function main(): Promise<void> {
   };
   const persistTurn = async (history: AgentMessage[]): Promise<void> => {
     try {
-      const existing = await sessionStore.load(sessionId);
-      const persisted = {
-        id: sessionId,
-        createdAt: existing?.createdAt ?? Date.now(),
+      await sessionManager.save({
+        id: activeSessionId,
         modelId: activeLlm.model,
         thinkingLevel: activeLlm.thinkingLevel,
+        thinkingMode: activeThinkingMode,
         permissionMode: state.permissionMode,
         skillNames: activeSkillNames,
+        todos: toPersistedTodos(state.todoItems),
+        todoVersion: state.todoRevision,
         messages: [...history],
-      };
-      if (existing) await sessionStore.save(persisted);
-      else await sessionStore.create(persisted);
+      });
     } catch {
       // Persistence is best-effort; never break the interactive loop.
     }
   };
 
   const state: TuiState = {
-    history: await buildTuiHistory(),
+    history: await buildTuiHistory("plan"),
     streamingText: "",
     tools: [],
     busy: false,
     input: "",
     pendingUser: undefined,
-    status: "就绪",
+    taskTitle: "",
+    taskStatus: "completed",
+    taskStartedAt: undefined,
+    taskDurationMs: undefined,
+    taskTokens: 0,
+    status: "Ready",
     permissionMode: "plan" as PermissionMode,
-    thinkingLevel: activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off"),
+        thinkingLevel: activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off"),
+        thinkingMode: activeThinkingMode,
     todoPlan: (await loadPlanDocument(cwd).catch(() => null)) ?? undefined,
     todoItems: undefined,
     todoRevision: 0,
-    todoViewMode: "expanded",
+    todoViewMode: "compact",
+    cwd,
+    modelName: `${activeLlm.provider}/${activeLlm.model}`,
+    billingLabel: "API Usage Billing",
+    version: TUI_BRAND_VERSION,
+    showWelcome: true,
   };
 
-  // Resume the most recent session on startup (Claude Code `--continue`).
+  // A normal launch starts a new session. Explicit session IDs still support
+  // restoring a session for integrations and scripted launches.
   try {
-    const mostRecent = (await sessionStore.listSessions())[0];
-    if (mostRecent) {
-      const restored = await sessionStore.load(mostRecent.id);
-      if (restored && restored.messages.length > 0) {
-        const base = await buildTuiHistory();
-        state.history = [
-          ...base,
-          ...restored.messages.filter((message) => message.role !== "system"),
-        ];
-        state.status = `已恢复会话 ${mostRecent.id.slice(0, 8)} (${restored.messages.length} 条消息)，/clear 可重新开始`;
-      }
+    const startupSelection = startup.resume
+      ? resolveSessionByPrefix(
+          await sessionManager.list(),
+          startupSessionId ?? "",
+        )
+      : { candidates: [] };
+    if (!startupSelection.session && startupSelection.candidates.length > 1) {
+      state.status = formatAmbiguousSessionNotice(startupSessionId ?? "", startupSelection.candidates);
+    }
+    const restored = startupSelection.session
+      ? await sessionManager.load(startupSelection.session.id)
+      : undefined;
+    let restoredSession = restored;
+    if (restoredSession && startup.fork) {
+      restoredSession = await sessionManager.fork(restoredSession.id);
+    }
+    if (restoredSession && restoredSession.messages.length > 0) {
+        const mode = restoredSession.permissionMode ?? state.permissionMode;
+        state.permissionMode = mode;
+        activeLlm = restoreLlmConfig(activeLlm, restoredSession);
+        if (restoredSession.thinkingMode) activeThinkingMode = restoredSession.thinkingMode;
+        state.thinkingLevel = activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off");
+        state.modelName = activeLlm.provider + "/" + activeLlm.model;
+        if (restoredSession.skillNames) activeSkillNames = [...restoredSession.skillNames];
+        const base = await buildTuiHistory(mode);
+        const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
+        const restoredState = restoreTuiSession(
+          restoredSession,
+          systemPrompt,
+          (session, prompt) => sessionManager.restoreHistory(session, prompt),
+        );
+        state.history = restoredState.history;
+      activeSessionId = restoredSession.id;
+      sessionManager.setSessionId(restoredSession.id);
+        state.todoItems = restoredState.todos;
+        state.todoRevision = restoredState.todoRevision;
+        state.showWelcome = false;
+      state.status = `Session resumed ${restoredSession.id.slice(0, 8)} (${restoredSession.messages.length} messages); /clear starts over`;
     }
   } catch {
     // Resume is best-effort.
@@ -295,7 +369,7 @@ async function main(): Promise<void> {
   let tools;
   const parentRuntime: AgentRuntimeRef = {};
   const runtimeContext: RuntimeExecutionContext = {
-    sessionId: "tui_session",
+    sessionId: activeSessionId,
     workspaceId: cwd,
   };
   const globalTokenBudget = loadGlobalTokenBudgetFromEnv();
@@ -314,16 +388,17 @@ async function main(): Promise<void> {
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
       onSubagentEvent: (event: SubagentEvent) => {
         if (event.type === "subagent_start") {
-          state.status = `子 agent 启动: ${event.task.slice(0, 60)}...`;
+          state.status = `Subagent started: ${event.task.slice(0, 60)}…`;
           render(state);
         } else if (event.type === "subagent_end") {
-          state.status = event.success ? "子 agent 完成" : "子 agent 失败";
+          state.status = event.success ? "Subagent done" : "Subagent failed";
           render(state);
         }
       },
       parentRuntime,
       globalTokenBudget,
       globalConcurrencyLimit,
+      roleLlmConfigs: buildRoleLlmConfigs(activeLlm),
     });
     const subagentBatchTool = createSubagentBatchTool({
       parentLlm: activeLlm,
@@ -332,16 +407,17 @@ async function main(): Promise<void> {
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
       onSubagentEvent: (event: SubagentEvent) => {
         if (event.type === "subagent_start") {
-          state.status = `子 agent 启动: ${event.task.slice(0, 60)}...`;
+          state.status = `Subagent started: ${event.task.slice(0, 60)}…`;
           render(state);
         } else if (event.type === "subagent_end") {
-          state.status = event.success ? "子 agent 完成" : "子 agent 失败";
+          state.status = event.success ? "Subagent done" : "Subagent failed";
           render(state);
         }
       },
       parentRuntime,
       globalTokenBudget,
       globalConcurrencyLimit,
+      roleLlmConfigs: buildRoleLlmConfigs(activeLlm),
     });
     tools = () => [
       ...baseTools(),
@@ -373,7 +449,7 @@ async function main(): Promise<void> {
     if (state.busy) return;
     activeLlm = withThinkingLevel(activeLlm, cycleThinkingLevel(activeLlm, direction, { wrap }));
     state.thinkingLevel = activeLlm.thinkingLevel ?? (activeLlm.reasoning ? "medium" : "off");
-    state.status = `思考强度: ${thinkingLevelToDisplay(state.thinkingLevel)}`;
+    state.status = thinkingLevelStatusText(activeLlm, state.thinkingLevel);
     render(state);
   };
 
@@ -385,57 +461,97 @@ async function main(): Promise<void> {
   process.on("SIGINT", quit);
   process.on("exit", cleanup);
 
-  const submit = async (prompt: string) => {
+  const openSessionPicker = async (command: "resume" | "sessions"): Promise<void> => {
+    const picker = createSessionPickerState(command);
+    state.sessionPicker = picker;
+    state.input = "";
+    state.status = "Loading session…";
+    render(state);
+    const sessions = await sessionManager.list().catch(() => []);
+    // Escape or another picker action may have replaced the loading state.
+    if (state.sessionPicker !== picker) return;
+    state.sessionPicker = { ...picker, sessions, loading: false };
+    state.status = "Ready";
+    render(state);
+  };
+
+  const submit = async (prompt: string, knownSession?: PersistedSessionMeta) => {
     const text = prompt.trim();
     if (!text || state.busy) return;
     if (text === "/exit" || text === "/quit") return quit();
     if (text === "/clear") {
-      state.history = await buildTuiHistory();
+      activeSessionId = sessionManager.newSession();
+      runtimeContext.sessionId = activeSessionId;
+      state.history = await buildTuiHistory(state.permissionMode);
       state.tools = [];
-      state.status = "已清空会话";
+      state.status = "Conversation cleared";
       state.todoItems = undefined;
       state.todoRevision = nextTodoRevision();
+      state.showWelcome = true;
       render(state);
       return;
     }
     if (text === "/sessions") {
-      const metas: PersistedSessionMeta[] = await sessionStore.listSessions().catch(() => []);
-      if (metas.length === 0) {
-        state.status = "没有可恢复的会话";
-      } else {
-        state.status = `会话列表: ${metas
-          .slice(0, 5)
-          .map((meta) => `${meta.id.slice(0, 8)}(${meta.messageCount}条)`)
-          .join(", ")} — /resume <id> 恢复`;
-      }
-      render(state);
+      await openSessionPicker("sessions");
       return;
     }
-    if (text.startsWith("/resume")) {
-      const arg = text.slice("/resume".length).trim();
-      const metas = await sessionStore.listSessions().catch(() => []);
-      const target =
-        (arg && metas.find((meta) => meta.id.startsWith(arg))) ??
-        (arg ? undefined : metas[0]);
+    const resumeCommand = parseResumeCommand(text);
+    if (resumeCommand) {
+      const arg = resumeCommand.prefix;
+      if (!arg) {
+        await openSessionPicker("resume");
+        return;
+      }
+      const metas = knownSession
+        ? [knownSession]
+        : await sessionManager.list().catch(() => []);
+      const selection = knownSession
+        ? { session: knownSession, candidates: [knownSession] }
+        : resolveSessionByPrefix(metas, arg);
+      if (!selection.session && selection.candidates.length > 1) {
+        state.status = formatAmbiguousSessionNotice(arg, selection.candidates);
+        render(state);
+        return;
+      }
+      const target = selection.session;
       if (!target) {
-        state.status = arg ? `未找到会话: ${arg}` : "没有可恢复的会话";
+        state.status = arg ? `No session found: ${arg}` : "No saved sessions.";
         render(state);
         return;
       }
-      const restoredSession = await sessionStore.load(target.id).catch(() => undefined);
+      const restoredSession = await sessionManager.load(target.id).catch(() => undefined);
       if (!restoredSession) {
-        state.status = `未找到会话: ${target.id}`;
+        state.status = `No session found: ${target.id}`;
         render(state);
         return;
       }
-      const base = await buildTuiHistory();
-      state.history = [
-        ...base,
-        ...restoredSession.messages.filter((message) => message.role !== "system"),
-      ];
+      const mode = restoredSession.permissionMode ?? state.permissionMode;
+      permissionManager.setMode(mode);
+      state.permissionMode = mode;
+      activeLlm = restoreLlmConfig(activeLlm, restoredSession);
+      if (restoredSession.thinkingMode) activeThinkingMode = restoredSession.thinkingMode;
+      if (restoredSession.thinkingLevel) {
+        state.thinkingLevel = activeLlm.thinkingLevel ?? state.thinkingLevel;
+      }
+      if (restoredSession.skillNames) activeSkillNames = [...restoredSession.skillNames];
+      state.modelName = activeLlm.provider + "/" + activeLlm.model;
+      const base = await buildTuiHistory(mode);
+      const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
+      const restoredState = restoreTuiSession(
+        restoredSession,
+        systemPrompt,
+        (session, prompt) => sessionManager.restoreHistory(session, prompt),
+      );
+      state.history = restoredState.history;
+      activeSessionId = restoredSession.id;
+      sessionManager.setSessionId(restoredSession.id);
+      runtimeContext.sessionId = restoredSession.id;
+      state.todoItems = restoredState.todos;
+      state.todoRevision = restoredState.todoRevision;
+      state.showWelcome = false;
       state.tools = [];
       state.pendingUser = undefined;
-      state.status = `已恢复会话 ${target.id.slice(0, 8)} (${restoredSession.messages.length} 条消息)`;
+      state.status = `Session resumed ${target.id.slice(0, 8)} (${restoredSession.messages.length} messages)`;
       render(state);
       return;
     }
@@ -443,20 +559,20 @@ async function main(): Promise<void> {
       const arg = text.slice("/memory".length).trim();
       const records = await memoryStore.list({ includeForgotten: arg === "--all" }).catch(() => []);
       if (records.length === 0) {
-        state.status = "🧠 暂无记忆（对话积累后会自动提取）";
+        state.status = "🧠 No memories yet (they are extracted as the conversation grows)";
         render(state);
         return;
       }
       const lines = records
         .slice(-8)
-        .map((record) => `${record.status === "forgotten" ? "−" : "+"} ${record.key}: ${short(record.content, 60)}`);
+        .map((record) => `${record.status === "forgotten" ? "−" : "+"} ${record.key}: ${compactText(record.content, 60)}`);
       state.memoryEvents = [
         ...(state.memoryEvents ?? []),
         { added: [], forgotten: [], at: Date.now(), previews: Object.fromEntries(records.slice(-8).map((r) => [r.key, r.content])) },
       ];
       // Show the listing via notice for full-width readability.
       state.notice = {
-        title: `🧠 记忆列表 (${records.length} 条${arg === "--all" ? "，含已遗忘" : ""})`,
+        title: `🧠 Memories (${records.length}${arg === "--all" ? ", including forgotten" : ""})`,
         text: lines.join("\n"),
       };
       render(state);
@@ -507,11 +623,17 @@ async function main(): Promise<void> {
     cursorCol = 0;
     cursorRow = 0;
     state.pendingUser = planTurnOverride?.displayText ?? text;
+    state.taskTitle = state.pendingUser;
+    state.taskStatus = "running";
+    state.taskStartedAt = Date.now();
+    state.taskDurationMs = undefined;
+    state.taskTokens = 0;
+    state.showWelcome = false;
     state.streamingText = "";
     state.busy = true;
-    state.status = "请求模型中...";
+    state.status = "Waiting for model…";
     const parsedThinking = parseThinkingIntensityPrompt(text);
-    const turnLlm = parsedThinking.intensity
+    let turnLlm = parsedThinking.intensity
       ? buildIntenseLlm(activeLlm, parsedThinking.intensity)
       : activeLlm;
     if (parsedThinking.intensity) {
@@ -525,11 +647,11 @@ async function main(): Promise<void> {
       : parseThinkingCommandMode(text) ?? loadThinkingModeFromEnv();
     render(state);
     const permissionTurn = permissionManager.beginTurn(
-      "tui_session",
+      activeSessionId,
       (request) => {
         state.pendingPermissionRequestId = request.id;
-        state.pendingPermissionSessionId = "tui_session";
-        state.status = `等待权限确认: ${request.tool} (${request.risk}) [按 A 允许 / D 拒绝 / Enter 拒绝 / Esc 取消]`;
+        state.pendingPermissionSessionId = activeSessionId;
+        state.status = `Waiting for permission: ${request.tool} (${request.risk}) [A allow / D deny / Enter deny / Esc cancel]`;
         render(state);
       },
       abortController.signal,
@@ -537,12 +659,15 @@ async function main(): Promise<void> {
     let turnSucceeded = false;
     let turnErrorMessage: string | undefined;
     try {
+      await persistTurn([
+        ...state.history,
+        { role: "user", content: planTurnOverride?.prompt ?? text },
+      ]);
       state.history = await runAgentTurn(state.history, planTurnOverride?.prompt ?? text, {
-        llm: turnLlm,
+        llm: { ...turnLlm, sessionId: activeSessionId },
         tools,
         autoSubagent,
         preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
-        signal: abortController.signal,
         permissionTurn,
         autoValidate: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_VALIDATE),
         validationWorkspace: cwd,
@@ -556,7 +681,8 @@ async function main(): Promise<void> {
         onEvent: (event) => {
           handleEvent(state, event);
           if (event.type === "thinking_policy") {
-            activeLlm = withThinkingLevel(activeLlm, event.level);
+            // Adaptive escalation is local to this turn; keep the session-owned level unchanged.
+            turnLlm = withThinkingLevel(turnLlm, event.level);
           }
           render(state);
         },
@@ -569,14 +695,18 @@ async function main(): Promise<void> {
         state.history = error.messages;
         state.pendingUser = undefined;
         state.busy = false;
-        state.status = `已达到最大执行轮数 (${error.maxTurns})，本轮已停止`;
+        state.taskStatus = "failed";
+        state.taskDurationMs = state.taskStartedAt === undefined ? undefined : Math.max(0, Date.now() - state.taskStartedAt);
+        state.status = `Turn limit reached (${error.maxTurns}); this turn stopped`;
         render(state);
         return;
       }
       state.pendingUser = undefined;
       state.busy = false;
+      state.taskStatus = "failed";
+      state.taskDurationMs = state.taskStartedAt === undefined ? undefined : Math.max(0, Date.now() - state.taskStartedAt);
       turnErrorMessage = error instanceof Error ? error.message : String(error);
-      state.status = `错误: ${turnErrorMessage}`;
+      state.status = `Error: ${turnErrorMessage}`;
       render(state);
     } finally {
       permissionTurn.close();
@@ -584,9 +714,11 @@ async function main(): Promise<void> {
         permissionManager.setMode(planTurnOverride.restoreMode);
         dispatchPlanAction({ type: "SET_PERMISSION_MODE", mode: planTurnOverride.restoreMode });
       }
+      // Persist both completed and interrupted turns. The turn-start snapshot
+      // guarantees the prompt survives a crash before the first model reply.
+      await persistTurn(state.history);
       if (turnSucceeded) {
-        // Persist the turn and extract memories — both best-effort.
-        await persistTurn(state.history);
+        // Extract memories — best-effort and never blocks the answer.
         if (isAutoMemoryEnabled()) {
           // Reuse the module-scope memoryStore (same records.json path).
           const extract = createAutoMemoryHook(activeLlm, memoryStore);
@@ -606,8 +738,8 @@ async function main(): Promise<void> {
               ];
               const changed = result.added.length + result.forgotten.length;
               state.status = changed > 0
-                ? `🧠 已自动更新记忆 (${changed} 条)`
-                : "🧠 记忆检查完成（无需更新）";
+                ? `🧠 Memories updated automatically (${changed})`
+                : "🧠 Memory check complete (no updates)";
               render(state);
             })
             .catch(() => {});
@@ -649,13 +781,30 @@ async function main(): Promise<void> {
       inputChunk = inputChunk.replaceAll("\u0012", "");
     }
     if (inputChunk.includes("\u001b[Z")) {
-      const current = PERMISSION_MODES.indexOf(state.permissionMode);
-      const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
-      permissionManager.setMode(next);
-      state.permissionMode = permissionManager.getMode();
-      state.status = `权限模式: ${next}`;
+      if (state.sessionPicker) {
+        const selected = selectedSessionFromPicker(state.sessionPicker);
+        if (selected) {
+          state.input = `/resume ${selected.id}`;
+          state.sessionPicker = undefined;
+          state.status = "Ready";
+        }
+      } else {
+        const current = PERMISSION_MODES.indexOf(state.permissionMode);
+        const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
+        permissionManager.setMode(next);
+        state.permissionMode = permissionManager.getMode();
+        state.status = `Permission mode: ${next}`;
+      }
       inputChunk = inputChunk.replaceAll("\u001b[Z", "");
       render(state);
+    }
+    if (state.sessionPicker) {
+      for (const [sequence, delta] of [["\u001b[A", -1] as const, ["\u001b[B", 1] as const]) {
+        if (!inputChunk.includes(sequence)) continue;
+        state.sessionPicker = moveSessionPicker(state.sessionPicker, delta);
+        inputChunk = inputChunk.replaceAll(sequence, "");
+        render(state);
+      }
     }
     // Strip recognized escape sequences BEFORE the per-char loop so they're not
     // emitted as individual printable characters.
@@ -667,7 +816,15 @@ async function main(): Promise<void> {
     // so that the per-char loop below can handle them explicitly.
     for (const char of inputChunk) {
       if (char === "\u0003") return quit();
-      if (char === "\u001b") continue;
+      if (char === "\u001b") {
+        if (state.sessionPicker) {
+          state.sessionPicker = undefined;
+          state.input = "";
+          state.status = "Ready";
+          render(state);
+        }
+        continue;
+      }
       // Arrow keys (sent as individual up/down/left/right chars when terminfo is active)
       if (char === "\u0001" || char === "\u0005" || char === "\u0002" || char === "\u0006") {
         if (!state.busy && state.pendingUser === undefined) {
@@ -702,16 +859,37 @@ async function main(): Promise<void> {
         continue;
       }
       if (char === "\r" || char === "\n") {
+        if (state.sessionPicker) {
+          const selected = selectedSessionFromPicker(state.sessionPicker);
+          if (selected) {
+            state.sessionPicker = undefined;
+            state.input = "";
+            void submit(`/resume ${selected.id}`, selected);
+          }
+          continue;
+        }
         // If there's a pending permission, deny it
         if (state.pendingPermissionRequestId && state.pendingPermissionSessionId) {
           permissionManager.resolve(state.pendingPermissionSessionId, state.pendingPermissionRequestId, "deny");
         state.pendingPermissionRequestId = undefined;
         state.pendingPermissionSessionId = undefined;
-          state.status = "权限已拒绝";
+          state.status = "Permission denied";
           render(state);
           return;
         }
         void submit(state.input);
+        continue;
+      }
+      if (char === "\t") {
+        if (state.sessionPicker) {
+          const selected = selectedSessionFromPicker(state.sessionPicker);
+          if (selected) {
+            state.input = `/resume ${selected.id}`;
+            state.sessionPicker = undefined;
+            state.status = "Ready";
+            render(state);
+          }
+        }
         continue;
       }
       if (char === "\u007f") {
@@ -734,6 +912,7 @@ async function main(): Promise<void> {
         continue;
       }
       if (char >= " " && char !== "\u007f") {
+        if (state.sessionPicker) continue;
         // Handle permission resolution: 'a' = allow, 'd' = deny
         if (state.pendingPermissionRequestId && state.pendingPermissionSessionId) {
           const decision = char === "a" || char === "A" ? "allow" as const : char === "d" || char === "D" ? "deny" as const : null;
@@ -741,7 +920,7 @@ async function main(): Promise<void> {
             permissionManager.resolve(state.pendingPermissionSessionId, state.pendingPermissionRequestId, decision);
             state.pendingPermissionRequestId = undefined;
             state.pendingPermissionSessionId = undefined;
-            state.status = decision === "allow" ? "权限已批准" : "权限已拒绝";
+            state.status = decision === "allow" ? "Permission granted" : "Permission denied";
             render(state);
             return;
           }

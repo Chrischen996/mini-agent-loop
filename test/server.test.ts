@@ -17,6 +17,19 @@ const llm = makeLlmConfig({
 });
 
 describe("agent server", () => {
+  it("rejects the removed approval environment mode instead of silently defaulting", () => {
+    const previous = process.env.MINI_AGENT_PERMISSION_MODE;
+    process.env.MINI_AGENT_PERMISSION_MODE = "approval";
+    try {
+      assert.throws(
+        () => createAgentServer({ llm, tools: [], permissionMode: undefined }),
+        /approval.*removed.*plan.*bypass/i,
+      );
+    } finally {
+      if (previous === undefined) delete process.env.MINI_AGENT_PERMISSION_MODE;
+      else process.env.MINI_AGENT_PERMISSION_MODE = previous;
+    }
+  });
   it("exposes session permission mode and approval APIs", async () => {
     const app = createAgentServer({
       llm,
@@ -45,6 +58,11 @@ describe("agent server", () => {
       .put(`/api/sessions/${sessionId}/permission-mode`)
       .send({ mode: "unknown" });
     assert.equal(alsoInvalid.status, 400);
+    const removedApproval = await request(app)
+      .put(`/api/sessions/${sessionId}/permission-mode`)
+      .send({ mode: "approval" });
+    assert.equal(removedApproval.status, 400);
+    assert.match(removedApproval.body.error, /approval.*removed.*plan.*bypass/i);
     const decision = await request(app)
       .post(`/api/sessions/${sessionId}/permissions/request-id`)
       .send({ decision: "allow" });
@@ -113,10 +131,11 @@ describe("agent server", () => {
       for (let attempt = 0; attempt < 50; attempt += 1) {
         const session = await request(app).get(`/api/sessions/${sessionId}`);
         busy = Boolean((session.body as { busy?: boolean }).busy);
-        if (busy) break;
+        if (busy && modelCalls === 1) break;
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
       assert.equal(busy, true);
+      assert.equal(modelCalls, 1, "the first model call must be active before switching mode");
 
       const changed = await request(app)
         .put(`/api/sessions/${sessionId}/permission-mode`)
@@ -235,6 +254,71 @@ describe("agent server", () => {
       ["user", "assistant", "user", "assistant"],
     );
     assert.doesNotMatch(history.text, /must-not-leak/);
+  });
+
+  it("supports stable message IDs for fork and rewind while keeping index compatibility", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-server-message-ids-"));
+    try {
+      const app = createAgentServer({
+        llm,
+        tools: [],
+        dataDir,
+        chat: async (_config, messages) => ({
+          role: "assistant",
+          content: `reply ${messages.filter((message) => message.role === "user").length}`,
+        }),
+      });
+      const created = await request(app).post("/api/sessions");
+      const sessionId = (created.body as { id: string }).id;
+
+      await request(app).post(`/api/sessions/${sessionId}/messages`).field("prompt", "first");
+      await request(app).post(`/api/sessions/${sessionId}/messages`).field("prompt", "second");
+
+      const history = await request(app).get(`/api/sessions/${sessionId}`);
+      const messages = (history.body as { messages: Array<{ id?: string; role: string; content: string }> }).messages;
+      assert.equal(messages.every((message) => typeof message.id === "string" && message.id.length > 0), true);
+      const firstUser = messages.find((message) => message.role === "user" && message.content === "first");
+      const firstAssistant = messages.find((message) => message.role === "assistant" && message.content === "reply 1");
+      assert.ok(firstUser?.id);
+      assert.ok(firstAssistant?.id);
+
+      const forked = await request(app)
+        .post(`/api/sessions/${sessionId}/fork`)
+        .send({ messageId: firstAssistant.id });
+      assert.equal(forked.status, 201);
+      assert.equal((forked.body as { forkedFromMessage: number }).forkedFromMessage, 2);
+      assert.equal((forked.body as { forkedFromMessageId: string }).forkedFromMessageId, firstAssistant.id);
+      const forkHistory = await request(app).get(`/api/sessions/${(forked.body as { id: string }).id}`);
+      assert.deepEqual(
+        (forkHistory.body as { messages: Array<{ role: string; content: string }> }).messages.map((message) => message.content),
+        ["first", "reply 1"],
+      );
+
+      const rewound = await request(app)
+        .post(`/api/sessions/${sessionId}/rewind`)
+        .send({ messageId: firstUser.id });
+      assert.equal(rewound.status, 200);
+      assert.equal((rewound.body as { messageId: string }).messageId, firstUser.id);
+      const afterRewind = await request(app).get(`/api/sessions/${sessionId}`);
+      assert.deepEqual(
+        (afterRewind.body as { messages: Array<{ role: string; content: string }> }).messages.map((message) => message.content),
+        ["first"],
+      );
+
+      const indexedFork = await request(app)
+        .post(`/api/sessions/${sessionId}/fork`)
+        .send({ messageIndex: 0 });
+      assert.equal(indexedFork.status, 201);
+      assert.equal((indexedFork.body as { forkedFromMessage: number }).forkedFromMessage, 0);
+
+      const conflict = await request(app)
+        .post(`/api/sessions/${sessionId}/rewind`)
+        .send({ messageId: firstUser.id, messageIndex: 1 });
+      assert.equal(conflict.status, 400);
+      assert.match(conflict.text, /mutually exclusive/);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
   });
 
   it("binds todo updates to sessions, persists them, and inherits them on fork", async () => {
@@ -402,6 +486,44 @@ describe("agent server", () => {
       assert.equal(restored.status, 200);
       assert.match(restored.text, /remember this/);
       assert.match(restored.text, /persisted reply/);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("restores a turn-start prompt when the model fails before replying", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-session-turn-start-"));
+    try {
+      const firstApp = createAgentServer({
+        llm,
+        tools: [],
+        dataDir,
+        chat: async () => {
+          throw new Error("provider unavailable");
+        },
+      });
+      const created = await request(firstApp).post("/api/sessions");
+      const sessionId = (created.body as { id: string }).id;
+      const failed = await request(firstApp)
+        .post(`/api/sessions/${sessionId}/messages`)
+        .field("prompt", "keep this prompt");
+
+      assert.equal(failed.status, 200);
+      assert.match(failed.text, /provider unavailable/);
+
+      const restoredApp = createAgentServer({
+        llm,
+        tools: [],
+        dataDir,
+        chat: async () => ({ role: "assistant" as const, content: "unused" }),
+      });
+      const restored = await request(restoredApp).get(`/api/sessions/${sessionId}`);
+      assert.equal(restored.status, 200);
+      assert.equal(
+        (restored.body as { messages: Array<{ role: string; content: string }> }).messages
+          .find((message) => message.role === "user")?.content,
+        "keep this prompt",
+      );
     } finally {
       await rm(dataDir, { recursive: true, force: true });
     }

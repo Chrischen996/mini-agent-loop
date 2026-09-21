@@ -47,6 +47,44 @@ describe("sandbox detection", () => {
       /Secure sandbox required/,
     );
   });
+
+  it("prefers node isolation over docker on Windows in auto mode", async () => {
+    const sandboxType = await detectBestSandboxType(
+      { enabled: true, type: "auto" },
+      { platform: "win32", docker: async () => true, podman: async () => true },
+    );
+    assert.equal(sandboxType, "node");
+  });
+
+  it("fails closed on Windows auto mode with required sandbox", async () => {
+    await assert.rejects(
+      () =>
+        detectBestSandboxType(
+          { enabled: true, type: "auto", mode: "required" },
+          { platform: "win32", docker: async () => true, podman: async () => true },
+        ),
+      /Secure sandbox required/,
+    );
+  });
+
+  it("still prefers docker in auto mode off Windows", async () => {
+    const sandboxType = await detectBestSandboxType(
+      { enabled: true, type: "auto" },
+      { platform: "linux", docker: async () => true, podman: async () => false },
+    );
+    assert.equal(sandboxType, "docker");
+  });
+
+  it("keeps explicit docker on Windows fail-closed when unavailable", async () => {
+    await assert.rejects(
+      () =>
+        detectBestSandboxType(
+          { enabled: true, type: "docker" },
+          { platform: "win32", docker: async () => false, podman: async () => false },
+        ),
+      /Docker is not available/,
+    );
+  });
 });
 
 describe("NodeSandboxRunner", () => {
@@ -89,6 +127,39 @@ describe("NodeSandboxRunner", () => {
       });
       assert.equal(result.timedOut, true);
       assert.notEqual(result.exitCode, 0);
+    });
+  });
+
+  it("terminates shell descendants when a command times out", async () => {
+    await withTempDir(async (cwd) => {
+      const runner = new NodeSandboxRunner();
+      const startedAt = Date.now();
+      const result = await runner.execute({
+        command: "bash",
+        args: ["-lc", "sleep 30"],
+        cwd,
+        timeout: 100,
+      });
+
+      assert.equal(result.timedOut, true);
+      assert.ok(Date.now() - startedAt < 2_000, "timeout should not wait for shell descendants");
+    });
+  });
+
+  it("stops a shell and its descendants when aborted", async () => {
+    await withTempDir(async (cwd) => {
+      const runner = new NodeSandboxRunner();
+      const controller = new AbortController();
+      const execution = runner.execute({
+        command: "bash",
+        args: ["-lc", "sleep 30"],
+        cwd,
+        timeout: 30_000,
+        signal: controller.signal,
+      });
+      setTimeout(() => controller.abort(), 25);
+
+      await assert.rejects(execution, (error: Error) => error.name === "AbortError");
     });
   });
 

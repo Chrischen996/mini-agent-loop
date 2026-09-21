@@ -15,6 +15,8 @@ export type StreamChatUsage = {
   cacheReadTokens?: number;
   /** Tokens written to prompt cache (cache miss/write). */
   cacheWriteTokens?: number;
+  /** Thinking/reasoning tokens reported by the provider (subset of completion tokens). */
+  reasoningTokens?: number;
 };
 
 // ─── Legacy event type (kept for backward compat; loop now uses LlmStreamEvent) ───
@@ -84,6 +86,22 @@ export class ProtocolError extends Error {
   readonly msg: string;
 }
 
+/**
+ * Thrown when an SSE stream closes without any completion signal
+ * (no [DONE] marker, no finish_reason, no terminal message). The stream was
+ * cut off mid-generation; the request is safe to replay because tool calls
+ * have not been executed yet.
+ */
+export class StreamTruncatedError extends Error {
+  /** Answer text received before the stream died (for diagnostics/UI). */
+  readonly partialContent: string;
+  constructor(partialContent = "") {
+    super("LLM stream ended before completion (missing finish_reason, terminal message, or [DONE])");
+    this.name = "StreamTruncatedError";
+    this.partialContent = partialContent;
+  }
+}
+
 /** Thrown when the LLM request times out. May contain partial content. */
 export class LlmTimeoutError extends Error {
   readonly partialContent?: string;
@@ -111,6 +129,10 @@ export class LlmTimeoutError extends Error {
 
 export function isContextOverflowError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
+  // Policy rejections are never context overflow, even if message contains token references.
+  if (/\b(sensitive_words_detected|content_filter|content_policy_violation)\b/i.test(message)) {
+    return false;
+  }
   return /(context length|context window|maximum context|max context|too many tokens|prompt is too long|token limit|input.*token)/i.test(message);
 }
 
@@ -137,16 +159,29 @@ export type RetryStrategy = {
 export function classifyError(error: unknown): RetryableErrorType | null {
   // Typed timeout errors take priority
   if (error instanceof LlmTimeoutError) return "timeout";
-  
+
+  // Typed stream truncation: connection dropped mid-generation. Safe to
+  // replay because tool calls have not been executed yet.
+  if (error instanceof StreamTruncatedError) return "network";
+
   const message = error instanceof Error ? error.message : String(error);
 
+  // Legacy/untyped truncation message (defensive; chat.ts now throws the
+  // typed error above).
+  if (/stream ended before completion/i.test(message)) {
+    return "network";
+  }
+  if (/stream ended without finish_reason/i.test(message)) {
+    return "network";
+  }
+
   // Rate limit (429 or explicit rate limit messages)
-  if (/rate limit|429|too many requests|quota exceeded/i.test(message)) {
+  if (/rate limit|\b429\b|too many requests|quota exceeded/i.test(message)) {
     return "rate_limit";
   }
 
   // Server overload / temporary unavailability
-  if (/502|503|504|server (busy|overload|unavailable)|service unavailable/i.test(message)) {
+  if (/\b(502|503|504)\b|server (busy|overload|unavailable)|service unavailable/i.test(message)) {
     return "server_overload";
   }
 

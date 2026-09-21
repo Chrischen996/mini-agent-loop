@@ -763,7 +763,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
  * Note: effort "max" is available on all adaptive-thinking Claude models, while native
  * "xhigh" is only available on Opus 4.7/4.8, Sonnet 5, and Fable 5.
  */
-function mapThinkingLevelToEffort(
+export function mapThinkingLevelToEffort(
 	model: Model<"anthropic-messages">,
 	level: SimpleStreamOptions["reasoning"],
 ): AnthropicEffort {
@@ -778,6 +778,11 @@ function mapThinkingLevelToEffort(
 			return "medium";
 		case "high":
 			return "high";
+		case "xhigh":
+			return "high";
+		case "max":
+		case "ultra":
+			return "max";
 		default:
 			return "high";
 	}
@@ -1284,7 +1289,7 @@ function convertTools(
 	});
 }
 
-function mapStopReason(
+export function mapStopReason(
 	reason: Anthropic.Messages.StopReason | string,
 	stopDetails?: RefusalStopDetails | null,
 ): { stopReason: StopReason; errorMessage?: string } {
@@ -1307,7 +1312,10 @@ function mapStopReason(
 		case "sensitive": // Content flagged by safety filters (not yet in SDK types)
 			return { stopReason: "error" };
 		default:
-			// Handle unknown stop reasons gracefully (API may add new values)
-			throw new Error(`Unhandled stop reason: ${reason}`);
+			// Unknown values must not kill the stream; Anthropic adds stop reasons over time.
+			return {
+				stopReason: "stop",
+				errorMessage: `Unhandled stop reason: ${reason}`,
+			};
 	}
 }

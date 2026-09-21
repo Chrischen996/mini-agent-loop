@@ -1,0 +1,775 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { buildTerminalRenderLines } from "../src/tui/terminal-render-model.ts";
+import { permissionPanelRenderLines, planApprovalRenderLines } from "../src/tui/terminal-overlay-lines.ts";
+import { createInitialState, tuiReducer } from "../src/tui/state.ts";
+import { terminalStringWidth, truncateTerminalPath } from "../src/tui/terminal-width.ts";
+import { displaySubagentTask, isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from "../src/tui/subagent-lines.ts";
+import { markdownRowText, parseMarkdownLines, stripInlineMarkdown } from "../src/tui/markdown-lines.ts";
+import { LOADING_GLYPHS } from "../src/tui/activity.ts";
+import { TUI_BRAND_HEADER_HEIGHT, TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "../src/tui/brand.ts";
+import { buildWelcomePanelRows } from "../src/tui/welcome-panel.ts";
+import type { TerminalAutocompleteState } from "../src/tui/terminal-autocomplete-controller.ts";
+
+describe("standalone terminal render model", () => {
+  it("uses the mini-agent mark and name for the default welcome row", () => {
+    const lines = buildTerminalRenderLines(createInitialState("test-model"), { header: {} });
+
+    assert.equal(lines.filter((line) => line.key.startsWith("header-")).length, TUI_BRAND_HEADER_HEIGHT);
+    assert.equal(lines[0]?.key, "header-spark-top");
+    assert.equal(lines[1]?.key, "header-title");
+    assert.equal(lines[1]?.prefix, `${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}  `);
+    assert.equal(lines[1]?.text, TUI_BRAND_NAME);
+    assert.equal(lines[2]?.key, "header-spark-bottom");
+  });
+
+  it("renders a fixed-width LogoV2-style welcome panel on wide terminals", () => {
+    const width = 100;
+    const rows = buildWelcomePanelRows(width, {
+      model: "anthropic/claude-sonnet",
+      cwd: "/Users/chenjiaxu/Project/agent loop/mini-agent",
+    });
+    assert.equal(rows.length, 10);
+    for (const row of rows) assert.equal(terminalStringWidth(row.text), width);
+    assert.match(rows[0]?.text ?? "", /╭─ mini-agent v/);
+    assert.match(rows[1]?.text ?? "", /Welcome back!/);
+    assert.match(rows[1]?.text ?? "", /Tips for getting started/);
+    assert.match(rows[5]?.text ?? "", /What's new/);
+    assert.match(rows.at(-1)?.text ?? "", /╰─+╯/);
+  });
+
+  it("keeps the compact identity below the wide welcome breakpoint", () => {
+    const lines = buildTerminalRenderLines(createInitialState("test-model"), {
+      width: 60,
+      header: { showWelcome: true },
+    });
+    assert.equal(lines.filter((line) => line.key.startsWith("header-")).length, TUI_BRAND_HEADER_HEIGHT);
+    assert.equal(lines.some((line) => line.text.includes("Tips for getting started")), false);
+  });
+
+  it("keeps the final path segments visible when compacting cwd", () => {
+    const compact = truncateTerminalPath("/Users/chenjiaxu/Project/agent loop/mini-agent", 24);
+    assert.equal(compact, "…/agent loop/mini-agent");
+    assert.ok(terminalStringWidth(compact) <= 24);
+  });
+
+  it("projects chat state without mutating the reducer state", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "hello" });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "assistant_delta", text: "answer", kind: "answer" } });
+    state = tuiReducer(state, { type: "SET_STATUS", status: "就绪" });
+    const before = structuredClone(state);
+
+    const lines = buildTerminalRenderLines(state);
+
+    assert.ok(lines.some((line) => line.text.includes("hello")));
+    assert.ok(lines.some((line) => line.text.includes("answer")));
+    assert.deepEqual(state, before);
+  });
+
+  it("renders saved session previews in the terminal picker", () => {
+    const autocomplete: TerminalAutocompleteState = {
+      mode: "session-list",
+      index: 0,
+      commands: [],
+      files: [],
+      models: [],
+      sessions: [{ id: "abc123456789", createdAt: 1, lastActiveAt: 2, messageCount: 3, preview: "inspect the repository" }],
+      modelContextWindows: {},
+      modelQuery: "",
+      fileFragment: "",
+      sessionCommand: "resume",
+      sessionLoading: false,
+    };
+    const lines = buildTerminalRenderLines(createInitialState("test-model"), { autocomplete, input: "/resume" });
+    assert.ok(lines.some((line) => line.text.includes("abc123456789")));
+    assert.ok(lines.some((line) => line.text.includes("inspect the repository")));
+    assert.ok(lines.some((line) => line.text.includes("Enter resume selected")));
+  });
+
+  it("keeps the selected session visible after moving past the first page", () => {
+    const autocomplete: TerminalAutocompleteState = {
+      mode: "session-list",
+      index: 9,
+      commands: [],
+      files: [],
+      models: [],
+      sessions: Array.from({ length: 10 }, (_, index) => ({
+        id: `session-${String(index + 1).padStart(2, "0")}`,
+        createdAt: 1,
+        lastActiveAt: 2,
+        messageCount: 1,
+        preview: `prompt ${index + 1}`,
+      })),
+      modelContextWindows: {},
+      modelQuery: "",
+      fileFragment: "",
+      sessionCommand: "resume",
+      sessionLoading: false,
+    };
+    const lines = buildTerminalRenderLines(createInitialState("test-model"), { autocomplete, input: "/resume" });
+    assert.ok(lines.some((line) => line.text.includes("session-10")));
+    assert.equal(lines.some((line) => line.text.includes("session-01")), false);
+    assert.ok(lines.some((line) => line.text.includes("Showing 3-10 / 10")));
+  });
+
+  it("keeps inline Markdown out of ANSI transcript rows", () => {
+    assert.equal(stripInlineMarkdown("**Plan** with `npm test` and [docs](https://example.com)"), "Plan with npm test and docs");
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "assistant_delta", text: "**Planning targeted subagent exploration**", kind: "answer" } });
+    const lines = buildTerminalRenderLines(state);
+    assert.ok(lines.some((line) => line.text === "Planning targeted subagent exploration"));
+    assert.equal(lines.some((line) => line.text.includes("**")), false);
+  });
+
+  it("strips leading blank rows from live streaming text", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "assistant_delta", text: "\n\nhello", kind: "answer" } });
+    const lines = buildTerminalRenderLines(state);
+    const streaming = lines.find((line) => line.key === "streaming-text");
+    // A reply that starts with newlines must not draw a lone "⏺ " marker row.
+    assert.equal(streaming?.text, "hello");
+    assert.equal(streaming?.prefix, "⏺ ");
+  });
+
+  it("keeps a stable key for unchanged line identities", () => {
+    const state = createInitialState("test-model");
+    const first = buildTerminalRenderLines(state);
+    const second = buildTerminalRenderLines(state);
+    assert.deepEqual(first, second);
+  });
+
+  it("marks the focused reasoning message in the terminal rows", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "question" });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "assistant", message: { role: "assistant", content: "answer" } } });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "assistant_delta", text: "reasoning", kind: "reasoning" } });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "assistant", message: { role: "assistant", content: "" } } });
+    state = tuiReducer(state, { type: "SET_FOCUSED_MESSAGE", index: 2 });
+
+    const lines = buildTerminalRenderLines(state);
+    assert.ok(lines.some((line) => line.text === "◆ "));
+    assert.ok(lines.some((line) => line.prefix === "│ "));
+    assert.ok(lines.some((line) => line.tone === "running" && line.text.includes("reasoning")));
+  });
+
+  it("wraps and clips the body while keeping status and input visible", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "one two three four" });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "assistant_delta", text: "long response", kind: "answer" } });
+    const lines = buildTerminalRenderLines(state, {
+      width: 10,
+      height: 4,
+      input: "go",
+      cursor: 1,
+    });
+
+    assert.ok(lines.length <= 4);
+    assert.equal(lines.at(-1)?.key, "input-0");
+    assert.ok(lines.some((line) => line.text.includes("g▌o")));
+  });
+
+  it("uses an empty gutter on wrapped continuation rows", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "a long prompt" });
+    const lines = buildTerminalRenderLines(state, { width: 10 });
+    const promptRows = lines.filter((line) => line.key === "message-0" || line.key.startsWith("message-0-w"));
+    assert.ok(promptRows.length > 1);
+    assert.equal(promptRows[0]?.prefix, "❯ ");
+    assert.equal(promptRows[1]?.prefix, "  ");
+  });
+
+  it("wraps multiline input without repeating the prompt marker", () => {
+    const state = createInitialState("test-model");
+    const lines = buildTerminalRenderLines(state, { width: 10, input: "0123456789abc" });
+    const inputRows = lines.filter((line) => line.key === "input-0" || line.key.startsWith("input-0-w"));
+    assert.ok(inputRows.length > 1);
+    assert.equal(inputRows[0]?.prefix, "❯ ");
+    assert.equal(inputRows[1]?.prefix, "  ");
+  });
+
+  it("keeps the Todo panel pinned while history scrolls", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, {
+      type: "SET_TODO_ITEMS",
+      revision: 1,
+      todos: [{ id: "task-1", content: "inspect", activeForm: "inspecting", status: "in_progress", source: "model" }],
+    });
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "history" });
+    state = tuiReducer(state, { type: "SCROLL_BY", delta: 3 });
+    const lines = buildTerminalRenderLines(state, { height: 5, input: "" });
+    const panelIndex = lines.findIndex((line) => line.key.startsWith("panel-todo"));
+    const messageIndex = lines.findIndex((line) => line.key === "message-0");
+    const inputIndex = lines.findIndex((line) => line.key === "input-0");
+    assert.ok(panelIndex > messageIndex);
+    assert.ok(panelIndex < inputIndex);
+  });
+
+  it("renders a completed task root with its checklist, duration, and tokens", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "审查工具执行与沙箱安全" });
+    state = tuiReducer(state, {
+      type: "SET_TODO_ITEMS",
+      revision: 1,
+      todos: [
+        { id: "done", content: "定位失败测试的根因", activeForm: "定位失败测试的根因", status: "completed", source: "model" },
+        { id: "pending", content: "审查 TUI 层", activeForm: "审查 TUI 层", status: "pending", source: "model" },
+      ],
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "finished" },
+        usage: { promptTokens: 800, inputTokens: 800, completionTokens: 400, totalTokens: 1200 },
+      },
+    });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "done", messages: [] } });
+
+    const lines = buildTerminalRenderLines(state, { width: 100 });
+    const root = lines.find((line) => line.key === "panel-task-summary-root");
+    assert.equal(root?.prefix, "✻ ");
+    assert.match(root?.text ?? "", /审查工具执行与沙箱安全/);
+    assert.match(root?.text ?? "", /1\.2k tokens/);
+    assert.equal(lines.find((line) => line.key === "panel-task-summary-item-done")?.prefix, "  ├─ ✓ ");
+    assert.equal(lines.find((line) => line.key === "panel-task-summary-item-pending")?.prefix, "  └─ ■ ");
+    const rootIndex = lines.findIndex((line) => line.key === "panel-task-summary-root");
+    const answerIndex = lines.findIndex((line) => line.text === "finished");
+    assert.ok(rootIndex > answerIndex);
+
+    const withInput = buildTerminalRenderLines(state, { width: 100, input: "next" });
+    const inputIndex = withInput.findIndex((line) => line.key === "input-0");
+    const summaryIndex = withInput.findIndex((line) => line.key === "panel-task-summary-root");
+    assert.ok(summaryIndex < inputIndex);
+    assert.equal(withInput.at(-1)?.key, "input-0");
+  });
+
+  it("keeps the checklist visible and marks the task root failed after an error", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "审查任务" });
+    state = tuiReducer(state, {
+      type: "SET_TODO_ITEMS",
+      revision: 1,
+      todos: [{ id: "pending", content: "审查持久化", activeForm: "审查持久化", status: "pending", source: "model" }],
+    });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "error", message: "provider failed" } });
+
+    const root = buildTerminalRenderLines(state).find((line) => line.key === "panel-task-summary-root");
+    assert.equal(root?.prefixTone, "error");
+    assert.match(root?.text ?? "", /审查任务/);
+  });
+
+  it("keeps the completed task root on one row in a narrow terminal", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "审查任务" });
+    state = tuiReducer(state, {
+      type: "SET_TODO_ITEMS",
+      revision: 1,
+      todos: [{ id: "done", content: "完成检查", activeForm: "完成检查", status: "completed", source: "model" }],
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "finished" },
+        usage: { promptTokens: 800, inputTokens: 800, completionTokens: 400, totalTokens: 1200 },
+      },
+    });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "done", messages: [] } });
+
+    const lines = buildTerminalRenderLines(state, { width: 24 });
+    const root = lines.find((line) => line.key === "panel-task-summary-root");
+    assert.ok(root);
+    assert.ok(terminalStringWidth(`${root.prefix ?? ""}${root.text}`) <= 24);
+    assert.equal(lines.some((line) => line.key === "panel-task-summary-root-w1"), false);
+  });
+
+  it("masks API keys while the model setup overlay owns the input", () => {
+    const state = createInitialState("test-model");
+    const lines = buildTerminalRenderLines(state, {
+      input: "secret-key",
+      cursor: 6,
+      maskInput: true,
+    });
+    const input = lines.find((line) => line.key === "input-0");
+    assert.equal(input?.text, "******▌****");
+    assert.ok(!lines.some((line) => line.text.includes("secret-key")));
+  });
+
+  it("keeps pending image attachments visible above the prompt", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, {
+      type: "ADD_PENDING_IMAGE",
+      image: { path: "/tmp/diagram.png", mimeType: "image/png" },
+    });
+    const lines = buildTerminalRenderLines(state, { input: "" });
+    const image = lines.find((line) => line.key === "pending-image-0");
+    assert.equal(image?.text, "diagram.png");
+    assert.equal(lines.at(-1)?.key, "input-0");
+  });
+
+  it("projects the Claude Code conversation chrome without changing the default model", () => {
+    let state = createInitialState("claude-sonnet");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "hello" });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "assistant", message: { role: "assistant", content: "answer" } } });
+
+    const lines = buildTerminalRenderLines(state, {
+      width: 100,
+      header: { title: "Claude Code", cwd: "/workspace" },
+      promptRule: true,
+      input: "next",
+    });
+
+    const headerRows = lines.filter((line) => line.key.startsWith("header-"));
+    assert.equal(headerRows.length, TUI_BRAND_HEADER_HEIGHT);
+    assert.equal(headerRows[1]?.key, "header-title");
+    assert.equal(headerRows[1]?.text, "Claude Code");
+    assert.equal(headerRows[1]?.prefix, `${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}  `);
+    assert.equal(lines.find((line) => line.key.startsWith("message-0"))?.prefix, "❯ ");
+    assert.equal(lines.find((line) => line.key.startsWith("message-0"))?.background, "user");
+    assert.equal(lines.find((line) => line.key.startsWith("message-1"))?.prefix, "⏺ ");
+    // Messages are rendered compactly: no inter-message blank rows are emitted.
+    assert.equal(lines.some((line) => line.key.startsWith("message-gap-")), false);
+    assert.equal(lines.find((line) => line.key === "prompt-rule")?.text.length, 100);
+    // The activity row animates with the single shared spinner, so assert the
+    // glyph comes from that set instead of pinning one time-dependent frame.
+    const activityPrefix = lines.find((line) => line.key === "activity")?.prefix ?? "";
+    assert.equal(activityPrefix.endsWith(" "), true);
+    assert.ok((LOADING_GLYPHS as readonly string[]).includes(activityPrefix.trim()));
+    assert.match(lines.find((line) => line.key === "activity")?.text ?? "", /Finalizing response/);
+    // The status row carries its own colored segments (marker included), which
+    // is what lets the ANSI footer match the Ink StatusBar segment for segment.
+    const status = lines.find((line) => line.key === "status");
+    assert.equal(status?.prefix, undefined);
+    assert.equal(status?.segments?.[0]?.role, "marker");
+    assert.match(status?.text ?? "", /claude-sonnet · \/workspace · Plan mode/);
+  });
+
+  it("keeps the three-row brand header above restored conversation messages", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "restored prompt" });
+
+    const lines = buildTerminalRenderLines(state, { header: {} });
+    const headerRows = lines.filter((line) => line.key.startsWith("header-"));
+
+    assert.equal(headerRows.length, TUI_BRAND_HEADER_HEIGHT);
+    assert.equal(lines.findIndex((line) => line.key === "message-0"), TUI_BRAND_HEADER_HEIGHT);
+  });
+
+  it("shows the active thinking level in wide status metadata", () => {
+    const state = createInitialState("claude-sonnet");
+    const lines = buildTerminalRenderLines(state, {
+      width: 100,
+      header: { title: "Claude Code", cwd: "/workspace" },
+      thinkingLevel: "high",
+    });
+    assert.match(lines.find((line) => line.key === "status")?.text ?? "", /Plan mode · high/);
+  });
+
+  it("keeps model and cwd out of the optional title row", () => {
+    const state = createInitialState("claude-sonnet");
+    const lines = buildTerminalRenderLines(state, { header: { title: "Claude Code", cwd: "/workspace" } });
+    assert.deepEqual(lines.filter((line) => line.key.startsWith("header-")), [
+      { key: "header-spark-top", text: TUI_BRAND_SPARK, prefix: "  ", style: "assistant", bold: true, tone: "running" },
+      { key: "header-title", text: "Claude Code", prefix: `${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}  `, prefixTone: "running", style: "assistant", bold: true },
+      { key: "header-spark-bottom", text: TUI_BRAND_SPARK, prefix: "  ", style: "assistant", bold: true, tone: "running" },
+    ]);
+  });
+
+  it("renders tool output as a nested Claude-style activity row", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "inspect" });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "tool_start", call: { id: "tool-1", name: "read", arguments: { path: "src/app.tsx" } } } });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "tool_end", call: { id: "tool-1", name: "read", arguments: { path: "src/app.tsx" } }, result: { content: "line one\nline two", isError: false } } });
+    const lines = buildTerminalRenderLines(state);
+    const tool = lines.find((line) => line.key.endsWith("-tool"));
+    assert.match(tool?.text ?? "", /Read\(src\/app\.tsx\)/);
+    assert.equal(tool?.prefix, "✓ ");
+    assert.equal(lines.find((line) => line.key.endsWith("-result-0"))?.prefix, "  ├─ ");
+  });
+
+  it("keeps standalone errors readable instead of painting the full row red", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "error", message: "The provider returned a long diagnostic" } });
+    const error = buildTerminalRenderLines(state).find((line) => line.key.endsWith("-error"));
+    assert.equal(error?.prefix, "✗ ");
+    assert.equal(error?.prefixTone, "error");
+    assert.equal(error?.style, "assistant");
+    assert.equal(error?.tone, undefined);
+  });
+
+  it("renders completed tools as compact status rows instead of full-width cards", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "tool_start", call: { id: "tool-1", name: "read", arguments: { path: "src/app.tsx" } } } });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "tool_end", call: { id: "tool-1", name: "read", arguments: { path: "src/app.tsx" } }, result: { content: "line one\nline two", isError: false } } });
+    const width = 36;
+    const lines = buildTerminalRenderLines(state, { width });
+    const rows = lines.filter((line) => line.key.includes("message-0-tool") || line.key.includes("message-0-result"));
+    // One status row plus a connected tree gutter for the result: no box chrome, so
+    // the ANSI projection matches the Ink tool row at any terminal width.
+    assert.equal(rows[0]?.prefix, "✓ ");
+    assert.match(rows[0]?.text ?? "", /^Read\(src\/app\.tsx\)/);
+    assert.equal(rows[1]?.prefix, "  ├─ ");
+    assert.equal(rows[2]?.prefix, "  └─ ");
+    assert.equal(rows.some((line) => /[╭╰]/.test(line.text)), false);
+    for (const line of rows) assert.ok(terminalStringWidth(`${line.prefix ?? ""}${line.text}`) <= width);
+  });
+
+  it("uses append-only transcript rows and a live tail in scrollback mode", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "inspect" });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "tool_start", call: { id: "tool-1", name: "read", arguments: { path: "src/app.tsx" } } } });
+
+    const lines = buildTerminalRenderLines(state, {
+      width: 40,
+      scrollback: true,
+      header: { title: "Claude Code", cwd: "/workspace" },
+      input: "",
+    });
+
+    const firstLive = lines.findIndex((line) => line.ephemeral);
+    assert.ok(firstLive > 0);
+    assert.equal(lines.slice(0, firstLive).some((line) => line.text.at(0) === "╭"), false);
+    assert.equal(lines.find((line) => line.key === "message-1-tool")?.prefix, "⟳ ");
+    assert.ok(lines.slice(firstLive).every((line) => line.ephemeral));
+  });
+
+  it("keeps the complete transcript in scrollback mode beyond the fullscreen cap", () => {
+    let state = createInitialState("test-model");
+    for (let index = 0; index < 205; index++) {
+      state = tuiReducer(state, { type: "USER_MESSAGE", text: `message-${index}` });
+    }
+
+    const lines = buildTerminalRenderLines(state, { scrollback: true, input: "" });
+    assert.ok(lines.some((line) => line.text.includes("message-0")));
+    assert.ok(lines.some((line) => line.text.includes("message-204")));
+    assert.equal(lines.filter((line) => line.text.includes("message-0")).length, 1);
+  });
+
+  it("truncates oversized user prompts with head and tail context", () => {
+    const prompt = `${"head\n".repeat(900)}${"middle\n".repeat(900)}${"tail\n".repeat(900)}`;
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: prompt });
+
+    const user = buildTerminalRenderLines(state, { scrollback: true }).find((line) => line.key === "message-0");
+    assert.ok(user);
+    assert.match(user.text, /head/);
+    assert.match(user.text, /tail/);
+    assert.match(user.text, /\+\d+ lines/);
+    assert.ok(user.text.length < prompt.length);
+  });
+
+  it("moves Todo updates into the live tail without blocking transcript history", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, {
+      type: "SET_TODO_ITEMS",
+      revision: 1,
+      todos: [{ id: "task-1", content: "inspect", activeForm: "inspecting", status: "in_progress", source: "model" }],
+    });
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "history" });
+
+    const lines = buildTerminalRenderLines(state, { width: 40, scrollback: true, input: "" });
+    const firstLive = lines.findIndex((line) => line.ephemeral);
+    assert.ok(firstLive > 0);
+    assert.ok(lines.slice(firstLive).some((line) => line.key.startsWith("panel-")));
+    assert.ok(lines.slice(0, firstLive).some((line) => line.text.includes("history")));
+  });
+
+  it("renders permission and plan overlays as English bordered cards", () => {
+    const permission = permissionPanelRenderLines({ requestId: "p", sessionId: "s", tool: "bash", arguments: { command: "npm test" }, risk: "high" });
+    assert.equal(permission[0]?.prefix, "╭─ ");
+    assert.match(permission.map((line) => line.text).join(" "), /Permission required.*npm test.*Do you want to proceed\?.*Allow.*Deny/);
+    const plan = planApprovalRenderLines({ id: "p", sessionId: "s", createdAt: 0, summary: "Run checks", steps: [{ id: "s1", order: 1, description: "Run tests", tool: "bash", arguments: {}, risk: "safe", rationale: "verify", status: "pending" }], risks: [], requiredTools: [], status: "pending_review" });
+    assert.match(plan.map((line) => line.text).join(" "), /Plan approval.*Run checks.*Approve.*Reject/);
+    assert.equal(plan.at(-1)?.prefix, "╰─ ");
+  });
+
+  it("keeps full-width card borders stable on the terminal path", () => {
+    const width = 32;
+    const permission = permissionPanelRenderLines({ requestId: "p", sessionId: "s", tool: "bash", arguments: { command: "npm test" }, risk: "high" }, width);
+    const plan = planApprovalRenderLines({ id: "p", sessionId: "s", createdAt: 0, summary: "Run checks", steps: [], risks: [], requiredTools: [], status: "pending_review" }, width);
+    for (const line of [...permission, ...plan]) assert.equal(terminalStringWidth(`${line.prefix ?? ""}${line.text}`), width);
+    assert.equal(permission[0]?.text.at(0), "╭");
+    assert.equal(permission.at(-1)?.text.at(-1), "╯");
+  });
+
+  it("keeps the Claude chrome within a short terminal frame", () => {
+    const state = createInitialState("test-model");
+    const lines = buildTerminalRenderLines(state, {
+      width: 20,
+      height: 4,
+      header: { title: "Claude Code", cwd: "/tmp" },
+      promptRule: true,
+      input: "go",
+    });
+
+    assert.ok(lines.length <= 4);
+    assert.equal(lines.at(-1)?.key, "input-0");
+  });
+
+  it("fills the frame and pins the prompt to the requested height", () => {
+    const state = createInitialState("test-model");
+    const lines = buildTerminalRenderLines(state, {
+      width: 30,
+      height: 10,
+      header: { title: "Claude Code", cwd: "/tmp" },
+      promptRule: true,
+      input: "go",
+    });
+
+    assert.equal(lines.length, 10);
+    assert.equal(lines.at(-1)?.key, "input-0");
+    assert.ok(lines.some((line) => line.key.startsWith("frame-spacer-")));
+  });
+
+  it("truncates long status context without adding a wrapped status row", () => {
+    const state = createInitialState("very-long-model-name");
+    const lines = buildTerminalRenderLines(state, {
+      width: 20,
+      height: 8,
+      header: { title: "Claude Code", cwd: "/Users/chenjiaxu/Project/agent loop/mini-agent" },
+      promptRule: true,
+      input: "",
+    });
+    const status = lines.find((line) => line.key === "status");
+    assert.ok(status);
+    assert.ok(terminalStringWidth(`${status.prefix ?? ""}${status.text}`) <= 20);
+    assert.match(status.text, /mini-agent|…/);
+    assert.equal(lines.at(-1)?.key, "input-0");
+  });
+
+  it("uses scrollOffset to move the visible transcript window", () => {
+    let state = createInitialState("test-model");
+    for (const text of ["one", "two", "three", "four", "five"]) {
+      state = tuiReducer(state, { type: "USER_MESSAGE", text });
+    }
+    const bottom = buildTerminalRenderLines(state, {
+      width: 30,
+      height: 6,
+      scrollOffset: 0,
+      input: "",
+    });
+    const scrolled = buildTerminalRenderLines(state, {
+      width: 30,
+      height: 6,
+      scrollOffset: 2,
+      input: "",
+    });
+    assert.ok(bottom.some((line) => line.text === "five"));
+    assert.equal(scrolled.some((line) => line.text === "five"), false);
+    assert.equal(bottom.at(-1)?.key, "input-0");
+    assert.equal(scrolled.at(-1)?.key, "input-0");
+  });
+
+  it("does not replace clipped conversation rows with a row-count hint", () => {
+    let state = createInitialState("test-model");
+    for (const text of ["one", "two", "three", "four"]) {
+      state = tuiReducer(state, { type: "USER_MESSAGE", text });
+    }
+    const lines = buildTerminalRenderLines(state, {
+      width: 30,
+      height: 6,
+      scrollOffset: 2,
+      input: "",
+    });
+    assert.ok(!lines.some((line) => line.text.includes("还有")));
+    assert.equal(lines.at(-1)?.key, "input-0");
+  });
+
+  it("renders subagents as Claude Code progress rows instead of a card", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_start",
+        id: "agent-1",
+        task: "Inspect the workspace",
+        profile: "researcher",
+        depth: 1,
+        runtime: {
+          model: "test-model",
+          provider: "faux",
+          baseUrl: "http://localhost",
+          thinkingMode: "fixed",
+          modelSwitchSucceeded: true,
+        },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_event",
+        id: "agent-1",
+        depth: 1,
+        inner: {
+          type: "tool_start",
+          call: { id: "read-1", name: "read", arguments: { path: "src/app.tsx" } },
+        },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_event",
+        id: "agent-1",
+        depth: 1,
+        inner: {
+          type: "tool_end",
+          call: { id: "read-1", name: "read", arguments: { path: "src/app.tsx" } },
+          result: { content: "ok", isError: false },
+        },
+      },
+    });
+
+    const message = state.messages[0];
+    assert.equal(message?.kind, "subagent_call");
+    if (!message || message.kind !== "subagent_call") return;
+    const rows = subagentRenderLines(message, 0);
+    assert.match(rows[0]?.text ?? "", /researcher \(Inspect the workspace\) · 1 tool use/);
+    assert.equal(rows[0]?.prefix, "⏺ ");
+    assert.equal(rows[0]?.ephemeral, true);
+    assert.match(rows.at(-1)?.text ?? "", /Read\(src\/app\.tsx\)/);
+    assert.ok(!rows.some((row) => row.text.includes("╭") || row.text.includes("╰")));
+  });
+
+  it("hides the subagent scaffold and keeps long task titles single-line", () => {
+    const task = `You are the researcher subagent for a parent orchestrator.\nGather only the key facts.\n\nUser request:\n${"inspect the workspace ".repeat(30)}`;
+    const visible = displaySubagentTask(task);
+    assert.doesNotMatch(visible, /You are|parent orchestrator|Gather only/);
+    assert.doesNotMatch(visible, /\n/);
+    assert.ok(visible.length <= 180);
+  });
+
+  it("cleans provider-normalized subagent scaffolds and namespaced tools", () => {
+    const task = "You are the researcher subagent for a parent orchestrator.\r\nGather only the key facts needed for the parent to continue.\r\nDo not implement code changes.\r\n\r\nUser request：\r\nInspect the terminal layout";
+    assert.equal(displaySubagentTask(task), "Inspect the terminal layout");
+    assert.equal(displaySubagentTask("You are the researcher subagent.\\nUser request:\\nInspect the terminal layout"), "Inspect the terminal layout");
+    assert.equal(displaySubagentTask("You are a researcher subagent\nGather only the key facts\nInspect the terminal layout"), "Inspect the terminal layout");
+    assert.equal(displaySubagentTask("task=Inspect the terminal layout"), "Inspect the terminal layout");
+    assert.equal(isSubagentToolName("functions.subagent"), true);
+    assert.equal(isSubagentToolName("mcp.subagent_batch"), true);
+    assert.equal(isSubagentToolName("assistant"), false);
+  });
+
+  it("does not truncate a normal task that mentions request syntax", () => {
+    assert.equal(displaySubagentTask("Explain the request: marker in this task"), "Explain the request: marker in this task");
+  });
+
+  it("recognizes only serialized subagent calls as assistant protocol noise", () => {
+    assert.equal(isSubagentProtocolText("subagent(task=Inspect files, profile=researcher)"), true);
+    assert.equal(isSubagentProtocolText("functions.subagent(task=Inspect files, profile=researcher)"), true);
+    assert.equal(isSubagentProtocolText("Please explain subagent(task=Inspect files)"), false);
+    assert.equal(isSubagentProtocolText("The task is complete."), false);
+  });
+
+  it("uses tree connectors and compact token counts for expanded subagents", () => {
+    const message = {
+      kind: "subagent_call" as const,
+      id: "agent-2",
+      task: "Review changes",
+      profile: "reviewer",
+      depth: 1,
+      status: "done" as const,
+      totalTokens: 3200,
+      durationMs: 1250,
+      innerEvents: [
+        { type: "tool_start", label: "▶ read", detail: '{"path":"a.ts"}' },
+        { type: "tool_end", label: "✓ read", detail: "ok" },
+      ],
+      toolCallCount: 1,
+      startedAt: 0,
+      expanded: true,
+    };
+    const rows = subagentRenderLines(message, "x");
+    assert.match(rows[0]?.text ?? "", /3\.2k tokens/);
+    assert.equal(rows[1]?.prefix, "  ├─ ");
+    assert.equal(rows[2]?.prefix, "  └─ ");
+
+    const completedRows = subagentRenderLines({ ...message, expanded: false, result: "review complete" }, "done");
+    assert.match(completedRows[1]?.text ?? "", /Done \(1 tool use · 3\.2k tokens · 1\.3s\)/);
+    assert.equal(completedRows[2]?.prefix, "     ");
+  });
+
+  it("keeps a failed subagent title neutral while emphasizing its status", () => {
+    const message = {
+      kind: "subagent_call" as const,
+      id: "agent-failed",
+      task: "Audit the external repository loading and spinner presentation",
+      profile: "researcher",
+      depth: 1,
+      status: "error" as const,
+      innerEvents: [],
+      toolCallCount: 6,
+      totalTokens: 16_000,
+      startedAt: 0,
+      expanded: false,
+      result: "No final assistant summary was produced. Recovered recent tool output: command failed",
+    };
+    const rows = subagentRenderLines(message, "failed");
+    assert.equal(rows[0]?.tone, undefined);
+    assert.equal(rows[0]?.prefixTone, "error");
+    assert.equal(rows[1]?.tone, "error");
+    assert.match(rows[2]?.text ?? "", /^Recovered:/);
+    assert.equal(rows[2]?.tone, undefined);
+  });
+
+  it("counts active tools and omits assistant bookkeeping rows", () => {
+    const message = {
+      kind: "subagent_call" as const,
+      id: "agent-active",
+      task: "Inspect files",
+      profile: "researcher",
+      depth: 1,
+      status: "running" as const,
+      innerEvents: [
+        { type: "assistant" as const, label: "💬 assistant" },
+        { type: "tool_start" as const, label: "▶ read", detail: '{"path":"a.ts"}' },
+      ],
+      toolCallCount: 0,
+      startedAt: 0,
+      expanded: true,
+    };
+    const rows = subagentRenderLines(message, "active");
+    assert.match(rows[0]?.text ?? "", /1 tool use/);
+    assert.ok(!rows.some((row) => row.text.includes("assistant")));
+    assert.match(rows.at(-1)?.text ?? "", /Read\(a\.ts\)/);
+  });
+
+  it("does not duplicate the protocol subagent tool row", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "tool_start",
+        call: { id: "parent-call", name: "subagent", arguments: { task: "internal scaffold", profile: "researcher" } },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_start",
+        id: "child-call",
+        task: "You are the researcher subagent.\n\nUser request:\nCheck the upgrade list",
+        profile: "researcher",
+        depth: 1,
+        runtime: {
+          model: "test-model",
+          provider: "faux",
+          baseUrl: "http://localhost",
+          thinkingMode: "fixed",
+          modelSwitchSucceeded: true,
+        },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant", message: { role: "assistant", content: "subagent(task=internal scaffold, profile=researcher)" } },
+    });
+    const lines = buildTerminalRenderLines(state);
+    assert.equal(lines.some((line) => line.text.includes("internal scaffold")), false);
+    assert.ok(lines.some((line) => line.text === "researcher (Check the upgrade list) · 0 tool uses"));
+    assert.equal(lines.some((line) => /\bsubagent\s*\(/i.test(line.text)), false);
+    assert.equal(lines.some((line) => /You are the researcher/i.test(line.text)), false);
+    assert.equal(displaySubagentTask("You are a researcher subagent\n\nUser request:\nInspect files"), "Inspect files");
+  });
+});

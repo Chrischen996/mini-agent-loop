@@ -1,16 +1,19 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { type CommandDef } from "../components/FileAutocomplete.tsx";
-import { PATH_COMMANDS } from "../slash-commands.ts";
+import { ARGUMENT_COMMANDS, PATH_COMMANDS } from "../slash-commands.ts";
 import { listCandidates } from "../file-completion.ts";
 import { modelChoices } from "../model-command.ts";
 import { type AcMode, type FileAcTrigger } from "../input-utils.ts";
 import type { ModelRef } from "../../models.ts";
+import type { PersistedSessionMeta } from "../../session-store.ts";
+import type { ResumeMessageCandidate } from "../session-serialization.ts";
 import type { ModelSetupState, PendingProfileSetup, ProfileListState } from "../types.ts";
 import {
   currentAutocompleteNavIndex,
   isOverlayAcMode,
   resolveAutocompleteInput,
   resolveAutocompleteNav,
+  sessionListCommand,
   type AutocompleteNavKey,
 } from "../autocomplete.ts";
 
@@ -19,6 +22,7 @@ export type UseAutocompleteOptions = {
   cwd: string;
   setInput: (value: string) => void;
   resetInputCursorToEnd: () => void;
+  listSessions?: () => Promise<PersistedSessionMeta[]>;
 };
 
 export function useAutocomplete({
@@ -26,12 +30,17 @@ export function useAutocomplete({
   cwd,
   setInput,
   resetInputCursorToEnd,
+  listSessions,
 }: UseAutocompleteOptions) {
   const [acMode, setAcMode] = useState<AcMode>(null);
   const [acIndex, setAcIndex] = useState(0);
   const [cmdCandidates, setCmdCandidates] = useState<CommandDef[]>([]);
   const [fileCandidates, setFileCandidates] = useState<string[]>([]);
   const [modelCandidates, setModelCandidates] = useState<string[]>([]);
+  const [sessionCandidates, setSessionCandidates] = useState<PersistedSessionMeta[]>([]);
+  const [sessionCommand, setSessionCommand] = useState<"resume" | "sessions" | undefined>();
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [resumeMessageCandidates, setResumeMessageCandidates] = useState<ResumeMessageCandidate[]>([]);
   const [modelContextWindows, setModelContextWindows] = useState<Record<string, number>>({});
   const [modelQuery, setModelQuery] = useState("");
   const [modelSetup, setModelSetup] = useState<ModelSetupState | undefined>();
@@ -40,12 +49,19 @@ export function useAutocomplete({
   const [fileFragment, setFileFragment] = useState("");
   const fileTriggerRef = useRef<FileAcTrigger | null>(null);
   const acDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const acRequestRef = useRef(0);
+  const sessionListRequestRef = useRef<"resume" | "sessions" | null>(null);
 
   const clearAc = useCallback(() => {
+    acRequestRef.current += 1;
     setAcMode(null);
     setCmdCandidates([]);
     setFileCandidates([]);
     setModelCandidates([]);
+    setSessionCandidates([]);
+    setSessionCommand(undefined);
+    setSessionLoading(false);
+    setResumeMessageCandidates([]);
     setModelContextWindows({});
     setModelQuery("");
     setModelSetup(undefined);
@@ -54,10 +70,58 @@ export function useAutocomplete({
     setAcIndex(0);
     setPendingProfileSetup(null);
     setProfileListState(null);
+    sessionListRequestRef.current = null;
   }, []);
 
   useEffect(() => {
     if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
+    const requestedSessionCommand = sessionListCommand(input);
+    if (requestedSessionCommand && listSessions) {
+      // Changing acMode to session-list causes this effect to run again. The
+      // input has not changed, so reuse the in-flight request instead of
+      // scanning the session directory a second time.
+      if (sessionListRequestRef.current === requestedSessionCommand && acMode === "session-list") {
+        return () => {
+          if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
+        };
+      }
+      const requestId = ++acRequestRef.current;
+      sessionListRequestRef.current = requestedSessionCommand;
+      setCmdCandidates([]);
+      setFileCandidates([]);
+      setModelCandidates([]);
+      setModelContextWindows({});
+      setModelQuery("");
+      setFileFragment("");
+      fileTriggerRef.current = null;
+      setSessionCommand(requestedSessionCommand);
+      setSessionCandidates([]);
+      setSessionLoading(true);
+      setAcMode("session-list");
+      setAcIndex(0);
+      void listSessions().then((sessions) => {
+        if (requestId !== acRequestRef.current) return;
+        setSessionCandidates(sessions);
+        setSessionLoading(false);
+      }).catch(() => {
+        if (requestId !== acRequestRef.current) return;
+        setSessionCandidates([]);
+        setSessionLoading(false);
+      });
+      return () => {
+        // React runs this cleanup before the next effect. Keep the request
+        // alive while the same session command is still active; the next
+        // effect invalidates it when the input leaves the picker or changes
+        // to another session command. clearAc() can invalidate it earlier.
+        if (sessionListRequestRef.current !== requestedSessionCommand) {
+          acRequestRef.current += 1;
+        }
+        if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
+      };
+    }
+
+    const requestId = ++acRequestRef.current;
+    sessionListRequestRef.current = null;
 
     const resolution = resolveAutocompleteInput(input, acMode);
 
@@ -71,37 +135,66 @@ export function useAutocomplete({
     }
 
     if (resolution.kind === "sticky") return;
-
-    if (resolution.kind === "command") {
-      setCmdCandidates(resolution.candidates);
-      setFileCandidates([]);
-      setAcMode(resolution.candidates.length > 0 ? "command" : null);
-      setAcIndex(0);
+    // Typing a fresh prompt while the rewind picker is open means the user is
+    // abandoning it: clear the overlay so the typed text keeps working instead
+    // of being swallowed by a rewind on the next Enter. The picker stays open
+    // while the input is empty (the "choose history point" rows are driven by
+    // arrow keys, not typing).
+    if (acMode === "resume-messages") {
+      if (input.trim()) clearAc();
       return;
     }
 
+    if (resolution.kind === "command") {
+      acDebounceRef.current = setTimeout(() => {
+        if (requestId !== acRequestRef.current) return;
+        setCmdCandidates(resolution.candidates);
+        setFileCandidates([]);
+        setSessionCandidates([]);
+        setSessionCommand(undefined);
+        setSessionLoading(false);
+        setAcMode(resolution.candidates.length > 0 ? "command" : null);
+        setAcIndex(0);
+      }, 80);
+      return () => {
+        if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
+      };
+    }
+
     if (resolution.kind === "model") {
-      const choices = modelChoices(resolution.query);
-      setModelQuery(resolution.query);
-      setModelCandidates(choices.references);
-      setModelContextWindows(choices.contextWindows);
-      setCmdCandidates([]);
-      setFileCandidates([]);
-      setAcMode("model");
-      setAcIndex(0);
-      return;
+      acDebounceRef.current = setTimeout(() => {
+        if (requestId !== acRequestRef.current) return;
+        const choices = modelChoices(resolution.query);
+        setModelQuery(resolution.query);
+        setModelCandidates(choices.references);
+        setModelContextWindows(choices.contextWindows);
+        setCmdCandidates([]);
+        setFileCandidates([]);
+        setSessionCandidates([]);
+        setSessionCommand(undefined);
+        setSessionLoading(false);
+        setAcMode("model");
+        setAcIndex(0);
+      }, 80);
+      return () => {
+        if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
+      };
     }
 
     if (resolution.kind === "file") {
       fileTriggerRef.current = resolution.trigger;
       setFileFragment(resolution.trigger.fragment);
       setCmdCandidates([]);
+      setSessionCandidates([]);
+      setSessionCommand(undefined);
+      setSessionLoading(false);
       acDebounceRef.current = setTimeout(async () => {
         const candidates = await listCandidates(cwd, resolution.trigger.fragment);
+        if (requestId !== acRequestRef.current) return;
         setFileCandidates(candidates);
         setAcMode(candidates.length > 0 ? "file" : null);
         setAcIndex(0);
-      }, 150);
+      }, 300);
       return () => {
         if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
       };
@@ -110,15 +203,16 @@ export function useAutocomplete({
     clearAc();
 
     return () => {
+      acRequestRef.current += 1;
       if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
     };
-  }, [input, cwd, clearAc, acMode]);
+  }, [input, cwd, clearAc, acMode, listSessions]);
 
   const acceptCommand = useCallback(
     (idx: number) => {
       const cmd = cmdCandidates[idx];
       if (!cmd) return;
-      if (PATH_COMMANDS.has(cmd.name)) {
+      if (PATH_COMMANDS.has(cmd.name) || ARGUMENT_COMMANDS.has(cmd.name)) {
         setInput(`/${cmd.name} `);
       } else {
         setInput(`/${cmd.name}`);
@@ -175,6 +269,13 @@ export function useAutocomplete({
     [acMode, cwd],
   );
 
+  const openResumeMessages = useCallback((candidates: ResumeMessageCandidate[]) => {
+    setResumeMessageCandidates([...candidates]);
+    setAcIndex(0);
+    setInput("");
+    setAcMode("resume-messages");
+  }, [setInput]);
+
   const openModelPicker = useCallback(
     (query = "", models?: ModelRef[]) => {
       const choices = modelChoices(query, models);
@@ -200,6 +301,7 @@ export function useAutocomplete({
         files: fileCandidates.length,
         models: modelCandidates.length,
         profiles: profileListState?.profiles.length ?? 0,
+        sessions: acMode === "resume-messages" ? resumeMessageCandidates.length : sessionCandidates.length,
       });
 
       switch (action.type) {
@@ -225,6 +327,12 @@ export function useAutocomplete({
         case "accept-model":
           acceptModel(acIndex);
           return true;
+        case "accept-session": {
+          const selected = sessionCandidates[acIndex];
+          if (selected) setInput(`/resume ${selected.id}`);
+          clearAc();
+          return true;
+        }
         case "cancel":
           if (action.clearInput) setInput("");
           clearAc();
@@ -237,6 +345,8 @@ export function useAutocomplete({
       cmdCandidates.length,
       fileCandidates.length,
       modelCandidates.length,
+      sessionCandidates,
+      resumeMessageCandidates,
       profileListState,
       acceptCommand,
       acceptFile,
@@ -254,6 +364,10 @@ export function useAutocomplete({
     cmdCandidates,
     fileCandidates,
     modelCandidates,
+    sessionCandidates,
+    resumeMessageCandidates,
+    sessionCommand,
+    sessionLoading,
     modelContextWindows,
     modelQuery,
     modelSetup,
@@ -269,6 +383,7 @@ export function useAutocomplete({
     acceptModel,
     handleTabAt,
     handleAutocompleteKey,
+    openResumeMessages,
     openModelPicker,
   };
 }

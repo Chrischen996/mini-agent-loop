@@ -25,6 +25,7 @@ import {
   type RetryableErrorType,
   type StreamChatUsage,
   LlmTimeoutError,
+  StreamTruncatedError,
   ThinkingCapabilityError,
 } from "./llm/index.ts";
 import { resolveModel } from "./models.ts";
@@ -232,6 +233,12 @@ export type AgentRuntimeRef = {
 
 export type LoopEvent =
   | { type: "assistant_delta"; text: string; kind: "reasoning" | "answer" }
+  /**
+   * Coalesced streaming update emitted by TurnEventBuffer.flush(): at most
+   * one reasoning chunk and one answer chunk per flush, so consumers apply
+   * both in a single state update instead of one update per raw delta.
+   */
+  | { type: "assistant_deltas"; reasoning?: string; answer?: string }
   | { type: "context_compacted"; beforeTokens: number; afterTokens: number; reason: string }
   | { type: "assistant"; message: AssistantMessage; usage?: StreamChatUsage }
   | { type: "error"; message: string }
@@ -276,7 +283,7 @@ export type LoopEvent =
   | { type: "permission_required"; request: PermissionRequest }
   | { type: "plan_act_event"; event: PlanActEvent }
   | { type: "done"; messages: AgentMessage[] }
-  | { type: "attempt_reset"; reason: "reasoning_only"; attempt: number }
+  | { type: "attempt_reset"; reason: "reasoning_only" | "stream_truncated"; attempt: number }
   | {
       type: "model_switched";
       previousModel: string;
@@ -310,7 +317,6 @@ const PERMISSION_MODE_MARKER = "\n[MODE]\n";
 /** Mode-specific suffix appended to the system prompt. */
 const MODE_SUFFIX: Record<PermissionMode, string> = {
   plan: "mode=plan. Read-only tools only. No writes, dangerous bash, or MCP. Output a plan first.",
-  approval: "mode=approval. Safe reads may run; writes, dangerous bash, and remote tools pause for explicit approval.",
   bypass: "mode=bypass. All tools run without approval; sandbox rules still apply.",
 };
 
@@ -324,7 +330,12 @@ const PHASE_SUFFIX: Record<SessionPhase, string> = {
   failed: "\n[PHASE:failed] Execution failed.",
 };
 
-function applyPermissionModePrompt(messages: AgentMessage[], mode: PermissionMode): void {
+/**
+ * In-place update of the permission-mode suffix on the system prompt.
+ * Used by Shift+Tab mode cycling so the conversation history (user/assistant/
+ * tool messages) is preserved — only the `[MODE]` marker line is rewritten.
+ */
+export function applyPermissionModePrompt(messages: AgentMessage[], mode: PermissionMode): void {
   const system = messages[0];
   if (!system || system.role !== "system" || typeof system.content !== "string") return;
   const base = system.content.split(PERMISSION_MODE_MARKER, 1)[0]!.trimEnd();
@@ -369,19 +380,12 @@ function mergeLoopSignals(...signals: (AbortSignal | undefined)[]): {
   signal?: AbortSignal;
   cleanup: () => void;
 } {
-  const active = signals.filter((value): value is AbortSignal => Boolean(value));
+  const active = [...new Set(
+    signals.filter((value): value is AbortSignal => Boolean(value)),
+  )];
   if (active.length === 0) return { cleanup: () => {} };
   if (active.length === 1) return { signal: active[0], cleanup: () => {} };
-  const controller = new AbortController();
-  const cleanups = active.map((signal) => {
-    const abort = () => {
-      if (!controller.signal.aborted) controller.abort(signal.reason);
-    };
-    if (signal.aborted) abort();
-    signal.addEventListener("abort", abort, { once: true });
-    return () => signal.removeEventListener("abort", abort);
-  });
-  return { signal: controller.signal, cleanup: () => cleanups.forEach((remove) => remove()) };
+  return { signal: AbortSignal.any(active), cleanup: () => {} };
 }
 
 /** Maximum characters of the injected memory section (Claude Code caps its MEMORY.md index similarly). */
@@ -418,8 +422,7 @@ export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string, memo
     "",
     "### Permission Mode Awareness",
     "- plan mode: you CANNOT write. Say \"我当前处于计划模式，无权限改代码。\" and output a clear plan for user review.",
-    "- approval mode: safe reads may run; writes, dangerous bash, and remote tools pause until the user explicitly allows or denies them.",
-    "- bypass mode: all registered tools may run without interactive approval; sandbox rules still apply.",
+    "- bypass mode: all registered tools may run without approval; sandbox rules still apply.",
     "- When a tool call is blocked, adapt and inform the user about the mode constraint.",
     "",
     "### Security",
@@ -451,6 +454,20 @@ export function createAgentHistory(
 ): AgentMessage[] {
   const prompt = systemPrompt ?? buildSystemPrompt(mode);
   return [{ role: "system", content: prompt }];
+}
+
+/**
+ * Rebuild the base prompt for a resumed session without dropping compacted
+ * summaries or other transcript-level system messages.
+ */
+export function restoreAgentHistory(
+  initialMessages: AgentMessage[],
+  systemPrompt: string,
+): AgentMessage[] {
+  const [first, ...rest] = initialMessages;
+  return first?.role === "system"
+    ? [{ ...first, content: systemPrompt }, ...rest]
+    : [{ role: "system", content: systemPrompt }, ...initialMessages];
 }
 
 /** Get the default system prompt for a given permission mode. */
@@ -555,12 +572,9 @@ export async function runAgentLoop(
   if (turnOptions._parentHistory) {
     history = inheritHistoryWithPrompt(turnOptions._parentHistory, prompt);
   } else if (initialMessages && initialMessages.length > 0) {
-    // Resumed session: rebuild the system prompt (it may have changed between
-    // runs) and keep the restored conversation after it.
-    const [first, ...rest] = initialMessages;
-    history = first?.role === "system"
-      ? [{ ...first, content: prompt }, ...rest]
-      : [{ role: "system", content: prompt }, ...initialMessages];
+    // Resumed session: rebuild the base prompt while retaining transcript
+    // system messages such as compacted conversation summaries.
+    history = restoreAgentHistory(initialMessages, prompt);
   } else {
     history = createAgentHistory(prompt, activePermissionMode);
   }
@@ -882,6 +896,11 @@ async function runAgentTurnInternal(
   let reasoningOnlyRetries = 0;
   const retryCoordinator = new LlmRetryCoordinator();
   let timeoutRetries = 0;
+  let truncatedStreamRetries = 0;
+  // Consecutive-truncation budget. Reset on any successful turn so a flaky
+  // provider can be retried indefinitely across the session, but a hard
+  // outage fails fast instead of spinning.
+  const MAX_TRUNCATED_STREAM_RETRIES = 2;
 
   if (initialDecision) {
     onEvent?.({
@@ -1482,6 +1501,25 @@ async function runAgentTurnInternal(
           continue;
         }
         throw err;
+      }
+      // Stream cut off mid-generation (no [DONE]/finish_reason). Tool calls
+      // have not been executed yet, so replaying the request is side-effect
+      // free. Reset the UI's streamed text first so the retry doesn't
+      // duplicate the partial answer, then re-run the same turn.
+      if (err instanceof StreamTruncatedError && truncatedStreamRetries < MAX_TRUNCATED_STREAM_RETRIES) {
+        truncatedStreamRetries += 1;
+        onEvent?.({ type: "attempt_reset", reason: "stream_truncated", attempt: truncatedStreamRetries });
+        turn -= 1;
+        continue;
+      }
+      if (err instanceof StreamTruncatedError) {
+        throw new Error(
+          `LLM stream truncated ${MAX_TRUNCATED_STREAM_RETRIES + 1} times in a row; ` +
+          "provider connection is unstable. " +
+          (err.partialContent.trim()
+            ? `Partial answer before disconnect: "${err.partialContent.slice(0, 200)}"`
+            : "No content was received."),
+        );
       }
       const maxRetries = currentContext?.maxCompactionRetries ?? 1;
       if (isContextOverflowError(err) && overflowRetries < maxRetries) {

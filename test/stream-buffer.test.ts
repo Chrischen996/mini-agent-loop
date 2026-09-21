@@ -31,11 +31,12 @@ describe("TurnEventBuffer", () => {
     buffer.handle(runId, { type: "assistant_delta", kind: "answer", text: "a1" });
     buffer.handle(runId, { type: "done", messages: [] });
 
-    assert.deepEqual(events.map((event) => event.type), ["assistant_delta", "assistant_delta", "done"]);
-    assert.deepEqual(events.slice(0, 2).map((event) => event.type === "assistant_delta" ? [event.kind, event.text] : []), [
-      ["reasoning", "r1r2"],
-      ["answer", "a1"],
-    ]);
+    // A single flush coalesces pending reasoning+answer deltas into one
+    // `assistant_deltas` event so the consumer applies both in one update.
+    assert.deepEqual(events.map((event) => event.type), ["assistant_deltas", "done"]);
+    const merged = events[0] as Extract<LoopEvent, { type: "assistant_deltas" }>;
+    assert.equal(merged.reasoning, "r1r2");
+    assert.equal(merged.answer, "a1");
     assert.equal(buffer.isActive(runId), false);
   });
 

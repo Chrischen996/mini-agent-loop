@@ -12,9 +12,12 @@ import express, {
 import multer from "multer";
 import { documentTextPart, MAX_ATTACHMENT_BYTES } from "./attachments.ts";
 import { contentAsString, imagePart, textPart } from "./content.ts";
+import { adaptHistoryForModel, mergeConsecutiveSameRole } from "./message-adapter.ts";
 import { loadInstructionBundle } from "./agents-md.ts";
 import { DocumentStore } from "./documents.ts";
-import { SessionStore, type PersistedSession } from "./session-store.ts";
+import type { PersistedSession } from "./session-store.ts";
+import { SessionManager } from "./session-manager.ts";
+import { sanitizeResumableMessages } from "./session-history.ts";
 import { isAbortError, loadLlmConfigFromEnv, switchLlmModel, type ChatFn, type LlmConfig } from "./llm/index.ts";
 import { getAvailableModels, resolveModel, searchModels } from "./models.ts";
 import { getActiveProfile, loadProfileStore } from "./profile-store.ts";
@@ -40,7 +43,7 @@ import { createDocumentEditTool } from "./tools/document-edit.ts";
 import { createTodoTool, validateTodoSnapshot, type TodoItem } from "./tools/todo.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "./tools/types.ts";
 import type { SandboxRunner } from "./sandbox/types.ts";
-import type { AgentMessage, ContentPart, MessageContent } from "./types.ts";
+import type { AgentMessage, ContentPart, ImageMimeType, MessageContent } from "./types.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
 import type { McpServerStatus } from "./mcp/types.ts";
 import {
@@ -74,7 +77,7 @@ import {
 } from "./think-intensity.ts";
 import { loadThinkingModeFromEnv, type ThinkingMode } from "./thinking-policy.ts";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
-import { PermissionManager, isPermissionMode, type PermissionDecision, type PermissionMode, type PermissionTurnContext } from "./permissions.ts";
+import { PermissionManager, isPermissionMode, removedApprovalModeMessage, type PermissionDecision, type PermissionMode, type PermissionTurnContext } from "./permissions.ts";
 import { planManager } from "./plan-act/plan-manager.ts";
 import { validatePhaseTransition } from "./plan-act/state-machine.ts";
 import { planGenerator } from "./plan-act/plan-generator.ts";
@@ -95,6 +98,17 @@ import {
 import type { PauseGate } from "./orchestration/pause-gate.ts";
 import type { SessionExecutionLease } from "./orchestration/session-gate.ts";
 import { createAutoMemoryHook, isAutoMemoryEnabled } from "./memory/auto-memory.ts";
+import { registerWorkspaceRoutes } from "./server/routes/workspace.ts";
+import { registerMemoryRoutes } from "./server/routes/memory.ts";
+import { registerJobRoutes } from "./server/routes/jobs.ts";
+import { registerGitRoutes } from "./server/routes/git.ts";
+import { registerModelRoutes } from "./server/routes/models.ts";
+import { registerSubagentProfileRoutes } from "./server/routes/subagent-profiles.ts";
+import { registerPlanActRoutes } from "./server/routes/plan-act.ts";
+import { registerPermissionRoutes } from "./server/routes/permissions.ts";
+import { registerSkillRoutes } from "./server/routes/skills.ts";
+import { registerFileRoutes } from "./server/routes/files.ts";
+import { registerPlanDocumentRoutes, planHttpError } from "./server/routes/plan-document.ts";
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 5;
@@ -128,21 +142,11 @@ function planSummaryPayload(plan: PlanDocument): Record<string, unknown> {
   };
 }
 
-function planHttpError(error: unknown): { status: number; message: string } {
-  const message = error instanceof Error ? error.message : String(error);
-  if (/no (saved )?plan/i.test(message) || /no plan found/i.test(message)) {
-    return { status: 404, message };
-  }
-  if (/not approved|rejected|cannot execute/i.test(message)) {
-    return { status: 400, message };
-  }
-  return { status: 500, message };
-}
-
 type Session = {
   id: string;
   messages: AgentMessage[];
   createdAt: number;
+  lastActiveAt?: number;
   busy: boolean;
   /** Per-session model identifier (e.g. "openai/gpt-4o-mini"). */
   modelId?: string;
@@ -155,6 +159,7 @@ type Session = {
   permissionManager: PermissionManager;
   parentSessionId?: string;
   forkedFromMessage?: number;
+  forkedFromMessageId?: string;
   /** Currently resolved skill names for this session. */
   skillNames?: string[];
   /** Current Plan-Act workflow phase. */
@@ -237,6 +242,7 @@ function safeMessage(message: AgentMessage): Record<string, unknown> {
   if (message.role === "system" || message.role === "assistant") {
     return {
       role: message.role,
+      ...(message.id ? { id: message.id } : {}),
       content: message.content,
       ...(message.role === "assistant" && message.toolCalls
         ? {
@@ -250,10 +256,15 @@ function safeMessage(message: AgentMessage): Record<string, unknown> {
     };
   }
   if (message.role === "user") {
-    return { role: "user", content: contentAsString(message.content) };
+    return {
+      role: "user",
+      ...(message.id ? { id: message.id } : {}),
+      content: contentAsString(message.content),
+    };
   }
   return {
     role: "tool",
+    ...(message.id ? { id: message.id } : {}),
     toolCallId: message.toolCallId,
     name: message.name,
     content: contentAsString(message.content),
@@ -450,7 +461,7 @@ function isRetryableError(message: string): boolean {
   );
 }
 
-function sniffImageMime(buffer: Buffer): string | undefined {
+function sniffImageMime(buffer: Buffer): ImageMimeType | undefined {
   if (
     buffer.length >= 8 &&
     buffer[0] === 0x89 &&
@@ -516,27 +527,45 @@ function formatReferencedBlock(paths: string[]): string {
 }
 
 export function truncateSessionMessages(messages: AgentMessage[], visibleCount: number): AgentMessage[] {
-  const system = messages.filter((message) => message.role === "system");
-  const visible = messages.filter((message) => message.role !== "system").slice(0, visibleCount);
-  for (let index = 0; index < visible.length; index += 1) {
-    const message = visible[index];
-    if (message.role !== "assistant" || !message.toolCalls?.length) continue;
-    const expected = new Set(message.toolCalls.map((call) => call.id));
-    const found = new Set<string>();
-    for (const candidate of visible.slice(index + 1)) {
-      if (candidate.role === "tool") found.add(candidate.toolCallId);
-      if (candidate.role === "user" || candidate.role === "assistant") break;
-    }
-    if ([...expected].some((id) => !found.has(id))) {
-      visible.splice(index);
-      break;
-    }
-  }
-  return [...system, ...visible];
+  return sanitizeResumableMessages(messages, visibleCount);
 }
 
 function visibleMessageCount(messages: AgentMessage[]): number {
   return messages.filter((message) => message.role !== "system").length;
+}
+
+function resolveMessageBoundary(
+  visibleMessages: AgentMessage[],
+  body: { messageId?: unknown; messageIndex?: unknown } | undefined,
+  defaultToEnd: boolean,
+): { messageIndex: number } | { error: string } {
+  if (body?.messageId !== undefined && body?.messageIndex !== undefined) {
+    return { error: "messageId and messageIndex are mutually exclusive" };
+  }
+  if (body?.messageId !== undefined) {
+    if (typeof body.messageId !== "string" || body.messageId.length === 0) {
+      return { error: "messageId must be a non-empty string" };
+    }
+    const index = visibleMessages.findIndex((message) => message.id === body.messageId);
+    if (index < 0) return { error: `messageId not found: ${body.messageId}` };
+    // A message ID identifies the last message to retain, while the legacy
+    // index API identifies the number of messages to retain.
+    return { messageIndex: index + 1 };
+  }
+  if (body?.messageIndex === undefined && defaultToEnd) {
+    return { messageIndex: visibleMessages.length };
+  }
+  const messageIndex = Number(body?.messageIndex);
+  if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex > visibleMessages.length) {
+    return { error: `messageIndex must be an integer between 0 and ${visibleMessages.length}` };
+  }
+  return { messageIndex };
+}
+
+function messageIdAtBoundary(messages: AgentMessage[], visibleCount: number): string | undefined {
+  return messages
+    .filter((message) => message.role !== "system")
+    .at(visibleCount - 1)?.id;
 }
 
 export function buildModelPrompt(input: {
@@ -814,6 +843,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
     instructionContent = bundle.content;
   });
   const envPermissionMode = process.env.MINI_AGENT_PERMISSION_MODE;
+  if (envPermissionMode === "approval") {
+    throw new Error(removedApprovalModeMessage("MINI_AGENT_PERMISSION_MODE=approval"));
+  }
   // All entry points use plan unless an explicit mode is configured.
   const defaultPermissionMode: PermissionMode = options.permissionMode
     ?? (isPermissionMode(envPermissionMode) ? envPermissionMode : "plan");
@@ -837,7 +869,10 @@ export function createAgentServer(options: AgentServerOptions): Express {
     );
   }
   const documentStore = new DocumentStore(path.join(dataRoot, "documents"));
-  const sessionStore = new SessionStore(path.join(dataRoot, "sessions"));
+  const sessionManager = new SessionManager({
+    dataDir: path.join(dataRoot, "sessions"),
+    workspaceId: workspace,
+  });
   const jobManager = new JobManager(new JobStore(path.join(dataRoot, "jobs")));
   const memoryStore = new MemoryStore(path.join(dataRoot, "memory", "records.json"));
   // Persistent memory digest for system-prompt injection (Claude Code-style).
@@ -851,6 +886,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
   const persistedSession = (session: Session): PersistedSession => ({
     id: session.id,
     createdAt: session.createdAt,
+    lastActiveAt: session.lastActiveAt,
+    workspaceId: workspace,
     modelId: session.modelId,
     thinkingLevel: session.thinkingLevel,
     thinkingMode: session.thinkingMode,
@@ -863,8 +900,19 @@ export function createAgentServer(options: AgentServerOptions): Express {
     todoVersion: session.todoVersion,
     parentSessionId: session.parentSessionId,
     forkedFromMessage: session.forkedFromMessage,
+    forkedFromMessageId: session.forkedFromMessageId,
   });
-  const saveSession = (session: Session): Promise<void> => sessionStore.save(persistedSession(session));
+  const saveSession = async (session: Session): Promise<void> => {
+    session.lastActiveAt = Date.now();
+    await sessionManager.save(persistedSession(session));
+  };
+  const persistTurnStart = async (session: Session, content: MessageContent): Promise<void> => {
+    session.lastActiveAt = Date.now();
+    await sessionManager.saveTurnStart({
+      ...persistedSession(session),
+      content,
+    });
+  };
   const updateSessionTodos = async (session: Session, snapshot: unknown): Promise<void> => {
     const todos = validateTodoSnapshot(snapshot);
     session.todos = todos;
@@ -877,22 +925,35 @@ export function createAgentServer(options: AgentServerOptions): Express {
     const todoTool = createSessionTodoTool(session);
     return () => [...resolveToolProvider(baseTools), todoTool];
   };
-  const restoreSessions = sessionStore.loadAll().then((restored) => {
+  const restoreSessions = sessionManager.loadAll().then((restored) => {
     return Promise.all([...restored.values()].map(async (persisted) => {
+      const restoredPlan = persisted.currentPlan
+        ? planManager.restorePlan({
+            ...persisted.currentPlan,
+            sessionId: persisted.id,
+          })
+        : undefined;
+      if (persisted.permissionModeMigratedFrom === "approval") {
+        console.warn(`[session] ${persisted.id}: removed permission mode 'approval' was restored as 'plan'`);
+      }
       const session: Session = {
         id: persisted.id,
         messages: persisted.messages,
         createdAt: persisted.createdAt,
+        lastActiveAt: persisted.lastActiveAt,
         busy: false,
         permissionManager: new PermissionManager(persisted.permissionMode ?? defaultPermissionMode),
         modelId: persisted.modelId,
         thinkingLevel: persisted.thinkingLevel,
         thinkingMode: persisted.thinkingMode,
         skillNames: persisted.skillNames ?? [...defaultSkillNames],
+        phase: persisted.phase,
+        currentPlan: restoredPlan,
         todos: persisted.todos ?? [],
         todoVersion: persisted.todoVersion ?? 0,
         parentSessionId: persisted.parentSessionId,
         forkedFromMessage: persisted.forkedFromMessage,
+        forkedFromMessageId: persisted.forkedFromMessageId,
       };
       // Restore the model choice first, then apply the persisted effort level
       // even when the session stayed on the server default model.
@@ -1026,6 +1087,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
           return workflow.reviewReport?.findings.join("\n");
         }
 
+        await persistTurnStart(session, taskPrompt);
         session.messages = await runAgentTurn(
           session.messages,
           taskPrompt,
@@ -1082,146 +1144,16 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
   };
 
-  app.get("/api/health", (_request, response) => response.json({ ok: true }));
-
-  app.get("/api/memory", async (request, response) => {
-    const scope = typeof request.query.scope === "string"
-      ? request.query.scope as import("./orchestration/index.ts").MemoryScope
-      : undefined;
-    const query = typeof request.query.query === "string" ? request.query.query : "";
-    const records = query
-      ? await memoryStore.search(query, { scope })
-      : await memoryStore.list({ scope });
-    response.json({ records });
+  registerWorkspaceRoutes(app, { workspace });
+  registerMemoryRoutes(app, { memoryStore });
+  registerJobRoutes(app, {
+    jobManager,
+    getSession: (id) => sessions.get(id),
+    reserveSession,
+    releaseSession,
+    startSessionJob,
   });
 
-  app.post("/api/memory", async (request, response) => {
-    const scope = request.body?.scope;
-    const key = typeof request.body?.key === "string" ? request.body.key.trim() : "";
-    const content = typeof request.body?.content === "string" ? request.body.content.trim() : "";
-    if (!["user", "project", "directory", "task"].includes(scope) || !key || !content) {
-      response.status(400).json({ error: "scope, key, and content are required" });
-      return;
-    }
-    const record = await memoryStore.add({
-      scope,
-      key,
-      content,
-      source: typeof request.body?.source === "string" ? request.body.source : undefined,
-    });
-    response.status(201).json({ record });
-  });
-
-  app.post("/api/memory/:id/confirm", async (request, response) => {
-    const record = await memoryStore.confirm(request.params.id);
-    if (!record) {
-      response.status(404).json({ error: "Memory record not found" });
-      return;
-    }
-    response.json({ record });
-  });
-
-  app.delete("/api/memory/:id", async (request, response) => {
-    const record = await memoryStore.forget(request.params.id);
-    if (!record) {
-      response.status(404).json({ error: "Memory record not found" });
-      return;
-    }
-    response.json({ record });
-  });
-
-  app.get("/api/jobs/:id", (request, response) => {
-    const job = jobManager.get(request.params.id);
-    if (!job) {
-      response.status(404).json({ error: "Job not found" });
-      return;
-    }
-    response.json({ job });
-  });
-
-  app.get("/api/sessions/:id/jobs", (request, response) => {
-    if (!sessions.has(request.params.id)) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    response.json({ jobs: jobManager.list(request.params.id) });
-  });
-
-  app.post("/api/sessions/:id/jobs", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const task = typeof request.body?.prompt === "string" ? request.body.prompt.trim() : "";
-    const requestedKind = request.body?.kind;
-    if (requestedKind !== undefined && requestedKind !== "agent_turn" && requestedKind !== "planner_worker_reviewer") {
-      response.status(400).json({ error: "kind must be agent_turn or planner_worker_reviewer" });
-      return;
-    }
-    if (!task) {
-      response.status(400).json({ error: "prompt is required" });
-      return;
-    }
-    const lease = reserveSession(session, "job:create");
-    if (!lease) {
-      response.status(409).json({ error: "Session already has an active job", jobId: session.activeJobId ?? null });
-      return;
-    }
-    try {
-      const job = await jobManager.create({
-        sessionId: session.id,
-        task,
-        kind: requestedKind ?? "agent_turn",
-      });
-      session.activeJobId = job.id;
-      await startSessionJob(session, job.id, lease);
-      response.status(202).json({ job });
-    } catch (error) {
-      releaseSession(session, lease);
-      session.activeJobId = undefined;
-      response.status(500).json({ error: error instanceof Error ? error.message : String(error) });
-    }
-  });
-
-  for (const action of ["pause", "resume", "cancel"] as const) {
-    app.post(`/api/jobs/:id/${action}`, async (request, response) => {
-      try {
-        const job = await jobManager[action](request.params.id);
-        response.json({ job });
-      } catch (error) {
-        response.status(404).json({ error: error instanceof Error ? error.message : String(error) });
-      }
-    });
-  }
-  app.post("/api/jobs/:id/retry", async (request, response) => {
-    const existing = jobManager.get(request.params.id);
-    if (!existing) {
-      response.status(404).json({ error: "Job not found" });
-      return;
-    }
-    const session = sessions.get(existing.sessionId);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const lease = reserveSession(session, "job:retry");
-    if (!lease) {
-      response.status(409).json({ error: "Session already has an active job", jobId: session.activeJobId ?? null });
-      return;
-    }
-    try {
-      const job = await jobManager.retry(existing.id);
-      session.activeJobId = job.id;
-      await startSessionJob(session, job.id, lease);
-      response.status(202).json({ job });
-    } catch (error) {
-      releaseSession(session, lease);
-      session.activeJobId = undefined;
-      const message = error instanceof Error ? error.message : String(error);
-      response.status(/Invalid orchestration job transition/i.test(message) ? 409 : 500).json({ error: message });
-    }
-  });
   app.get("/api/config", async (_request, response) => {
     const mcpStatuses = typeof options.mcpStatuses === "function"
       ? options.mcpStatuses()
@@ -1269,89 +1201,11 @@ export function createAgentServer(options: AgentServerOptions): Express {
     });
   });
 
-  app.get("/api/workspace/list", async (request, response) => {
-    const relativePath = String(request.query.path ?? "");
-    try {
-      const result = await listWorkspaceDirectory(workspace, relativePath);
-      response.json(result);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const status =
-        err && typeof err === "object" && "status" in err
-          ? Number((err as { status: unknown }).status) || 400
-          : 400;
-      response.status(status).json({ error: message });
-    }
-  });
-
-  app.get("/api/git/status", async (_request, response) => {
-    try { response.json(await gitWorkflow.status()); }
-    catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-  });
-
-  app.get("/api/git/diff", async (request, response) => {
-    try {
-      response.type("text/plain").send(await gitWorkflow.diff({
-        staged: String(request.query.staged ?? "") === "true",
-        path: request.query.path ? String(request.query.path) : undefined,
-      }));
-    } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-  });
-
-  app.get("/api/git/checkpoints", async (_request, response) => {
-    try { response.json({ checkpoints: await gitWorkflow.listCheckpoints() }); }
-    catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-  });
-
-  app.post("/api/git/checkpoints", async (request, response) => {
-    try {
-      const checkpoint = await gitWorkflow.createCheckpoint(String(request.body?.label ?? "agent-change"));
-      response.status(201).json(checkpoint);
-    } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-  });
-
-  app.post("/api/git/undo", async (request, response) => {
-    const checkpointId = String(request.body?.checkpointId ?? "");
-    if (!checkpointId) { response.status(400).json({ error: "checkpointId is required" }); return; }
-    try { response.json(await gitWorkflow.undo(checkpointId)); }
-    catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-  });
-
-  app.post("/api/git/branches", async (request, response) => {
-    try { response.status(201).json(await gitWorkflow.createIsolatedBranch(String(request.body?.label ?? "task"))); }
-    catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-  });
-
-  app.post("/api/validation", async (request, response) => {
-    const requested = Array.isArray(request.body?.steps) ? request.body.steps : undefined;
-    const steps = requested?.filter((value: unknown): value is ValidationStepName =>
-      value === "test" || value === "typecheck" || value === "build");
-    try {
-      const report = await runValidation({ workspace, steps, timeoutMs: typeof request.body?.timeoutMs === "number" ? request.body.timeoutMs : undefined });
-      response.status(report.ok ? 200 : 422).json({ ...report, summary: formatValidationReport(report) });
-    } catch (error) { response.status(400).json({ error: error instanceof Error ? error.message : String(error) }); }
-  });
+  registerGitRoutes(app, { gitWorkflow, workspace });
 
   // ── Model discovery & per-session switching ─────────────────────────────────
 
-  app.get("/api/models", (request, response) => {
-    const query = String(request.query.q ?? "").trim();
-    const available = getAvailableModels();
-    const models = query ? searchModels(query, available) : available;
-    response.json({
-      models: models.map((model) => ({
-        id: model.id,
-        name: model.name,
-        provider: model.provider,
-        qualifiedId: `${model.provider}/${model.id}`,
-        capabilities: model.capabilities,
-        contextWindow: model.contextWindow,
-        maxTokens: model.maxTokens,
-        reasoning: model.reasoning,
-      })),
-      defaultModel: options.llm.model,
-    });
-  });
+  registerModelRoutes(app, { defaultModel: options.llm.model });
 
   app.put("/api/sessions/:id/model", async (request, response) => {
     const session = sessions.get(request.params.id);
@@ -1370,12 +1224,20 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     try {
+      const previousLlm = session.llmOverride ?? options.llm;
       const newLlm = switchLlmModel(
-        session.llmOverride ?? options.llm,
+        previousLlm,
         modelId,
         {},
         options.relayRegistry,
       );
+      // Persist a provider-safe transcript at the switch boundary. This is
+      // important for a later request/restart: the next model must not be
+      // handed tool calls or images it cannot consume.
+      session.messages = mergeConsecutiveSameRole(adaptHistoryForModel(session.messages, {
+        targetCapabilities: newLlm.capabilities,
+        sourceCapabilities: previousLlm.capabilities,
+      }));
       session.modelId = `${newLlm.provider}/${newLlm.model}`;
       session.llmOverride = newLlm;
       session.thinkingLevel = newLlm.thinkingLevel;
@@ -1400,76 +1262,26 @@ export function createAgentServer(options: AgentServerOptions): Express {
 
   // ── Subagent profile hot-update API ────────────────────────────────────────
 
-  app.get("/api/subagent/profiles", (_request, response) => {
-    const profiles = options.subagentProfiles ?? defaultProfiles;
-    response.json({
-      profiles: profiles.map((p) => ({
-        name: p.name,
-        description: p.description,
-        allowedTools: p.allowedTools,
-        maxTurns: p.maxTurns,
-        timeout: p.timeout,
-        hasCustomLlm: Boolean(p.llm),
-      })),
-    });
-  });
-
-  app.put("/api/subagent/profiles/:name", (request, response) => {
-    const name = request.params.name;
-    const body = request.body as Partial<SubagentProfile> | undefined;
-    if (!body || typeof body.description !== "string" || typeof body.systemPrompt !== "string") {
-      response.status(400).json({ error: "description and systemPrompt are required" });
-      return;
-    }
-    const profiles = options.subagentProfiles ?? defaultProfiles;
-    const existing = profiles.findIndex((p) => p.name === name);
-    const newProfile: SubagentProfile = {
-      name,
-      description: body.description,
-      systemPrompt: body.systemPrompt,
-      allowedTools: Array.isArray(body.allowedTools) ? body.allowedTools : undefined,
-      maxTurns: typeof body.maxTurns === "number" ? body.maxTurns : undefined,
-      timeout: typeof body.timeout === "number" ? body.timeout : undefined,
-    };
-    if (existing >= 0) {
-      profiles[existing] = newProfile;
-    } else {
-      profiles.push(newProfile);
-    }
-    // Update the options reference so new sessions pick up the change
-    options.subagentProfiles = profiles;
-    response.json({
-      name: newProfile.name,
-      description: newProfile.description,
-      allowedTools: newProfile.allowedTools,
-      maxTurns: newProfile.maxTurns,
-    });
-  });
-
-  app.delete("/api/subagent/profiles/:name", (_request, response) => {
-    const name = _request.params.name;
-    const profiles = options.subagentProfiles ?? defaultProfiles;
-    const index = profiles.findIndex((p) => p.name === name);
-    if (index < 0) {
-      response.status(404).json({ error: `Profile "${name}" not found` });
-      return;
-    }
-    profiles.splice(index, 1);
-    options.subagentProfiles = profiles;
-    response.status(204).end();
+  registerSubagentProfileRoutes(app, {
+    getProfiles: () => options.subagentProfiles ?? defaultProfiles,
+    setProfiles: (profiles) => { options.subagentProfiles = profiles; },
   });
 
   // ── Sessions ────────────────────────────────────────────────────────────────
 
   app.get("/api/sessions", (_request, response) => {
     const items = [...sessions.values()]
-      .sort((a, b) => a.createdAt - b.createdAt)
+      .sort((a, b) =>
+        (b.lastActiveAt ?? b.createdAt) - (a.lastActiveAt ?? a.createdAt),
+      )
       .map((session) => ({
         id: session.id,
         createdAt: session.createdAt,
+        lastActiveAt: session.lastActiveAt ?? session.createdAt,
         busy: isSessionBusy(session),
         parentSessionId: session.parentSessionId ?? null,
         forkedFromMessage: session.forkedFromMessage ?? null,
+        forkedFromMessageId: session.forkedFromMessageId ?? null,
         messageCount: visibleMessageCount(session.messages),
         modelId: session.modelId,
         thinkingLevel: session.thinkingLevel ?? (session.llmOverride ?? options.llm).thinkingLevel ?? "off",
@@ -1499,7 +1311,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       todoVersion: 0,
     };
     sessions.set(id, session);
-    await sessionStore.create(persistedSession(session));
+    await sessionManager.save(persistedSession(session));
     void documentStore.createSession(id);
     response.status(201).json({ id, createdAt: session.createdAt, permissionMode: session.permissionManager.getMode() });
   });
@@ -1510,24 +1322,28 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(404).json({ error: "Session not found" });
       return;
     }
-    const requestedIndex = request.body?.messageIndex;
     const visibleMessages = parent.messages.filter((message) => message.role !== "system");
-    const messageIndex = requestedIndex === undefined
-      ? visibleMessages.length
-      : Number(requestedIndex);
-    if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex > visibleMessages.length) {
-      response.status(400).json({ error: `messageIndex must be an integer between 0 and ${visibleMessages.length}` });
+    const boundary = resolveMessageBoundary(visibleMessages, request.body, true);
+    if ("error" in boundary) {
+      response.status(400).json({ error: boundary.error });
       return;
     }
+    const messageIndex = boundary.messageIndex;
     const lease = reserveSession(parent, "fork");
     if (!lease) {
       response.status(409).json({ error: "Session is busy" });
       return;
     }
     try {
-      const messages = truncateSessionMessages(parent.messages, messageIndex);
+      // Keep the fork fully independent: later tool/result updates must not
+      // mutate message content or nested tool arguments in the parent.
+      const messages = structuredClone(truncateSessionMessages(parent.messages, messageIndex));
       const safeMessageIndex = visibleMessageCount(messages);
+      const forkedFromMessageId = messageIdAtBoundary(messages, safeMessageIndex);
       const id = randomUUID();
+      const childPlan = parent.currentPlan
+        ? planManager.clonePlan(parent.currentPlan, id)
+        : undefined;
       const child: Session = {
         id,
         messages,
@@ -1538,19 +1354,28 @@ export function createAgentServer(options: AgentServerOptions): Express {
         thinkingLevel: parent.thinkingLevel,
         thinkingMode: parent.thinkingMode,
         permissionManager: new PermissionManager(parent.permissionManager.getMode()),
+        phase: parent.phase,
+        currentPlan: childPlan,
         todos: parent.todos.map((todo) => ({ ...todo })),
         todoVersion: parent.todoVersion,
         parentSessionId: parent.id,
         forkedFromMessage: safeMessageIndex,
+        forkedFromMessageId,
         skillNames: [...(parent.skillNames ?? [])],
       };
+      try {
+        await sessionManager.save(persistedSession(child));
+      } catch (error) {
+        if (childPlan) planManager.deletePlan(childPlan.id);
+        throw error;
+      }
       sessions.set(id, child);
-      await sessionStore.create(persistedSession(child));
       await documentStore.createSession(id);
       response.status(201).json({
         id,
         parentSessionId: parent.id,
         forkedFromMessage: safeMessageIndex,
+        forkedFromMessageId: forkedFromMessageId ?? null,
         createdAt: child.createdAt,
         messageCount: safeMessageIndex,
       });
@@ -1566,11 +1391,12 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     const visibleMessages = session.messages.filter((message) => message.role !== "system");
-    const messageIndex = Number(request.body?.messageIndex);
-    if (!Number.isInteger(messageIndex) || messageIndex < 0 || messageIndex > visibleMessages.length) {
-      response.status(400).json({ error: `messageIndex must be an integer between 0 and ${visibleMessages.length}` });
+    const boundary = resolveMessageBoundary(visibleMessages, request.body, false);
+    if ("error" in boundary) {
+      response.status(400).json({ error: boundary.error });
       return;
     }
+    const messageIndex = boundary.messageIndex;
     const lease = reserveSession(session, "rewind");
     if (!lease) {
       response.status(409).json({ error: "Session is busy" });
@@ -1580,7 +1406,12 @@ export function createAgentServer(options: AgentServerOptions): Express {
       session.messages = truncateSessionMessages(session.messages, messageIndex);
       const safeMessageIndex = visibleMessageCount(session.messages);
       await saveSession(session);
-      response.json({ id: session.id, messageIndex: safeMessageIndex, messageCount: safeMessageIndex });
+      response.json({
+        id: session.id,
+        messageIndex: safeMessageIndex,
+        messageId: messageIdAtBoundary(session.messages, safeMessageIndex) ?? null,
+        messageCount: safeMessageIndex,
+      });
     } finally {
       releaseSession(session, lease);
     }
@@ -1592,6 +1423,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       createdAt: session.createdAt,
       parentSessionId: session.parentSessionId ?? null,
       forkedFromMessage: session.forkedFromMessage ?? null,
+      forkedFromMessageId: session.forkedFromMessageId ?? null,
       messageCount: visibleMessageCount(session.messages),
       busy: isSessionBusy(session),
       children: [] as string[],
@@ -1606,458 +1438,24 @@ export function createAgentServer(options: AgentServerOptions): Express {
     response.json({ sessions: nodes, roots });
   });
 
-  app.get("/api/sessions/:id/permission-mode", (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    response.json({ mode: session.permissionManager.getMode() });
-  });
-
-  app.put("/api/sessions/:id/permission-mode", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const mode = request.body?.mode;
-    if (!isPermissionMode(mode)) {
-      response.status(400).json({ error: "mode must be plan, approval, or bypass" });
-      return;
-    }
-    const change = session.permissionManager.setMode(mode);
-    await saveSession(session);
-    response.json({
-      mode: change.mode,
-      previousMode: change.previousMode,
-      changed: change.changed,
-      interrupted: change.interrupted,
-    });
-  });
-
-  app.post("/api/sessions/:id/permissions/:requestId", (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const decision = request.body?.decision;
-    if (decision !== "allow" && decision !== "deny") {
-      response.status(400).json({ error: "decision must be allow or deny" });
-      return;
-    }
-    const resolved = session.permissionManager.resolve(
-      session.id,
-      request.params.requestId,
-      decision as PermissionDecision,
-    );
-    if (!resolved) {
-      response.status(404).json({ error: "Permission request not found" });
-      return;
-    }
-    response.json({ resolved: true, decision });
-  });
+  registerPermissionRoutes(app, { getSession: (id) => sessions.get(id), saveSession });
 
   // ─── Plan-Act Workflow API ──────────────────────────────────────────────────
 
-  /** GET /api/sessions/:id/phase - Get current phase */
-  app.get("/api/sessions/:id/phase", (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    response.json({ phase: session.phase });
-  });
-
-  /** PUT /api/sessions/:id/phase - Transition phase */
-  app.put("/api/sessions/:id/phase", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const targetPhase = request.body?.phase as SessionPhase | undefined;
-    if (!targetPhase) {
-      response.status(400).json({ error: "phase is required" });
-      return;
-    }
-    const result = validatePhaseTransition(session.phase ?? "planning", targetPhase, request.body);
-    if (!result.allowed) {
-      response.status(400).json({ error: result.reason });
-      return;
-    }
-    const lease = reserveSession(session, "phase");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const previousPhase = session.phase;
-      session.phase = targetPhase;
-      await saveSession(session);
-      response.json({ from: previousPhase, to: targetPhase, reason: result.reason });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  /** POST /api/sessions/:id/plans - Generate new plan */
-  app.post("/api/sessions/:id/plans", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const output = request.body?.output as string | undefined;
-    const summary = request.body?.summary as string | undefined;
-    if (!output) {
-      response.status(400).json({ error: "output is required" });
-      return;
-    }
-    const lease = reserveSession(session, "plan-act:generate");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const plan = planGenerator.generateAndStore(output, session.id, summary);
-      if (!plan) {
-        response.status(400).json({ error: "Failed to parse plan from output" });
-        return;
-      }
-      session.currentPlan = plan;
-      session.planHistory = session.planHistory ?? []; session.planHistory.push(plan);
-      session.phase = "review";
-      await saveSession(session);
-      response.status(201).json(plan);
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  /** GET /api/sessions/:id/plans - List plans for session */
-  app.get("/api/sessions/:id/plans", (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plans = planManager.getSessionPlans(session.id);
-    response.json(plans);
-  });
-
-  /** GET /api/sessions/:id/plans/:planId - Get plan details */
-  app.get("/api/sessions/:id/plans/:planId", (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plan = planManager.getPlan(request.params.planId);
-    if (!plan) {
-      response.status(404).json({ error: "Plan not found" });
-      return;
-    }
-    if (plan.sessionId !== session.id) {
-      response.status(403).json({ error: "Plan does not belong to this session" });
-      return;
-    }
-    response.json(plan);
-  });
-
-  /** POST /api/sessions/:id/plans/:planId/approve - Approve plan */
-  app.post("/api/sessions/:id/plans/:planId/approve", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plan = planManager.getPlan(request.params.planId);
-    if (!plan) {
-      response.status(404).json({ error: "Plan not found" });
-      return;
-    }
-    if (plan.sessionId !== session.id) {
-      response.status(403).json({ error: "Plan does not belong to this session" });
-      return;
-    }
-    const lease = reserveSession(session, "plan-act:approve");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const approved = planManager.approvePlan(plan.id, request.body);
-      if (!approved) {
-        response.status(400).json({ error: "Failed to approve plan" });
-        return;
-      }
-      session.currentPlan = approved;
-      session.phase = "acting";
-      await saveSession(session);
-      response.json(approved);
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  /** POST /api/sessions/:id/plans/:planId/reject - Reject plan */
-  app.post("/api/sessions/:id/plans/:planId/reject", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plan = planManager.getPlan(request.params.planId);
-    if (!plan) {
-      response.status(404).json({ error: "Plan not found" });
-      return;
-    }
-    if (plan.sessionId !== session.id) {
-      response.status(403).json({ error: "Plan does not belong to this session" });
-      return;
-    }
-    const reason = request.body?.reason as string | undefined;
-    const lease = reserveSession(session, "plan-act:reject");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const rejected = planManager.rejectPlan(plan.id, reason);
-      if (!rejected) {
-        response.status(400).json({ error: "Failed to reject plan" });
-        return;
-      }
-      session.currentPlan = undefined;
-      session.phase = "cancelled";
-      await saveSession(session);
-      response.json(rejected);
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  /** POST /api/sessions/:id/plans/:planId/modify - Request modifications */
-  app.post("/api/sessions/:id/plans/:planId/modify", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plan = planManager.getPlan(request.params.planId);
-    if (!plan) {
-      response.status(404).json({ error: "Plan not found" });
-      return;
-    }
-    if (plan.sessionId !== session.id) {
-      response.status(403).json({ error: "Plan does not belong to this session" });
-      return;
-    }
-    const lease = reserveSession(session, "plan-act:modify");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const modified = planManager.updatePlanStatus(plan.id, "modified");
-      if (!modified) {
-        response.status(400).json({ error: "Failed to modify plan" });
-        return;
-      }
-      session.currentPlan = modified;
-      session.phase = "planning";
-      await saveSession(session);
-      response.json(modified);
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  /** DELETE /api/sessions/:id/plans/:planId - Delete plan */
-  app.delete("/api/sessions/:id/plans/:planId", (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plan = planManager.getPlan(request.params.planId);
-    if (!plan) {
-      response.status(404).json({ error: "Plan not found" });
-      return;
-    }
-    if (plan.sessionId !== session.id) {
-      response.status(403).json({ error: "Plan does not belong to this session" });
-      return;
-    }
-    const lease = reserveSession(session, "plan-act:delete");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      planManager.deletePlan(plan.id);
-      if (session.currentPlan?.id === plan.id) {
-        session.currentPlan = undefined;
-      }
-      response.status(204).end();
-    } finally {
-      releaseSession(session, lease);
-    }
+  registerPlanActRoutes(app, {
+    getSession: (id) => sessions.get(id),
+    reserveSession,
+    releaseSession,
+    saveSession,
   });
 
   // ── Session plan API (per-session plan kernel root) ─────────────────────────
 
-  app.get("/api/sessions/:id/plan", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plan = await loadPlanDocument(sessionPlanRoot(dataRoot, session.id));
-    response.json({ plan });
-  });
-
-  app.post("/api/sessions/:id/plan", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const prompt = typeof request.body?.prompt === "string" ? request.body.prompt.trim() : "";
-    const planMarkdown = typeof request.body?.plan === "string" ? request.body.plan : "";
-    if (!prompt) {
-      response.status(400).json({ error: "prompt is required" });
-      return;
-    }
-    if (!planMarkdown.trim()) {
-      response.status(400).json({ error: "plan is required" });
-      return;
-    }
-    const autoApprove = Boolean(request.body?.autoApprove);
-    const lease = reserveSession(session, "plan:create");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const planRoot = sessionPlanRoot(dataRoot, session.id);
-      const plan = await createAndSavePlan(planRoot, prompt, planMarkdown, {
-        autoApprove,
-        approvedBy: autoApprove ? "api" : undefined,
-      });
-      response.status(201).json({ plan });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  app.post("/api/sessions/:id/plan/approve", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const by = typeof request.body?.by === "string" && request.body.by.trim()
-      ? request.body.by.trim()
-      : "api";
-    const lease = reserveSession(session, "plan:approve");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const plan = await approveCurrentPlan(sessionPlanRoot(dataRoot, session.id), by);
-      response.json({ plan });
-    } catch (error) {
-      const { status, message } = planHttpError(error);
-      response.status(status).json({ error: message });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  app.post("/api/sessions/:id/plan/reject", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const lease = reserveSession(session, "plan:reject");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const plan = await rejectCurrentPlan(sessionPlanRoot(dataRoot, session.id));
-      response.json({ plan });
-    } catch (error) {
-      const { status, message } = planHttpError(error);
-      response.status(status).json({ error: message });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  app.post("/api/sessions/:id/plan/edit", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const planMarkdown = typeof request.body?.plan === "string" ? request.body.plan : "";
-    if (!planMarkdown.trim()) {
-      response.status(400).json({ error: "plan is required" });
-      return;
-    }
-    const lease = reserveSession(session, "plan:edit");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const plan = await editCurrentPlan(sessionPlanRoot(dataRoot, session.id), planMarkdown);
-      response.json({ plan });
-    } catch (error) {
-      const { status, message } = planHttpError(error);
-      response.status(status).json({ error: message });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  app.post("/api/sessions/:id/plan/archive", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const lease = reserveSession(session, "plan:archive");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const result = await archiveCurrentPlan(sessionPlanRoot(dataRoot, session.id));
-      response.json({ plan: result.document, archivedPath: result.archivedPath });
-    } catch (error) {
-      const { status, message } = planHttpError(error);
-      response.status(status).json({ error: message });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  app.get("/api/sessions/:id/plan/history", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const plans = await listPlanHistory(sessionPlanRoot(dataRoot, session.id));
-    response.json({ plans });
+  registerPlanDocumentRoutes(app, {
+    getSession: (id) => sessions.get(id),
+    reserveSession,
+    releaseSession,
+    sessionPlanRoot: (sessionId) => sessionPlanRoot(dataRoot, sessionId),
   });
 
   app.post("/api/sessions/:id/plan/generate", async (request, response) => {
@@ -2109,6 +1507,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       const sessionTools: ToolProvider = addSessionTodoTool(session, tools);
 
       try {
+        await persistTurnStart(session, generatePrompt);
         session.messages = await runAgentTurn(
           session.messages,
           generatePrompt,
@@ -2259,6 +1658,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         onSubagentEvent: (subEvent) => send(safeEvent(subEvent)),
       });
 
+      await persistTurnStart(session, executionUserText);
       session.messages = await runAgentTurn(
         session.messages,
         executionUserText,
@@ -2385,6 +1785,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       thinkingMode: session.thinkingMode ?? loadThinkingModeFromEnv(),
       parentSessionId: session.parentSessionId ?? null,
       forkedFromMessage: session.forkedFromMessage ?? null,
+      forkedFromMessageId: session.forkedFromMessageId ?? null,
       permissionMode: session.permissionManager.getMode(),
       planStatus,
       model: effectiveLlm.model,
@@ -2400,66 +1801,12 @@ export function createAgentServer(options: AgentServerOptions): Express {
     });
   });
 
-  app.get("/api/sessions/:id/skills", (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const activation = activateSkillNames(session.skillNames ?? [], skillRegistry);
-    response.json({
-      available: activation.available.map((skill) => ({
-        name: skill.name,
-        description: skill.description,
-      })),
-      active: activation.activeNames,
-      missing: activation.missingNames,
-    });
-  });
-
-  app.put("/api/sessions/:id/skills", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const body = (request.body ?? {}) as {
-      skillNames?: unknown;
-      add?: unknown;
-      remove?: unknown;
-    };
-    const requested = Array.isArray(body.skillNames)
-      ? body.skillNames.filter((name): name is string => typeof name === "string")
-      : (session.skillNames ?? []);
-    const add = Array.isArray(body.add)
-      ? body.add.filter((name): name is string => typeof name === "string")
-      : [];
-    const remove = new Set(
-      Array.isArray(body.remove)
-        ? body.remove.filter((name): name is string => typeof name === "string")
-        : [],
-    );
-    const merged = uniqueSkillNames([...requested, ...add]).filter((name) => !remove.has(name));
-    const lease = reserveSession(session, "skills");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    const activation = activateSkillNames(merged, skillRegistry);
-    try {
-      session.skillNames = activation.activeNames;
-      await saveSession(session);
-      response.json({
-        available: activation.available.map((skill) => ({
-          name: skill.name,
-          description: skill.description,
-        })),
-        active: activation.activeNames,
-        missing: activation.missingNames,
-      });
-    } finally {
-      releaseSession(session, lease);
-    }
+  registerSkillRoutes(app, {
+    getSession: (id) => sessions.get(id),
+    reserveSession,
+    releaseSession,
+    saveSession,
+    skillRegistry,
   });
 
   app.delete("/api/sessions/:id", async (request, response) => {
@@ -2475,7 +1822,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
     try {
       sessions.delete(request.params.id);
-      await sessionStore.remove(request.params.id);
+      await sessionManager.remove(request.params.id);
       void documentStore.removeSession(request.params.id);
       response.status(204).end();
     } finally {
@@ -2483,28 +1830,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
   });
 
-  app.get("/api/sessions/:id/files/:fileId", async (request, response) => {
-    if (!sessions.has(request.params.id)) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    try {
-      const output = documentStore.getOutput(request.params.id, request.params.fileId);
-      if (!existsSync(output.path)) {
-        response.status(404).json({ error: "File not found" });
-        return;
-      }
-      response.setHeader("Content-Type", output.artifact.mimeType);
-      response.setHeader("Content-Length", String(output.artifact.size));
-      response.setHeader("Content-Disposition", `attachment; filename="${output.artifact.name}"`);
-      createReadStream(output.path).on("error", (error) => {
-        if (!response.headersSent) response.status(404).json({ error: error.message });
-        else response.destroy(error);
-      }).pipe(response);
-    } catch (error) {
-      response.status(404).json({ error: error instanceof Error ? error.message : String(error) });
-    }
-  });
+  registerFileRoutes(app, { hasSession: (id) => sessions.has(id), documentStore });
 
   app.post(
     "/api/sessions/:id/messages",
@@ -2611,6 +1937,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
           thinkingMode: input.thinkingMode ?? session.thinkingMode,
           onSubagentEvent: (subEvent) => send(safeEvent(subEvent)),
         });
+        await persistTurnStart(session, userContent ?? input.modelPrompt);
         session.messages = await runAgentTurn(
           session.messages,
           input.modelPrompt,

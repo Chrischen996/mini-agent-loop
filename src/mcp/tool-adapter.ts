@@ -1,17 +1,16 @@
 import { createHash } from "node:crypto";
-import type { ContentPart, MessageContent } from "../types.ts";
+import type { ContentPart, ImageMimeType, MessageContent } from "../types.ts";
 import type { Tool, ToolResult } from "../tools/types.ts";
 import type {
   McpCallResult,
   McpClientConnection,
   McpContentBlock,
   McpServerConfig,
-  McpStdioServerConfig,
   McpToolDefinition,
 } from "./types.ts";
 
 const MAX_TOOL_NAME_LENGTH = 64;
-const SUPPORTED_IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const SUPPORTED_IMAGE_MIME = new Set<string>(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
 function segment(value: string): string {
   const sanitized = value.replace(/[^A-Za-z0-9_-]/g, "_").replace(/_+/g, "_");
@@ -54,7 +53,7 @@ function blockToPart(block: McpContentBlock): ContentPart {
       return { type: "text", text: block.text };
     case "image":
       if (SUPPORTED_IMAGE_MIME.has(block.mimeType)) {
-        return { type: "image", data: block.data, mimeType: block.mimeType, source: "mcp" };
+        return { type: "image", data: block.data, mimeType: block.mimeType as ImageMimeType, source: "mcp" };
       }
       return { type: "text", text: `[Unsupported MCP image omitted: ${block.mimeType}]` };
     case "audio":

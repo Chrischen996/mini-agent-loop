@@ -25,11 +25,38 @@ export class PlanManager {
       version: 1,
     };
 
+    return this.registerPlan(plan);
+  }
+
+  /** Restore a persisted plan into the in-memory index after a server restart. */
+  restorePlan(plan: ExecutionPlan): ExecutionPlan {
+    return this.registerPlan(structuredClone(plan));
+  }
+
+  /** Clone a plan for a forked session with a new ownership identity. */
+  clonePlan(plan: ExecutionPlan, sessionId: string): ExecutionPlan {
+    return this.registerPlan({
+      ...structuredClone(plan),
+      id: `plan_${randomUUID()}`,
+      sessionId,
+      createdAt: Date.now(),
+    });
+  }
+
+  private registerPlan(plan: ExecutionPlan): ExecutionPlan {
+    const previous = this.plans.get(plan.id);
+    if (previous && previous.sessionId !== plan.sessionId) {
+      const previousIds = this.sessionPlans.get(previous.sessionId) ?? [];
+      this.sessionPlans.set(
+        previous.sessionId,
+        previousIds.filter((id) => id !== plan.id),
+      );
+    }
     this.plans.set(plan.id, plan);
-    
-    const sessionPlanIds = this.sessionPlans.get(sessionId) ?? [];
-    sessionPlanIds.push(plan.id);
-    this.sessionPlans.set(sessionId, sessionPlanIds);
+
+    const sessionPlanIds = this.sessionPlans.get(plan.sessionId) ?? [];
+    if (!sessionPlanIds.includes(plan.id)) sessionPlanIds.push(plan.id);
+    this.sessionPlans.set(plan.sessionId, sessionPlanIds);
 
     return plan;
   }

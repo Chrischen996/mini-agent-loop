@@ -3,6 +3,12 @@ import { describe, it } from "node:test";
 import { parseCliArgs } from "../src/cli.ts";
 
 describe("parseCliArgs", () => {
+  it("makes --fork-session resume the latest session when used alone", () => {
+    const result = parseCliArgs(["--fork-session"]);
+    assert.equal(result.forkSession, true);
+    assert.equal(result.continueSession, true);
+  });
+
   it("extracts a plain prompt from positional arguments", () => {
     const result = parseCliArgs(["read", "package.json"]);
     assert.equal(result.prompt, "read package.json");
@@ -101,6 +107,11 @@ describe("parseCliArgs", () => {
   it("rejects legacy manual/auto modes", () => {
     assert.throws(() => parseCliArgs(["--mode=manual", "do something"]), /Invalid mode/);
     assert.throws(() => parseCliArgs(["--mode", "auto", "do something"]), /Invalid mode/);
+  });
+
+  it("explains how to migrate the removed approval mode", () => {
+    assert.throws(() => parseCliArgs(["--mode=approval", "do something"]), /approval.*removed.*plan.*bypass/i);
+    assert.throws(() => parseCliArgs(["--mode", "approval", "do something"]), /approval.*removed.*plan.*bypass/i);
   });
 
   it("defaults to plan mode when not specified", () => {

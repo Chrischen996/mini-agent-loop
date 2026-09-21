@@ -1,6 +1,12 @@
-# Mini Tool Agent (Phases 1–3)
+# Mini Agent Runtime
 
-Educational rebuild of a Pi-style agent loop. Focus is control flow, not a full product.
+An extensible, production-oriented AI agent runtime for terminal, CLI, and HTTP
+workflows. Mini Agent combines multi-provider model access, tool execution,
+skills, MCP, sessions, subagents, Plan-Act workflows, Git operations, sandbox
+adapters, and vision/document processing behind reusable runtime APIs.
+
+The project is actively developed as a usable agent product. The loop below is
+the core execution cycle, not the complete product boundary:
 
 ```text
 user prompt
@@ -12,6 +18,10 @@ user prompt
   -> LLM again
   -> stop when assistant has no tool_calls
 ```
+
+**Documentation:** [Architecture](docs/architecture.md) ·
+[Security model & permission matrix](docs/security-model.md) ·
+[Codebase analysis](docs/project-analysis.md)
 
 ## Requirements
 
@@ -56,10 +66,11 @@ npm install
 | `GROQ_API_KEY` | no | — |
 | `OPENROUTER_API_KEY` | no | — |
 | `TOKENROUTER_API_KEY` | no | — |
+| `ORCAROUTER_API_KEY` | no | — |
 | `SILICONFLOW_API_KEY` | no | — |
 | `OPENAI_BASE_URL` | no | OpenAI or DeepSeek auto |
 | `OPENAI_MODEL` | no | `gpt-4o-mini` / `deepseek-chat` |
-| `MINI_AGENT_REQUEST_TIMEOUT_MS` | no | `120000` (total request) |
+| `MINI_AGENT_REQUEST_TIMEOUT_MS` | no | `120000` (total request; `0` disables) |
 | `MINI_AGENT_FIRST_RESPONSE_TIMEOUT_MS` | no | same as request timeout |
 | `MINI_AGENT_STREAM_IDLE_TIMEOUT_MS` | no | `60000` after stream starts |
 | `MINI_AGENT_MODELS` | no | — |
@@ -174,9 +185,12 @@ export OPENAI_API_KEY=sk-...
 # optional:
 # export OPENAI_BASE_URL=https://api.openai.com/v1
 # export OPENAI_MODEL=gpt-4o-mini
+# export OPENAI_MODEL=openai/gpt-6-astra
+# Codex ChatGPT backend (same model id, qualified reference required):
+# export OPENAI_MODEL=openai-codex/gpt-6-astra
 ```
 
-#### DeepSeek (recommended for local teaching in CN)
+#### DeepSeek (recommended for local development in CN)
 
 DeepSeek’s chat API is OpenAI-compatible and supports tool calling via `deepseek-chat`.
 
@@ -247,23 +261,51 @@ In the TUI, select it with `/model tokenrouter/kimi-k3-free`. The project sends
 the fixed model id `kimi-k3-free` to
 `https://api.tokenrouter.io/v1/chat/completions`.
 
+#### OrcaRouter (Free Models)
+
+OrcaRouter is an OpenAI-compatible AI gateway; the catalog registers its free
+routes (see <https://www.orcarouter.ai/models?price=free>):
+
+```bash
+export ORCAROUTER_API_KEY=sk-orca-...
+export OPENAI_MODEL=orcarouter/deepseek/deepseek-v4-flash-free
+```
+
+In the TUI, select one of the registered free routes:
+
+```bash
+/model orcarouter/deepseek/deepseek-v4-flash-free   # DeepSeek V4 Flash free (1M context)
+/model orcarouter/tencent/hy3-free                  # Tencent Hy3 free (256K context)
+/model orcarouter/z-ai/glm-5.3-flash-free           # GLM 5.3 Flash free (1M context, text + image)
+/model orcarouter/orcarouter/free                  # OrcaRouter's free adaptive router
+```
+
+Requests go to `https://api.orcarouter.ai/v1/chat/completions`.
+
 #### Model providers
 
 The built-in catalog contains the generated multi-provider model definitions.
-Run the Ink TUI, then use `/model` to search all adapted models:
+Run the TUI, then use `/model` to search all adapted models:
 
 ```bash
-npm run tui:ink
+npm run tui
 
 # examples inside the TUI
 /model
 /model deepseek/deepseek-v4-flash
+/model openai/gpt-6-astra
+/model openai-codex/gpt-6-astra
 /model google/gemini-2.5-pro
 /model openrouter/anthropic/claude-sonnet-4
 # positional custom gateway: model, base URL, api key
 /model xai/grok-3 https://api.sparkcode.top/v1 sk-...
 # flag form still works for a custom OpenAI-compatible gateway
 /model openai/gpt-4.1 --base-url https://llm.example/v1 --api-key-env COMPANY_LLM_KEY
+# Claude 中转站: most gateways speak Chat Completions, so a custom URL
+# drops native Anthropic Messages. Force Messages only when the gateway
+# actually implements /v1/messages.
+/model anthropic/claude-sonnet-4-6 https://api.sparkcode.top/v1 sk-...
+/model anthropic/claude-sonnet-4-6 https://gw.example/anthropic/v1 sk-... --protocol anthropic
 ```
 
 Models are shown even when their provider credential is not configured. Selecting
@@ -280,8 +322,18 @@ MINI_AGENT_MODELS='[{"provider":"company","id":"company-model-v1","baseUrl":"htt
 ```
 
 `MINI_AGENT_MODELS` is a JSON array. Each entry requires `provider`, `id`,
-`baseUrl`, and `apiKeyEnv`; optional fields are `input`, `tools`, and
-`contextWindow`.
+`baseUrl`, and `apiKeyEnv`; optional fields are `input`, `tools`,
+`contextWindow`, and `api` (`"anthropic-messages"` keeps Claude on native
+Messages even when `baseUrl` is a private gateway).
+
+A persistent 中转站 for every Claude request can also be set with
+`MINI_AGENT_RELAY`. Omit `protocol` (or set `"openai-compatible"`) for the
+usual Chat Completions gateways; set `"protocol":"anthropic-messages"` only
+when the relay implements Anthropic `/v1/messages`:
+
+```bash
+MINI_AGENT_RELAY='{"providers":["anthropic"],"baseUrl":"https://api.sparkcode.top/v1","apiKey":"sk-..."}'
+```
 
 #### Per-model timeouts
 
@@ -294,9 +346,9 @@ CUSTOM_LLM_KEY=sk-...
 MINI_AGENT_MODELS='[{"provider":"company","id":"deep-thinker-v1","baseUrl":"https://llm.example/v1","apiKeyEnv":"CUSTOM_LLM_KEY","contextWindow":128000,"timeoutMs":600000,"firstResponseTimeoutMs":300000,"streamIdleTimeoutMs":180000}]'
 ```
 
-- `timeoutMs` — total request deadline (default 120s)
-- `firstResponseTimeoutMs` — time-to-first-chunk deadline (defaults to `timeoutMs`)
-- `streamIdleTimeoutMs` — max gap between stream chunks (default 60s)
+- `timeoutMs` — total request deadline (default 120s; `0` disables)
+- `firstResponseTimeoutMs` — time-to-first-chunk deadline (defaults to `timeoutMs`; `0` disables)
+- `streamIdleTimeoutMs` — max gap between stream chunks (default 60s; `0` disables)
 
 Resolution order: explicit config override → model catalog value →
 `MINI_AGENT_*_TIMEOUT_MS` env var → default. Switching models with `/model`
@@ -364,6 +416,16 @@ npm start -- "读取 package.json 并总结项目名"
 npm start -- "描述图片并提取可见文字" --image ./shot.png
 npm start -- "比较两张图片" --image ./a.png --image ./b.png
 
+# resume the most recent session in the current workspace
+npm start -- --continue "继续完成之前的工作"
+
+# resume a specific session, or list sessions when no id is supplied
+npm start -- --resume <session-id> "继续这个会话"
+npm start -- --resume
+
+# resume into a new fork without changing the source session
+npm start -- --resume <session-id> --fork-session "从这里开始新的分支"
+
 # equivalent without npm script:
 npx tsx src/cli.ts "读取 package.json 并总结项目名"
 ```
@@ -398,8 +460,8 @@ The chat supports multi-turn sessions, workspace file-tree path references,
 up to five images per message, file selection or clipboard image paste, tool
 activity events, Markdown rendering, and new-session reset. Selecting a file in
 the sidebar only adds a path reference; the agent still uses the `read` tool to
-load contents. Sessions are kept in memory and are cleared when the server
-restarts.
+load contents. Sessions are persisted under `AGENT_DATA_DIR` (workspace-scoped,
+with a 30-day default TTL) and are restored when the server restarts.
 
 The tool registry follows Pi Agent's seven-tool vocabulary:
 
@@ -434,6 +496,27 @@ name and requested question are sent to it.
 All tools still use relative paths and reject paths that escape the configured
 workspace or resolve through an outside symlink. `.git` and `node_modules`
 remain protected by the workspace sandbox.
+
+### Shell execution on Windows
+
+The tool keeps the name `bash`, but local Windows execution discovers PowerShell
+7 (`pwsh.exe`) first, then Windows PowerShell (`powershell.exe`), then falls back
+to `ComSpec` / `cmd.exe`. Discovery checks absolute PATH entries and standard
+installation directories. PowerShell runs without profiles and non-interactively.
+The tool description advertises the selected shell syntax; commands are not
+translated between bash, PowerShell, and cmd. Unix execution remains `bash -lc`.
+
+With sandbox type `auto`, Windows uses the Node process runner rather than
+implicitly selecting Docker. `MINI_AGENT_SANDBOX_TYPE=docker` explicitly selects
+the container runner, which still executes Linux bash and requires a working
+Docker runtime and sandbox image. Other platforms retain their existing auto
+selection order. A `required` sandbox configuration never falls back to Node:
+Windows auto mode fails with guidance to explicitly configure Docker.
+
+**The Node runner is not an OS security sandbox.** It does not enforce arbitrary
+shell filesystem confinement or reliable network isolation. Permission checks
+remain in effect; use local execution only for trusted commands. Native Windows
+ACL sandboxing and interactive PTY sessions are not implemented by this change.
 
 ### MCP tools
 
@@ -510,6 +593,14 @@ PUT    /api/sessions/:id/permission-mode  { mode: plan|bypass }
 POST   /api/sessions/:id/permissions/:requestId  { decision: allow|deny }
 DELETE /api/sessions/:id
 POST   /api/sessions/:id/messages  multipart(prompt, referencedPaths, images) -> NDJSON stream
+POST   /api/sessions/:id/fork     { messageId? | messageIndex? } -> new session
+POST   /api/sessions/:id/rewind   { messageId? | messageIndex } -> truncated session
+GET    /api/sessions/tree         session fork tree
+
+Session detail messages include stable `id` values. `messageId` retains the
+selected message and everything before it; `messageIndex` remains supported
+for clients using the original count-based API. Truncation never leaves a
+partial assistant tool-call block.
 
 # Per-session plan workflow (stored under dataDir/session-plans/:id)
 GET    /api/sessions/:id/plan
@@ -539,18 +630,55 @@ the local `/model` selector. Permission modes are cycled with `Shift+Tab`:
 | `plan` (default) | Local read-only only; writes/dangerous shell/MCP hard-denied | No approval path | Risk analysis / planning |
 | `bypass` | Yes, including MCP | Never | Trusted local runs / CI |
 
+The former `approval` permission mode was removed. It must not be silently
+mapped to `bypass`; use `plan` for safe analysis or the plan workflow for
+reviewing a complete plan before execution.
+
 ```bash
 npm run tui
 ```
 
-Use `/model`, `/clear`, `/quit`, or `Ctrl+C` inside the terminal client. `/model`
-also accepts `--base-url`, `--api-key-env`, and temporary `--api-key` overrides. The
-previous dependency-free ANSI client remains available as `npm run tui:legacy`.
+The default `npm run tui` entry uses the React + Ink renderer. It renders the
+same shared Agent Core, reducer state, streaming events, permission flow,
+autocomplete, and session persistence as the rest of the TUI components. The
+previous standalone ANSI renderer remains available under the explicit
+`tui:terminal` alias:
+
+```bash
+npm run tui:terminal
+```
+
+`npm run tui:ink` remains available as an explicit alias for the same Ink
+implementation.
+
+Use `/model`, `/profiles`, `/sessions`, `/resume [id]` (or `resume [id]`), `/clear`, `/quit`, or `Ctrl+C`
+inside the Ink client. Typing `/sessions` or `/resume` opens the saved-session
+picker with IDs, message counts, and prompt previews. Enter on `/resume` restores
+the selected session; `/resume <id-prefix>` selects a specific one directly.
+Startup flags mirror the CLI: `npm run tui -- --continue`,
+`npm run tui -- --resume <id>`, and `npm run tui -- --resume <id> --fork-session`.
+`/model` also accepts `--base-url`, `--api-key-env`, and temporary `--api-key`
+overrides. Sessions are persisted under the shared `AGENT_DATA_DIR` root and
+restore history, tool results, Todo/Plan state, permission mode, and model
+settings on the next start. The standalone frame follows the Claude Code
+conversation layout and remains available through `npm run tui:terminal`; the
+previous dependency-free compatibility client remains available as
+`npm run tui:legacy`.
 TUI supports plan workflow slash commands: `/plan`, `/plan-show`, `/plan-approve`,
 `/plan-reject`, `/plan-run`, `/plan-retry`, `/plan-history`, `/plan-archive`.
-CLI one-shot runs accept `--mode plan|bypass` (default `plan`).
-`--plan` forces plan mode; `--plan-execute` loads a saved plan and runs it in
-`bypass`. Use `--mode=bypass` for unattended execution that may write files.
+Terminal input follows the Claude Code-style priority order: `Tab`/`↑↓` first
+operate the active command, argument, file, model, or profile picker; when no
+picker is open, `↑`/`↓` recall the last 200 submitted prompts (multiline drafts
+keep vertical cursor movement). `Alt+↑`/`Alt+↓` moves focus between reasoning
+messages, and `Alt+T` expands or collapses the focused reasoning block.
+`/tasks`, `/copy`, `/skills`, and `/resume` provide argument completion;
+`/resume` loads session IDs from the shared session store.
+CLI one-shot runs accept `--mode plan|bypass` (default `plan`). The former
+`approval` permission mode is no longer supported; migrate read-only runs to
+`plan`, trusted unattended execution to `bypass`, or use the plan workflow
+below for human review before writes. `--plan` forces plan mode;
+`--plan-execute` loads a saved plan and runs it in `bypass`. Use
+`--mode=bypass` for unattended execution that may write files.
 
 ### Plan workflow
 
@@ -584,7 +712,7 @@ the status bar shows the new level immediately. Use `Shift+Up` / `Shift+Down`
 responsible for changing the model, while these shortcuts only change the
 current session configuration and never rewrite the user prompt. The setting
 is provider-neutral: it does not automatically switch providers or models.
-The default is `medium` for reasoning-capable models and `off` otherwise;
+The cycle only includes mapped provider levels, so `xhigh` appears for models that declare it (for example GPT-5.2+ and Claude Opus 4.7+) and is omitted otherwise. The default is `medium` for reasoning-capable models and `off` otherwise;
 `DEFAULT_THINKING_INTENSITY=low|med|high|xhigh|ultra` overrides the startup default.
 Profiles may persist an optional `thinkingLevel` plus optional per-model
 timeout overrides (`timeoutMs`, `firstResponseTimeoutMs`,
@@ -616,33 +744,25 @@ Coverage includes:
 
 ## Layout
 
+See [`docs/architecture.md`](docs/architecture.md) for the full directory map,
+the front-end/runtime boundary, and the HTTP route-module breakdown.
+
 ```text
-mini-agent/
-  package.json
-  tsconfig.json
+mini-agent-loop/
+  scripts/generate-models.ts   # generates the provider model catalogs
   src/
-    types.ts
-    llm.ts
-    content.ts
-    models.ts
-    preprocessors/
-      types.ts
-      vision.ts
-      index.ts
-    validate.ts
-    loop.ts
-    cli.ts
-    server.ts
-    tools/
-      types.ts
-      read.ts
-      index.ts
-  test/
-    faux-model.ts
-    loop.test.ts
-    vision.test.ts
-    server.test.ts
-  README.md
+    loop.ts                    # core agent turn/loop
+    cli.ts  server.ts          # CLI and HTTP entry points
+    server/routes/             # HTTP routes split by domain
+    tui/                       # Ink / pi-tui terminal client
+    llm/  pi-ai/               # model calls and the vendored provider layer
+    tools/  runtime/           # built-in tools and the execution broker
+    permissions.ts             # permission modes and approval requests
+    skills/  mcp/  subagent/   # extension surfaces
+    plan/  plan-act/           # plan document kernel and phase state machine
+    orchestration/  sandbox/   # background jobs and shell isolation
+  test/                        # ~100 node:test suites
+  docs/                        # architecture, security model, design notes
 ```
 
 ## Invariants
@@ -658,7 +778,15 @@ with the partial message history attached. The TUI preserves that history and
 shows a controlled-stop status, while the CLI reports the limit and returns the
 latest partial assistant output instead of treating the stop as an API failure.
 
-## Non-goals (this teaching cut)
+## Current boundaries
 
-General extension loading, parallel tools, MCP resources/prompts/sampling,
-Streamable HTTP/OAuth, session tree, and sub-agent orchestration.
+Mini Agent is a product runtime, not a tutorial implementation. The repository
+includes CLI and terminal UIs, an HTTP/NDJSON server, multi-provider LLM
+adapters, workspace tools, MCP and Skills integration, persistent sessions,
+subagents, Plan-Act workflows, Git workflows, sandbox adapters, and
+vision/document support.
+
+Deployment still requires an explicit provider, persistence, observability, and
+security setup. In particular, sandbox availability, live provider behavior,
+network policy, and long-running job recovery must be validated for the target
+environment rather than inferred from offline tests alone.

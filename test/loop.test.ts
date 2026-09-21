@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import {
+  applyPermissionModePrompt,
   createAgentHistory,
+  restoreAgentHistory,
   MaxTurnsExceededError,
   runAgentLoop,
   runAgentTurn,
@@ -40,6 +42,25 @@ const dummyLlm = makeLlmConfig({
 });
 
 describe("runAgentLoop", () => {
+  it("replaces only the base prompt when restoring a compacted history", () => {
+    const summary = {
+      role: "system" as const,
+      content: "[Conversation summary - older messages were compacted to fit the context window]\nkeep this\n[End conversation summary]",
+    };
+    const restored = restoreAgentHistory(
+      [
+        { role: "system", content: "old system" },
+        summary,
+        { role: "user", content: "continue" },
+      ],
+      "new system",
+    );
+
+    assert.equal(restored[0]?.content, "new system");
+    assert.equal(restored[1], summary);
+    assert.equal(restored[2]?.content, "continue");
+  });
+
   it("emits todo_updated without adding a visible TodoWrite result to the model contract", async () => {
     let calls = 0;
     const events: import("../src/loop.ts").LoopEvent[] = [];
@@ -987,6 +1008,30 @@ describe("runAgentTurn", () => {
     for (const mode of ["plan", "bypass"] as const) {
       assert.ok(buildSystemPrompt(mode).includes(`mode=${mode}`));
     }
+  });
+
+  it("applyPermissionModePrompt rewrites only the mode suffix and keeps history", () => {
+    const history = createAgentHistory(undefined, "plan");
+    history.push(
+      { role: "user", content: "first request" },
+      { role: "assistant", content: "first answer" },
+      { role: "user", content: "second request" },
+      { role: "assistant", content: "second answer" },
+    );
+    const before = [...history];
+
+    applyPermissionModePrompt(history, "bypass");
+
+    const system = history.find((message) => message.role === "system");
+    assert.ok(system && typeof system.content === "string");
+    assert.match(system.content, /mode=bypass/);
+    assert.doesNotMatch(system.content, /mode=plan/);
+    // Conversation messages are untouched and in the same order.
+    assert.deepEqual(history.slice(1), before.slice(1));
+    // Switching back restores the plan suffix without duplication.
+    applyPermissionModePrompt(history, "plan");
+    const noticeCount = ((system.content as string).match(/mode=plan/g) ?? []).length;
+    assert.equal(noticeCount, 1);
   });
 
   it("uses one permission snapshot for the prompt and tools across a mode switch", async () => {

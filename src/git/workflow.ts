@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 
 const execFileAsync = promisify(execFile);
+const GIT_CONFIG_NULL = process.platform === "win32" ? "NUL" : os.devNull;
 
 export type GitStatus = {
   root: string;
@@ -49,9 +50,15 @@ function safeLabel(value: string): string {
 }
 
 async function runGit(root: string, args: string[], options: { env?: NodeJS.ProcessEnv; maxBuffer?: number } = {}): Promise<string> {
-  const result = await execFileAsync("git", ["-C", root, ...args], {
+  const result = await execFileAsync("git", ["-c", "core.autocrlf=false", "-C", root, ...args], {
     cwd: root,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...options.env },
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_GLOBAL: GIT_CONFIG_NULL,
+      GIT_CONFIG_NOSYSTEM: "1",
+      ...options.env,
+    },
     maxBuffer: options.maxBuffer ?? 4 * 1024 * 1024,
   });
   return result.stdout;

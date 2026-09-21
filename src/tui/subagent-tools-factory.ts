@@ -16,6 +16,7 @@ export type SubagentToolsFactoryDeps = {
   parentRuntime: AgentRuntimeRef;
   globalTokenBudget?: number;
   globalConcurrencyLimit?: number;
+  roleLlmConfigs?: Record<string, import("../llm/index.ts").LlmConfig>;
 };
 
 /**
@@ -26,11 +27,19 @@ export class SubagentToolsFactory {
   private lastDeps: SubagentToolsFactoryDeps | null = null;
 
   getTools(deps: SubagentToolsFactoryDeps): Tool[] {
-    if (
-      !this.tools ||
-      this.lastDeps !== deps ||
-      this.lastDeps?.parentLlm.model !== deps.parentLlm.model
-    ) {
+    const keysChanged =
+      this.lastDeps === null ||
+      JSON.stringify(Object.keys(this.lastDeps?.roleLlmConfigs ?? {})) !==
+        JSON.stringify(Object.keys(deps.roleLlmConfigs ?? {}));
+    const valuesChanged =
+      this.lastDeps === null ||
+      JSON.stringify(this.lastDeps?.roleLlmConfigs ?? {}) !==
+        JSON.stringify(deps.roleLlmConfigs ?? {});
+    const modelChanged =
+      this.lastDeps === null || this.lastDeps.parentLlm.model !== deps.parentLlm.model;
+    // The deps object is rebuilt on every call, so reference equality is
+    // never useful; compare the fields that actually affect tool behaviour.
+    if (modelChanged || keysChanged || valuesChanged) {
       const sharedOptions = {
         parentLlm: deps.parentLlm,
         parentTools: deps.parentTools,
@@ -41,6 +50,7 @@ export class SubagentToolsFactory {
         parentRuntime: deps.parentRuntime,
         globalTokenBudget: deps.globalTokenBudget,
         globalConcurrencyLimit: deps.globalConcurrencyLimit,
+        roleLlmConfigs: deps.roleLlmConfigs,
       };
       this.tools = [
         createSubagentTool(sharedOptions) as Tool,
@@ -48,6 +58,6 @@ export class SubagentToolsFactory {
       ];
       this.lastDeps = deps;
     }
-    return this.tools;
+    return this.tools!;
   }
 }

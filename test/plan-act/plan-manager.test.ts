@@ -59,6 +59,24 @@ describe("PlanManager", () => {
     });
   });
 
+  describe("session ownership", () => {
+    test("restores and clones plans without sharing state", () => {
+      const parent = manager.createPlan("parent", "Test", [
+        { id: "step-1", order: 1, description: "Read", tool: "read", arguments: { path: "a" }, risk: "safe", rationale: "inspect", status: "pending" },
+      ]);
+      const restored = manager.restorePlan({ ...structuredClone(parent), id: "restored", sessionId: "restored-session" });
+      assert.equal(manager.getSessionPlans("restored-session")[0]?.id, restored.id);
+
+      const child = manager.clonePlan(parent, "child");
+      child.steps[0]!.arguments.path = "child-only";
+
+      assert.notEqual(child.id, parent.id);
+      assert.equal(child.sessionId, "child");
+      assert.equal(parent.steps[0]!.arguments.path, "a");
+      assert.equal(manager.getSessionPlans("child")[0]?.id, child.id);
+    });
+  });
+
   describe("getCurrentPlan", () => {
     test("returns most recent non-rejected plan", () => {
       const plan1 = manager.createPlan("s1", "Plan 1", []);

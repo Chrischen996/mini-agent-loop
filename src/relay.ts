@@ -24,6 +24,12 @@
  */
 
 import type { LlmConfig } from "./llm/index.ts";
+import {
+  modelReference,
+  normalizeOpenAiCompatibleBaseUrl,
+  resolveModel,
+  type LlmGatewayProtocol,
+} from "./models.ts";
 
 // ─── types ───────────────────────────────────────────────────────────────────
 
@@ -56,6 +62,12 @@ export type RelayEntry = {
    * - `() => string | Promise<string>` — a factory for dynamic / expiring keys
    */
   apiKey: string | string[] | (() => string | Promise<string>);
+  /**
+   * Wire protocol for this relay.
+   * - omit / `"openai-compatible"` — Chat Completions (most 中转站)
+   * - `"anthropic-messages"` — native Anthropic `/v1/messages`
+   */
+  protocol?: LlmGatewayProtocol;
 };
 
 /** An ordered list of relay entries.  First match wins. */
@@ -127,10 +139,17 @@ export function createKeyResolver(
  * the values from `relay`.  All other fields are preserved.
  */
 export function applyRelay(config: LlmConfig, relay: RelayEntry): LlmConfig {
+  const rawUrl = relay.baseUrl.replace(/\/$/, "");
+  const resolved = resolveModel(modelReference(config.provider, config.model), rawUrl, relay.protocol);
+  const rewriteAnthropic =
+    config.piModel?.api === "anthropic-messages" || relay.protocol === "anthropic-messages";
+  const useAnthropic = rewriteAnthropic && Boolean(resolved.piModel);
+  const baseUrl = useAnthropic ? rawUrl : normalizeOpenAiCompatibleBaseUrl(rawUrl);
   return {
     ...config,
-    baseUrl: relay.baseUrl.replace(/\/$/, ""),
+    baseUrl,
     getApiKey: createKeyResolver(relay.apiKey),
+    piModel: resolved.piModel,
   };
 }
 
@@ -152,6 +171,11 @@ function isRelayEntry(value: unknown): value is RelayEntry {
   if (entry.providers !== undefined && !Array.isArray(entry.providers))
     return false;
   if (entry.models !== undefined && !Array.isArray(entry.models)) return false;
+  if (
+    entry.protocol !== undefined &&
+    entry.protocol !== "openai-compatible" &&
+    entry.protocol !== "anthropic-messages"
+  ) return false;
   return true;
 }
 

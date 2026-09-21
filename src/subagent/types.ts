@@ -150,6 +150,15 @@ export type SubagentToolOptions = {
   getPermissionMode?: () => PermissionMode;
   /** @deprecated Use permissionTurn/getPermissionTurn. */
   authorizeTool?: (tool: Tool, args: Record<string, unknown>, signal?: AbortSignal) => Promise<void>;
+  /**
+   * Per-role LlmConfig overrides resolved from the profile store.
+   * Maps subagent role (profile name) to a full LlmConfig built from
+   * the user's saved model profiles.
+   * Takes lower priority than profile.llm and args.model.
+   *
+   * @example { researcher: llmConfigFromProfile, coder: llmConfigFromProfile }
+   */
+  roleLlmConfigs?: Record<string, import("../llm/index.ts").LlmConfig>;
 };
 
 // ─── Tool call arguments (what the LLM sends) ───────────────────────────────

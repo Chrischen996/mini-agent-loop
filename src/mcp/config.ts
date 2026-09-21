@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import type { LoadedMcpConfig, McpStdioServerConfig } from "./types.ts";
+import type { LoadedMcpConfig, McpHttpServerConfig, McpServerConfig, McpStdioServerConfig } from "./types.ts";
 
 const MAX_SERVERS = 16;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -45,6 +45,32 @@ function positiveInteger(value: unknown, fallback: number, label: string, max: n
   return Number(value);
 }
 
+function resolveHeaders(
+  value: unknown,
+  serverId: string,
+  environment: NodeJS.ProcessEnv,
+): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  const input = record(value, `MCP server ${serverId}.headers`);
+  const output: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(input)) {
+    if (typeof raw !== "string") {
+      throw new Error(`MCP server ${serverId}.headers.${key} must be a string`);
+    }
+    const reference = raw.match(ENV_REFERENCE);
+    if (!reference) {
+      output[key] = raw;
+      continue;
+    }
+    const resolved = environment[reference[1]!];
+    if (resolved === undefined) {
+      throw new Error(`MCP server ${serverId} requires environment variable ${reference[1]}`);
+    }
+    output[key] = resolved;
+  }
+  return output;
+}
+
 function resolveEnvironment(
   value: unknown,
   serverId: string,
@@ -74,28 +100,23 @@ function resolveEnvironment(
   return output;
 }
 
-function parseServer(
+function parseCommonFields(
   id: string,
-  value: unknown,
-  configDirectory: string,
-  workspace: string,
-  environment: NodeJS.ProcessEnv,
-): McpStdioServerConfig {
-  if (!id.trim()) throw new Error("MCP server ids must not be empty");
-  const input = record(value, `MCP server ${id}`);
-  const transport = input.transport ?? "stdio";
-  if (transport !== "stdio") {
-    throw new Error(`MCP server ${id} uses unsupported transport: ${String(transport)}`);
-  }
-  if (typeof input.command !== "string" || !input.command.trim()) {
-    throw new Error(`MCP server ${id}.command must be a non-empty string`);
-  }
-  if (input.cwd !== undefined && (typeof input.cwd !== "string" || !input.cwd.trim())) {
-    throw new Error(`MCP server ${id}.cwd must be a non-empty string`);
-  }
-  const cwd = input.cwd
-    ? path.resolve(configDirectory, input.cwd as string)
-    : workspace;
+  input: Record<string, unknown>,
+): Pick<
+  McpStdioServerConfig,
+  | "enabled"
+  | "required"
+  | "reconnect"
+  | "reconnectDelayMs"
+  | "maxReconnectDelayMs"
+  | "includeTools"
+  | "excludeTools"
+  | "timeoutMs"
+  | "maxTools"
+  | "maxSchemaBytes"
+  | "maxResultBytes"
+> {
   const reconnectDelayMs = positiveInteger(
     input.reconnectDelayMs,
     DEFAULT_RECONNECT_DELAY_MS,
@@ -112,12 +133,6 @@ function parseServer(
     throw new Error(`MCP server ${id}.maxReconnectDelayMs must be greater than or equal to reconnectDelayMs`);
   }
   return {
-    id,
-    transport: "stdio",
-    command: input.command.trim(),
-    args: stringArray(input.args, `MCP server ${id}.args`, [], false),
-    cwd,
-    env: resolveEnvironment(input.env, id, environment),
     enabled: boolean(input.enabled, true, `MCP server ${id}.enabled`),
     required: boolean(input.required, false, `MCP server ${id}.required`),
     reconnect: boolean(input.reconnect, true, `MCP server ${id}.reconnect`),
@@ -142,6 +157,55 @@ function parseServer(
       16 * 1024 * 1024,
     ),
   };
+}
+
+function parseServer(
+  id: string,
+  value: unknown,
+  configDirectory: string,
+  workspace: string,
+  environment: NodeJS.ProcessEnv,
+): McpServerConfig {
+  if (!id.trim()) throw new Error("MCP server ids must not be empty");
+  const input = record(value, `MCP server ${id}`);
+  const transport = input.transport ?? "stdio";
+  if (transport === "http") {
+    if (typeof input.url !== "string" || !input.url.trim()) {
+      throw new Error(`MCP server ${id} uses unsupported transport: http (missing required 'url' field)`);
+    }
+    const common = parseCommonFields(id, input);
+    const result: McpHttpServerConfig = {
+      id,
+      transport: "http",
+      url: input.url.trim(),
+      headers: resolveHeaders(input.headers, id, environment),
+      ...common,
+    };
+    return result;
+  }
+  if (transport !== "stdio") {
+    throw new Error(`MCP server ${id} uses unsupported transport: ${String(transport)}`);
+  }
+  if (typeof input.command !== "string" || !input.command.trim()) {
+    throw new Error(`MCP server ${id}.command must be a non-empty string`);
+  }
+  if (input.cwd !== undefined && (typeof input.cwd !== "string" || !input.cwd.trim())) {
+    throw new Error(`MCP server ${id}.cwd must be a non-empty string`);
+  }
+  const cwd = input.cwd
+    ? path.resolve(configDirectory, input.cwd as string)
+    : workspace;
+  const common = parseCommonFields(id, input);
+  const result: McpStdioServerConfig = {
+    id,
+    transport: "stdio",
+    command: input.command.trim(),
+    args: stringArray(input.args, `MCP server ${id}.args`, [], false),
+    cwd,
+    env: resolveEnvironment(input.env, id, environment),
+    ...common,
+  };
+  return result;
 }
 
 export async function loadMcpConfig(

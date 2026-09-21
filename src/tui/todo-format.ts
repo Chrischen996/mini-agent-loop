@@ -5,12 +5,12 @@ import { normalizeTodoText, type TodoItem, type TodoStatus, type TodoViewMode } 
 export const TODO_PANEL_MAX_VISIBLE_ITEMS = 8;
 
 export const TODO_PLAN_STATUS_LABELS: Record<PlanDocument["status"], string> = {
-  pending: "待审批",
-  approved: "已批准",
-  rejected: "已拒绝",
-  executing: "执行中",
-  completed: "已完成",
-  failed: "失败",
+  pending: "pending",
+  approved: "approved",
+  rejected: "rejected",
+  executing: "in progress",
+  completed: "completed",
+  failed: "failed",
 };
 
 const PLAN_STEP_TODO_STATUS: Record<PlanStepStatus, TodoStatus> = {
@@ -65,13 +65,14 @@ export function executionPlanToTodoItems(plan: ExecutionPlan): TodoItem[] {
 }
 
 export function resolveTodoItems(source: TodoSource): TodoItem[] {
-  return source.todos ? [...source.todos] : planToTodoItems(source.plan);
+  if (source.todos && source.todos.length > 0) return [...source.todos];
+  return planToTodoItems(source.plan);
 }
 
 export function todoIcon(status: TodoStatus): string {
   switch (status) {
     case "completed": return "☒";
-    case "in_progress": return "…";
+    case "in_progress": return "◐";
     case "failed": return "✗";
     case "skipped": return "-";
     default: return "☐";
@@ -92,6 +93,14 @@ export function todoText(value: string, max = 100): string {
   return normalized.length > max ? `${normalized.slice(0, Math.max(1, max - 3))}...` : normalized;
 }
 
+/** Compact progress meter kept inline with the Todo header to avoid adding rows. */
+export function todoProgressMeter(completed: number, total: number, width = 6): string {
+  const slots = Math.max(1, width);
+  if (total <= 0) return "·".repeat(slots);
+  const filled = Math.max(0, Math.min(slots, Math.round((completed / total) * slots)));
+  return `${"▰".repeat(filled)}${"▱".repeat(slots - filled)}`;
+}
+
 export function getTodoPanelRows(
   source: TodoSource,
   viewMode: TodoViewMode = "expanded",
@@ -99,7 +108,7 @@ export function getTodoPanelRows(
 ): number {
   const items = resolveTodoItems(source);
   if (viewMode === "hidden" || (!source.plan && !source.todos)) return 0;
-  if (viewMode === "compact") return 1;
+  if (viewMode === "compact") return 2;
   const visible = Math.min(items.length, maxVisibleItems);
   return 1 + Math.max(1, visible) + (items.length > visible ? 1 : 0);
 }

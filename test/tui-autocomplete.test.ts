@@ -13,6 +13,7 @@ import {
   nextWrappedIndex,
   resolveAutocompleteInput,
   resolveAutocompleteNav,
+  sessionListCommand,
 } from "../src/tui/autocomplete.ts";
 import { SLASH_COMMANDS } from "../src/tui/components/FileAutocomplete.tsx";
 
@@ -68,10 +69,27 @@ describe("autocomplete input resolution", () => {
     assert.ok(matches.some((command) => command.name === "plan"));
   });
 
+  it("opens the saved-session picker for complete session commands", () => {
+    assert.equal(sessionListCommand("/sessions"), "sessions");
+    assert.equal(sessionListCommand("/resume"), "resume");
+    assert.equal(sessionListCommand("resume"), "resume");
+    assert.equal(sessionListCommand("/resume abc"), null);
+    assert.deepEqual(resolveAutocompleteInput("/resume", null), {
+      kind: "session-list",
+      command: "resume",
+    });
+    assert.deepEqual(resolveAutocompleteInput("/sessions", null), {
+      kind: "session-list",
+      command: "sessions",
+    });
+  });
+
   it("recognizes a fully typed slash command for direct submission", () => {
     assert.equal(isExactSlashCommand("/plan-show", "plan-show"), true);
     assert.equal(isExactSlashCommand(" /PLAN-SHOW ", "plan-show"), true);
     assert.equal(isExactSlashCommand("/plan", "plan-show"), false);
+    assert.equal(isExactSlashCommand("/resume abc123", "resume", ["abc123"]), true);
+    assert.equal(isExactSlashCommand("/resume abc", "resume", ["abc123"]), false);
   });
 
   it("keeps bare /model on the command palette instead of the model picker", () => {
@@ -133,6 +151,18 @@ describe("autocomplete keyboard mapping", () => {
     assert.deepEqual(
       resolveAutocompleteNav("command", { tab: true }, 1, lengths),
       { type: "accept-command" },
+    );
+  });
+
+  it("navigates and accepts saved-session candidates", () => {
+    const sessionLengths = { commands: 0, files: 0, models: 0, profiles: 0, sessions: 2 };
+    assert.deepEqual(
+      resolveAutocompleteNav("session-list", { downArrow: true }, 0, sessionLengths),
+      { type: "move", index: 1 },
+    );
+    assert.deepEqual(
+      resolveAutocompleteNav("session-list", { tab: true }, 1, sessionLengths),
+      { type: "accept-session" },
     );
   });
 

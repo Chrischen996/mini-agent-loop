@@ -2,8 +2,9 @@ import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import type { ImagePart } from "../types.ts";
+import type { ImageMimeType, ImagePart } from "../types.ts";
 import type { ImageAttachment } from "./state.ts";
+import { runChildProcess } from "./child-process.ts";
 
 export const MAX_TUI_IMAGE_BYTES = 4 * 1024 * 1024;
 export const MAX_TUI_IMAGES = 5;
@@ -15,7 +16,7 @@ type ClipboardImageOptions = {
   now?: () => number;
 };
 
-function sniffImageMime(buffer: Buffer): string | undefined {
+function sniffImageMime(buffer: Buffer): ImageMimeType | undefined {
   if (
     buffer.length >= 8
     && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
@@ -37,7 +38,7 @@ function sniffImageMime(buffer: Buffer): string | undefined {
   return undefined;
 }
 
-function validateImageBuffer(buffer: Buffer, source: string): string {
+function validateImageBuffer(buffer: Buffer, source: string): ImageMimeType {
   if (buffer.byteLength === 0) throw new Error(`${source} is empty`);
   if (buffer.byteLength > MAX_TUI_IMAGE_BYTES) {
     throw new Error(`${source} exceeds the 4MB image limit`);
@@ -103,29 +104,10 @@ async function exportMacClipboardPng(outputPath: string): Promise<void> {
     "close access outputFile",
   ];
 
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    const child = spawn("osascript", script.flatMap((line) => ["-e", line]), {
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    let settled = false;
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error) rejectPromise(error);
-      else resolvePromise();
-    };
-    const timeout = setTimeout(() => {
-      child.kill();
-      finish(new Error("clipboard read timed out"));
-    }, 5_000);
-
-    child.stderr?.resume();
-    child.once("error", (error) => finish(error));
-    child.once("close", (code) => {
-      if (code === 0) finish();
-      else finish(new Error("clipboard does not contain a PNG-compatible image"));
-    });
+  await runChildProcess("osascript", script.flatMap((line) => ["-e", line]), {
+    stdio: ["ignore", "ignore", "pipe"],
+    timeoutMessage: "clipboard read timed out",
+    failureMessage: () => "clipboard does not contain a PNG-compatible image",
   });
 }
 
@@ -162,30 +144,10 @@ export function buildWindowsClipboardCommand(outputPath: string): WindowsClipboa
 async function exportWindowsClipboardPng(outputPath: string): Promise<void> {
   const { command, args } = buildWindowsClipboardCommand(outputPath);
 
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    const child = spawn(command, args, {
-      stdio: ["ignore", "ignore", "pipe"],
-      windowsHide: true,
-    });
-    let settled = false;
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (error) rejectPromise(error);
-      else resolvePromise();
-    };
-    const timeout = setTimeout(() => {
-      child.kill();
-      finish(new Error("clipboard read timed out"));
-    }, 5_000);
-
-    child.stderr?.resume();
-    child.once("error", (error) => finish(error));
-    child.once("close", (code) => {
-      if (code === 0) finish();
-      else finish(new Error("clipboard does not contain an image"));
-    });
+  await runChildProcess(command, args, {
+    stdio: ["ignore", "ignore", "pipe"],
+    timeoutMessage: "clipboard read timed out",
+    failureMessage: () => "clipboard does not contain an image",
   });
 }
 

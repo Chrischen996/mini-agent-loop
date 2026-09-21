@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { truncateSessionMessages } from "../src/server.ts";
 import { SessionStore } from "../src/session-store.ts";
 import type { TodoItem } from "../src/tools/todo.ts";
+import type { ExecutionPlan } from "../src/plan-act/types.ts";
 
 describe("SessionStore", () => {
   it("truncates an incomplete assistant tool-call block as one unit", () => {
@@ -36,10 +37,36 @@ describe("SessionStore", () => {
       const recent = { id: "recent-session", createdAt: Date.now(), messages: [{ role: "user" as const, content: "new" }] };
       await store.create(old);
       await store.create(recent);
+      await store.compact({
+        ...old,
+        lastActiveAt: Date.now() - 5_000,
+      });
 
       const loaded = await new SessionStore(root, { sessionTtlMs: 1_000 }).loadAll();
       assert.equal(loaded.has("old-session"), false, "expired session should be evicted");
       assert.equal(loaded.has("recent-session"), true, "recent session should remain");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not bypass TTL when loading an explicit session id", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-explicit-ttl-"));
+    try {
+      const store = new SessionStore(root, { sessionTtlMs: 1_000 });
+      const stale = {
+        id: "expired-explicit",
+        createdAt: Date.now() - 2_000,
+        messages: [{ role: "user" as const, content: "stale" }],
+      };
+      await store.create(stale);
+      await store.compact({ ...stale, lastActiveAt: Date.now() - 2_000 });
+
+      assert.equal(await store.load("expired-explicit"), undefined);
+      await assert.rejects(
+        readFile(path.join(root, "expired-explicit", "events.jsonl")),
+        /ENOENT/,
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -98,11 +125,13 @@ describe("SessionStore", () => {
         createdAt: Date.now(),
         parentSessionId: "parent-session",
         forkedFromMessage: 3,
+        forkedFromMessageId: "msg-parent-3",
         messages: [],
       });
       const restored = await store.loadAll();
       assert.equal(restored.get("child-session")?.parentSessionId, "parent-session");
       assert.equal(restored.get("child-session")?.forkedFromMessage, 3);
+      assert.equal(restored.get("child-session")?.forkedFromMessageId, "msg-parent-3");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -123,6 +152,47 @@ describe("SessionStore", () => {
       const restored = await new SessionStore(root).loadAll();
       assert.equal(restored.get("adaptive-session")?.thinkingMode, "adaptive");
       assert.equal(restored.get("adaptive-session")?.thinkingLevel, "high");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("round-trips Claude thinking signatures on assistant messages", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-thinking-parts-"));
+    try {
+      const store = new SessionStore(root);
+      const messages = [
+        { role: "user" as const, content: "inspect the file" },
+        {
+          role: "assistant" as const,
+          content: "I'll read it.",
+          thinking: [
+            {
+              type: "thinking" as const,
+              thinking: "need to inspect the file first",
+              thinkingSignature: "sig_abc",
+            },
+          ],
+          toolCalls: [{ id: "toolu_1", name: "read", arguments: { path: "src/loop.ts" } }],
+        },
+      ];
+      await store.create({
+        id: "thinking-parts",
+        createdAt: Date.now(),
+        messages,
+      });
+
+      const restored = await new SessionStore(root).load("thinking-parts");
+      const assistant = restored?.messages.find((message) => message.role === "assistant");
+      assert.equal(assistant?.role, "assistant");
+      if (assistant?.role !== "assistant") return;
+      assert.deepEqual(assistant.thinking, [
+        {
+          type: "thinking",
+          thinking: "need to inspect the file first",
+          thinkingSignature: "sig_abc",
+        },
+      ]);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -180,10 +250,12 @@ describe("SessionStore", () => {
           type: "session_created",
           sessionId,
           createdAt: Date.now(),
+          permissionMode: "approval",
         })}\n${JSON.stringify({
           type: "session_snapshot",
           sessionId,
           createdAt: Date.now(),
+          permissionMode: "approval",
           messages: [],
         })}\n`,
         "utf8",
@@ -192,6 +264,7 @@ describe("SessionStore", () => {
       const restored = await new SessionStore(root).loadAll();
       assert.deepEqual(restored.get(sessionId)?.todos, []);
       assert.equal(restored.get(sessionId)?.todoVersion, 0);
+      assert.equal(restored.get(sessionId)?.permissionMode, "plan");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -217,9 +290,9 @@ describe("SessionStore", () => {
       assert.ok(lines.length < 5, `expected compaction, got ${lines.length} lines`);
       // The surviving snapshot must be the latest state.
       const restored = await new SessionStore(root).loadAll();
-      assert.deepEqual(restored.get(session.id)?.messages, [
-        { role: "user", content: "v5" },
-      ]);
+      assert.equal(restored.get(session.id)?.messages[0]?.role, "user");
+      assert.equal(restored.get(session.id)?.messages[0]?.content, "v5");
+      assert.match(restored.get(session.id)?.messages[0]?.id ?? "", /^msg_[a-f0-9]{24}$/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -247,6 +320,22 @@ describe("SessionStore", () => {
     }
   });
 
+  it("rejects unsafe session ids before touching the filesystem", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-id-validation-"));
+    try {
+      const store = new SessionStore(root);
+      const unsafe = { id: "../outside", createdAt: Date.now(), messages: [] };
+
+      await assert.rejects(store.save(unsafe), /Invalid session id/);
+      await assert.rejects(store.create(unsafe), /Invalid session id/);
+      await assert.rejects(store.remove("../outside"), /Invalid session id/);
+      await assert.rejects(store.compact(unsafe), /Invalid session id/);
+      assert.equal(await store.load("../outside"), undefined);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("lists sessions most-recently-active first with previews", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-list-"));
     try {
@@ -263,6 +352,60 @@ describe("SessionStore", () => {
       assert.equal(list[0]!.id, "newer", "most recently active should be first");
       assert.equal(list[0]!.preview, "second question");
       assert.ok(list[0]!.lastActiveAt >= list[1]!.lastActiveAt);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("excludes system-only sessions without spending a resume-list slot", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-list-filter-"));
+    try {
+      const store = new SessionStore(root, { maxSessions: 1 });
+      await store.create({
+        id: "system-only",
+        createdAt: Date.now(),
+        messages: [{ role: "system", content: "system prompt" }],
+      });
+      await store.create({
+        id: "older-user",
+        createdAt: Date.now(),
+        messages: [{ role: "user", content: "older prompt" }],
+      });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await store.create({
+        id: "newer-user",
+        createdAt: Date.now(),
+        messages: [{ role: "system", content: "system prompt" }, { role: "user", content: "newer prompt" }],
+      });
+
+      assert.deepEqual((await store.listSessions()).map((session) => session.id), ["newer-user"]);
+      const loaded = await new SessionStore(root, { maxSessions: 1 }).loadAll();
+      assert.equal(loaded.has("newer-user"), true, "a system-only record must not evict a resumable session");
+      assert.equal(loaded.has("system-only"), true, "non-expired records remain loadable for compatibility");
+      assert.equal((await store.load("system-only"))?.messages.length, 1);
+      assert.equal(await store.load("older-user"), undefined);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("cleans expired system-only sessions while listing resumable sessions", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-list-expired-system-"));
+    try {
+      const store = new SessionStore(root, { sessionTtlMs: 1_000 });
+      const stale = {
+        id: "expired-system-only",
+        createdAt: Date.now(),
+        messages: [{ role: "system" as const, content: "system prompt" }],
+      };
+      await store.create(stale);
+      await store.compact({ ...stale, lastActiveAt: Date.now() - 5_000 });
+
+      assert.deepEqual(await store.listSessions(), []);
+      await assert.rejects(
+        readFile(path.join(root, stale.id, "events.jsonl")),
+        /ENOENT/,
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -286,6 +429,112 @@ describe("SessionStore", () => {
       assert.equal(loaded.has("stale"), true, "recently-active session should survive");
       const restored = loaded.get("stale")!;
       assert.ok(restored.lastActiveAt !== undefined, "lastActiveAt should round-trip");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("filters sessions by workspace scope", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-workspace-"));
+    try {
+      const first = new SessionStore(root, { workspaceId: "/workspace/one" });
+      const second = new SessionStore(root, { workspaceId: "/workspace/two" });
+      await first.create({ id: "one", createdAt: Date.now(), messages: [{ role: "user", content: "one" }] });
+      await second.create({ id: "two", createdAt: Date.now(), messages: [{ role: "user", content: "two" }] });
+
+      assert.equal((await first.listSessions()).map((item) => item.id).join(), "one");
+      assert.equal((await second.listSessions()).map((item) => item.id).join(), "two");
+      assert.equal(await first.load("two"), undefined);
+      assert.equal((await new SessionStore(root).listSessions()).length, 2);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("claims legacy unscoped sessions for the first workspace that opens them", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-legacy-scope-"));
+    try {
+      const legacy = new SessionStore(root);
+      await legacy.create({
+        id: "legacy-scope-session",
+        createdAt: Date.now(),
+        messages: [{ role: "user", content: "old prompt" }],
+      });
+
+      const firstWorkspace = new SessionStore(root, { workspaceId: "/workspace/first" });
+      const restored = await firstWorkspace.load("legacy-scope-session");
+      assert.equal(restored?.workspaceId, "/workspace/first");
+      assert.equal(restored?.messages[0]?.content, "old prompt");
+
+      const secondWorkspace = new SessionStore(root, { workspaceId: "/workspace/second" });
+      assert.equal(await secondWorkspace.load("legacy-scope-session"), undefined);
+      assert.deepEqual(
+        (await firstWorkspace.listSessions()).map((item) => item.id),
+        ["legacy-scope-session"],
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats null currentPlan as an explicit clear", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-plan-clear-"));
+    try {
+      const store = new SessionStore(root);
+      const plan: ExecutionPlan = {
+        id: "plan-1",
+        sessionId: "plan-session",
+        createdAt: Date.now(),
+        summary: "do it",
+        steps: [],
+        risks: [],
+        requiredTools: [],
+        status: "draft",
+      };
+      await store.create({ id: "plan-session", createdAt: Date.now(), currentPlan: plan, messages: [] });
+      await store.save({ id: "plan-session", createdAt: Date.now(), currentPlan: undefined, messages: [] });
+
+      assert.equal((await store.load("plan-session"))?.currentPlan, undefined);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes concurrent saves without losing snapshots", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-lock-"));
+    try {
+      const first = new SessionStore(root, { compactThreshold: 100 });
+      const second = new SessionStore(root, { compactThreshold: 100 });
+      const session = { id: "locked-session", createdAt: Date.now(), messages: [] };
+      await first.create(session);
+      await Promise.all([
+        first.save({ ...session, messages: [{ role: "user", content: "first" }] }),
+        second.save({ ...session, messages: [{ role: "user", content: "second" }] }),
+      ]);
+
+      const lines = (await readFile(path.join(root, session.id, "events.jsonl"), "utf8"))
+        .split("\n")
+        .filter(Boolean);
+      assert.equal(lines.length, 4);
+      assert.ok(["first", "second"].includes((await new SessionStore(root).load(session.id))?.messages[0]?.content as string));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps create() from appending a second session_created event", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-create-once-"));
+    try {
+      const store = new SessionStore(root);
+      const session = { id: "create-once", createdAt: Date.now(), messages: [] };
+      await store.create(session);
+      await assert.rejects(store.create(session), /Session already exists/);
+
+      const events = (await readFile(path.join(root, session.id, "events.jsonl"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { type: string });
+      assert.equal(events.filter((event) => event.type === "session_created").length, 1);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -3,9 +3,12 @@ export type TextPart = {
   text: string;
 };
 
+export type ImageMimeType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+
 export type ImagePart = {
   type: "image";
-  mimeType: string; // image/png | image/jpeg | image/gif | image/webp
+  /** Supported image MIME types. */
+  mimeType: ImageMimeType;
   /** Base64 payload without data: prefix */
   data: string;
   source?: string; // relative path, "cli", etc.
@@ -20,27 +23,46 @@ export type VisionAnalysisPart = {
 
 export type ContentPart = TextPart | ImagePart | VisionAnalysisPart;
 
-/** Plain string stays supported for teaching / backward compatibility. */
+/** Plain strings remain supported for compatibility with existing callers. */
 export type MessageContent = string | ContentPart[];
 
 export type UserMessage = {
+  /** Stable identity used by persisted sessions and fork/rewind APIs. */
+  id?: string;
   role: "user";
   content: MessageContent;
 };
 
+export type ThinkingPart = {
+  type: "thinking";
+  thinking: string;
+  /** Provider-encrypted thinking signature required for Claude multi-turn continuity. */
+  thinkingSignature?: string;
+  /** When true, `thinkingSignature` holds the opaque redacted_thinking payload. */
+  redacted?: boolean;
+};
+
 export type AssistantMessage = {
+  /** Stable identity used by persisted sessions and fork/rewind APIs. */
+  id?: string;
   role: "assistant";
-  /** Assistant stays text-only in this teaching cut. */
+  /** Assistant response text is kept separate from structured tool calls. */
   content: string;
   toolCalls?: ToolCall[];
+  /** Claude/Anthropic thinking blocks replayed on the next turn. */
+  thinking?: ThinkingPart[];
 };
 
 export type SystemMessage = {
+  /** Stable identity used by persisted sessions and fork/rewind APIs. */
+  id?: string;
   role: "system";
   content: string;
 };
 
 export type ToolResultMessage = {
+  /** Stable identity used by persisted sessions and fork/rewind APIs. */
+  id?: string;
   role: "tool";
   toolCallId: string;
   name: string;

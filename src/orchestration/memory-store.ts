@@ -112,18 +112,23 @@ export class MemoryStore {
   }
 
   /**
-   * Cap total records; when exceeded, forget the least-recently-used
-   * records until under the cap.
+   * Cap active (non-forgotten) records; when exceeded, mark the
+   * least-recently-used records as forgotten until under the cap.
+   *
+   * Note: `excess` is derived from active records only so that already-
+   * forgotten records do not inflate the eviction count.
    */
   private async enforceCapacity(maxRecords = MAX_RECORDS): Promise<void> {
-    if (this.records.length <= maxRecords) return;
-    const excess = this.records.length - maxRecords;
-    const byLru = [...this.records]
-      .filter((record) => record.status !== "forgotten")
-      .sort((a, b) => (a.lastUsedAt ?? a.updatedAt) - (b.lastUsedAt ?? b.updatedAt));
+    const active = this.records.filter((record) => record.status !== "forgotten");
+    if (active.length <= maxRecords) return;
+    const excess = active.length - maxRecords;
+    const byLru = [...active].sort(
+      (a, b) => (a.lastUsedAt ?? a.updatedAt) - (b.lastUsedAt ?? b.updatedAt),
+    );
+    const now = Date.now();
     for (const record of byLru.slice(0, excess)) {
       record.status = "forgotten";
-      record.updatedAt = Date.now();
+      record.updatedAt = now;
     }
   }
 

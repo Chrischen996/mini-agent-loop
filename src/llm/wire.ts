@@ -20,6 +20,7 @@ import type {
   AssistantMessage,
   ImagePart,
   MessageContent,
+  ThinkingPart,
   ToolCall,
 } from "../types.ts";
 import { parseToolArgumentsJson } from "../validate.ts";
@@ -208,6 +209,12 @@ function toPiMessages(messages: AgentMessage[]): { systemPrompt?: string; messag
       converted.push({
         role: "assistant",
         content: [
+          ...(message.thinking ?? []).map((part) => ({
+            type: "thinking" as const,
+            thinking: part.thinking,
+            ...(part.thinkingSignature ? { thinkingSignature: part.thinkingSignature } : {}),
+            ...(part.redacted ? { redacted: true } : {}),
+          })),
           ...(message.content ? [{ type: "text", text: message.content } satisfies PiTextContent] : []),
           ...(message.toolCalls ?? []).map((call) => ({
             type: "toolCall" as const,
@@ -258,10 +265,18 @@ export function fromPiAssistant(message: PiAssistantMessage): {
     .filter((part) => part.type === "text")
     .map((part) => part.text)
     .join("");
+  const thinking: ThinkingPart[] = message.content
+    .filter((part) => part.type === "thinking")
+    .map((part) => ({
+      type: "thinking" as const,
+      thinking: part.thinking,
+      ...(part.thinkingSignature ? { thinkingSignature: part.thinkingSignature } : {}),
+      ...(part.redacted ? { redacted: true } : {}),
+    }));
   const toolCalls = message.content
     .filter((part) => part.type === "toolCall")
     .map((part) => ({ id: part.id, name: part.name, arguments: part.arguments }));
-  
+
   // Map pi-ai usage to unified StreamChatUsage
   // pi-ai: input (uncached), cacheRead, cacheWrite, output
   // StreamChatUsage: promptTokens (total), inputTokens (uncached), completionTokens, cacheReadTokens, cacheWriteTokens
@@ -269,11 +284,13 @@ export function fromPiAssistant(message: PiAssistantMessage): {
   const cacheRead = message.usage.cacheRead || 0;
   const cacheWrite = message.usage.cacheWrite || 0;
   const promptTokens = input + cacheRead + cacheWrite;
-  
+  const reasoningTokens = message.usage.reasoning;
+
   return {
     message: {
       role: "assistant",
       content: text,
+      ...(thinking.length > 0 ? { thinking } : {}),
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
     },
     usage: {
@@ -283,6 +300,7 @@ export function fromPiAssistant(message: PiAssistantMessage): {
       totalTokens: message.usage.totalTokens,
       ...(cacheRead > 0 ? { cacheReadTokens: cacheRead } : {}),
       ...(cacheWrite > 0 ? { cacheWriteTokens: cacheWrite } : {}),
+      ...(reasoningTokens != null ? { reasoningTokens } : {}),
     },
   };
 }

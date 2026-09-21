@@ -52,3 +52,39 @@ export function countTerminalRows(value: string, columns: number): number {
     return rows + Math.max(1, Math.ceil(terminalStringWidth(line) / safeColumns));
   }, 0);
 }
+
+/**
+ * Keep a useful directory suffix when a status row is narrower than cwd.
+ * Generic tail truncation often starts in the middle of a path segment (for
+ * example `…s/project`), while Claude Code keeps the final folder visible.
+ */
+export function truncateTerminalPath(value: string, maxWidth: number): string {
+  const safeWidth = Math.max(1, maxWidth);
+  if (terminalStringWidth(value) <= safeWidth) return value;
+  if (safeWidth === 1) return "…";
+
+  const separator = value.includes("\\") && !value.includes("/") ? "\\" : "/";
+  const segments = value.split(/[\\/]+/).filter(Boolean);
+
+  // Walk whole segments from the end. Only when the final segment itself does
+  // not fit does the fallback cut inside it, so the visible suffix never starts
+  // with a fragment such as `…p/mini-agent`.
+  let suffix = "";
+  for (let index = segments.length - 1; index >= 0; index--) {
+    const candidate = suffix ? `${segments[index]}${separator}${suffix}` : segments[index]!;
+    if (terminalStringWidth(`…${separator}${candidate}`) > safeWidth) break;
+    suffix = candidate;
+  }
+  if (suffix) return `…${separator}${suffix}`;
+
+  const last = segments[segments.length - 1] ?? value;
+  let tail = "";
+  let used = 0;
+  for (const grapheme of [...last].reverse()) {
+    const glyphWidth = Math.max(1, terminalStringWidth(grapheme));
+    if (used + glyphWidth > safeWidth - 1) break;
+    tail = grapheme + tail;
+    used += glyphWidth;
+  }
+  return `…${tail}`;
+}

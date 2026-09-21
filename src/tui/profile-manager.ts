@@ -18,6 +18,8 @@ export type ProfileManagerDeps = {
   setProfileListState: React.Dispatch<React.SetStateAction<any>>;
   dispatch: Dispatch<TuiAction>;
   historyRef: React.MutableRefObject<AgentMessage[]>;
+  /** Persist the adapted transcript immediately after a model switch. */
+  persistSession?: (history: AgentMessage[]) => Promise<void>;
 };
 
 /**
@@ -41,8 +43,11 @@ export function startModelSetup(
     baseUrl: overrides.baseUrl || model.baseUrl,
     apiKey: overrides.apiKey ?? (canReuseCurrentKey ? llm.apiKey : providerKey ?? ""),
     field: "baseUrl",
+    ...(overrides.protocol ? { protocol: overrides.protocol } : {}),
   });
-  setInput(overrides.baseUrl || model.baseUrl);
+  // Keep the default in modelSetup as the fallback, but leave the field empty
+  // so a pasted gateway URL replaces it instead of being appended to it.
+  setInput("");
   setAcMode("model-setup");
   setAcIndex(0);
 }
@@ -58,9 +63,11 @@ export async function commitModelSetup(
   const { llm, setLlm, setModelSetup, setAcMode, setInput, dispatch, historyRef } = deps;
 
   try {
+    const effectiveApiKey = apiKey.trim() || setup.apiKey.trim();
     const newLlmConfig = switchLlmModel(llm, setup.model, {
       baseUrl: setup.baseUrl,
-      apiKey,
+      apiKey: effectiveApiKey,
+      ...(setup.protocol ? { protocol: setup.protocol } : {}),
     });
     setLlm(newLlmConfig);
     dispatch({ type: "MODEL_CHANGED", modelName: setup.model.id });
@@ -72,6 +79,7 @@ export async function commitModelSetup(
         sourceCapabilities: llm.capabilities,
       });
     }
+    await deps.persistSession?.(historyRef.current);
 
     setModelSetup(undefined);
     setAcMode(null);
@@ -85,7 +93,7 @@ export async function commitModelSetup(
       await saveProfile(defaultName, {
         model: `${setup.model.provider}/${setup.model.id}`,
         baseUrl: setup.baseUrl,
-        apiKey,
+        apiKey: newLlmConfig.apiKey,
         thinkingLevel: newLlmConfig.thinkingLevel,
         ...(newLlmConfig.timeoutMs !== undefined ? { timeoutMs: newLlmConfig.timeoutMs } : {}),
         ...(newLlmConfig.firstResponseTimeoutMs !== undefined
@@ -99,7 +107,7 @@ export async function commitModelSetup(
       // non-fatal: model is already switched in memory
     }
   } catch (error) {
-    setModelSetup({ ...setup, apiKey, error: error instanceof Error ? error.message : String(error) });
+    setModelSetup({ ...setup, apiKey: apiKey.trim(), error: error instanceof Error ? error.message : String(error) });
     setInput(apiKey);
   }
 }

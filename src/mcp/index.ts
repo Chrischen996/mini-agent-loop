@@ -7,6 +7,7 @@ export type {
   LoadedMcpConfig,
   McpClientConnection,
   McpClientFactory,
+  McpHttpServerConfig,
   McpServerStatus,
   McpStdioServerConfig,
   McpToolDefinition,

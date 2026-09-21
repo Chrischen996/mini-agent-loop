@@ -1,0 +1,16 @@
+# Lock all text files to LF so Windows checkouts stop reintroducing CRLF
+# churn into the diff (see MessageFeed.tsx / PromptInput.tsx CRLF incident).
+* text=lf
+
+# Anything that is not plain text
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.tgz binary
+*.wasm binary
+
+# pnpm store artifacts, if any ever get committed
+.pnpm-store/** binary

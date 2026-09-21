@@ -1,15 +1,18 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { TUI_COLORS as C } from "../theme.ts";
+import { markdownRowText, markdownRuleText, parseMarkdownLines } from "../markdown-lines.ts";
 
 /**
  * Lightweight terminal markdown renderer (pure Ink, no dependencies).
  *
  * Design constraint: renders exactly one visual row per source line (headers,
- * rules and list markers transform in place instead of inserting blank lines),
- * so `countTerminalRows(rawText)` in message-viewport.ts stays an accurate
- * height estimate — unlike the previous regex-based formatAssistantText which
- * injected newlines and caused viewport clipping drift.
+ * rules, table rows and code fences transform in place instead of inserting or
+ * dropping lines), so `countTerminalRows(rawText)` in message-viewport.ts stays
+ * an accurate height estimate — unlike the previous regex-based
+ * formatAssistantText which injected newlines and caused viewport clipping
+ * drift. Row text comes from the shared `markdownRowText` helper, which is also
+ * what the ANSI projection uses, so the two clients render the same markdown.
  */
 
 /** Parse inline `code` and **bold** spans into styled Text nodes. */
@@ -40,60 +43,36 @@ function renderInline(text: string, keyPrefix: string, baseColor?: string): Reac
   return nodes;
 }
 
-const RULE_WIDTH = 48;
-
-export function MarkdownText({ text }: { text: string }): React.ReactElement {
-  const lines = text.split("\n");
-  let inCodeBlock = false;
+export function MarkdownText({ text, width }: { text: string; width?: number }): React.ReactElement {
+  const lines = parseMarkdownLines(text);
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={width} minWidth={0} overflow="hidden">
       {lines.map((line, i) => {
-        if (line.trimStart().startsWith("```")) {
-          inCodeBlock = !inCodeBlock;
-          return <Text key={i} color={C.muted}>{line}</Text>;
-        }
-        if (inCodeBlock) {
-          return <Text key={i} color={C.info}>{line}</Text>;
-        }
-
-        const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-        if (heading) {
-          const level = heading[1]!.length;
-          if (level <= 2) {
-            return (
-              <Text key={i} color={C.primary} bold>▸ {heading[2]}</Text>
-            );
+        if (line.kind === "code-fence") return <Text key={i} color={C.muted} dimColor>{markdownRowText(line)}</Text>;
+        if (line.kind === "code") return <Text key={i} color={C.info}>{markdownRowText(line)}</Text>;
+        if (line.kind === "heading") {
+          if (line.level <= 2) {
+            return <Text key={i} color={C.primary} bold>{markdownRowText(line)}</Text>;
           }
-          return (
-            <Text key={i} color={C.selection} bold>· {heading[2]}</Text>
-          );
+          return <Text key={i} color={C.info} bold>{markdownRowText(line)}</Text>;
         }
-
-        if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
-          return <Text key={i} color={C.border}>{"─".repeat(RULE_WIDTH)}</Text>;
+        if (line.kind === "rule") return <Text key={i} color={C.border}>{markdownRuleText(width)}</Text>;
+        if (line.kind === "table") {
+          if (line.role === "header") return <Text key={i} color={C.assistant} bold wrap="truncate-end">{line.text}</Text>;
+          if (line.role === "rule") return <Text key={i} color={C.border} dimColor wrap="truncate-end">{line.text}</Text>;
+          return <Text key={i} color={C.assistant} wrap="truncate-end">{line.text}</Text>;
         }
-
-        const listItem = /^(\s*)([-*+]|\d+\.)\s+(.*)$/.exec(line);
-        if (listItem) {
-          const indent = Math.floor(listItem[1]!.length / 2);
-          const ordered = /\d/.test(listItem[2]!);
+        if (line.kind === "list") {
           return (
-            <Box key={i} paddingLeft={indent * 2} gap={1}>
-              <Text color={C.running}>{ordered ? listItem[2] : "•"}</Text>
-              <Text color={C.assistant}>{renderInline(listItem[3]!, `li${i}`, C.assistant)}</Text>
+            <Box key={i} paddingLeft={line.indent * 2} gap={1} minWidth={0}>
+              <Text color={C.running}>{line.ordered ? line.marker : "•"}</Text>
+              <Text color={C.assistant} wrap="wrap">{renderInline(line.text, `li${i}`, C.assistant)}</Text>
             </Box>
           );
         }
-
-        const quote = /^>\s?(.*)$/.exec(line);
-        if (quote) {
-          return <Text key={i} color={C.muted}>│ {quote[1]}</Text>;
-        }
-
-        return (
-          <Text key={i} color={C.assistant}>{renderInline(line, `ln${i}`, C.assistant)}</Text>
-        );
+        if (line.kind === "quote") return <Text key={i} color={C.muted}>{markdownRowText(line)}</Text>;
+        return <Text key={i} color={C.assistant}>{renderInline(line.text, `ln${i}`, C.assistant)}</Text>;
       })}
     </Box>
   );

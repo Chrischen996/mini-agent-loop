@@ -49,10 +49,11 @@ describe("model selection", () => {
       GROQ_API_KEY: "test",
       OPENROUTER_API_KEY: "test",
       TOKENROUTER_API_KEY: "test",
+      ORCAROUTER_API_KEY: "test",
     };
     assert.deepEqual(
       [...new Set(getAvailableModels(env).map((model) => model.provider))],
-      ["agnes-ai", "deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai", "tokenrouter"],
+      ["agnes-ai", "deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai", "tokenrouter", "orcarouter"],
     );
     assert.ok(getAllModels().every((model) => model.contextWindow > 0 && model.maxTokens > 0));
   });
@@ -242,13 +243,183 @@ describe("model selection", () => {
     assert.equal(resolved.baseUrl, "https://openrouter.ai/api/v1");
   });
 
+  it("registers OrcaRouter's free routes with compatible metadata", () => {
+    const models = getAllModels().filter((model) => model.provider === "orcarouter");
+    assert.deepEqual(
+      models.map((model) => model.id),
+      ["orcarouter/free", "deepseek/deepseek-v4-flash-free", "tencent/hy3-free", "z-ai/glm-5.3-flash-free"],
+    );
+
+    for (const model of models) {
+      assert.equal(model.provider, "orcarouter");
+      assert.equal(model.baseUrl, "https://api.orcarouter.ai/v1");
+      assert.deepEqual(model.apiKeyEnv, ["ORCAROUTER_API_KEY"]);
+      assert.equal(model.capabilities.tools, true);
+      assert.equal(model.reasoning, false);
+      assert.deepEqual(model.cost, {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+      });
+      assert.deepEqual(model.compat, {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        maxTokensField: "max_tokens",
+        supportsStrictMode: false,
+        thinkingFormat: "openai",
+      });
+    }
+
+    assert.deepEqual(
+      models.find((model) => model.id === "orcarouter/free")?.capabilities.input,
+      ["text"],
+    );
+    assert.deepEqual(
+      models.find((model) => model.id === "deepseek/deepseek-v4-flash-free")?.capabilities.input,
+      ["text"],
+    );
+    assert.deepEqual(
+      models.find((model) => model.id === "tencent/hy3-free")?.capabilities.input,
+      ["text"],
+    );
+    assert.deepEqual(
+      models.find((model) => model.id === "z-ai/glm-5.3-flash-free")?.capabilities.input,
+      ["text", "image"],
+    );
+
+    const flashFree = models.find((model) => model.id === "deepseek/deepseek-v4-flash-free");
+    assert.equal(flashFree?.contextWindow, 1048576);
+    assert.equal(flashFree?.maxTokens, 16384);
+    assert.equal(
+      models.find((model) => model.id === "tencent/hy3-free")?.contextWindow,
+      262144,
+    );
+    assert.equal(
+      models.find((model) => model.id === "z-ai/glm-5.3-flash-free")?.contextWindow,
+      1048576,
+    );
+
+    const available = getAvailableModels({ ORCAROUTER_API_KEY: "test" });
+    for (const id of models.map((model) => model.id)) {
+      assert.ok(available.some((item) => item.provider === "orcarouter" && item.id === id), `Expected orcarouter/${id} to be available`);
+    }
+
+    const resolved = resolveModel("orcarouter/deepseek/deepseek-v4-flash-free");
+    assert.equal(resolved.provider, "orcarouter");
+    assert.equal(resolved.id, "deepseek/deepseek-v4-flash-free");
+    assert.equal(resolved.baseUrl, "https://api.orcarouter.ai/v1");
+
+    assert.ok(searchModels("orcarouter").some((item) => item.provider === "orcarouter"));
+  });
+
+  it("registers GPT-6 Astra on OpenAI API and OpenAI Codex", () => {
+    const apiModel = getAllModels().find(
+      (model) => model.provider === "openai" && model.id === "gpt-6-astra",
+    );
+    assert.ok(apiModel);
+    assert.equal(apiModel.name, "GPT-6 Astra");
+    assert.equal(apiModel.api, "openai-responses");
+    assert.equal(apiModel.baseUrl, "https://api.openai.com/v1");
+    assert.deepEqual(apiModel.apiKeyEnv, ["OPENAI_API_KEY"]);
+    assert.equal(apiModel.reasoning, true);
+    assert.deepEqual(apiModel.capabilities.input, ["text", "image"]);
+    assert.equal(apiModel.capabilities.tools, true);
+    assert.equal(apiModel.contextWindow, 272000);
+    assert.equal(apiModel.maxTokens, 128000);
+    assert.deepEqual(apiModel.thinkingLevelMap, {
+      off: "none",
+      xhigh: "xhigh",
+      max: "max",
+    });
+    assert.deepEqual(apiModel.compat, { supportsToolSearch: true });
+    assert.deepEqual(apiModel.cost, {
+      input: 2.5,
+      output: 15,
+      cacheRead: 0.25,
+      cacheWrite: 3.125,
+      tiers: [{
+        inputTokensAbove: 272000,
+        input: 5,
+        output: 22.5,
+        cacheRead: 0.5,
+        cacheWrite: 6.25,
+      }],
+    });
+    assert.ok(apiModel.piModel);
+
+    const codexModel = getAllModels().find(
+      (model) => model.provider === "openai-codex" && model.id === "gpt-6-astra",
+    );
+    assert.ok(codexModel);
+    assert.equal(codexModel.name, "GPT-6 Astra");
+    assert.equal(codexModel.api, "openai-codex-responses");
+    assert.equal(codexModel.baseUrl, "https://chatgpt.com/backend-api");
+    assert.deepEqual(codexModel.apiKeyEnv, ["OPENAI_CODEX_AUTH_JSON", "OPENAI_API_KEY"]);
+    assert.equal(codexModel.reasoning, true);
+    assert.deepEqual(codexModel.capabilities.input, ["text", "image"]);
+    assert.equal(codexModel.capabilities.tools, true);
+    assert.equal(codexModel.contextWindow, 372000);
+    assert.equal(codexModel.maxTokens, 128000);
+    assert.deepEqual(codexModel.thinkingLevelMap, {
+      xhigh: "xhigh",
+      max: "max",
+      minimal: "low",
+    });
+    assert.deepEqual(codexModel.compat, { supportsToolSearch: true });
+    assert.ok(codexModel.piModel);
+
+    assert.ok(getAvailableModels({ OPENAI_API_KEY: "test" }).some(
+      (model) => model.provider === "openai" && model.id === "gpt-6-astra",
+    ));
+    assert.ok(getAvailableModels({ OPENAI_CODEX_AUTH_JSON: "test" }).some(
+      (model) => model.provider === "openai-codex" && model.id === "gpt-6-astra",
+    ));
+    assert.equal(
+      getAvailableModels({ DEEPSEEK_API_KEY: "test" }).some((model) => model.id === "gpt-6-astra"),
+      false,
+    );
+
+    const apiResolved = resolveModel("openai/gpt-6-astra");
+    assert.equal(apiResolved.provider, "openai");
+    assert.equal(apiResolved.id, "gpt-6-astra");
+    assert.equal(apiResolved.baseUrl, "https://api.openai.com/v1");
+
+    const codexResolved = resolveModel("openai-codex/gpt-6-astra");
+    assert.equal(codexResolved.provider, "openai-codex");
+    assert.equal(codexResolved.id, "gpt-6-astra");
+    assert.equal(codexResolved.baseUrl, "https://chatgpt.com/backend-api");
+
+    const searchReferences = searchModels("gpt-6-astra").map(
+      (model) => `${model.provider}/${model.id}`,
+    );
+    assert.ok(searchReferences.includes("openai/gpt-6-astra"));
+    assert.ok(searchReferences.includes("openai-codex/gpt-6-astra"));
+    assert.ok(searchModels("astra").some(
+      (model) => model.provider === "openai" && model.id === "gpt-6-astra",
+    ));
+  });
+
   it("registers Agnes AI with its documented OpenAI-compatible capabilities", () => {
     const models = getAvailableModels({ AGNES_API_KEY: "test" })
       .filter((model) => model.provider === "agnes-ai");
-    assert.deepEqual(models.map((model) => model.id), ["agnes-2.0-flash", "agnes-2.5-flash"]);
+    assert.deepEqual(models.map((model) => model.id), ["agnes-2.0-flash", "agnes-2.5-flash", "agnes-3.0-flash"]);
     assert.ok(models.every((model) => model.baseUrl === "https://apihub.agnes-ai.com/v1"));
     assert.ok(models.every((model) => model.capabilities.tools && model.capabilities.input.includes("image")));
     assert.ok(models.every((model) => model.contextWindow === 524288 && model.maxTokens === 65536));
+    const flash = models.find((model) => model.id === "agnes-3.0-flash");
+    assert.equal(flash?.name, "Agnes 3.0 Flash");
+    assert.deepEqual(flash?.compat, {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      maxTokensField: "max_tokens",
+      thinkingFormat: "chat-template",
+      chatTemplateKwargs: {
+        enable_thinking: { $var: "thinking.enabled" },
+      },
+    });
   });
 
   it("matches qualified and unqualified model references case-insensitively", () => {
@@ -262,13 +433,54 @@ describe("model selection", () => {
     assert.equal(resolveModel("deepseek-reasoner").id, "deepseek-v4-pro");
   });
 
-  it("keeps Anthropic native transport when using a custom gateway", () => {
+  it("maps dotted Claude version aliases to hyphenated catalog ids", () => {
+    assert.equal(resolveModel("claude-sonnet-4.6").id, "claude-sonnet-4-6");
+    assert.equal(resolveModel("sonnet-4.6").id, "claude-sonnet-4-6");
+    assert.ok(searchModels("sonnet-4.6").some((model) => model.id === "claude-sonnet-4-6"));
+  });
+
+  it("keeps Anthropic native transport on the official API host", () => {
     const model = getAllModels().find((item) => item.provider === "anthropic");
     assert.ok(model?.piModel);
-    const resolved = resolveModel(`anthropic/${model.id}`, "https://anthropic-gateway.example/v1");
-    assert.equal(resolved.baseUrl, "https://anthropic-gateway.example/v1");
+    const resolved = resolveModel(`anthropic/${model.id}`, "https://api.anthropic.com");
+    assert.equal(resolved.baseUrl, "https://api.anthropic.com");
     assert.ok(resolved.piModel);
+    assert.equal(resolved.piModel?.api, "anthropic-messages");
+  });
+
+  it("appends /v1 for a bare OpenAI-compatible Claude gateway origin", () => {
+    const resolved = resolveModel("anthropic/claude-sonnet-4-6", "https://ai.wudi987.com");
+    assert.equal(resolved.baseUrl, "https://ai.wudi987.com/v1");
+    assert.equal(resolved.piModel, undefined);
+    assert.equal(resolveModel("anthropic/claude-sonnet-4-6", "https://ai.wudi987.com/v1").baseUrl, "https://ai.wudi987.com/v1");
+    const native = resolveModel("anthropic/claude-sonnet-4-6", "https://ai.wudi987.com", "anthropic-messages");
+    assert.equal(native.baseUrl, "https://ai.wudi987.com");
+    assert.ok(native.piModel);
+  });
+
+  it("routes a generic Claude 中转站 through OpenAI-compatible Chat Completions", () => {
+    const model = getAllModels().find((item) => item.provider === "anthropic");
+    assert.ok(model?.piModel);
+    const resolved = resolveModel(`anthropic/${model.id}`, "https://api.sparkcode.top/v1");
+    assert.equal(resolved.baseUrl, "https://api.sparkcode.top/v1");
+    assert.equal(resolved.piModel, undefined);
     assert.equal(resolved.api, "anthropic-messages");
+  });
+
+  it("keeps Anthropic Messages when a custom gateway looks like /v1/messages", () => {
+    const model = getAllModels().find((item) => item.provider === "anthropic");
+    assert.ok(model);
+    const resolved = resolveModel(`anthropic/${model.id}`, "https://gw.example/anthropic/v1");
+    assert.ok(resolved.piModel);
+    assert.equal(resolved.piModel?.baseUrl, "https://gw.example/anthropic/v1");
+  });
+
+  it("can force Anthropic Messages on a generic Claude gateway", () => {
+    const model = getAllModels().find((item) => item.provider === "anthropic");
+    assert.ok(model);
+    const resolved = resolveModel(`anthropic/${model.id}`, "https://api.sparkcode.top/v1", "anthropic-messages");
+    assert.ok(resolved.piModel);
+    assert.equal(resolved.piModel?.baseUrl, "https://api.sparkcode.top/v1");
   });
 
   it("reports duplicate unqualified ids as ambiguous", () => {
@@ -305,6 +517,36 @@ describe("model selection", () => {
     assert.equal(custom?.id, "company-model-v1");
     assert.deepEqual(custom?.capabilities.input, ["text", "image"]);
     assert.equal(custom?.contextWindow, 64000);
+    assert.equal(custom?.api, "openai-completions");
+    assert.equal(custom?.protocol, "openai-compatible");
+  });
+
+  it("loads custom Anthropic Messages models from MINI_AGENT_MODELS", () => {
+    const env = {
+      CUSTOM_CLAUDE_KEY: "test",
+      MINI_AGENT_MODELS: JSON.stringify([{
+        provider: "company-claude",
+        id: "claude-proxy",
+        api: "anthropic-messages",
+        baseUrl: "https://claude.internal/v1",
+        apiKeyEnv: "CUSTOM_CLAUDE_KEY",
+        reasoning: true,
+        contextWindow: 200000,
+        maxTokens: 16000,
+        compat: { forceAdaptiveThinking: true, supportsTemperature: false },
+        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+      }]),
+    };
+    const custom = getAvailableModels(env).find((model) => model.id === "claude-proxy");
+    assert.ok(custom);
+    assert.equal(custom.api, "anthropic-messages");
+    assert.equal(custom.protocol, "pi");
+    assert.equal(custom.reasoning, true);
+    assert.equal(custom.piModel?.api, "anthropic-messages");
+    assert.equal(custom.piModel?.baseUrl, "https://claude.internal/v1");
+    assert.equal(custom.piModel?.provider, "anthropic");
+    assert.deepEqual(custom.compat, { forceAdaptiveThinking: true, supportsTemperature: false });
+    assert.deepEqual(custom.thinkingLevelMap, { xhigh: "xhigh", max: "max" });
   });
 
   it("parses per-model timeout overrides from MINI_AGENT_MODELS", () => {

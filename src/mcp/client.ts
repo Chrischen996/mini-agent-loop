@@ -5,6 +5,7 @@ import {
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import type {
   McpCallResult,
   McpClientConnection,
@@ -93,8 +94,9 @@ class SdkMcpClientConnection implements McpClientConnection {
   onClose(listener: (error?: Error) => void): () => void {
     this.closeListeners.add(listener);
     if (this.closeError) {
+      const closeError = this.closeError;
       queueMicrotask(() => {
-        if (this.closeListeners.has(listener)) listener(this.closeError);
+        if (this.closeListeners.has(listener)) listener(closeError);
       });
     }
     return () => this.closeListeners.delete(listener);
@@ -116,8 +118,9 @@ class SdkMcpClientConnection implements McpClientConnection {
   handleClose(): void {
     if (this.closed) return;
     this.closed = true;
-    this.closeError = this.lastError ?? new Error("MCP connection closed");
-    for (const listener of this.closeListeners) listener(this.closeError);
+    const closeError = this.lastError ?? new Error("MCP connection closed");
+    this.closeError = closeError;
+    for (const listener of this.closeListeners) listener(closeError);
   }
 
   async close(): Promise<void> {
@@ -133,27 +136,15 @@ async function connectMcpClient(
   signal?: AbortSignal,
 ): Promise<McpClientConnection> {
   let connection: SdkMcpClientConnection;
-  const client = new Client(
-    { name: "mini-agent", version: "0.1.0" },
-    {
-      capabilities: {},
-      listChanged: {
-        tools: {
-          autoRefresh: false,
-          debounceMs: 100,
-          onChanged: (error) => {
-            if (error) connection.handleError(error);
-            else connection.handleToolsChanged();
-          },
-        },
-      },
-    },
-  );
+  // `tools` is a server capability in the current MCP SDK; advertising it
+  // from the client is rejected by the SDK's strict capabilities type.
+  const client = new Client({ name: "mini-agent", version: "0.1.0" }, {});
   connection = new SdkMcpClientConnection(client, timeoutMs);
   client.onerror = (error) => connection.handleError(error);
   client.onclose = () => connection.handleClose();
   try {
     await client.connect(transport, { signal, timeout: timeoutMs });
+    client.setNotificationHandler(ToolListChangedNotificationSchema, () => connection.handleToolsChanged());
     return connection;
   } catch (error) {
     await transport.close().catch(() => undefined);
@@ -181,11 +172,13 @@ export async function createStreamableHttpMcpClient(
   options: {
     url: URL;
     timeoutMs: number;
+    headers?: Record<string, string>;
     fetch?: typeof globalThis.fetch;
   },
   signal?: AbortSignal,
 ): Promise<McpClientConnection> {
   const transport = new StreamableHTTPClientTransport(options.url, {
+    requestInit: options.headers ? { headers: options.headers } : undefined,
     fetch: options.fetch,
   });
   return connectMcpClient(transport, options.timeoutMs, signal);

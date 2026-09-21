@@ -63,4 +63,53 @@ describe("adaptive thinking policy", () => {
     });
     assert.equal(decision, undefined);
   });
+
+  it("keeps a high-score prompt at high when xhigh is unmapped", () => {
+    const decision = decideInitialThinkingLevel({
+      prompt: `${"Implement the architecture and then run test verification. ".repeat(80)}`,
+      llm: reasoningLlm,
+      hasAttachments: true,
+    });
+    assert.equal(decision.level, "high");
+    assert.ok(decision.score > 6);
+  });
+
+  it("selects xhigh for a high-score prompt when the model maps it", () => {
+    const llm = {
+      ...reasoningLlm,
+      piModel: { thinkingLevelMap: { xhigh: "xhigh" } },
+    } as typeof reasoningLlm;
+    const decision = decideInitialThinkingLevel({
+      prompt: `${"Implement the architecture and then run test verification. ".repeat(80)}`,
+      llm,
+      hasAttachments: true,
+    });
+    assert.equal(decision.level, "xhigh");
+    assert.ok(decision.score > 6);
+  });
+
+  it("does not invent ultra when escalating from high on an unmapped model", () => {
+    const decision = decideNextThinkingLevel({
+      llm: reasoningLlm,
+      currentLevel: "high",
+      toolResults: [{ name: "bash", isError: true }],
+      escalationCount: 0,
+    });
+    assert.equal(decision, undefined);
+  });
+
+  it("escalates from high to xhigh when the model maps it", () => {
+    const llm = {
+      ...reasoningLlm,
+      piModel: { thinkingLevelMap: { xhigh: "xhigh" } },
+    } as typeof reasoningLlm;
+    const decision = decideNextThinkingLevel({
+      llm,
+      currentLevel: "high",
+      toolResults: [{ name: "bash", isError: true }],
+      escalationCount: 0,
+    });
+    assert.equal(decision?.level, "xhigh");
+    assert.deepEqual(decision?.reasons, ["tool_failure"]);
+  });
 });

@@ -1,13 +1,14 @@
 import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from "react";
 import { randomUUID } from "node:crypto";
-import { Box, Text, useApp, useStdout } from "ink";
+import { Box, Text, useApp, useStdout, useInput } from "ink";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { TodoPanel } from "./components/TodoPanel.tsx";
-import { getTodoPanelRows } from "./todo-format.ts";
-import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
-import { parseSlashCommand } from "./slash-commands.ts";
+import { TaskSummaryPanel } from "./components/TaskSummaryPanel.tsx";
+import { getTodoPanelRows, resolveTodoItems } from "./todo-format.ts";
+import { taskSummaryRows, taskSummaryViewMode } from "./task-summary.ts";
+import { formatHelpNotice, parseSlashCommand, parseUnknownSlashCommand, SLASH_COMMANDS } from "./slash-commands.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
 
 /** Human-readable message for an LlmTimeoutError, with partial-response preview. */
@@ -35,7 +36,7 @@ import {
   type LoopEvent,
 } from "../loop.ts";
 import { LlmTimeoutError } from "../llm/retry.ts";
-import { loadLlmConfigFromEnv, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
+import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
 import {
   buildIntenseLlm,
   cycleThinkingLevel,
@@ -49,11 +50,14 @@ import { adaptHistoryForModel } from "../message-adapter.ts";
 import { findExactModelReferenceMatch, getAllModels } from "../models.ts";
 import {
   parseModelCommand,
+  modelCommandFromPickerInput,
   shouldSubmitTypedModelCommand,
 } from "./model-command.ts";
 import {
   activateProfile,
+  loadProfileStoreSync,
   removeProfile,
+  resolveSubagentRoleLlmConfigs,
   saveProfile,
 } from "../profile-store.ts";
 import {
@@ -74,10 +78,14 @@ import {
 } from "../permissions.ts";
 import { TurnEventBuffer } from "./stream-buffer.ts";
 import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./layout.ts";
-import { estimateViewportContentHeight } from "./message-viewport.ts";
+import { pickerChromeRows, pickerRequestedItems } from "./picker-window.ts";
+import { thinkingLevelStatusText } from "./status-line.ts";
+import { promptPlaceholder, type AcMode } from "./input-utils.ts";
+import { estimateViewportContentHeight, estimateViewportActualHeight, MessageHeightCache } from "./message-viewport.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
-import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
+import { executeTodoCommand, parseLegacyTodoCommand, parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
+import { confirmTodoEditor, createTodoEditorState, reduceTodoEditor, type TodoEditorAction, type TodoEditorState } from "./todo-editor.ts";
 import { addPendingImage, handlePasteImage } from "./image-handler.ts";
 import { startModelSetup, commitModelSetup, openProfileList } from "./profile-manager.ts";
 import { selectModel } from "./model-switcher.ts";
@@ -86,6 +94,7 @@ import { useKeyboardHandler } from "./hooks/useKeyboardHandler.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
 import { PromptInput } from "./components/PromptInput.tsx";
+import { TerminalInputHistory } from "./terminal-input-history.ts";
 import {
   sanitizeInput,
   shouldAcceptAutocompleteOnEnter,
@@ -115,20 +124,86 @@ import { PlanApprovalBar } from "./components/PlanApprovalBar.tsx";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
 import { isTuiFeatureEnabled } from "./execution-policy.ts";
+import { SessionManager } from "../session-manager.ts";
+import type { PersistedSessionMeta } from "../session-store.ts";
+import { TUI_BRAND_VERSION } from "./brand.ts";
+import { getWelcomeHeaderHeight } from "./welcome-panel.ts";
+import { formatAmbiguousSessionNotice, getResumeMessageCandidates, getStartupSessionRequest, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
 
 type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
-const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
+const DEFAULT_IMAGE_PROMPT = "Analyze the attached image.";
+
+import {
+  checkForUpdate,
+  runUpdateUpgrade,
+  type UpdateInfo,
+} from "../update-check.ts";
+import { UpdateNotice } from "./components/UpdateNotice.tsx";
+import type { Key } from "ink";
 
 export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
-  const termWidth = stdout?.columns ?? 80;
-  // Leave one terminal row unused so Ink never enters its full-screen clear
-  // path (`outputHeight >= rows`) while streamed reasoning is growing.
-  const termHeight = getTuiViewportHeight(stdout?.rows);
+  // ── Update-check state ────────────────────────────────────────────────────
+  // A background check may surface an upgrade offer; `u` runs the upgrade
+  // and Esc/N dismisses the notice. The check never blocks startup.
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [upgrading, setUpgrading] = useState(false);
+  const [upgradeResult, setUpgradeResult] = useState<string | null>(null);
+  const upgradeLockRef = useRef(false);
+  const startUpgrade = useCallback(async () => {
+    if (!update || upgradeLockRef.current || upgrading) return;
+    upgradeLockRef.current = true;
+    setUpgrading(true);
+    const outcome = await runUpdateUpgrade();
+    setUpgradeResult(outcome);
+    setUpgrading(false);
+    upgradeLockRef.current = false;
+  }, [update, upgrading]);
+  const dismissUpdate = useCallback(() => {
+    setUpdate(null);
+    setUpgradeResult(null);
+  }, []);
+  const handleUpdateKey = useCallback(
+    (input: string, key: Key) => {
+      if (update === null && upgradeResult === null) return false;
+      if (key.escape || input === "n" || input === "N") {
+        dismissUpdate();
+        return true;
+      }
+      if (!upgrading && (input === "u" || input === "U" || key.return)) {
+        void startUpgrade();
+        return true;
+      }
+      return true; // swallow remaining keys while the notice is on screen
+    },
+    [update, upgrading, upgradeResult, startUpgrade, dismissUpdate],
+  );
+  useEffect(() => {
+    let cancelled = false;
+    void checkForUpdate()
+      .then((info) => {
+        if (!cancelled && info?.isUpgrade) setUpdate(info);
+      })
+      .catch(() => { /* update check is best-effort */ });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  // Capture upgrade-notice keys (u upgrade · Esc/n dismiss) while the notice is
+  // on screen; a no-op otherwise, so it never interferes with normal typing.
+  useInput((input, key) => {
+    handleUpdateKey(input, key);
+  }, { isActive: update !== null || upgradeResult !== null });
+  const termWidth = Math.max(10, stdout?.columns || 80);
+  // Leave two terminal rows unused. Ink's renderer adds a trailing newline and
+  // can gain a row from borders/wrapping; staying below the terminal height
+  // prevents its visible `clearTerminal` fallback during streamed updates.
+  const termHeight = Math.max(1, (stdout?.rows || 24) - 2);
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const llmRef = useRef(llm);
   llmRef.current = llm;
+  const startupSession = useMemo(() => getStartupSessionRequest(), []);
   const vision = loadVisionConfigFromEnv();
   const autoSubagent = useMemo(() => loadAutoSubagentOptionsFromEnv(), []);
   const globalTokenBudget = useMemo(() => loadGlobalTokenBudgetFromEnv(), []);
@@ -139,14 +214,43 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const allToolsRef = useRef<ToolProvider>(allTools ?? createAllTools(cwd));
   const agentToolsRef = useRef<ToolProvider>(agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
 
-  // Create the subagent tool — dispatches SubagentEvents to the TUI reducer
-  const subagentFactory = new SubagentToolsFactory();
+  // Create the subagent tool — dispatches SubagentEvents to the TUI reducer.
+  // Memoized so the factory survives re-renders instead of rebuilding every
+  // render, and the vision preprocessor keeps its image cache across turns.
+  const subagentFactory = useMemo(() => new SubagentToolsFactory(), []);
   const subagentRuntimeRef = useRef<AgentRuntimeRef>({});
+  const visionPreprocessors = useMemo(
+    () => (vision ? [createVisionPreprocessor(vision)] : []),
+    [vision],
+  );
   const getSubagentTools = useCallback((parentLlm = llm): Tool[] => {
+    // Resolve per-role LlmConfigs from the persisted profile store so that
+    // /multi-agent role bindings (subagentRoles → ModelProfile) actually take
+    // effect at dispatch time. Missing store or invalid profile → empty map,
+    // which makes every role fall back to parentLlm (matches terminal-main.ts).
+    let roleLlmConfigs: Record<string, LlmConfig> = {};
+    try {
+      const store = loadProfileStoreSync();
+      if (store) {
+        const roleProfiles = resolveSubagentRoleLlmConfigs(store);
+        for (const [role, profile] of Object.entries(roleProfiles)) {
+          try {
+            roleLlmConfigs[role] = switchLlmModel(parentLlm, profile.model, {
+              baseUrl: profile.baseUrl,
+              apiKey: profile.apiKey,
+            });
+          } catch {
+            // profile invalid → skip, subagent falls back to parent model
+          }
+        }
+      }
+    } catch {
+      // non-fatal: role resolution must never break the main agent loop
+    }
     return subagentFactory.getTools({
       parentLlm,
       parentTools: agentToolsRef.current,
-      visionPreprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+      visionPreprocessors,
       onSubagentEvent: (event: SubagentEvent) => {
         dispatch({ type: "SUBAGENT_EVENT", event });
       },
@@ -154,12 +258,23 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       parentRuntime: subagentRuntimeRef.current,
       globalTokenBudget,
       globalConcurrencyLimit,
+      roleLlmConfigs,
     });
-  }, [llm, vision]);
+  }, [llm, subagentFactory, visionPreprocessors]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
+  const stateRef = useRef(state);
+  const [todoEditorState, setTodoEditorState] = useState<TodoEditorState | null>(null);
+  stateRef.current = state;
   // Generate a stable conversation session ID on startup
-  const [conversationId, setConversationId] = useState(() => process.env.MINI_AGENT_SESSION_ID ?? randomUUID());
+  // Startup --resume values can be prefixes. Allocate a safe fresh id until
+  // the selected persisted session is resolved and activated below.
+  const [conversationId, setConversationId] = useState<string>(() => randomUUID());
+  const sessionManagerRef = useRef<SessionManager>();
+  if (!sessionManagerRef.current) {
+    sessionManagerRef.current = new SessionManager({ workspaceId: cwd, sessionId: conversationId });
+  }
+  const thinkingPolicyRef = useRef<"fixed" | "adaptive">(loadThinkingModeFromEnv());
   
   const pendingImagesRef = useRef<ImageAttachment[]>([]);
   pendingImagesRef.current = state.pendingImages;
@@ -169,7 +284,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   // Bump to remount the text input so ink-text-input resets cursorOffset to value.length
   // after programmatic completions (Tab @file / slash commands).
   const [inputEpoch, setInputEpoch] = useState(0);
+  const promptInputHistoryRef = useRef(new TerminalInputHistory());
   const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "plan"));
+  const sessionRestoreCompletedRef = useRef(false);
+  const resumePickerSessionRef = useRef<import("../session-store.ts").PersistedSession | null>(null);
+  const resumePickerCandidatesRef = useRef<import("./session-serialization.ts").ResumeMessageCandidate[]>([]);
   const abortRef = useRef<AbortController>(new AbortController());
   const permissionManagerRef = useRef<PermissionManager | null>(null);
   const permissionTurnRef = useRef<PermissionTurnContext | null>(null);
@@ -190,7 +309,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     });
   }
 
-  const permissionSessionId = "tui_session";
+  // Shared per-message row-count cache: finished history messages are
+  // immutable, so a streaming flush turns the O(N) markdown row walk into
+  // cheap Map lookups. Survives the whole session; cleared on unmount.
+  const heightCacheRef = useRef<MessageHeightCache | null>(null);
+  if (!heightCacheRef.current) heightCacheRef.current = new MessageHeightCache();
+  const heightCache = heightCacheRef.current;
+
+  const permissionSessionId = conversationId;
 
   const getPermissionManager = useCallback(() => {
     return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("plan"));
@@ -208,6 +334,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   useEffect(() => {
     return () => {
       streamBufferRef.current?.dispose();
+      heightCacheRef.current?.clear();
     };
   }, []);
 
@@ -222,6 +349,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const resetInputCursorToEnd = useCallback(() => {
     setInputEpoch((n) => n + 1);
   }, []);
+  const listSessions = useCallback(
+    () => sessionManagerRef.current!.list(),
+    [],
+  );
 
   const {
     acMode,
@@ -233,6 +364,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     modelCandidates,
     modelContextWindows,
     modelQuery,
+    sessionCandidates,
+    resumeMessageCandidates,
+    sessionCommand,
+    sessionLoading,
     modelSetup,
     setModelSetup,
     pendingProfileSetup,
@@ -245,13 +380,18 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     acceptFile,
     handleTabAt,
     handleAutocompleteKey,
+    openResumeMessages,
     openModelPicker,
   } = useAutocomplete({
     input,
     cwd,
     setInput,
     resetInputCursorToEnd,
+    listSessions,
   });
+
+  // Multi-agent wizard state
+  const [multiAgentSetup, setMultiAgentSetup] = useState<import("./types.ts").MultiAgentSetupState | null>(null);
 
   const resolvePendingPermission = useCallback((decision: PermissionDecision) => {
     const pending = state.pendingPermission;
@@ -270,9 +410,106 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   useEffect(() => {
     void loadPlanDocument(cwd)
-      .then((plan) => dispatch({ type: "SET_TODO_PLAN", plan: plan ?? undefined }))
+      .then((plan) => {
+        // A restored session's Todo snapshot wins over the workspace plan.
+        if (sessionRestoreCompletedRef.current && stateRef.current.todoItems?.length) return;
+        dispatch({ type: "SET_TODO_PLAN", plan: plan ?? undefined });
+      })
       .catch(() => { /* a missing or unreadable plan is non-fatal */ });
   }, [cwd]);
+
+  const persistSession = useCallback(async (history: AgentMessage[], id = conversationId): Promise<void> => {
+    try {
+      const sessionManager = sessionManagerRef.current!;
+      const permissionMode = getPermissionManager().getMode();
+      const currentState = stateRef.current;
+      const todos = toPersistedTodos(currentState.todoItems ?? currentState.todos);
+      await sessionManager.save({
+        id,
+        workspaceId: cwd,
+        modelId: llmRef.current.model,
+        thinkingLevel: llmRef.current.thinkingLevel,
+        thinkingMode: thinkingPolicyRef.current,
+        permissionMode,
+        skillNames: skillNamesRef.current,
+        phase: currentState.phase,
+        currentPlan: currentState.currentPlan,
+        messages: [...history],
+        todos,
+        todoVersion: currentState.todoRevision,
+      });
+    } catch {
+      // Persistence is best-effort; a disk error must not break chat.
+    }
+  }, [conversationId, cwd, getPermissionManager]);
+
+  const restoreSession = useCallback(async (
+    requestedId?: string,
+    fork = false,
+    knownSession?: PersistedSessionMeta,
+    openMessagePicker = false,
+  ): Promise<import("../session-store.ts").PersistedSession | undefined> => {
+    const sessionManager = sessionManagerRef.current!;
+    const selection = knownSession
+      ? { session: knownSession, candidates: [knownSession] }
+      : requestedId
+      ? resolveSessionByPrefix(await sessionManager.list(), requestedId)
+      : resolveSessionByPrefix(await sessionManager.list(), "");
+    if (!selection.session) {
+      if (selection.candidates.length > 1) {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "Resume session",
+          text: formatAmbiguousSessionNotice(requestedId ?? "", selection.candidates),
+        });
+      }
+      return undefined;
+    }
+    let restored = await sessionManager.load(selection.session.id);
+    if (restored && fork) restored = await sessionManager.fork(restored.id);
+    if (!restored || restored.messages.length === 0) return undefined;
+    sessionRestoreCompletedRef.current = true;
+    const mode = restored.permissionMode ?? getPermissionManager().getMode();
+    getPermissionManager().setMode(mode);
+    const restoredLlm = restoreLlmConfig(llmRef.current, restored);
+    llmRef.current = restoredLlm;
+    setLlm(restoredLlm);
+    thinkingPolicyRef.current = restored.thinkingMode ?? thinkingPolicyRef.current;
+    if (restored.skillNames) setSkillNames([...restored.skillNames]);
+    const base = createAgentHistory(undefined, mode);
+    const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
+    const restoredState = restoreTuiSession(
+      restored,
+      systemPrompt,
+      (session, prompt) => sessionManager.restoreHistory(session, prompt),
+    );
+    historyRef.current = restoredState.history;
+    sessionManager.setSessionId(restored.id);
+    setConversationId(restored.id);
+    dispatch({
+      type: "RESTORE_SESSION",
+      history: restoredState.history,
+      permissionMode: mode,
+      modelName: restoredLlm.model,
+      thinkingMode: restored.thinkingMode === "adaptive" ? "hidden" : "summary",
+      phase: restored.phase,
+      currentPlan: restored.currentPlan,
+      todos: restoredState.todos,
+      todoRevision: restoredState.todoRevision,
+    });
+    if (openMessagePicker) {
+      resumePickerSessionRef.current = restored;
+      const candidates = getResumeMessageCandidates(restored.messages);
+      resumePickerCandidatesRef.current = candidates;
+      openResumeMessages(candidates);
+    }
+    return restored;
+  }, [dispatch, getPermissionManager, openResumeMessages]);
+
+  useEffect(() => {
+    if (!startupSession.resume) return;
+    void restoreSession(startupSession.sessionId, startupSession.fork).catch(() => { /* Resume is best-effort. */ });
+  }, [restoreSession, startupSession]);
 
   // ── model switching ─────────────────────────────────────────────────────
 
@@ -281,12 +518,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       openModelPicker,
       commitModelSetup: (setup, apiKey) => commitModelSetup(setup, apiKey, {
         llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
+        persistSession,
       }),
       startModelSetup: (model, overrides) => startModelSetup(model, overrides, {
         llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
+        persistSession,
       }),
     });
-  }, [llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef]);
+  }, [llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef, persistSession]);
 
   const openProfileListRef = useCallback(async () => {
     return openProfileList({ llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef });
@@ -301,39 +540,79 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     const next = withThinkingLevel(current, nextLevel);
     llmRef.current = next;
     setLlm(next);
-    dispatch({ type: "SET_STATUS", status: `思考强度: ${thinkingLevelToDisplay(nextLevel)}` });
+    dispatch({ type: "SET_STATUS", status: thinkingLevelStatusText(next, nextLevel) });
   }, [state.busy, state.pendingPermission]);
 
-  const requestedPickerItems =
-    acMode === "command" ? Math.min(6, cmdCandidates.length)
-      : acMode === "file" ? Math.min(8, fileCandidates.length)
-        : acMode === "model" || acMode === "model-picker" ? Math.min(12, modelCandidates.length)
-          : acMode === "profile-list" ? Math.min(10, profileListState?.profiles.length ?? 0)
-            : acMode ? 4 : 0;
+  // Row caps live in `picker-window` so the ANSI renderer asks for the same
+  // page sizes and clips its lists at the same row.
+  const pickerCandidateCounts: Partial<Record<NonNullable<AcMode>, number>> = {
+    command: cmdCandidates.length,
+    file: fileCandidates.length,
+    model: modelCandidates.length,
+    "model-picker": modelCandidates.length,
+    "session-list": sessionCandidates.length,
+    "resume-messages": resumeMessageCandidates.length,
+    "profile-list": profileListState?.profiles.length ?? 0,
+  };
+  const requestedPickerItems = pickerRequestedItems(acMode ?? undefined, acMode ? pickerCandidateCounts[acMode] : 0);
+  // Keep the product identity pinned above the transcript, including restored
+  // sessions and active turns.
+  const hasHeader = true;
+  const showWelcome = state.messages.length === 0 && !state.busy && !state.pendingPermission;
+  const headerRows = getWelcomeHeaderHeight(termWidth, showWelcome);
+  const taskTodos = resolveTodoItems({ plan: state.todoPlan, todos: state.todoItems });
+  const showTaskSummary = state.taskStatus !== "running" && state.taskTitle.trim().length > 0 && taskTodos.length > 0;
   const todoRows = getTodoPanelRows(
     { plan: state.todoPlan, todos: state.todoItems },
     state.todoViewMode,
   );
+  const taskRows = showTaskSummary
+    ? taskSummaryRows({
+      title: state.taskTitle,
+      status: state.taskStatus,
+      durationMs: state.taskDurationMs,
+      totalTokens: state.taskTokens,
+      todos: taskTodos,
+      viewMode: taskSummaryViewMode(state.taskStatus, state.todoViewMode),
+      width: termWidth,
+    })
+    : 0;
+  // The completed task summary lives in the bottom input chrome. While a
+  // turn is active, the ordinary Todo panel remains above the transcript.
+  const bottomPanelRows = showTaskSummary ? taskRows : todoRows;
   // Approval chrome: the permission card / plan approval bar render between
   // the feed and the input row; reserve their rows in every height budget.
-  const permissionRows = state.pendingPermission ? 4 : 0;
-  const planApprovalRows = state.phase === "review" && state.currentPlan ? 3 : 0;
+  // Ink's bordered approval cards include two border rows plus the content
+  // rows below. Reserve their real footprint so streaming never pushes the
+  // prompt onto the terminal's last row.
+  const permissionRows = state.pendingPermission ? 6 : 0;
+  const planApprovalRows = state.phase === "review" && state.currentPlan
+    ? 6 + Math.min(4, state.currentPlan.steps.length) + (state.currentPlan.steps.length > 4 ? 1 : 0)
+    : 0;
+  // The upgrade notice occupies two rows of the bottom chrome while active.
+  const updateRows = update !== null ? 2 : 0;
   const pickerLayout = getPickerLayout({
     termRows: stdout?.rows,
+    hasHeader,
+    headerRows,
     requestedItems: requestedPickerItems,
     hasPendingImages: state.pendingImages.length > 0,
-    todoRows,
-    extraRows: acMode === "model" || acMode === "model-picker" || acMode === "file" ? 3 : 2,
+    todoRows: bottomPanelRows,
+    extraRows: pickerChromeRows(acMode ?? undefined),
     permissionRows,
     planApprovalRows,
+    updateRows,
   });
   const feedHeight = getMessageFeedHeight({
     termRows: stdout?.rows,
+    hasHeader,
+    headerRows,
     hasPendingImages: state.pendingImages.length > 0,
-    todoRows,
+    todoRows: bottomPanelRows,
     pickerRows: pickerLayout.totalRows,
     permissionRows,
     planApprovalRows,
+    updateRows,
   });
 
   const copyResolvedText = useCallback(async (target: import("./copy-text.ts").CopyTarget = "auto") => {
@@ -346,18 +625,31 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       target,
     });
     if (!selection) {
-      dispatch({ type: "ADD_NOTICE", title: "复制", text: "没有可复制的原文。可用 /copy last、/copy tool 或先聚焦一条消息。" });
+      dispatch({ type: "ADD_NOTICE", title: "Clipboard", text: "Nothing to copy yet. Use /copy last, /copy tool, or focus a message first." });
       return;
     }
     const result = await writeClipboardText(selection.text);
     dispatch({
       type: "ADD_NOTICE",
-      title: result.ok ? "已复制到剪贴板" : "复制失败",
+      title: result.ok ? "Copied to clipboard" : "Copy failed",
       text: result.ok
         ? formatCopyResultNotice(selection, result.method)
-        : (result.error ?? "无法写入系统剪贴板"),
+        : (result.error ?? "Unable to write to the system clipboard"),
     });
   }, [input, state.focusedMessageIndex, state.messages, state.streamingReasoning, state.streamingText]);
+
+  const editableTodos = state.todos.length > 0 ? state.todos : state.todoItems ?? [];
+  const commitTodoEditor = useCallback(() => {
+    if (!todoEditorState) return;
+    const next = confirmTodoEditor(todoEditorState);
+    if (next.error) {
+      setTodoEditorState(next);
+      return;
+    }
+    dispatch({ type: "SET_TODOS", todos: next.todos });
+    dispatch({ type: "ADD_NOTICE", title: "Todo", text: "Todo list updated." });
+    setTodoEditorState(null);
+  }, [todoEditorState]);
 
   // ── keyboard handler ─────────────────────────────────────────────────────
 
@@ -366,6 +658,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     adjustThinkingLevel, resolvePendingPermission, dispatch,
     acMode, state, feedHeight, handleAutocompleteKey, historyRef,
     suppressInputEchoRef, pendingPermissionRef,
+    todoEditorOpen: todoEditorState !== null,
+    todoEditorMode: todoEditorState?.mode ?? "select",
+    openTodoEditor: () => setTodoEditorState(createTodoEditorState(editableTodos)),
+    closeTodoEditor: () => setTodoEditorState(null),
+    todoEditorAction: (action: TodoEditorAction) => setTodoEditorState((current) => current ? reduceTodoEditor(current, action) : current),
+    commitTodoEditor,
   });
 
   // ── direct tool invocation ────────────────────────────────────────────────
@@ -382,12 +680,58 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
   // ── submit handler ────────────────────────────────────────────────────────
 
-  const handleSubmit = useCallback(async (text: string) => {
+  const handleSubmit = useCallback(async (
+    text: string,
+    knownSession?: PersistedSessionMeta,
+    knownSessions?: PersistedSessionMeta[],
+  ) => {
     const trimmed = text.trim();
-    const allowEmptyApiKey = acMode === "model-setup" && modelSetup?.field === "apiKey";
+    const allowEmptyModelSetup = acMode === "model-setup" && Boolean(modelSetup);
     const hasPendingImages = pendingImagesRef.current.length > 0;
-    if (!trimmed && !allowEmptyApiKey && !hasPendingImages) return;
+    if (!trimmed && !allowEmptyModelSetup && !hasPendingImages) return;
+    // Record plain prompts (not slash commands) into the input history so ↑ can
+    // recall them. Model-setup entries are the base URL / API key — they must
+    // never be recorded, because recalling them with ↑ would print the key in
+    // plain text once setup finishes and the input mask is gone.
+    if (trimmed && !trimmed.startsWith("/") && !allowEmptyModelSetup) {
+      promptInputHistoryRef.current.add(trimmed);
+    }
+    if (acMode === "resume-messages") {
+      // An Enter with no typed text confirms the highlighted rewind point.
+      if (!trimmed) {
+        const selected = resumePickerCandidatesRef.current[acIndex] ?? resumeMessageCandidates[acIndex];
+        const session = resumePickerSessionRef.current;
+        const boundary = selected?.boundary;
+        if (session && boundary !== undefined) {
+          const rewound = await sessionManagerRef.current!.rewind(session.id, boundary);
+          if (rewound) {
+            const mode = rewound.permissionMode ?? getPermissionManager().getMode();
+            const base = createAgentHistory(undefined, mode);
+            const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
+            const history = sessionManagerRef.current!.restoreHistory(rewound, systemPrompt);
+            historyRef.current = history;
+            dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: llmRef.current.model, thinkingMode: rewound.thinkingMode === "adaptive" ? "hidden" : "summary", phase: rewound.phase, currentPlan: rewound.currentPlan, todos: restoreTuiSession(rewound, systemPrompt).todos, todoRevision: rewound.todoVersion });
+            dispatch({ type: "ADD_NOTICE", title: "Session rewound", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} messages` });
+          }
+        }
+        resumePickerSessionRef.current = null;
+        setInput("");
+        clearAc();
+        return;
+      }
+      // A typed prompt means the user has moved on: drop the rewind picker and
+      // fall through so the text is sent to the model instead of being
+      // swallowed by a rewind.
+      resumePickerSessionRef.current = null;
+      clearAc();
+    }
+
     if (state.busy) {
+      if (/^(?:\/?resume)(?:\s|$)/i.test(trimmed)) {
+        dispatch({ type: "ADD_NOTICE", title: "Turn in progress", text: "The current turn is still running. Sessions can be resumed once it finishes." });
+        setInput("");
+        return;
+      }
       if (trimmed) {
         promptQueueRef.current.push(trimmed);
         setQueuedCount(promptQueueRef.current.length);
@@ -430,6 +774,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               sourceCapabilities: previousLlm.capabilities,
             });
           }
+          await persistSession(historyRef.current);
         } catch { /* non-fatal */ }
       }
       setInput("");
@@ -439,13 +784,354 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
 
     if (acMode === "model-setup" && modelSetup) {
       if (modelSetup.field === "baseUrl") {
-        const baseUrl = trimmed.replace(/\/$/, "");
+        const baseUrl = (trimmed || modelSetup.baseUrl).replace(/\/$/, "");
         setModelSetup({ ...modelSetup, baseUrl, field: "apiKey", error: undefined });
-        setInput(modelSetup.apiKey);
+        // The key is kept in modelSetup as a fallback, but must not be shown
+        // or appended to when the user enters a replacement key.
+        setInput("");
       } else {
         void commitModelSetup(modelSetup, trimmed, {
           llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
+          persistSession,
         });
+      }
+      return;
+    }
+
+    // Multi-agent wizard: model selection step
+    if (acMode === "multi-agent-model") {
+      const modelId = trimmed.trim() || llm.model;
+      setMultiAgentSetup({ step: "mode", orchestratorModel: modelId });
+      setAcMode("multi-agent-mode");
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "多智能体向导 — 选择模式",
+        text: "输入编号选择执行模式:\n  1) planner_worker_reviewer            — 规划 → 执行 → 审查（推荐，LLM 动态驱动）\n  2) agent_turn                       — 单轮 Agent，自动委托子 Agent\n  3) planner_worker_reviewer_forced — 100% 确定性：代码直接驱动 H3+H4 流水线，不经过 LLM 决策",
+      });
+      setInput("");
+      return;
+    }
+
+    // Multi-agent wizard: mode selection step
+    if (acMode === "multi-agent-mode" && multiAgentSetup) {
+      const choice = trimmed.trim();
+      const mode: "planner_worker_reviewer" | "agent_turn" | "planner_worker_reviewer_forced" =
+        choice === "2" ? "agent_turn"
+        : choice === "3" ? "planner_worker_reviewer_forced"
+        : "planner_worker_reviewer";
+      setMultiAgentSetup({ ...multiAgentSetup, step: "roles", mode });
+      setAcMode("multi-agent-roles");
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "多智能体向导 — 子角色模型配置",
+        text: "为每个角色选择模型（0=继承主模型，1..n=已有 profile，n+1=新建）。",
+      });
+      setInput("");
+      return;
+    }
+
+    // Multi-agent wizard: sub-role model matrix step
+    if (acMode === "multi-agent-roles" && multiAgentSetup) {
+      const choiceText = trimmed.trim();
+      const store = await import("../profile-store.ts").then(m => m.loadProfileStoreSync()).catch(() => null);
+      const profileNames: string[] = store ? Array.from(Object.keys(store.profiles ?? {})) : [];
+      const optionCount = profileNames.length;
+
+      // Build roleAssignments from sequential input: first role gets input 0..n, etc.
+      // Since terminal flow is single-line input, use numeric index for current role only.
+      const roleIndex = multiAgentSetup.roleIndex ?? 0;
+      const roles: Array<"researcher" | "coder" | "reviewer"> = ["researcher", "coder", "reviewer"];
+      const currentRole = roles[roleIndex];
+      const assignments: Record<string, import("./types.ts").MultiAgentRoleAssignment> = {
+        ...(multiAgentSetup.roleAssignments ?? {}),
+      };
+
+      if (choiceText === "" || choiceText === "0") {
+        // Inherit main model
+        assignments[currentRole] = { type: "inherit" };
+      } else if (choiceText === String(optionCount + 1)) {
+        // New model: enter sub-step and stop. The later "advance to next
+        // role" block would otherwise overwrite this step immediately.
+        setMultiAgentSetup({
+          ...multiAgentSetup,
+          step: "role-new",
+          roleIndex,
+          roleAssignments: assignments as Record<import("./types.ts").MultiAgentRoleName, import("./types.ts").MultiAgentRoleAssignment>,
+        });
+        setAcMode("multi-agent-role-new");
+        dispatch({
+          type: "ADD_NOTICE",
+          title: `多智能体向导 — 为 ${currentRole} 新建模型`,
+          text: "输入: <modelId> <baseUrl> <apiKey>（空格分隔）",
+        });
+        setInput("");
+        return;
+      } else if (choiceText.match(/^\d+$/)) {
+        const idx = parseInt(choiceText, 10);
+        if (idx >= 1 && idx <= optionCount) {
+          assignments[currentRole] = { type: "profile", profileName: profileNames[idx - 1]! };
+        } else {
+          dispatch({ type: "ADD_NOTICE", title: "多智能体向导", text: `无效编号，范围 0..${optionCount + 1}（0=继承，${optionCount + 1}=新建）` });
+          return;
+        }
+      } else {
+        dispatch({ type: "ADD_NOTICE", title: "多智能体向导", text: `输入 0..${optionCount + 1}：0=继承主模型，1..${optionCount}=已有 profile，${optionCount + 1}=新建` });
+        return;
+      }
+
+      // Advance to next role, or to task step if last role done
+      const nextRoleIndex = roleIndex + 1;
+      if (nextRoleIndex < roles.length) {
+        setMultiAgentSetup({
+          ...multiAgentSetup,
+          roleIndex: nextRoleIndex,
+          roleAssignments: assignments as Record<import("./types.ts").MultiAgentRoleName, import("./types.ts").MultiAgentRoleAssignment>,
+        });
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体向导 — 子角色模型配置",
+          text: `${currentRole} 已配置 → 下一角色: ${roles[nextRoleIndex]}\n输入 0=继承主模型，1..${optionCount}=已有 profile，${optionCount + 1}=新建`,
+        });
+      } else {
+        setMultiAgentSetup({
+          ...multiAgentSetup,
+          step: "task",
+          roleAssignments: assignments as Record<import("./types.ts").MultiAgentRoleName, import("./types.ts").MultiAgentRoleAssignment>,
+        });
+        setAcMode("multi-agent-task");
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体向导 — 输入任务",
+          text: `全部角色配置完成，模式: ${multiAgentSetup.mode}\n现在请描述你的任务，输入完成后按 Enter 启动。`,
+        });
+      }
+      setInput("");
+      return;
+    }
+
+    // Multi-agent wizard: new model sub-step for a sub-role
+    if (acMode === "multi-agent-role-new" && multiAgentSetup) {
+      const inputParts = trimmed.trim().split(/\s+/);
+      if (inputParts.length < 3 || !inputParts[0]) {
+        dispatch({ type: "ADD_NOTICE", title: "多智能体向导", text: "格式: <modelId> <baseUrl> <apiKey>" });
+        return;
+      }
+      const [modelId, baseUrl, apiKey] = inputParts;
+      const roleIndex = multiAgentSetup.roleIndex ?? 0;
+      const roles: Array<"researcher" | "coder" | "reviewer"> = ["researcher", "coder", "reviewer"];
+      const currentRole = roles[roleIndex];
+      const assignments: Record<string, import("./types.ts").MultiAgentRoleAssignment> = {
+        ...(multiAgentSetup.roleAssignments ?? {}),
+        [currentRole]: { type: "draft-new", modelId, baseUrl, apiKey },
+      };
+      const nextRoleIndex = roleIndex + 1;
+      if (nextRoleIndex < roles.length) {
+        setMultiAgentSetup({
+          ...multiAgentSetup,
+          roleIndex: nextRoleIndex,
+          step: "roles",
+          roleAssignments: assignments as Record<import("./types.ts").MultiAgentRoleName, import("./types.ts").MultiAgentRoleAssignment>,
+        });
+        setAcMode("multi-agent-roles");
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体向导 — 子角色模型配置",
+          text: `${currentRole} → 新建 ${modelId}\n下一角色: ${roles[nextRoleIndex]}`,
+        });
+      } else {
+        setMultiAgentSetup({
+          ...multiAgentSetup,
+          step: "task",
+          roleAssignments: assignments as Record<import("./types.ts").MultiAgentRoleName, import("./types.ts").MultiAgentRoleAssignment>,
+        });
+        setAcMode("multi-agent-task");
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体向导 — 输入任务",
+          text: `全部角色配置完成，模式: ${multiAgentSetup.mode}\n现在请描述你的任务。`,
+        });
+      }
+      setInput("");
+      return;
+    }
+
+    // Multi-agent wizard: task input step — submit the job
+    if (acMode === "multi-agent-task" && multiAgentSetup) {
+      const task = trimmed.trim();
+      if (!task) {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体向导",
+          text: "任务描述不能为空，请输入任务内容。",
+        });
+        setInput("");
+        return;
+      }
+      const finalSetup = { ...multiAgentSetup, task };
+      setMultiAgentSetup(null);
+      setAcMode(null);
+      setInput("");
+      // If a specific orchestrator model was chosen, switch to it first
+      if (finalSetup.orchestratorModel && finalSetup.orchestratorModel !== llm.model) {
+        selectModelRef(finalSetup.orchestratorModel, {});
+      }
+      // Persist role assignments to profile store (MVP: save as default subagentRoles)
+      if (finalSetup.roleAssignments) {
+        try {
+          const { saveSubagentRole: saveSubagentRoleFunc } = await import("../profile-store.ts");
+          for (const [role, assignment] of Object.entries(finalSetup.roleAssignments)) {
+            if (assignment.type === "inherit") {
+              await saveSubagentRoleFunc(role, null);
+            } else if (assignment.type === "profile") {
+              await saveSubagentRoleFunc(role, assignment.profileName);
+            } else if (assignment.type === "draft-new" && assignment.modelId) {
+              const profileName = `${assignment.modelId.replace(/\//g, "-")}-${role}`;
+              const { saveProfile } = await import("../profile-store.ts");
+              await saveProfile(profileName, {
+                model: assignment.modelId,
+                baseUrl: assignment.baseUrl ?? "",
+                apiKey: assignment.apiKey ?? "",
+                thinkingLevel: llm.thinkingLevel,
+              }, false);
+              await saveSubagentRoleFunc(role, profileName);
+            }
+          }
+        } catch {
+          // Non-fatal: role binding save failure should not block task start
+        }
+      }
+      // Submit the task as a normal turn with the chosen mode appended in system context
+      const modeLabel = finalSetup.mode === "planner_worker_reviewer"
+        ? "Multi-agent mode: planner_worker_reviewer"
+        : "Multi-agent mode: agent_turn";
+      // Resolve the effective orchestrator LLM *before* creating the pipeline
+      // tool so the pipeline runs on the chosen model, not the previous one.
+      let effectiveLlm: LlmConfig = llm;
+      if (finalSetup.orchestratorModel && finalSetup.orchestratorModel !== llm.model) {
+        try {
+          effectiveLlm = switchLlmModel(llm, finalSetup.orchestratorModel, {});
+          setLlm(effectiveLlm);
+        } catch {
+          // model switch failed — fall back to the current model with a notice
+          dispatch({
+            type: "ADD_NOTICE",
+            title: "Multi-agent pipeline",
+            text: `Could not switch to ${finalSetup.orchestratorModel}; using current model ${llm.model}.`,
+          });
+        }
+      }
+      // Persist role assignments to profile store (MVP: save as default subagentRoles)
+      if (finalSetup.roleAssignments) {
+        try {
+          const { saveSubagentRole: saveSubagentRoleFunc } = await import("../profile-store.ts");
+          for (const [role, assignment] of Object.entries(finalSetup.roleAssignments)) {
+            if (assignment.type === "inherit") {
+              await saveSubagentRoleFunc(role, null);
+            } else if (assignment.type === "profile") {
+              await saveSubagentRoleFunc(role, assignment.profileName);
+            } else if (assignment.type === "draft-new" && assignment.modelId) {
+              const profileName = `${assignment.modelId.replace(/\//g, "-")}-${role}`;
+              const { saveProfile } = await import("../profile-store.ts");
+              await saveProfile(profileName, {
+                model: assignment.modelId,
+                baseUrl: assignment.baseUrl ?? "",
+                apiKey: assignment.apiKey ?? "",
+                thinkingLevel: llm.thinkingLevel,
+              }, false);
+              await saveSubagentRoleFunc(role, profileName);
+            }
+          }
+        } catch {
+          // Non-fatal: role binding save failure should not block task start
+        }
+      }
+      // Resolve roleLlmConfigs after persisting so the new bindings are visible.
+      let roleLlmConfigs: Record<string, LlmConfig> = {};
+      try {
+        const store = loadProfileStoreSync();
+        if (store) {
+          const roleProfiles = resolveSubagentRoleLlmConfigs(store);
+          for (const [role, profile] of Object.entries(roleProfiles)) {
+            try {
+              roleLlmConfigs[role] = switchLlmModel(effectiveLlm, profile.model, {
+                baseUrl: profile.baseUrl,
+                apiKey: profile.apiKey,
+              });
+            } catch {
+              // profile invalid → skip, subagent falls back to effectiveLlm
+            }
+          }
+        }
+      } catch {
+        // non-fatal
+      }
+      // In planner_worker_reviewer mode, expose the full H3+H4 pipeline tool
+      // (analyzeRequirement → topological dispatch → review → iterate) so the
+      // main agent can drive the real planning/review engine instead of only
+      // delegating to generic subagents.
+      const pipelineTools: Tool[] = [];
+      if (finalSetup.mode === "planner_worker_reviewer") {
+        try {
+          const { createAnalyzePipelineTool } = await import("../orchestration/pipeline/planning-engine.ts");
+          pipelineTools.push(
+            createAnalyzePipelineTool({
+              parentLlm: effectiveLlm,
+              parentTools: agentToolsRef.current,
+              workspaceRoot: cwd,
+              roleLlmConfigs,
+              onEvent: (event) =>
+                dispatch({ type: "ADD_NOTICE", title: "Pipeline", text: `[${event.event}] ${event.task_id}` }),
+            }) as Tool,
+          );
+        } catch {
+          // Pipeline tool unavailable — fall back to subagent-only mode.
+        }
+      }
+      const fullPrompt = `${modeLabel}\n\n${task}`;
+      dispatch({ type: "USER_MESSAGE", text: `${modeLabel}\n${task}` });
+      abortRef.current = new AbortController();
+      const abortSignal = abortRef.current.signal;
+      const permissionManager = getPermissionManager();
+      const permissionTurn = permissionManager.beginTurn(
+        permissionSessionId,
+        (request) => dispatch({ type: "LOOP_EVENT", event: { type: "permission_required", request } }),
+        abortSignal,
+      );
+      permissionTurnRef.current = permissionTurn;
+      const streamBuffer = streamBufferRef.current!;
+      const runId = streamBuffer.start();
+      // If the turn is aborted mid-pipeline, the pipeline tool receives the
+      // same signal via the broker and cancels in-flight subagent dispatches.
+      try {
+        historyRef.current = await runAgentTurn(historyRef.current, task, {
+          llm: { ...effectiveLlm, sessionId: conversationId },
+          tools: () => [
+            ...resolveToolProvider(agentToolsRef.current),
+            ...getSubagentTools(effectiveLlm),
+            ...pipelineTools,
+          ],
+          autoSubagent,
+          preprocessors: visionPreprocessors,
+          userContent: fullPrompt,
+          permissionTurn,
+          runtimeContext: { sessionId: conversationId, workspaceId: cwd } satisfies RuntimeExecutionContext,
+          globalTokenBudget,
+          thinkingMode: thinkingPolicyRef.current,
+          runtimeRef: subagentRuntimeRef.current,
+          skillNames: skillNamesRef.current,
+          skillRegistry: defaultSkillRegistry,
+          onEvent: (event: LoopEvent) => { streamBuffer.handle(runId, event); },
+        });
+        streamBuffer.finish(runId);
+      } catch (err) {
+        streamBuffer.finish(runId);
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体任务错误",
+          text: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        await persistSession(historyRef.current).catch(() => {});
       }
       return;
     }
@@ -459,7 +1145,79 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       dispatch({ type: "RESET" });
       setInput("");
       // Generate new conversation ID for fresh session
-      setConversationId(randomUUID());
+      setConversationId(sessionManagerRef.current!.newSession());
+      return;
+    }
+    if (trimmed === "/sessions") {
+      const sessions = knownSessions ?? await sessionManagerRef.current!.list().catch(() => []);
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "Saved sessions",
+        text: sessions.length === 0
+          ? "No saved sessions."
+          : sessions.slice(0, 8)
+            .map((session) => session.id.slice(0, 8) + "  " + session.messageCount + " msgs  " + session.preview)
+            .join("\n"),
+      });
+      setInput("");
+      return;
+    }
+    const resumeCommand = parseResumeCommand(trimmed);
+    if (resumeCommand) {
+      const prefix = resumeCommand.prefix;
+      const sessions = knownSession
+        ? [knownSession]
+        : knownSessions ?? await sessionManagerRef.current!.list().catch(() => []);
+      const selection = knownSession
+        ? { session: knownSession, candidates: [knownSession] }
+        : resolveSessionByPrefix(sessions, prefix);
+      if (!selection.session && selection.candidates.length > 1) {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "Resume session",
+          text: formatAmbiguousSessionNotice(prefix, selection.candidates),
+        });
+        setInput("");
+        return;
+      }
+      const target = selection.session;
+      if (!target) {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "Resume session",
+          text: prefix ? "No session found: " + prefix : "No saved sessions.",
+        });
+        setInput("");
+        return;
+      }
+      const restored = await restoreSession(target.id, false, target);
+      dispatch({
+        type: "ADD_NOTICE",
+        title: restored ? "Session resumed" : "Resume failed",
+        text: restored
+          ? restored.id.slice(0, 8) + " · " + restored.messages.length + " messages"
+          : "Unable to read session: " + target.id,
+      });
+      setInput("");
+      return;
+    }
+    if (trimmed === "/rewind") {
+      const session = await sessionManagerRef.current!.load(conversationId).catch(() => undefined);
+      if (!session || session.messages.length === 0) {
+        dispatch({ type: "ADD_NOTICE", title: "Rewind session", text: "No rewindable messages in this session." });
+        setInput("");
+        return;
+      }
+      const candidates = getResumeMessageCandidates(session.messages);
+      if (candidates.length === 0) {
+        dispatch({ type: "ADD_NOTICE", title: "Rewind session", text: "No selectable rewind points in this session." });
+        setInput("");
+        return;
+      }
+      resumePickerSessionRef.current = session;
+      resumePickerCandidatesRef.current = candidates;
+      openResumeMessages(candidates);
+      setInput("");
       return;
     }
     if (trimmed === "/context") {
@@ -468,22 +1226,28 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       const ctxWindow = modelContextWindows[state.modelName] ?? llm.contextWindow ?? 128000;
       const pct = ctxWindow > 0 ? Math.round(tokenEst / ctxWindow * 100) : 0;
       const lines = [
-        `上下文统计: ${tokenEst} / ${ctxWindow} tokens (${pct}%)`,
+        `Context: ${tokenEst} / ${ctxWindow} tokens (${pct}%)`,
         '',
       ];
       if (compactions.length === 0) {
-        lines.push('尚无压缩记录（上下文未超过阈值）');
+        lines.push('No compaction yet (context is below the threshold).');
       } else {
-        lines.push(`已压缩 ${compactions.length} 次:`);
+        lines.push(`Compacted ${compactions.length} ${compactions.length === 1 ? "time" : "times"}:`);
         for (const c of compactions.slice(-5)) {
           lines.push(`  turn${c.turn}: ${c.before} → ${c.after} (${c.reason})`);
         }
       }
-      dispatch({ type: "ADD_NOTICE", title: "上下文统计", text: lines.join("\n") });
+      dispatch({ type: "ADD_NOTICE", title: "Context usage", text: lines.join("\n") });
       setInput("");
       return;
     }
 
+    const legacyTodo = parseLegacyTodoCommand(trimmed);
+    if (legacyTodo) {
+      executeTodoCommand(editableTodos, legacyTodo, dispatch);
+      setInput("");
+      return;
+    }
     const todoCommand = parseTodoCommand(trimmed);
     if (todoCommand) {
       if (todoCommand === "clear") {
@@ -518,7 +1282,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         addPendingImageRef(await loadImageAttachment(imagePath, cwd));
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        dispatch({ type: "ATTACHMENT_ERROR", message: `无法添加图片: ${detail}` });
+        dispatch({ type: "ATTACHMENT_ERROR", message: `Unable to attach image: ${detail}` });
       }
       setInput("");
       return;
@@ -533,8 +1297,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     if (trimmed === "/help" || trimmed === "/?") {
       dispatch({
         type: "ADD_NOTICE",
-        title: "可用命令",
-        text: SLASH_COMMANDS.map((command) => `${command.usage.padEnd(28)} ${command.description}`).join("\n"),
+        title: "Available commands",
+        text: formatHelpNotice(SLASH_COMMANDS, termWidth),
       });
       setInput("");
       return;
@@ -561,6 +1325,33 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       permissionManager: getPermissionManager(),
     });
     if (planTurnOverride === null) {
+      return;
+    }
+
+    // /multi-agent: launch the multi-agent setup wizard
+    if (/^\/multi-agent(?:\s+(.*))?$/i.test(trimmed)) {
+      const inlineTask = trimmed.replace(/^\/multi-agent\s*/i, "").trim();
+      if (inlineTask) {
+        // Inline task provided — skip wizard, go straight to task step with defaults
+        setMultiAgentSetup({ step: "task", orchestratorModel: llm.model, mode: "planner_worker_reviewer" });
+        setAcMode("multi-agent-task");
+        setInput(inlineTask);
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体向导",
+          text: `模型: ${llm.model}\n模式: planner_worker_reviewer\n\n任务已预填，按 Enter 启动，或修改后再按 Enter。`,
+        });
+      } else {
+        // Full wizard: start at model selection
+        setMultiAgentSetup({ step: "model" });
+        setAcMode("multi-agent-model");
+        setInput("");
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "多智能体向导 — 选择 Orchestrator 模型",
+          text: `当前模型: ${llm.model}\n\n直接按 Enter 使用当前模型，或输入其他模型 ID (如 openai/gpt-4o-mini)。`,
+        });
+      }
       return;
     }
 
@@ -614,6 +1405,19 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       return;
     }
 
+    // A leading "/" that is not a known command is a typo, not a prompt.
+    // Sending it to the model wasted a turn and produced a confusing answer.
+    const unknownCommand = parseUnknownSlashCommand(trimmed);
+    if (unknownCommand && !planTurnOverride) {
+      setInput("");
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "Unknown command",
+        text: `${unknownCommand} is not a command. Use /help to list the available commands.`,
+      });
+      return;
+    }
+
     const pendingImgs = planTurnOverride ? [] : [...pendingImagesRef.current];
     if (!planTurnOverride && !trimmed && pendingImgs.length === 0) {
       setInput("");
@@ -632,7 +1436,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       imageParts = await Promise.all(pendingImgs.map(imageAttachmentToPart));
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      dispatch({ type: "ATTACHMENT_ERROR", message: `无法读取待发送图片: ${detail}` });
+      dispatch({ type: "ATTACHMENT_ERROR", message: `Unable to read the pending image: ${detail}` });
       return;
     }
 
@@ -651,22 +1455,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       abortRef.current.signal,
     );
     permissionTurnRef.current = permissionTurn;
-    // Collapse multi-line pastes into a summary for display, but keep full text for model context.
-    const displaySource = planTurnOverride?.displayText ?? prompt;
-    const normalizedPrompt = displaySource.replace(/\r\n/g, '\n');
-    const isMultiLine = !planTurnOverride && normalizedPrompt.includes('\n');
-    const lineCount = isMultiLine ? normalizedPrompt.split('\n').length : 1;
-    // Count graphemes properly (emoji = 1 char, not 2 UTF-16 units)
-    const charCount = [...normalizedPrompt].length;
-    const displayText = planTurnOverride
-      ? planTurnOverride.displayText
-      : isMultiLine
-        ? `[已折叠 ${lineCount} 行 / ${charCount} 字]`
-        : undefined;
     dispatch({
       type: "USER_MESSAGE",
       text: planTurnOverride ? planTurnOverride.displayText : prompt,
-      ...(displayText !== undefined && !planTurnOverride ? { displayText } : {}),
+      ...(planTurnOverride?.displayText !== undefined ? { displayText: planTurnOverride.displayText } : {}),
       images: pendingImgs,
     });
 
@@ -678,36 +1470,41 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       ? prompt
       : prompt.replace(/@\S+/g, "").replace(/\s{2,}/g, " ").trim();
     const thinkingMode = planTurnOverride
-      ? loadThinkingModeFromEnv()
+      ? thinkingPolicyRef.current
       : parsedThinking.intensity
         ? "fixed"
-        : parseThinkingCommandMode(prompt) ?? loadThinkingModeFromEnv();
+        : parseThinkingCommandMode(prompt) ?? thinkingPolicyRef.current;
     let turnSucceeded = false;
     let turnErrorMessage: string | undefined;
 
     const onLoopEvent = (event: LoopEvent) => {
       if (event.type === "thinking_policy") {
+        // Keep adaptive escalation local to this turn. The selected level in
+        // llmRef is user-owned and is what session persistence must restore.
         turnLlm = withThinkingLevel(turnLlm, event.level);
-        setLlm(turnLlm);
       } else if (event.type === "auto_subagent") {
         const status = event.executed
-          ? `自动子 agent 已启动 (${event.profile}, score=${event.score})`
+          ? `Auto subagent started (${event.profile}, score=${event.score})`
           : event.shouldDelegate
-            ? `建议委托子 agent (${event.profile}, score=${event.score})`
-            : `不自动委托 (score=${event.score})`;
+            ? `Subagent delegation suggested (${event.profile}, score=${event.score})`
+            : `No auto delegation (score=${event.score})`;
         dispatch({ type: "SET_STATUS", status });
       } else if (event.type === "coordinator_mode") {
         dispatch({
           type: "SET_STATUS",
           status: event.active
-            ? `编排模式: ${event.profile} (探索 ${event.directExplorationUsed}/${event.maxDirectExploration})`
-            : "编排模式已关闭",
+            ? `Orchestration: ${event.profile} (exploration ${event.directExplorationUsed}/${event.maxDirectExploration})`
+            : "Orchestration disabled",
         });
       }
       streamBuffer.handle(runId, event);
     };
 
     try {
+      await persistSession([
+        ...historyRef.current,
+        { role: "user", content: currentUserText },
+      ]);
       let currentUserContent = planTurnOverride
         ? prompt
         : await resolveAtRefsRef(prompt, permissionTurn);
@@ -726,8 +1523,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             llm: { ...turnLlm, sessionId: conversationId },
             tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools(turnLlm)],
             autoSubagent,
-            preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
-            signal: abortRef.current.signal,
+            preprocessors: visionPreprocessors,
             userContent: currentUserContent,
             permissionTurn,
             runtimeContext: {
@@ -755,7 +1551,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               streamBuffer.finish(runId);
               turnErrorMessage = permissionTurn.signal.aborted
                 ? "aborted"
-                : `已达到自动续跑上限 (${MAX_AUTO_CONTINUES} 次)`;
+                : `Auto-continue limit reached (${MAX_AUTO_CONTINUES} turns)`;
               if (permissionTurn.signal.aborted) {
                 const reason = permissionTurn.signal.reason;
                 dispatch({
@@ -775,7 +1571,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               }
               break;
             }
-            currentUserText = "继续完成之前的工作";
+            currentUserText = "Continue the remaining work.";
             currentUserContent = currentUserText;
             dispatch({ type: "AUTO_CONTINUE", count: autoContinueCount, max: MAX_AUTO_CONTINUES });
             continue;
@@ -825,6 +1621,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         }
       }
 
+      await persistSession(historyRef.current);
+
       await finalizePlanCapture({
         cwd,
         planCaptureRef,
@@ -841,46 +1639,142 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         dispatch,
       });
     }
-  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit]);
+  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit, persistSession, restoreSession]);
 
-  // Start the next queued prompt only after the current turn has emitted done/error/aborted.
+  // Start the next queued prompt only after the current turn has emitted
+  // done/error/aborted. handleSubmit's identity changes on every render
+  // (its dep list includes `state`), so the effect reads it through a ref
+  // and only re-runs on the busy transition that unblocks the queue.
+  const handleSubmitRef = useRef(handleSubmit);
+  handleSubmitRef.current = handleSubmit;
   useEffect(() => {
     if (state.busy || promptQueueRef.current.length === 0) return;
     const next = promptQueueRef.current.shift();
     setQueuedCount(promptQueueRef.current.length);
-    if (next) void handleSubmit(next);
-  }, [state.busy, handleSubmit]);
+    if (next) void handleSubmitRef.current(next);
+  }, [state.busy]);
 
   // ── render ────────────────────────────────────────────────────────────────
 
-  const viewportContentHeight = estimateViewportContentHeight({
-    messages: state.messages,
-    streamingText: state.streamingText,
-    streamingReasoning: state.streamingReasoning,
-    busy: state.busy,
-    thinkingMode: state.thinkingMode,
-    expandedThinking: state.expandedThinking,
-    width: termWidth,
-    maxMessages: 200,
-  });
+  // Both height estimates call buildBlocks() internally. Memoising them on the
+  // fields that actually change their output avoids rerunning the O(N) markdown
+  // row-count walk on every render that only updates unrelated state (e.g. the
+  // input field, autocomplete index, or permission panel visibility).
+  // Completed history blocks are served from the shared two-layer height
+  // cache: the full transcript walk is cached per messages-array reference,
+  // so a streaming flush (same array, new streaming text) costs O(1) — no
+  // off-screen message is reprocessed — while the live stack recomputes.
+  const viewportContentHeight = useMemo(
+    () => estimateViewportContentHeight({
+      messages: state.messages,
+      streamingText: state.streamingText,
+      streamingReasoning: state.streamingReasoning,
+      busy: state.busy,
+      thinkingMode: state.thinkingMode,
+      expandedThinking: state.expandedThinking,
+      width: termWidth,
+      maxMessages: Number.MAX_SAFE_INTEGER,
+      cache: heightCache,
+      subagentById: state.subagentById,
+      subagentRevision: state.subagentRevision,
+      subagentChange: state.subagentChange,
+      toolById: state.toolById,
+      toolRevision: state.toolRevision,
+      toolChange: state.toolChange,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.messages, state.subagentById, state.subagentRevision, state.subagentChange, state.toolById, state.toolRevision, state.toolChange, state.activeToolId, state.streamingText, state.streamingReasoning, state.busy, state.thinkingMode, state.expandedThinking, termWidth],
+  );
+  // Rows the Ink renderer actually draws. Truncated markdown kinds (tables,
+  // code, rules) hold one row per source line, so the estimate can exceed the
+  // drawn content. Sizing the frame with the drawn count keeps estimate
+  // surplus from pinning the frame at full terminal height and leaving a
+  // blank band between the transcript and the prompt.
+  const viewportActualHeight = useMemo(
+    () => estimateViewportActualHeight({
+      messages: state.messages,
+      streamingText: state.streamingText,
+      streamingReasoning: state.streamingReasoning,
+      busy: state.busy,
+      thinkingMode: state.thinkingMode,
+      expandedThinking: state.expandedThinking,
+      width: termWidth,
+      maxMessages: Number.MAX_SAFE_INTEGER,
+      cache: heightCache,
+      subagentById: state.subagentById,
+      subagentRevision: state.subagentRevision,
+      subagentChange: state.subagentChange,
+      toolById: state.toolById,
+      toolRevision: state.toolRevision,
+      toolChange: state.toolChange,
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.messages, state.subagentById, state.subagentRevision, state.subagentChange, state.toolById, state.toolRevision, state.toolChange, state.activeToolId, state.streamingText, state.streamingReasoning, state.busy, state.thinkingMode, state.expandedThinking, termWidth],
+  );
+  // Do not force a short session to occupy the entire alternate screen. The
+  // fixed-height viewport is useful once the transcript reaches the terminal
+  // edge, but before that point it creates a large empty band above the prompt
+  // (most noticeable while a restored session is still loading).
+  const fixedChromeRows =
+    (hasHeader ? headerRows : 0) +
+    bottomPanelRows +
+    pickerLayout.totalRows +
+    permissionRows +
+    planApprovalRows +
+    (state.pendingImages.length > 0 ? 1 : 0) +
+    updateRows +
+    2; // prompt + stable status row
+  const naturalFrameHeight = Math.max(
+    1,
+    fixedChromeRows + Math.min(viewportActualHeight, feedHeight),
+  );
+  const frameHeight = Math.min(termHeight, naturalFrameHeight);
   const previousViewportHeightRef = useRef(viewportContentHeight);
+  const previousMessagesRef = useRef(state.messages);
+  // Pending scroll-adjust accumulated while streaming so we only dispatch once
+  // per animation frame instead of once per 80 ms flush tick.
+  const pendingScrollDeltaRef = useRef(0);
+  const scrollAdjustScheduledRef = useRef(false);
   useLayoutEffect(() => {
     const previous = previousViewportHeightRef.current;
+    const messagesUnchanged = previousMessagesRef.current === state.messages;
     previousViewportHeightRef.current = viewportContentHeight;
-    if (state.scrollOffset > 0 && viewportContentHeight > previous) {
-      dispatch({ type: "SCROLL_BY", delta: viewportContentHeight - previous });
+    previousMessagesRef.current = state.messages;
+    // Reducer append actions already preserve the offset for completed message
+    // blocks. Only compensate here for streaming growth inside the same
+    // messages array; doing this after an append moves the viewport twice.
+    if (!messagesUnchanged) {
+      // A queued streaming adjustment belongs to the previous message array;
+      // never carry it across a completed-message append.
+      pendingScrollDeltaRef.current = 0;
+    }
+    if (messagesUnchanged && state.scrollOffset > 0 && viewportContentHeight > previous) {
+      pendingScrollDeltaRef.current += viewportContentHeight - previous;
+      if (!scrollAdjustScheduledRef.current) {
+        scrollAdjustScheduledRef.current = true;
+        // Defer the dispatch to the next microtask so rapid back-to-back
+        // layout effects (e.g. streaming deltas arriving faster than 80 ms)
+        // are coalesced into a single SCROLL_BY action.
+        Promise.resolve().then(() => {
+          scrollAdjustScheduledRef.current = false;
+          const delta = pendingScrollDeltaRef.current;
+          pendingScrollDeltaRef.current = 0;
+          if (delta > 0) dispatch({ type: "SCROLL_BY", delta });
+        });
+      }
     }
   }, [viewportContentHeight, state.scrollOffset]);
 
   return (
-    <Box flexDirection="column" width={termWidth} height={termHeight} overflow="hidden">
-      <Header modelName={state.modelName} cwd={cwd} />
-
-      {(state.todoPlan || state.todoItems) && (
-        <TodoPanel
-          plan={state.todoPlan}
-          todos={state.todoItems}
-          viewMode={state.todoViewMode}
+    <Box flexDirection="column" width={termWidth} height={frameHeight} overflow="hidden">
+      {hasHeader && (
+        <Header
+          modelName={`${llm.provider}/${llm.model}`}
+          billingLabel="API Usage Billing"
+          version={TUI_BRAND_VERSION}
+          cwd={cwd}
+          width={termWidth}
+          showWelcome={showWelcome}
         />
       )}
 
@@ -894,9 +1788,23 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           focusedMessageIndex={state.focusedMessageIndex}
           busy={state.busy}
           status={state.status}
+          pendingPermission={state.pendingPermission}
+          turnStartedAt={state.turnStartedAt}
+          lastStreamAt={state.lastStreamAt}
+          spinnerMessage={state.spinnerMessage}
+          todoPanelVisible={bottomPanelRows > 0}
           availableHeight={feedHeight}
           width={termWidth}
           scrollOffset={state.scrollOffset}
+          showHistoryHints
+          heightCache={heightCache}
+          subagentById={state.subagentById}
+          subagentRevision={state.subagentRevision}
+          subagentChange={state.subagentChange}
+          toolById={state.toolById}
+          toolRevision={state.toolRevision}
+          toolChange={state.toolChange}
+          activeToolId={state.activeToolId}
         />
         <Overlays
           acMode={acMode}
@@ -908,20 +1816,51 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           modelCandidates={modelCandidates}
           modelContextWindows={modelContextWindows}
           modelQuery={modelQuery}
+          sessionCandidates={sessionCandidates}
+          resumeMessageCandidates={resumeMessageCandidates}
+          sessionCommand={sessionCommand}
+          sessionLoading={sessionLoading}
           currentModel={`${llm.provider}/${llm.model}`}
           modelSetup={modelSetup}
           pendingProfileSetup={pendingProfileSetup}
           profileListState={profileListState}
           pickerItemRows={pickerLayout.itemRows}
+          width={termWidth}
+          todoEditorState={todoEditorState ?? undefined}
+          onTodoCancel={() => setTodoEditorState(null)}
+          onTodoInput={(value) => setTodoEditorState((current) => current ? reduceTodoEditor(current, { type: "INPUT", value }) : current)}
+          onTodoConfirm={commitTodoEditor}
         />
       </Box>
 
       <Box flexDirection="column" flexShrink={0}>
+        {showTaskSummary ? (
+          <TaskSummaryPanel
+            title={state.taskTitle}
+            status={state.taskStatus}
+            durationMs={state.taskDurationMs}
+            totalTokens={state.taskTokens}
+            todos={taskTodos}
+            viewMode={taskSummaryViewMode(state.taskStatus, state.todoViewMode)}
+            width={termWidth}
+          />
+        ) : (state.todoPlan || state.todoItems) && (
+          <TodoPanel
+            plan={state.todoPlan}
+            todos={state.todoItems}
+            viewMode={state.todoViewMode}
+            width={termWidth}
+          />
+        )}
         {state.pendingPermission && (
-          <PermissionPanel request={state.pendingPermission} />
+          <PermissionPanel request={state.pendingPermission} width={termWidth} />
         )}
         {state.phase === "review" && state.currentPlan && (
-          <PlanApprovalBar plan={state.currentPlan} />
+          <PlanApprovalBar plan={state.currentPlan} width={termWidth} />
+        )}
+
+        {update !== null && (
+          <UpdateNotice update={update} upgrading={upgrading} result={upgradeResult} width={termWidth} />
         )}
 
         {state.pendingImages.length > 0 && (
@@ -933,13 +1872,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
             ))}
           </Box>
         )}
-        {state.spinnerMessage && (
-          <Box paddingX={1} paddingY={0}>
-            <Text dimColor>{state.spinnerMessage}</Text>
-          </Box>
-        )}
-        <Box paddingX={1} gap={1} flexShrink={0}>
-          <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : ">"}</Text>
+        {/* The Todo tip renders inside the feed's single loading row. */}
+        <Box
+          paddingX={1}
+          gap={1}
+          flexShrink={0}
+        >
+          <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : "❯"}</Text>
           <Box flexGrow={1} minWidth={0}>
             <PromptInput
               key={inputEpoch}
@@ -947,11 +1886,31 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               onChange={setInputSafe}
               onPasteImage={handlePasteImageRef}
               onTab={handleTabAt}
-              pasteEnabled={!state.pendingPermission}
-              focus={!state.pendingPermission}
+              pasteEnabled={!state.pendingPermission && todoEditorState === null}
+              focus={!state.pendingPermission && todoEditorState === null && update === null && upgradeResult === null}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
+              inputHistory={promptInputHistoryRef.current}
+              disableArrowNavigation={Boolean(acMode)}
+              onScrollContext={(direction) => {
+                // Scrolling the transcript remains available while a turn is
+                // running; only overlays that own the input block it.
+                if (acMode || state.pendingPermission || todoEditorState !== null) return;
+                dispatch({ type: "SCROLL_BY", delta: direction === "up" ? 3 : -3 });
+              }}
               onSubmit={(val) => {
                 if (shouldAcceptAutocompleteOnEnter(acMode)) {
+                  if (acMode === "session-list") {
+                    const selectedSession = sessionCandidates[acIndex];
+                    if (selectedSession) {
+                      void handleSubmit(`/resume ${selectedSession.id}`, selectedSession);
+                    } else if (!sessionLoading) {
+                      void handleSubmit(val, undefined, sessionCandidates);
+                    } else {
+                      // The picker owns the list request. Wait for it to
+                      // settle instead of issuing a second scan on Enter.
+                    }
+                    return;
+                  }
                   if (acMode === "command") {
                     const selectedCommand = cmdCandidates[acIndex];
                     if (selectedCommand && isExactSlashCommand(val, selectedCommand.name)) {
@@ -966,7 +1925,10 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                     return;
                   }
                   if ((acMode === "model" || acMode === "model-picker") && shouldSubmitTypedModelCommand(val)) {
-                    void handleSubmit(val);
+                    // The picker holds the bare query; restore the command so
+                    // Enter switches the model instead of prompting with its
+                    // reference.
+                    void handleSubmit(modelCommandFromPickerInput(val));
                     return;
                   }
                   const chosen = modelCandidates[acIndex];
@@ -979,22 +1941,19 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
                 }
                 void handleSubmit(val);
               }}
-              placeholder={
-                state.busy ? "运行中，可输入消息并排队"
-                  : acMode === "model-picker" ? "搜索模型"
-                    : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "输入 Base URL"
-                      : acMode === "model-setup" ? "输入 API Key，可留空使用环境变量"
-                        : acMode === "profile-name" ? "输入配置文件名称（例如 coding-fast）"
-                          : acMode === "profile-list" ? "↑↓ 选择配置文件，Enter 激活"
-                            : "输入消息，/ 命令，或 @文件 引用"
-              }
+              placeholder={promptPlaceholder({
+                busy: state.busy,
+                acMode,
+                modelSetupField: modelSetup?.field,
+              })}
             />
-            {state.busy && queuedCount > 0 && <Text color={C.running}>队列 {queuedCount}</Text>}
           </Box>
         </Box>
         <StatusBar
           modelName={state.modelName}
-          tokenEstimate={state.usedTokens || state.contextTokens}
+          cwd={cwd}
+          width={termWidth}
+          tokenEstimate={state.contextTokens}
           contextWindow={llm.contextWindow}
           busy={state.busy}
           status={state.status}

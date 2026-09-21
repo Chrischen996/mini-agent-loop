@@ -50,18 +50,37 @@ export function decideInitialThinkingLevel(input: {
   if (prompt.length > 700) { score += 1; reasons.push("long_prompt"); }
   if (prompt.length > 2_000) { score += 1; reasons.push("very_long_prompt"); }
 
-  const requested: ModelThinkingLevel = score <= 0
-    ? "low"
-    : score <= 3
-      ? "medium"
-      : score <= 6
-        ? "high"
-        : "xhigh";
+  const requested = pickEffortForScore(getThinkingLevelChoices(input.llm), score);
   return {
     level: clampThinkingLevelForModel(input.llm, requested),
     score,
     reasons,
   };
+}
+
+function pickEffortForScore(choices: ModelThinkingLevel[], score: number): ModelThinkingLevel {
+  const efforts = choices.filter((level) => level !== "off");
+  if (efforts.length === 0) return "medium";
+
+  const preferred: ModelThinkingLevel = score <= 0
+    ? "low"
+    : score <= 3
+      ? "medium"
+      : score <= 6
+        ? "high"
+        : efforts.at(-1)!;
+  if (efforts.includes(preferred)) return preferred;
+
+  if (score <= 0) return efforts[0]!;
+  if (score <= 3) {
+    const mediumIndex = efforts.findIndex((level) => level === "medium" || level === "high");
+    return efforts[mediumIndex >= 0 ? mediumIndex : Math.min(1, efforts.length - 1)]!;
+  }
+  if (score <= 6) {
+    const highIndex = efforts.findIndex((level) => level === "high" || level === "xhigh" || level === "max" || level === "ultra");
+    return efforts[highIndex >= 0 ? highIndex : efforts.length - 1]!;
+  }
+  return efforts.at(-1)!;
 }
 
 /** Upgrade one available effort level after a meaningful failure; never downgrade. */

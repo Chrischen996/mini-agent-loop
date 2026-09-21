@@ -99,8 +99,157 @@ describe("TUI sidebar state", () => {
     state = tuiReducer(state, { type: "ATTACHMENT_ERROR", message: "Clipboard has no image" });
 
     assert.equal(state.busy, true);
-    assert.equal(state.status, "图片添加失败");
+    assert.equal(state.status, "Unable to attach image");
     assert.deepEqual(state.messages.at(-1), { kind: "error", text: "Clipboard has no image" });
+  });
+
+  it("applies a coalesced assistant_deltas event in a single update", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Hello" });
+
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_deltas", reasoning: "think1", answer: "say1" },
+    });
+    assert.equal(state.streamingReasoning, "think1");
+    assert.equal(state.streamingText, "say1");
+
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_deltas", answer: "say2" },
+    });
+    assert.equal(state.streamingReasoning, "think1");
+    assert.equal(state.streamingText, "say1say2");
+    assert.equal(typeof state.lastStreamAt, "number");
+    assert.equal(state.status, "Responding…");
+  });
+
+  it("tracks the completed task root and accumulates assistant usage", () => {
+    let state = createInitialState("model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Review the workspace" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "part one" },
+        usage: { promptTokens: 100, inputTokens: 100, completionTokens: 50, totalTokens: 150 },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "part two" },
+        usage: { promptTokens: 200, inputTokens: 200, completionTokens: 50, totalTokens: 250 },
+      },
+    });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "done", messages: [] } });
+
+    assert.equal(state.taskTitle, "Review the workspace");
+    assert.equal(state.taskStatus, "completed");
+    assert.equal(state.taskTokens, 400);
+    assert.ok((state.taskDurationMs ?? -1) >= 0);
+  });
+
+  it("does not turn a cancelled task back into completed on a late done event", () => {
+    let state = createInitialState("model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Stop this task" });
+    state = tuiReducer(state, { type: "CANCEL_GENERATION" });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "done", messages: [] } });
+
+    assert.equal(state.taskStatus, "cancelled");
+  });
+
+  it("keeps a bounded streaming preview while preserving the full assistant text", () => {
+    let state = createInitialState("test-model");
+    const first = "a".repeat(12_000);
+    const second = "b".repeat(12_000);
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "assistant_delta", kind: "answer", text: first } });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "assistant_delta", kind: "answer", text: second } });
+    assert.ok(state.streamingText.length <= 16_000);
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant", message: { role: "assistant", content: "" } },
+    });
+    const assistant = state.messages.at(-1);
+    assert.equal(assistant?.kind, "assistant");
+    if (assistant?.kind === "assistant") assert.equal(assistant.text, first + second);
+    assert.deepEqual(state.streamingTextParts, []);
+  });
+
+  it("records context compaction events for the context notice", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "context_compacted", beforeTokens: 12_000, afterTokens: 4_000, reason: "token budget" },
+    });
+    assert.equal(state.contextTokens, 4_000);
+    assert.deepEqual(state.contextCompactions, [{ before: 12_000, after: 4_000, reason: "token budget", turn: 1 }]);
+  });
+
+  it("ignores high-frequency subagent answer deltas in the transcript", () => {
+    const state = createInitialState("test-model");
+    const card = {
+      kind: "subagent_call" as const,
+      id: "sub-1",
+      task: "inspect",
+      depth: 0,
+      status: "running" as const,
+      innerEvents: [],
+      toolCallCount: 0,
+      startedAt: 0,
+      expanded: false,
+    };
+    state.messages = [card];
+    state.subagentIndexById = { "sub-1": 0 };
+    const next = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_event",
+        id: "sub-1",
+        depth: 0,
+        inner: { type: "assistant_delta", kind: "answer", text: "token" },
+      },
+    });
+    assert.equal(next, state);
+    assert.equal(next.messages[0], card);
+  });
+
+  it("bounds retained subagent progress events and uses the lifecycle index", () => {
+    let state = createInitialState("test-model");
+    const card = {
+      kind: "subagent_call" as const,
+      id: "sub-1",
+      task: "inspect",
+      depth: 0,
+      status: "running" as const,
+      innerEvents: [],
+      toolCallCount: 0,
+      startedAt: 0,
+      expanded: false,
+    };
+    state.messages = Array.from({ length: 500 }, (_, index) => ({ kind: "notice" as const, text: `history-${index}` }));
+    state.messages.push(card);
+    state.subagentIndexById = { "sub-1": state.messages.length - 1 };
+    const messagesReference = state.messages;
+    for (let index = 0; index < 150; index++) {
+      state = tuiReducer(state, {
+        type: "SUBAGENT_EVENT",
+        event: {
+          type: "subagent_event",
+          id: "sub-1",
+          depth: 0,
+          inner: { type: "tool_start", call: { id: `tool-${index}`, name: "read", arguments: { path: "x" } } },
+        },
+      });
+    }
+    assert.equal(state.messages, messagesReference, "subagent lifecycle updates must not copy the transcript array");
+    const updated = state.messages.at(-1);
+    assert.equal(updated?.kind, "subagent_call");
+    if (updated?.kind === "subagent_call") {
+      assert.equal(updated.innerEvents.length, 100);
+      assert.equal(updated.innerEvents[0]?.label, "▶ read");
+    }
   });
 
   it("tracks the goal, workflow step, file path, and tool card", () => {
@@ -134,6 +283,38 @@ describe("TUI sidebar state", () => {
     assert.ok((state.toolCards[0]?.durationMs ?? -1) >= 0);
   });
 
+  it("tracks active tool lookups without copying the transcript on tool_end", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Inspect the workspace" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "tool_start",
+        call: { id: "call-1", name: "read", arguments: { path: "src/index.ts" } },
+      },
+    });
+    assert.equal(state.activeToolId, "call-1");
+    const messagesReference = state.messages;
+
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "tool_end",
+        call: { id: "call-1", name: "read", arguments: { path: "src/index.ts" } },
+        result: { content: "export const answer = 42;", isError: false },
+      },
+    });
+
+    assert.equal(state.activeToolId, undefined, "finished tool must clear the active pointer");
+    assert.equal(state.messages, messagesReference, "tool completion must not copy the transcript array");
+    const tool = state.messages.at(-1);
+    assert.equal(tool?.kind, "tool_call");
+    if (tool?.kind === "tool_call") {
+      assert.equal(tool.status, "done");
+      assert.equal(tool.result, "export const answer = 42;");
+    }
+  });
+
   it("clears sidebar state when the conversation is reset", () => {
     let state = createInitialState("test-model");
     state = tuiReducer(state, { type: "USER_MESSAGE", text: "Do work" });
@@ -150,29 +331,23 @@ describe("TUI sidebar state", () => {
 
   it("cycles permission mode with TOGGLE_PERMISSION_MODE", () => {
     let state = createInitialState("test-model");
-    // Default is plan; order is plan -> approval -> bypass
+    // Default is plan; order is plan -> bypass
     assert.equal(state.permissionMode, "plan");
 
-    // plan -> approval
-    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
-    assert.equal(state.permissionMode, "approval");
-    assert.equal(state.status, "权限模式: 审批");
-
-    // approval -> bypass
+    // plan -> bypass
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "bypass");
-    assert.equal(state.status, "权限模式: 绕过");
+    assert.equal(state.status, "Permission mode: Bypass permissions");
 
     // bypass -> plan
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "plan");
-    assert.equal(state.status, "权限模式: 计划");
+    assert.equal(state.status, "Permission mode: Plan mode");
   });
 
   it("preserves permission mode on RESET", () => {
     let state = createInitialState("test-model");
-    // plan -> approval -> bypass
-    state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
+    // plan -> bypass
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "bypass");
 
@@ -201,13 +376,14 @@ describe("TUI sidebar state", () => {
       requestId: "perm-1",
       sessionId: "tui_session",
       tool: "write",
+      arguments: { path: "src/app.tsx" },
       risk: "high",
     });
-    assert.match(state.status, /等待权限确认: write \(high\).*A 允许.*D 拒绝/);
+    assert.match(state.status, /Waiting for permission: write \(high\).*A allow.*D deny/);
 
     state = tuiReducer(state, { type: "CLEAR_PENDING_PERMISSION" });
     assert.equal(state.pendingPermission, undefined);
-    assert.equal(state.status, "正在执行 write...");
+    assert.equal(state.status, "Running write…");
   });
 
   it("resets busy state when an error occurs", () => {
@@ -224,7 +400,7 @@ describe("TUI sidebar state", () => {
 
     // After error, busy should be reset to false so input is enabled again
     assert.equal(state.busy, false);
-    assert.equal(state.status, "请求失败");
+    assert.equal(state.status, "Request failed");
     assert.equal(state.messages[state.messages.length - 1]?.kind, "error");
   });
 
@@ -237,7 +413,7 @@ describe("TUI sidebar state", () => {
     });
 
     assert.equal(state.busy, true);
-    assert.match(state.status, /准备续跑/);
+    assert.match(state.status, /Turn limit reached \(30\), continuing…/);
 
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
@@ -261,7 +437,7 @@ describe("TUI sidebar state", () => {
 
     assert.equal(state.streamingText, "");
     assert.equal(state.streamingReasoning, "");
-    assert.equal(state.status, "思考结果不完整，正在重试 (1)...");
+    assert.equal(state.status, "Incomplete reasoning, retrying (1)…");
     assert.equal(state.busy, true);
   });
 
@@ -286,7 +462,7 @@ describe("TUI sidebar state", () => {
 
     assert.equal(state.streamingText, "");
     assert.equal(state.streamingReasoning, "");
-    assert.equal(state.status, "请求超时，正在重试 (1/1)...");
+    assert.equal(state.status, "Request timed out, retrying (1/1)…");
     assert.equal(state.busy, true);
   });
 
@@ -297,7 +473,7 @@ describe("TUI sidebar state", () => {
     assert.equal(state.busy, true);
     assert.equal(state.usedTokens, 42_000);
     assert.equal(state.contextTokens, 40_000);
-    assert.equal(state.status, "自动续跑 (1/5)...");
+    assert.equal(state.status, "Continuing… (1/5)");
   });
 
   it("scrolls history and re-pins on new user messages", () => {
@@ -339,10 +515,10 @@ describe("TUI sidebar state", () => {
   });
 
   it("preserveScrollOnAppend keeps history stable while scrolled up", () => {
-    assert.equal(preserveScrollOnAppend(0, 4, 6), 0); // pinned to bottom
-    assert.equal(preserveScrollOnAppend(2, 4, 6), 4); // 2 + (6-4) = 4
-    assert.equal(preserveScrollOnAppend(2, 4, 4), 2); // no change
-    assert.equal(preserveScrollOnAppend(5, 4, 3), 4); // 5 + (3-4) = 4
+    assert.equal(preserveScrollOnAppend(0, 2), 0); // pinned to bottom
+    assert.equal(preserveScrollOnAppend(2, 2), 4); // 2 + 2 added rows
+    assert.equal(preserveScrollOnAppend(2, 0), 2); // no new rows
+    assert.equal(preserveScrollOnAppend(5, 0), 5); // no new rows
   });
 
   it("preserves upward scroll when assistant and tool messages append", () => {
@@ -360,7 +536,7 @@ describe("TUI sidebar state", () => {
     state = tuiReducer(state, { type: "SCROLL_BY", delta: 2 });
     assert.equal(state.scrollOffset, 2);
 
-    // Assistant finalizes a new message while user is scrolled up.
+    // Assistant finalizes a new message ("reply" = 1 margin + 1 text line = 2 rows).
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
       event: {
@@ -369,9 +545,10 @@ describe("TUI sidebar state", () => {
       },
     });
     assert.equal(state.messages.length, 4);
-    assert.equal(state.scrollOffset, 3); // 2 + 1
+    assert.equal(state.scrollOffset, 4); // 2 + 2 rows (margin + text)
 
     // Tool cards also append into history and must preserve viewport.
+    // tool_call has no text field so estimateNewMessageRows gives 1+1=2.
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
       event: {
@@ -380,15 +557,15 @@ describe("TUI sidebar state", () => {
       },
     });
     assert.equal(state.messages.length, 5);
-    assert.equal(state.scrollOffset, 4); // 3 + 1
+    assert.equal(state.scrollOffset, 6); // 4 + 2 rows
 
-    // Errors append too.
+    // Errors append too ("boom" = 1 margin + 1 text line = 2 rows).
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
       event: { type: "error", message: "boom" },
     });
     assert.equal(state.messages.length, 6);
-    assert.equal(state.scrollOffset, 5); // 4 + 1
+    assert.equal(state.scrollOffset, 8); // 6 + 2 rows
   });
 
   it("adds help and other notices as renderable messages", () => {

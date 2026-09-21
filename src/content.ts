@@ -1,6 +1,7 @@
 import type {
   AgentMessage,
   ContentPart,
+  ImageMimeType,
   ImagePart,
   MessageContent,
   TextPart,
@@ -12,7 +13,7 @@ export function textPart(text: string): TextPart {
 }
 
 export function imagePart(
-  mimeType: string,
+  mimeType: ImageMimeType,
   data: string,
   source?: string,
 ): ImagePart {

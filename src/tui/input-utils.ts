@@ -29,10 +29,10 @@ export function extractFileAcTrigger(input: string): FileAcTrigger | null {
     };
   }
 
-  const bareTrigger = extractBareFileAcTrigger(input);
-  if (bareTrigger) return bareTrigger;
-
-  return null;
+  // Single bare words stay eligible for direct completion: the async candidate
+  // lookup decides whether a matching file exists, so ordinary prose (which is
+  // rejected below because it contains whitespace) never opens a picker.
+  return extractBareFileAcTrigger(input);
 }
 
 export function extractBareFileAcTrigger(input: string): FileAcTrigger | null {
@@ -43,6 +43,10 @@ export function extractBareFileAcTrigger(input: string): FileAcTrigger | null {
   if (/\s/.test(fragment)) return null;
   if (!/^[\p{L}\p{N}._/\\()+\-]+$/u.test(fragment)) return null;
   if (!/[\p{L}\p{N}]/u.test(fragment)) return null;
+  // Require an explicit path indicator (separator or extension dot) so that
+  // ordinary English words never open a file picker. Bare words like "app"
+  // or "hello" would otherwise trigger file-completion on every keystroke.
+  if (!/[./\\]/.test(fragment)) return null;
   return {
     fragment,
     replaceFn: (chosen) => chosen,
@@ -66,17 +70,69 @@ export type AcMode =
   | "file"
   | "model"
   | "model-picker"
+  | "session-list"
+  | "resume-messages"
   | "model-setup"
   | "profile-name"
   | "profile-list"
+  | "multi-agent-model"
+  | "multi-agent-mode"
+  | "multi-agent-roles"
+  | "multi-agent-role-new"
+  | "multi-agent-task"
+  | "role-setup"
   | null;
+
+export type PromptPlaceholderContext = {
+  busy?: boolean;
+  acMode?: AcMode;
+  /** Field the model-setup overlay is editing, when that overlay is open. */
+  modelSetupField?: string;
+};
+
+/**
+ * The hint an empty prompt shows.
+ *
+ * Both clients render the same cascade. The ANSI prompt used to print a bare
+ * cursor with no hint at all, so `/model`'s search field, the API-key field, and
+ * the idle prompt gave the user nothing to go on.
+ */
+export function promptPlaceholder(context: PromptPlaceholderContext = {}): string {
+  if (context.busy) return "Working; type a message to queue";
+  switch (context.acMode) {
+    case "model-picker":
+      return "Search models";
+    case "model-setup":
+      return context.modelSetupField === "baseUrl"
+        ? "Enter Base URL"
+        : "Enter API key (or leave blank for env)";
+    case "profile-name":
+      return "Enter a profile name (for example coding-fast)";
+    case "profile-list":
+      return "↑↓ select profile, Enter activate";
+    case "multi-agent-model":
+      return "输入模型 ID (如 deepseek/deepseek-v4-flash) 或直接 Enter 使用当前模型";
+    case "multi-agent-mode":
+      return "选择模式: 1) planner_worker_reviewer  2) agent_turn — 输入编号后按 Enter";
+    case "multi-agent-roles":
+      return "为每个子角色选择模型（0=继承主模型，1..n=已有 profile，n+1=新建）";
+    case "multi-agent-role-new":
+      return "新建模型配置：输入 modelId → baseUrl → apiKey";
+    case "multi-agent-task":
+      return "描述你的任务，Enter 启动多智能体";
+    default:
+      return "Message, /command, or @file reference";
+  }
+}
 
 /** Enter accepts a candidate only for list-style autocomplete modes. */
 export function shouldAcceptAutocompleteOnEnter(acMode: AcMode): boolean {
   return acMode === "command"
     || acMode === "file"
     || acMode === "model"
-    || acMode === "model-picker";
+    || acMode === "model-picker"
+    || acMode === "session-list"
+    || acMode === "resume-messages";
 }
 
 function extractAtFileAcTrigger(input: string): FileAcTrigger | null {
