@@ -42,6 +42,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "clear", usage: "/clear", description: "Clear the conversation" },
   { name: "sessions", usage: "/sessions", description: "List saved sessions" },
   { name: "resume", usage: "/resume [id]", description: "Resume a saved session" },
+  { name: "rewind", usage: "/rewind", description: "Rewind the current session to an earlier message" },
   { name: "tasks", usage: TODO_COMMAND_USAGE, description: "Show or manage todos" },
   // The alias advertises its own spelling: reusing TODO_COMMAND_USAGE made the
   // palette list `/tasks […]` twice, once described as "Alias of /tasks".

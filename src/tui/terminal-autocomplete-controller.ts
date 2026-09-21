@@ -88,6 +88,15 @@ export class TerminalAutocompleteController {
   update(input = this.options.getInput()): void {
     if (this.timer) clearTimeout(this.timer);
     const updateId = ++this.requestId;
+    // Typing a fresh prompt while the rewind picker is open means the user is
+    // abandoning it: clear the overlay so the typed text keeps working instead
+    // of being swallowed by a rewind on the next Enter. The picker stays open
+    // while the input is empty (the "choose history point" rows are driven by
+    // arrow keys, not typing).
+    if (this.state.mode === "resume-messages") {
+      if (input.trim()) this.clear();
+      return;
+    }
     const argument = resolveArgumentInput(input);
     if (argument) {
       this.fileTrigger = null;

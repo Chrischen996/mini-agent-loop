@@ -747,24 +747,34 @@ export function handleInputAction(action: TerminalInputAction, deps: InputDeps):
     if (autocompleteState.mode === "resume-messages") {
       const picker = deps.resumePickerRef?.current;
       const selected = autocompleteState.resumeMessages?.[autocompleteState.index];
-      if (!picker) return;
-      if (picker && selected && sessionAccess.rewind) {
-        void sessionAccess.rewind(picker.session.id, selected.boundary).then((rewound) => {
-          if (!rewound) return;
-          const mode = rewound.permissionMode ?? permissionManager.getMode();
-          const base = createAgentHistory(undefined, mode);
-          const prompt = typeof base[0]?.content === "string" ? base[0].content : "";
-          const history = sessionAccess.restoreHistory(rewound, prompt);
-          service.replaceHistory(history);
-          deps.sessionRef.current = rewound.id;
-          sessionAccess.setSessionId(rewound.id);
-          service.setSessionId(rewound.id);
-          store.dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: service.getLlm().model });
-          store.dispatch({ type: "ADD_NOTICE", title: "Session rewound", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} messages` });
-        }).catch((error) => store.dispatch({ type: "ADD_NOTICE", title: "Rewind failed", text: error instanceof Error ? error.message : String(error) }));
+      const submittedText = action.value.trim();
+      // An Enter with no typed text confirms the highlighted rewind point.
+      if (!submittedText && picker) {
+        if (selected && sessionAccess.rewind) {
+          void sessionAccess.rewind(picker.session.id, selected.boundary).then((rewound) => {
+            if (!rewound) return;
+            const mode = rewound.permissionMode ?? permissionManager.getMode();
+            const base = createAgentHistory(undefined, mode);
+            const prompt = typeof base[0]?.content === "string" ? base[0].content : "";
+            const history = sessionAccess.restoreHistory(rewound, prompt);
+            service.replaceHistory(history);
+            deps.sessionRef.current = rewound.id;
+            sessionAccess.setSessionId(rewound.id);
+            service.setSessionId(rewound.id);
+            store.dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: service.getLlm().model, thinkingMode: rewound.thinkingMode === "adaptive" ? "hidden" : "summary", phase: rewound.phase, currentPlan: rewound.currentPlan });
+            store.dispatch({ type: "ADD_NOTICE", title: "Session rewound", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} messages` });
+          }).catch((error) => store.dispatch({ type: "ADD_NOTICE", title: "Rewind failed", text: error instanceof Error ? error.message : String(error) }));
+        }
+        if (deps.resumePickerRef) deps.resumePickerRef.current = undefined;
+        deps.autocomplete.clear();
+        input.clear();
+        return;
       }
+      // A typed prompt means the user has moved on: drop the rewind picker and
+      // send the text to the model instead of swallowing it with a rewind.
+      if (deps.resumePickerRef) deps.resumePickerRef.current = undefined;
       deps.autocomplete.clear();
-      input.clear();
+      void submitInput(action.value, deps);
       return;
     }
     if (autocompleteState.mode === "session-list") {
@@ -906,30 +916,37 @@ async function submitInput(
   const sessionAccess = getSessionAccess(deps);
   const autocompleteState = deps.autocomplete.getState();
   if (autocompleteState.mode === "resume-messages") {
-    const selected = autocompleteState.resumeMessages?.[autocompleteState.index];
     const picker = deps.resumePickerRef?.current;
-    const boundary = picker && selected ? selected.boundary : undefined;
-    if (boundary === undefined || !picker || !sessionAccess.rewind) {
+    const selected = autocompleteState.resumeMessages?.[autocompleteState.index];
+    // An Enter with no typed text confirms the highlighted rewind point.
+    if (!text && picker && selected && sessionAccess.rewind) {
+      void sessionAccess.rewind(picker.session.id, selected.boundary).then((rewound) => {
+        if (!rewound) return;
+        const mode = rewound.permissionMode ?? permissionManager.getMode();
+        const base = createAgentHistory(undefined, mode);
+        const prompt = typeof base[0]?.content === "string" ? base[0].content : "";
+        const history = sessionAccess.restoreHistory(rewound, prompt);
+        service.replaceHistory(history);
+        deps.sessionRef.current = rewound.id;
+        sessionAccess.setSessionId(rewound.id);
+        service.setSessionId(rewound.id);
+        store.dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: service.getLlm().model, thinkingMode: rewound.thinkingMode === "adaptive" ? "hidden" : "summary", phase: rewound.phase, currentPlan: rewound.currentPlan });
+        store.dispatch({ type: "ADD_NOTICE", title: "Session rewound", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} messages` });
+      }).catch((error) => store.dispatch({ type: "ADD_NOTICE", title: "Rewind failed", text: error instanceof Error ? error.message : String(error) }));
+      if (deps.resumePickerRef) deps.resumePickerRef.current = undefined;
       input.clear();
       deps.autocomplete.clear();
       return;
     }
-    void sessionAccess.rewind(picker.session.id, boundary).then((rewound) => {
-      if (!rewound) return;
-      const mode = rewound.permissionMode ?? permissionManager.getMode();
-      const base = createAgentHistory(undefined, mode);
-      const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
-      const history = sessionAccess.restoreHistory(rewound, systemPrompt);
-      service.replaceHistory(history);
-      deps.sessionRef.current = rewound.id;
-      sessionAccess.setSessionId(rewound.id);
-      service.setSessionId(rewound.id);
-      store.dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: service.getLlm().model, thinkingMode: rewound.thinkingMode === "adaptive" ? "hidden" : "summary", phase: rewound.phase, currentPlan: rewound.currentPlan });
-      store.dispatch({ type: "ADD_NOTICE", title: "Session rewound", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} messages` });
-    }).catch((error) => store.dispatch({ type: "ADD_NOTICE", title: "Rewind failed", text: error instanceof Error ? error.message : String(error) }));
-    input.clear();
+    // A typed prompt means the user has moved on: drop the rewind picker and
+    // send the text to the model instead of swallowing it with a rewind.
+    if (deps.resumePickerRef) deps.resumePickerRef.current = undefined;
     deps.autocomplete.clear();
-    return;
+    if (!text) {
+      input.clear();
+      return;
+    }
+    // Continue with the normal submission flow below.
   }
   const allowEmptyModelSetup = autocompleteState.mode === "model-setup" && Boolean(autocompleteState.modelSetup);
   const allowEmptyProfileSelection = autocompleteState.mode === "profile-list";
@@ -1227,11 +1244,30 @@ async function submitInput(
       todoRevision: restoredState.todoRevision,
     });
     store.dispatch({ type: "ADD_NOTICE", title: "Session resumed", text: `${restored.id.slice(0, 8)} · ${restored.messages.length} messages` });
-    if (sessionAccess.rewind) {
-      const picker = { session: restored, candidates: getResumeMessageCandidates(restored.messages) };
-      if (deps.resumePickerRef) deps.resumePickerRef.current = picker;
-      deps.autocomplete.openResumeMessages(picker.candidates);
+    input.clear();
+    return;
+  }
+  if (text === "/rewind") {
+    if (!sessionAccess.rewind) {
+      store.dispatch({ type: "ADD_NOTICE", title: "Rewind session", text: "Session rewind is not available in this client." });
+      input.clear();
+      return;
     }
+    const session = await sessionAccess.load(deps.sessionRef.current);
+    if (!session || session.messages.length === 0) {
+      store.dispatch({ type: "ADD_NOTICE", title: "Rewind session", text: "No rewindable messages in this session." });
+      input.clear();
+      return;
+    }
+    const candidates = getResumeMessageCandidates(session.messages);
+    if (candidates.length === 0) {
+      store.dispatch({ type: "ADD_NOTICE", title: "Rewind session", text: "No selectable rewind points in this session." });
+      input.clear();
+      return;
+    }
+    const picker = { session, candidates };
+    if (deps.resumePickerRef) deps.resumePickerRef.current = picker;
+    deps.autocomplete.openResumeMessages(picker.candidates);
     input.clear();
     return;
   }

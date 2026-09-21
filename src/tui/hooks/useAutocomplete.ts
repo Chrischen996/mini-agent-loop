@@ -135,7 +135,15 @@ export function useAutocomplete({
     }
 
     if (resolution.kind === "sticky") return;
-    if (acMode === "resume-messages") return;
+    // Typing a fresh prompt while the rewind picker is open means the user is
+    // abandoning it: clear the overlay so the typed text keeps working instead
+    // of being swallowed by a rewind on the next Enter. The picker stays open
+    // while the input is empty (the "choose history point" rows are driven by
+    // arrow keys, not typing).
+    if (acMode === "resume-messages") {
+      if (input.trim()) clearAc();
+      return;
+    }
 
     if (resolution.kind === "command") {
       acDebounceRef.current = setTimeout(() => {

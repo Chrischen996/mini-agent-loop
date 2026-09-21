@@ -697,25 +697,33 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       promptInputHistoryRef.current.add(trimmed);
     }
     if (acMode === "resume-messages") {
-      const selected = resumePickerCandidatesRef.current[acIndex] ?? resumeMessageCandidates[acIndex];
-      const session = resumePickerSessionRef.current;
-      const boundary = selected?.boundary;
-      if (session && boundary !== undefined) {
-        const rewound = await sessionManagerRef.current!.rewind(session.id, boundary);
-        if (rewound) {
-          const mode = rewound.permissionMode ?? getPermissionManager().getMode();
-          const base = createAgentHistory(undefined, mode);
-          const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
-          const history = sessionManagerRef.current!.restoreHistory(rewound, systemPrompt);
-          historyRef.current = history;
-          dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: llmRef.current.model, thinkingMode: rewound.thinkingMode === "adaptive" ? "hidden" : "summary", phase: rewound.phase, currentPlan: rewound.currentPlan, todos: restoreTuiSession(rewound, systemPrompt).todos, todoRevision: rewound.todoVersion });
-          dispatch({ type: "ADD_NOTICE", title: "Session rewound", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} messages` });
+      // An Enter with no typed text confirms the highlighted rewind point.
+      if (!trimmed) {
+        const selected = resumePickerCandidatesRef.current[acIndex] ?? resumeMessageCandidates[acIndex];
+        const session = resumePickerSessionRef.current;
+        const boundary = selected?.boundary;
+        if (session && boundary !== undefined) {
+          const rewound = await sessionManagerRef.current!.rewind(session.id, boundary);
+          if (rewound) {
+            const mode = rewound.permissionMode ?? getPermissionManager().getMode();
+            const base = createAgentHistory(undefined, mode);
+            const systemPrompt = typeof base[0]?.content === "string" ? base[0].content : "";
+            const history = sessionManagerRef.current!.restoreHistory(rewound, systemPrompt);
+            historyRef.current = history;
+            dispatch({ type: "RESTORE_SESSION", history, permissionMode: mode, modelName: llmRef.current.model, thinkingMode: rewound.thinkingMode === "adaptive" ? "hidden" : "summary", phase: rewound.phase, currentPlan: rewound.currentPlan, todos: restoreTuiSession(rewound, systemPrompt).todos, todoRevision: rewound.todoVersion });
+            dispatch({ type: "ADD_NOTICE", title: "Session rewound", text: `${rewound.id.slice(0, 8)} · ${rewound.messages.length} messages` });
+          }
         }
+        resumePickerSessionRef.current = null;
+        setInput("");
+        clearAc();
+        return;
       }
+      // A typed prompt means the user has moved on: drop the rewind picker and
+      // fall through so the text is sent to the model instead of being
+      // swallowed by a rewind.
       resumePickerSessionRef.current = null;
-      setInput("");
       clearAc();
-      return;
     }
 
     if (state.busy) {
@@ -1182,7 +1190,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         setInput("");
         return;
       }
-      const restored = await restoreSession(target.id, false, target, true);
+      const restored = await restoreSession(target.id, false, target);
       dispatch({
         type: "ADD_NOTICE",
         title: restored ? "Session resumed" : "Resume failed",
@@ -1190,6 +1198,25 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           ? restored.id.slice(0, 8) + " · " + restored.messages.length + " messages"
           : "Unable to read session: " + target.id,
       });
+      setInput("");
+      return;
+    }
+    if (trimmed === "/rewind") {
+      const session = await sessionManagerRef.current!.load(conversationId).catch(() => undefined);
+      if (!session || session.messages.length === 0) {
+        dispatch({ type: "ADD_NOTICE", title: "Rewind session", text: "No rewindable messages in this session." });
+        setInput("");
+        return;
+      }
+      const candidates = getResumeMessageCandidates(session.messages);
+      if (candidates.length === 0) {
+        dispatch({ type: "ADD_NOTICE", title: "Rewind session", text: "No selectable rewind points in this session." });
+        setInput("");
+        return;
+      }
+      resumePickerSessionRef.current = session;
+      resumePickerCandidatesRef.current = candidates;
+      openResumeMessages(candidates);
       setInput("");
       return;
     }

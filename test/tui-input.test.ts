@@ -16,6 +16,7 @@ import {
 import { TerminalInputHistory } from "../src/tui/terminal-input-history.ts";
 import { useAutocomplete } from "../src/tui/hooks/useAutocomplete.ts";
 import type { AutocompleteNavKey } from "../src/tui/autocomplete.ts";
+import type { ResumeMessageCandidate } from "../src/tui/session-serialization.ts";
 import { shouldExitOnCtrlC } from "../src/tui/hooks/useKeyboardHandler.ts";
 
 const nextFrame = () => new Promise((resolve) => setTimeout(resolve, 25));
@@ -495,6 +496,61 @@ describe("PromptInput", () => {
       releaseSessions?.(sessions);
       await nextFrame();
       assert.deepEqual(currentSessions.map((session) => session.id), ["session-one"]);
+    } finally {
+      app.unmount();
+    }
+  });
+
+  it("exits the rewind picker as soon as the user starts typing a prompt", async () => {
+    const { terminalIn, terminalOut } = createTerminal();
+    let openPicker: ((candidates: ResumeMessageCandidate[]) => void) | undefined;
+    let currentMode: string | null = null;
+    let currentValue = "";
+    let pickerOpened = false;
+
+    function Harness(): React.ReactElement {
+      const [value, setValue] = useState("");
+      const autocomplete = useAutocomplete({
+        input: value,
+        cwd: process.cwd(),
+        setInput: setValue,
+        resetInputCursorToEnd: () => {},
+        listSessions: async () => [],
+      });
+      openPicker = autocomplete.openResumeMessages;
+      // Open the picker once, on the first render after mount.
+      if (!pickerOpened && !autocomplete.acMode) {
+        pickerOpened = true;
+        autocomplete.openResumeMessages([
+          { role: "user", text: "first", boundary: 1 },
+          { role: "assistant", text: "done", boundary: 2 },
+        ]);
+      }
+      currentMode = autocomplete.acMode;
+      currentValue = value;
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+      });
+    }
+
+    const app = render(React.createElement(Harness), {
+      stdin: terminalIn as unknown as NodeJS.ReadStream,
+      stdout: terminalOut as unknown as NodeJS.WriteStream,
+      stderr: terminalOut as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+    });
+    try {
+      await nextFrame();
+      assert.equal(currentMode, "resume-messages", "the picker must open after mount");
+
+      // Typing a fresh prompt abandons the picker.
+      terminalIn.write("h");
+      await nextFrame();
+      assert.equal(currentValue, "h");
+      assert.equal(currentMode, null, "typing a prompt must clear the rewind overlay");
     } finally {
       app.unmount();
     }
