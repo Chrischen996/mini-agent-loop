@@ -43,6 +43,11 @@ export {
   type NoticesSlice,
 } from "./store-slices.ts";
 export {
+  createFrameScheduler,
+  type FrameScheduler,
+  type FrameSchedulerOptions,
+} from "./frame-scheduler.ts";
+export {
   createCommandRegistry,
   type CommandContext,
   type CommandDef,

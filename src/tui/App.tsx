@@ -10,6 +10,8 @@ import { getTodoPanelRows, resolveTodoItems } from "./todo-format.ts";
 import { taskSummaryRows, taskSummaryViewMode } from "./task-summary.ts";
 import { formatHelpNotice, parseSlashCommand, parseUnknownSlashCommand, SLASH_COMMANDS } from "./slash-commands.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
+import { parseInitCommand } from "./init-command.ts";
+import { initAgentMd } from "../init-agent-md.ts";
 
 /** Human-readable message for an LlmTimeoutError, with partial-response preview. */
 function formatLlmTimeoutMessage(err: InstanceType<typeof LlmTimeoutError>): string {
@@ -32,9 +34,12 @@ import {
   createAgentHistory,
   MaxTurnsExceededError,
   runAgentTurn,
+  restoreAgentHistory,
+  getDefaultSystemPrompt,
   type AgentRuntimeRef,
   type LoopEvent,
 } from "../loop.ts";
+import { loadInstructionBundle } from "../agents-md.ts";
 import { LlmTimeoutError } from "../llm/retry.ts";
 import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
 import {
@@ -321,6 +326,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const getPermissionManager = useCallback(() => {
     return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("plan"));
   }, []);
+
+  const refreshInstructionPrompt = useCallback(async () => {
+    const bundle = await loadInstructionBundle(cwd).catch(() => undefined);
+    if (!bundle || bundle.content.length === 0) return;
+    const mode = getPermissionManager().getMode();
+    historyRef.current = restoreAgentHistory(historyRef.current, getDefaultSystemPrompt(mode, bundle.content));
+  }, [cwd, getPermissionManager]);
 
   const addPendingImageRef = useCallback((image: ImageAttachment): boolean => {
     return addPendingImage(image, { pendingImages: pendingImagesRef.current, pendingImagesRef, dispatch, cwd });
@@ -1385,6 +1397,53 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         const match = findExactModelReferenceMatch(parsed.reference, getAllModels());
         if (match?.ambiguous) openModelPicker(parsed.reference);
         else selectModelRef(parsed.reference, parsed.overrides);
+      }
+      return;
+    }
+
+    // /init: create the project AGENT.MD instructions file. Runs as a local
+    // meta command (no LLM, no Agent tool call) so it stays available in any
+    // permission mode and writes only inside the current workspace.
+    const initCommand = parseInitCommand(trimmed);
+    if (initCommand) {
+      setInput("");
+      if (initCommand.kind === "error") {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "Init",
+          text: initCommand.message,
+        });
+        return;
+      }
+      try {
+        const result = await initAgentMd({
+          cwd,
+          force: initCommand.force,
+          print: initCommand.print,
+        });
+        if (initCommand.print) {
+          dispatch({
+            type: "ADD_NOTICE",
+            title: "AGENT.MD Template Preview",
+            text: result.content,
+          });
+          return;
+        }
+        await refreshInstructionPrompt();
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "AGENT.MD",
+          text: result.overwritten
+            ? "Overwrote AGENT.MD. Updated instructions are now active for subsequent turns."
+            : "Created AGENT.MD. Instructions are now active for subsequent turns.",
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "Init Failed",
+          text: detail,
+        });
       }
       return;
     }

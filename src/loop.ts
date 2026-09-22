@@ -394,7 +394,7 @@ const MAX_MEMORY_SECTION_CHARS = 2_000;
 export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string, memorySection?: string): string {
   const parts: string[] = [];
   if (agentsMd) {
-    parts.push(`# Repository Agent Instructions (from AGENTS.md)\n${agentsMd}\n`);
+    parts.push(`# Repository Agent Instructions (from AGENT.MD)\n${agentsMd}\n`);
   }
   if (memorySection && memorySection.trim()) {
     let section = memorySection.trim();

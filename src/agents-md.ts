@@ -1,14 +1,14 @@
 /**
- * AGENTS.md loader — reads repo-level agent instructions.
+ * AGENT.MD loader — reads repo-level agent instructions.
  *
- * Looks for .agents.md or AGENTS.md in the workspace root and returns
+ * Looks for AGENT.MD in the workspace root and returns
  * the content as a string. Returns undefined if not found.
  */
 
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-const AGENTS_FILENAMES = [".agents.md", "AGENTS.md"];
+const AGENTS_FILENAMES = ["AGENT.MD"];
 
 export type InstructionSource = {
   path: string;
