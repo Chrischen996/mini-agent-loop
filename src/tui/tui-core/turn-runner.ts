@@ -93,9 +93,7 @@ export type TurnRunnerOptions = {
  * only dispatches actions; it never reimplements the agent loop or appends
  * model/tool messages itself.
  *
- * API-compatible with the existing `TerminalAgentService` class in
- * `src/tui/terminal-agent-service.ts`; that class is kept as a thin
- * re-export during the transition period and will be deleted in P4.
+ * API-compatible with the `createAgentSession` entry in `index.ts`.
  */
 export class TurnRunner {
   private history: AgentMessage[];

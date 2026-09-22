@@ -6,7 +6,7 @@ import { join } from "node:path";
 import type { LlmConfig } from "../src/llm/index.ts";
 import { PermissionManager, type PermissionRequest, type PermissionTurnContext } from "../src/permissions.ts";
 import { createInitialState, createTuiStore } from "../src/tui/state.ts";
-import { TerminalAgentService } from "../src/tui/terminal-agent-service.ts";
+import { createAgentSession } from "../src/tui/tui-core/index.ts";
 
 function testLlm(): LlmConfig {
   return {
@@ -36,12 +36,12 @@ class RecordingPermissionManager extends PermissionManager {
   }
 }
 
-describe("terminal agent service", () => {
+describe("createAgentSession", () => {
   it("resolves the permission namespace from the active session", async () => {
     const store = createTuiStore(createInitialState("test-model"));
     const permissionManager = new RecordingPermissionManager("bypass");
     let activeSessionId = "session-one";
-    const service = new TerminalAgentService({
+    const service = createAgentSession({
       store,
       llm: testLlm(),
       tools: [],
@@ -60,7 +60,7 @@ describe("terminal agent service", () => {
   it("persists the prompt before invoking the model", async () => {
     const store = createTuiStore(createInitialState("test-model"));
     const phases: string[] = [];
-    const service = new TerminalAgentService({
+    const service = createAgentSession({
       store,
       llm: testLlm(),
       tools: [],
@@ -87,7 +87,7 @@ describe("terminal agent service", () => {
       releaseChat = resolve;
     });
     let finalized = false;
-    const service = new TerminalAgentService({
+    const service = createAgentSession({
       store,
       llm: testLlm(),
       tools: [],
@@ -116,7 +116,7 @@ describe("terminal agent service", () => {
 
   it("keeps one loop history while projecting events into the store", async () => {
     const store = createTuiStore(createInitialState("test-model"));
-    const service = new TerminalAgentService({
+    const service = createAgentSession({
       store,
       llm: testLlm(),
       tools: [],
@@ -143,7 +143,7 @@ describe("terminal agent service", () => {
     const requestLevels: string[] = [];
     const changedLevels: string[] = [];
     let responses = 0;
-    const service = new TerminalAgentService({
+    const service = createAgentSession({
       store,
       llm: {
         ...testLlm(),
@@ -187,7 +187,7 @@ describe("terminal agent service", () => {
     const store = createTuiStore(createInitialState("test-model"));
     let responses = 0;
     const call = { id: "call-1", name: "echo", arguments: { value: "ok" } };
-    const service = new TerminalAgentService({
+    const service = createAgentSession({
       store,
       llm: testLlm(),
       tools: [{
@@ -215,7 +215,7 @@ describe("terminal agent service", () => {
   it("executes write tools and completes without blocking in bypass mode", async () => {
     const store = createTuiStore(createInitialState("test-model"));
     let responses = 0;
-    const service = new TerminalAgentService({
+    const service = createAgentSession({
       store,
       llm: testLlm(),
       tools: [{
@@ -239,7 +239,7 @@ describe("terminal agent service", () => {
   it("drains prompts submitted while a turn is running", async () => {
     const store = createTuiStore(createInitialState("test-model"));
     let calls = 0;
-    const service = new TerminalAgentService({
+    const service = createAgentSession({
       store,
       llm: testLlm(),
       tools: [],
@@ -266,7 +266,7 @@ describe("terminal agent service", () => {
   it("records direct tool turns for the same persistence hook", async () => {
     const store = createTuiStore(createInitialState("test-model"));
     const snapshots: string[][] = [];
-    const service = new TerminalAgentService({
+    const service = createAgentSession({
       store,
       llm: testLlm(),
       tools: [],
@@ -296,7 +296,7 @@ describe("terminal agent service", () => {
     let seenUserContent: unknown;
     try {
       const store = createTuiStore(createInitialState("test-model"));
-      const service = new TerminalAgentService({
+      const service = createAgentSession({
         store,
         llm: testLlm(),
         tools: [{

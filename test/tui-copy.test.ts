@@ -7,7 +7,7 @@ import {
   parseCopyCommand,
   resolveCopyTarget,
 } from "../src/tui/copy-text.ts";
-import { SLASH_COMMANDS } from "../src/tui/components/FileAutocomplete.tsx";
+import { SLASH_COMMANDS } from "../src/tui/slash-commands.ts";
 import type { ChatMessage } from "../src/tui/state.ts";
 
 const messages: ChatMessage[] = [

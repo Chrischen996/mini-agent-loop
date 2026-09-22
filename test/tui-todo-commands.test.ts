@@ -6,8 +6,7 @@ import {
   parseLegacyTodoCommand,
   type LegacyTodoCommand,
 } from "../src/tui/todo-commands.ts";
-import { parseSlashCommand, PATH_COMMANDS } from "../src/tui/slash-commands.ts";
-import { SLASH_COMMANDS } from "../src/tui/components/FileAutocomplete.tsx";
+import { parseSlashCommand, PATH_COMMANDS, SLASH_COMMANDS } from "../src/tui/slash-commands.ts";
 import type { TodoItem } from "../src/todo.ts";
 import { createInitialState, tuiReducer, type TuiAction } from "../src/tui/state.ts";
 

@@ -48,16 +48,14 @@ async function buildEntry(
 // Keep the published default aligned with README's one-shot CLI contract.
 await buildEntry("src/cli.ts", "cli.js", true);
 // P4: the published TUI executable is the renderer router. The default
-// path is the pi-tui canonical entrypoint; `--renderer=ink` falls back to
-// the Ink client for one release, and `--renderer=scrollback` to the raw
-// ANSI variant. The router's dynamic imports are external so the sibling
+// path is the pi-tui canonical entrypoint; `--renderer=scrollback` uses the
+// raw ANSI variant. The router's dynamic imports are external so the sibling
 // bundles resolve at runtime from dist/ rather than being inlined.
 await buildEntry("src/tui/terminal-main.ts", "terminal-main.js", false);
-await buildEntry("src/tui/ink-main.tsx", "tui-ink.js", false);
 await buildEntry("src/tui/terminal-main.ts", "terminal.js", false);
 await buildEntry(
   "src/tui/tui-bin.ts",
   "tui.js",
   false,
-  ["./tui-ink.js", "./terminal.js", "./terminal-main.js"],
+  ["./terminal.js", "./terminal-main.js"],
 );

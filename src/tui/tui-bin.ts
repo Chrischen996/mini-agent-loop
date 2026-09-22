@@ -1,15 +1,13 @@
 #!/usr/bin/env node
 // P4: the published `mini-agent-loop` bin is the pi-tui canonical
-// entrypoint. The Ink client remains available for one release as the
-// `--renderer=ink` fallback; the raw ANSI scrollback variant is
-// `dist/terminal.js`.
+// entrypoint. The Ink transition client was deleted in the P4 follow-up;
+// the raw ANSI scrollback variant is `dist/terminal.js`.
 //
 // Routing:
-//   --renderer=ink        → dist/tui-ink.js (Ink, transition period)
 //   --renderer=scrollback → dist/terminal.js (raw ANSI)
 //   default               → pi-tui (dist/terminal-main.js)
 //
-// The env-var equivalent (MINI_AGENT_TUI_RENDERER=ink|scrollback) is
+// The env-var equivalent (MINI_AGENT_TUI_RENDERER=scrollback) is
 // read by the shared display-mode resolver so a user who sets the env
 // var gets the same routing without the flag.
 //
@@ -31,12 +29,7 @@ function argValue(flag: string): string | undefined {
 
 const renderer = (argValue("--renderer") ?? process.env.MINI_AGENT_TUI_RENDERER ?? "").trim().toLowerCase();
 
-if (renderer === "ink" || renderer === "react") {
-  // Transition-period fallback: the Ink client stays wired until the
-  // follow-up release deletes it.
-  // @ts-ignore — sibling dist bundle emitted by build.ts; no .d.ts.
-  await import(/* @vite-ignore */ "./tui-ink.js");
-} else if (renderer === "scrollback" || renderer === "ansi" || renderer === "legacy-ansi") {
+if (renderer === "scrollback" || renderer === "ansi" || renderer === "legacy-ansi") {
   process.env.MINI_AGENT_TUI_MODE = "scrollback";
   // Raw ANSI scrollback renderer, no pi-tui dependency.
   // @ts-ignore — sibling dist bundle emitted by build.ts; no .d.ts.

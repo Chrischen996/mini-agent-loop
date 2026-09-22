@@ -29,7 +29,7 @@ import { thinkingLevelStatusText } from "./status-line.ts";
 import { IncrementalTerminalRenderer, resolveTerminalDisplayMode, ScrollbackTerminalRenderer } from "./incremental-renderer.ts";
 import { disableMouseTracking, enableMouseTracking } from "./mouse-tracking.ts";
 import { TerminalInputController, type TerminalInputAction } from "./terminal-input-controller.ts";
-import { TerminalAgentService } from "./terminal-agent-service.ts";
+import { createAgentSession, type AgentSession } from "./tui-core/index.ts";
 import { TerminalAutocompleteController } from "./terminal-autocomplete-controller.ts";
 import { SubagentToolsFactory } from "./subagent-tools-factory.ts";
 import { createAnalyzePipelineTool } from "../orchestration/pipeline/planning-engine.ts";
@@ -234,7 +234,7 @@ export async function runTerminalMain(): Promise<void> {
       }
     };
 
-    const service = new TerminalAgentService({
+    const service = createAgentSession({
       store,
       llm: activeLlm,
       tools: parentTools,
@@ -536,7 +536,7 @@ function sameRenderState(left: TuiState, right: TuiState): boolean {
 
 export type InputDeps = {
   store: ReturnType<typeof createTuiStore>;
-  service: TerminalAgentService;
+  service: AgentSession;
   permissionManager: PermissionManager;
   input: TerminalInputController;
   cwd: string;

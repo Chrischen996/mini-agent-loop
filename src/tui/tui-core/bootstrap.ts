@@ -31,7 +31,11 @@ import {
   type AutoSubagentOptions,
 } from "../../subagent/auto.ts";
 import type { SkillRegistry } from "../../skills/types.ts";
-import { loadSkillNamesFromEnv } from "../../skills/index.ts";
+import {
+  defaultSkillRegistry,
+  discoverWorkspaceSkills,
+  loadSkillNamesFromEnv,
+} from "../../skills/index.ts";
 import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
@@ -184,7 +188,6 @@ export async function bootstrapTui(options: TuiBootstrapOptions = {}): Promise<T
   const vision = loadVisionConfigFromEnv();
   const autoSubagent = loadAutoSubagentOptionsFromEnv();
   const skillNames = loadSkillNamesFromEnv();
-  const { defaultSkillRegistry, discoverWorkspaceSkills } = await import("../../skills/index.ts");
   await discoverWorkspaceSkills(cwd).catch(() => undefined);
 
   const roleLlmConfigs = options.llm ? buildRoleLlmConfigs(options.llm) : {};

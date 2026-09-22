@@ -30,10 +30,8 @@
   },
   "scripts": {
     "start": "tsx src/cli.ts",
-    "tui": "node --import tsx/esm src/tui/ink-main.tsx",
+    "tui": "tsx src/tui/terminal-main.ts",
     "tui:terminal": "tsx src/tui/terminal-main.ts",
-    "tui:legacy": "tsx src/tui/main.ts",
-    "tui:ink": "tsx src/tui/ink-main.tsx",
     "dev": "tsx watch src/server.ts",
     "dev:server": "tsx watch src/server.ts",
     "serve": "tsx src/server.ts",
@@ -42,9 +40,9 @@
     "generate-models:check": "tsx scripts/generate-models.ts --check",
     "build:package": "tsx build.ts && node -e \"const fs=require('node:fs'); fs.chmodSync('dist/cli.js', 0o755); fs.chmodSync('dist/tui.js', 0o755)\"",
     "prepack": "npm run build:package",
-    "dev:inspect": "node --inspect=0.0.0.0:8888 --import tsx src/tui/ink-main.tsx",
-    "tui:inspect": "tsx src/tui/ink-main.tsx --inspect=9229",
-    "tui:inspect-brk": "tsx src/tui/ink-main.tsx --inspect-brk=9229",
+    "dev:inspect": "node --inspect=0.0.0.0:8888 --import tsx src/tui/terminal-main.ts",
+    "tui:inspect": "tsx src/tui/terminal-main.ts --inspect=9229",
+    "tui:inspect-brk": "tsx src/tui/terminal-main.ts --inspect-brk=9229",
     "test": "tsx --test \"test/*.test.ts\"",
     "test:coverage": "c8 tsx --test \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit"
@@ -87,18 +85,15 @@
     "express": "^5.2.1",
     "http-proxy-agent": "7.0.2",
     "https-proxy-agent": "7.0.6",
-    "ink": "^5.2.0",
-    "ink-spinner": "^5.0.0",
-    "ink-text-input": "^6.0.0",
-    "mammoth": "^1.8.0",
-    "multer": "^2.2.0",
     "openai": "6.26.0",
+    "multer": "^2.2.0",
     "partial-json": "0.1.7",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^1.1.1",
     "pi-web-access": "0.18.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "typebox": "1.1.38"
+    "typebox": "1.1.38",
+    "mammoth": "^1.8.0"
   }
 }

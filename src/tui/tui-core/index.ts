@@ -63,7 +63,10 @@ export { TurnEventBuffer, DEFAULT_STREAM_BUFFER_DELAY_MS } from "../stream-buffe
 
 import { TurnRunner, type TerminalSubmitOptions, type TerminalTurnResult, type TurnRunnerOptions } from "./turn-runner.ts";
 import { createInitialState, createTuiStore, type TuiStore, type TuiState, type TuiAction } from "../state.ts";
-import type { AgentMessage } from "../../types.ts";
+import type { AgentMessage, ToolCall } from "../../types.ts";
+import type { ToolResult } from "../../tools/types.ts";
+import type { LlmConfig } from "../../llm/index.ts";
+import type { PermissionMode } from "../../permissions.ts";
 
 export type AgentSessionOptions = {
   /** Pre-built store. When omitted, a fresh store is created from `initialModelName`. */
@@ -86,6 +89,20 @@ export type AgentSession = {
   /** Convenience dispatch for client-side UI actions. */
   dispatch(action: TuiAction): void;
   getState(): TuiState;
+  // ── Extended API surface (mirrors TurnRunner) ──────────────────────────
+  getHistory(): AgentMessage[];
+  getLlm(): LlmConfig;
+  setLlm(llm: LlmConfig): void;
+  getThinkingMode(): "fixed" | "adaptive";
+  setThinkingMode(mode: "fixed" | "adaptive"): void;
+  getSkillNames(): string[];
+  setSkillNames(names: string[]): void;
+  resetHistory(mode?: PermissionMode): void;
+  replaceHistory(history: AgentMessage[]): void;
+  recordDirectToolTurn(prompt: string, call: ToolCall, result: ToolResult): Promise<TerminalTurnResult>;
+  setSessionId(sessionId: string): void;
+  isBusy(): boolean;
+  getQueuedCount(): number;
 };
 
 export function createAgentSession(options: AgentSessionOptions): AgentSession {
@@ -101,5 +118,18 @@ export function createAgentSession(options: AgentSessionOptions): AgentSession {
     waitForIdle: () => runner.waitForIdle(),
     dispatch: (action) => store.dispatch(action),
     getState: () => store.getState(),
+    getHistory: () => runner.getHistory(),
+    getLlm: () => runner.getLlm(),
+    setLlm: (llm) => runner.setLlm(llm),
+    getThinkingMode: () => runner.getThinkingMode(),
+    setThinkingMode: (mode) => runner.setThinkingMode(mode),
+    getSkillNames: () => runner.getSkillNames(),
+    setSkillNames: (names) => runner.setSkillNames(names),
+    resetHistory: (mode?) => runner.resetHistory(mode),
+    replaceHistory: (hist) => runner.replaceHistory(hist),
+    recordDirectToolTurn: (prompt, call, result) => runner.recordDirectToolTurn(prompt, call, result),
+    setSessionId: (id) => runner.setSessionId(id),
+    isBusy: () => runner.isBusy(),
+    getQueuedCount: () => runner.getQueuedCount(),
   };
 }

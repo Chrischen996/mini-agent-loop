@@ -1,5 +1,4 @@
-import type { CommandDef } from "./components/FileAutocomplete.tsx";
-import { ARGUMENT_COMMANDS, PATH_COMMANDS } from "./slash-commands.ts";
+import { ARGUMENT_COMMANDS, PATH_COMMANDS, SLASH_COMMANDS, type CommandDef } from "./slash-commands.ts";
 import { listCandidates } from "./file-completion.ts";
 import { modelChoices } from "./model-command.ts";
 import type { ModelRef } from "../models.ts";
@@ -14,7 +13,6 @@ import {
   resolveAutocompleteNav,
   type AutocompleteNavKey,
 } from "./autocomplete.ts";
-import { SLASH_COMMANDS } from "./slash-commands.ts";
 
 export type TerminalAutocompleteState = {
   mode: AcMode;

@@ -6,7 +6,7 @@ import { SessionStore, type PersistedSession, type PersistedSessionMeta } from "
 import { createInitialState, createTuiStore } from "../src/tui/state.ts";
 import { TerminalAutocompleteController } from "../src/tui/terminal-autocomplete-controller.ts";
 import { TerminalInputController } from "../src/tui/terminal-input-controller.ts";
-import { TerminalAgentService } from "../src/tui/terminal-agent-service.ts";
+import { createAgentSession } from "../src/tui/tui-core/index.ts";
 import { handleInputAction, type InputDeps } from "../src/tui/terminal-main.ts";
 import { formatHelpNotice, SLASH_COMMANDS } from "../src/tui/slash-commands.ts";
 import { confirmTodoEditor, type TodoEditorState } from "../src/tui/todo-editor.ts";
@@ -30,7 +30,7 @@ function model(): ModelRef {
 function dependencies(): InputDeps {
   const store = createTuiStore(createInitialState("model"));
   const permissionManager = new PermissionManager("plan");
-  const service = new TerminalAgentService({
+  const service = createAgentSession({
     store,
     llm: {
       apiKey: "",
