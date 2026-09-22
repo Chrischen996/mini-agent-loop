@@ -27,6 +27,33 @@ export {
   type TuiState,
   type TuiAction,
 } from "../state.ts";
+export {
+  createInitialSlices,
+  combineSlices,
+  projectToSlices,
+  slicedReducer,
+  type Slices,
+  type TranscriptSlice,
+  type AgentsSlice,
+  type TodosSlice,
+  type PlanSlice,
+  type PermissionSlice,
+  type RuntimeSlice,
+  type ViewSlice,
+  type NoticesSlice,
+} from "./store-slices.ts";
+export {
+  createCommandRegistry,
+  type CommandContext,
+  type CommandDef,
+  type CommandRegistry,
+  SLASH_COMMANDS,
+  KNOWN_SLASH_COMMAND_NAMES,
+  parseSlashCommand,
+  parseUnknownSlashCommand,
+  formatHelpNotice,
+  commandUsageColumn,
+} from "./commands.ts";
 export { TurnEventBuffer, DEFAULT_STREAM_BUFFER_DELAY_MS } from "../stream-buffer.ts";
 
 import { TurnRunner, type TerminalSubmitOptions, type TerminalTurnResult, type TurnRunnerOptions } from "./turn-runner.ts";

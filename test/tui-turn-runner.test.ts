@@ -43,7 +43,7 @@ function makeStore(): { store: TuiStore; actions: Recorded[] } {
 function loopEvents(actions: Recorded[]): import("../src/loop.ts").LoopEvent[] {
   return actions
     .filter((action): action is Extract<TuiAction, { type: "LOOP_EVENT" }> => action.type === "LOOP_EVENT")
-    .map((action) => (action as { type: "LOOP_EVENT" }).event);
+    .map((action) => (action as Extract<TuiAction, { type: "LOOP_EVENT" }>).event);
 }
 
 function eventTypes(actions: Recorded[]): string[] {
@@ -136,7 +136,7 @@ describe("TurnRunner kernel", () => {
       type: "LOOP_EVENT",
       event: {
         type: "permission_required",
-        request: { id: "perm-1", sessionId: "kernel-3", tool: "write", risk: "high" },
+        request: { id: "perm-1", sessionId: "kernel-3", tool: "write", risk: "high", arguments: {} },
       },
     });
     assert.equal(store.getState().pendingPermission !== undefined, true, "permission is pending");
