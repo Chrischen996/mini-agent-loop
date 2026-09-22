@@ -119,9 +119,47 @@ describe("TUI copy helpers", () => {
     assert.equal(writes[0], osc52Payload("hello"));
   });
 
-  it("skips OSC 52 for large payloads that exceed terminal limits", async () => {
+  it("copies a normal-length reply via OSC 52 when no native helper exists", async () => {
+    // Regression: the old 76-byte cap (MIME base64 line length misapplied to
+    // OSC 52) made every reply longer than ~51 bytes fail over SSH.
+    const text = "这是一条普通的助手回复，长度远超五十个字节，必须仍然能复制。".repeat(3);
     const writes: string[] = [];
-    const result = await writeClipboardText("x".repeat(200), {
+    const result = await writeClipboardText(text, {
+      platform: "linux",
+      env: {},
+      run: async () => {
+        throw new Error("missing");
+      },
+      writeStdout: (data) => {
+        writes.push(data);
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.method, "osc52");
+    assert.equal(writes[0], osc52Payload(text));
+  });
+
+  it("wraps OSC 52 in a tmux DCS passthrough when TMUX is set", async () => {
+    const writes: string[] = [];
+    const result = await writeClipboardText("hello", {
+      platform: "linux",
+      env: { TMUX: "/tmp/tmux-0/default,123,0" },
+      run: async () => {
+        throw new Error("missing");
+      },
+      writeStdout: (data) => {
+        writes.push(data);
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.method, "osc52");
+    const payload = osc52Payload("hello");
+    assert.equal(writes[0], `\x1bPtmux;${payload.replace(/\x1b/g, "\x1b\x1b")}\x1b\\`);
+  });
+
+  it("skips OSC 52 for oversized payloads beyond real terminal limits", async () => {
+    const writes: string[] = [];
+    const result = await writeClipboardText("x".repeat(200_000), {
       platform: "linux",
       env: {},
       run: async () => {

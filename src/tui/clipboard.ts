@@ -15,11 +15,22 @@ export type ClipboardIo = {
 
 const CLIPBOARD_TIMEOUT_MS = 5_000;
 
-// OSC 52 base64 payload is limited to ~76 bytes per terminal command.
-const MAX_OSC52_BASE64_BYTES = 76;
+// Terminal ceilings for one OSC 52 sequence are large: kitty defaults to
+// 512KB and iTerm2/alacritty/WezTerm/Windows Terminal accept well beyond
+// 100KB. Cap the raw text at 75KB so the emitted sequence stays ~100KB,
+// safely under every major terminal. (The old 76-byte cap was the MIME
+// base64 line length mistakenly applied to OSC 52; it disabled clipboard
+// copies over SSH for any reply longer than ~51 bytes, which is to say
+// almost every assistant reply.)
+const MAX_OSC52_TEXT_BYTES = 75_000;
 
-function encodeOsc52(text: string): string {
-  return `\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`;
+function encodeOsc52(text: string, tmux = false): string {
+  const sequence = `\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`;
+  if (!tmux) return sequence;
+  // tmux swallows bare OSC 52 sequences coming from panes: wrap in a DCS
+  // tmux passthrough, doubling every embedded ESC so tmux forwards the
+  // inner sequence verbatim to the outer terminal.
+  return `\x1bPtmux;${sequence.replace(/\x1b/g, "\x1b\x1b")}\x1b\\`;
 }
 
 function nativeCandidates(
@@ -56,11 +67,15 @@ export async function writeClipboardText(
   const writeStdout = io.writeStdout ?? ((data: string) => process.stdout.write(data));
 
   // ── Path 1: OSC 52 (preferred, ~0ms, handled by the terminal itself) ─────
-  // Emit the OSC 52 sequence and let the terminal perform the copy.
+  // Emit the OSC 52 sequence and let the terminal perform the copy. Works
+  // over SSH where no local clipboard helper exists, including tmux panes
+  // via DCS passthrough.
+  const tmux = Boolean(env.TMUX);
   try {
-    const osc52 = encodeOsc52(text);
-    // Only use OSC 52 for text that fits within terminal limits
-    if (Buffer.byteLength(osc52, "utf8") <= MAX_OSC52_BASE64_BYTES) {
+    const osc52 = encodeOsc52(text, tmux);
+    // Base64 expands 4/3, so gating on the raw UTF-8 size keeps the whole
+    // sequence within terminal limits.
+    if (Buffer.byteLength(text, "utf8") <= MAX_OSC52_TEXT_BYTES) {
       writeStdout(osc52);
       // After OSC 52 succeeds, fire-and-forget a native tool as a safety net so
       // the clipboard is still filled when the terminal ignores OSC 52.
@@ -95,6 +110,6 @@ export async function writeClipboardText(
   };
 }
 
-export function osc52Payload(text: string): string {
-  return encodeOsc52(text);
+export function osc52Payload(text: string, tmux = false): string {
+  return encodeOsc52(text, tmux);
 }
