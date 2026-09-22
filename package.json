@@ -51,8 +51,6 @@
     "node": ">=22.19.0"
   },
   "overrides": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
     "@earendil-works/pi-agent-core": "0.80.6",
     "@earendil-works/pi-ai": "0.80.6",
     "@earendil-works/pi-tui": "0.80.6"
@@ -61,8 +59,6 @@
     "@types/express": "^5.0.6",
     "@types/multer": "^2.2.0",
     "@types/node": "^22.13.10",
-    "@types/react": "^18.3.1",
-    "@types/react-dom": "^18.3.1",
     "@types/supertest": "^7.2.1",
     "c8": "^12.0.0",
     "supertest": "^7.2.2",
@@ -91,8 +87,6 @@
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^1.1.1",
     "pi-web-access": "0.18.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
     "typebox": "1.1.38",
     "mammoth": "^1.8.0"
   }
