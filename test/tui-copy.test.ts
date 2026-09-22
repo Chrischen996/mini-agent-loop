@@ -169,6 +169,75 @@ describe("TUI copy helpers", () => {
     assert.deepEqual(seen, [{ command: "pbcopy", input: "payload" }]);
   });
 
+  it("fires the clip.exe safety net on Windows when the terminal write path succeeds", async () => {
+    const seen: string[] = [];
+    const result = await writeClipboardText("hi", {
+      platform: "win32",
+      env: {},
+      run: async (command) => {
+        seen.push(command);
+      },
+      writeStdout: (data) => {
+        assert.equal(data, osc52Payload("hi"));
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.method, "osc52");
+    // Wait a tick so the fire-and-forget safety net can record its call.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(seen, ["clip"]);
+  });
+
+  it("tries the next native backend when the first one fails on Linux", async () => {
+    const seen: Array<{ command: string }> = [];
+    let stage = 0;
+    const result = await writeClipboardText("hello", {
+      platform: "linux",
+      env: {},
+      run: async (command) => {
+        seen.push({ command });
+        stage += 1;
+        if (stage === 1) throw new Error("wl-copy missing");
+      },
+      writeStdout: () => {},
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.method, "osc52");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(seen, [{ command: "wl-copy" }, { command: "xclip" }]);
+  });
+
+  it("sends a single OSC 52 command up to the 76-byte base64 boundary (57 chars)", async () => {
+    const writes: string[] = [];
+    const atBoundary = await writeClipboardText("a".repeat(57), {
+      platform: "linux",
+      env: {},
+      run: async () => {
+        throw new Error("missing");
+      },
+      writeStdout: (data) => {
+        writes.push(data);
+      },
+    });
+    assert.equal(atBoundary.ok, true);
+    assert.equal(atBoundary.method, "osc52");
+    assert.equal(Buffer.byteLength(writes[0]!.replace(/^\u001b\]52;c;/, "").replace(/\u0007$/, "")), 76);
+
+    const overBoundary = await writeClipboardText("a".repeat(58), {
+      platform: "linux",
+      env: {},
+      run: async () => {
+        throw new Error("missing");
+      },
+      writeStdout: (data) => {
+        writes.push(data);
+      },
+    });
+    assert.equal(overBoundary.ok, false);
+    assert.equal(overBoundary.method, "none");
+    assert.equal(writes.length, 1, "58-char text must not emit OSC 52");
+  });
+
   it("formats a copy notice with line and character counts", () => {
     assert.equal(
       formatCopyResultNotice({ label: "assistant reply", text: "ab\ncd" }, "pbcopy"),

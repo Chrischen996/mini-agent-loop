@@ -15,17 +15,24 @@ export type ClipboardIo = {
 
 const CLIPBOARD_TIMEOUT_MS = 5_000;
 
-// OSC 52 base64 payload is limited to ~76 bytes per terminal command.
+// xterm-compatible terminals cap each OSC 52 command parameter at 76 bytes;
+// the base64 payload itself must fit in a single command.
 const MAX_OSC52_BASE64_BYTES = 76;
 
 function encodeOsc52(text: string): string {
   return `\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`;
 }
 
+type NativeCandidate = {
+  method: Exclude<ClipboardWriteResult["method"], "osc52" | "none">;
+  command: string;
+  args: string[];
+};
+
 function nativeCandidates(
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
-): Array<{ method: Exclude<ClipboardWriteResult["method"], "osc52" | "none">; command: string; args: string[] }> {
+): NativeCandidate[] {
   if (platform === "darwin") {
     return [{ method: "pbcopy", command: "pbcopy", args: [] }];
   }
@@ -34,10 +41,29 @@ function nativeCandidates(
   }
   const wayland = Boolean(env.WAYLAND_DISPLAY);
   const x11 = Boolean(env.DISPLAY);
-  const linux: Array<{ method: "wl-copy" | "xclip"; command: string; args: string[] }> = [];
+  const linux: NativeCandidate[] = [];
   if (wayland || !x11) linux.push({ method: "wl-copy", command: "wl-copy", args: [] });
   if (x11 || !wayland) linux.push({ method: "xclip", command: "xclip", args: ["-selection", "clipboard"] });
   return linux;
+}
+
+// Fire-and-forget native clipboard fallback: try each backend in order and
+// stop at the first success. Runs after an OSC 52 write so the clipboard is
+// still filled when the terminal ignores or disables OSC 52 (e.g. Windows
+// Terminal blocks OSC 52 writes by default).
+async function runNativeSafetyNet(
+  candidates: NativeCandidate[],
+  text: string,
+  run: (command: string, args: string[], input: string) => Promise<void>,
+): Promise<void> {
+  for (const candidate of candidates) {
+    try {
+      await run(candidate.command, candidate.args, text);
+      return;
+    } catch {
+      /* Try the next backend. */
+    }
+  }
 }
 
 export async function writeClipboardText(
@@ -54,32 +80,28 @@ export async function writeClipboardText(
     stdio: ["pipe", "ignore", "pipe"],
   }));
   const writeStdout = io.writeStdout ?? ((data: string) => process.stdout.write(data));
+  const candidates = nativeCandidates(platform, env);
 
   // ── Path 1: OSC 52 (preferred, ~0ms, handled by the terminal itself) ─────
-  // Emit the OSC 52 sequence and let the terminal perform the copy.
-  try {
-    const osc52 = encodeOsc52(text);
-    // Only use OSC 52 for text that fits within terminal limits
-    if (Buffer.byteLength(osc52, "utf8") <= MAX_OSC52_BASE64_BYTES) {
-      writeStdout(osc52);
-      // After OSC 52 succeeds, fire-and-forget a native tool as a safety net so
-      // the clipboard is still filled when the terminal ignores OSC 52.
-      if (platform !== "win32") {
-        const candidates = nativeCandidates(platform, env);
-        for (const candidate of candidates) {
-          run(candidate.command, candidate.args, text).catch(() => {}); // fire-and-forget
-          break; // only try the first available backend
-        }
-      }
+  // Emit a single OSC 52 command whose base64 payload fits within the
+  // terminal's per-command limit. Always fire-and-forget the native clipboard
+  // tool as a safety net so the clipboard is still filled when the terminal
+  // has OSC 52 writes disabled or ignored them.
+  const base64 = Buffer.from(text, "utf8").toString("base64");
+  if (base64.length <= MAX_OSC52_BASE64_BYTES) {
+    try {
+      writeStdout(`\x1b]52;c;${base64}\x07`);
+      void runNativeSafetyNet(candidates, text, run).catch(() => {});
       return { ok: true, method: "osc52" };
+    } catch {
+      // Writing the OSC 52 sequence failed; fall through to native tools.
     }
-    // For large text, fall through to native tools
-  } catch (error) {
-    // OSC 52 failed; fall back to the native tools.
   }
+  // For larger payloads the base64 no longer fits a single command; use the
+  // native tools below.
 
   // ── Path 2: native clipboard tools (safety net) ───────────────────────────
-  for (const candidate of nativeCandidates(platform, env)) {
+  for (const candidate of candidates) {
     try {
       await run(candidate.command, candidate.args, text);
       return { ok: true, method: candidate.method };
