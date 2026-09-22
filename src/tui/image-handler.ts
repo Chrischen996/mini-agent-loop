@@ -1,11 +1,11 @@
-import type { Dispatch } from "react";
+
 import type { TuiAction, ImageAttachment } from "./state.ts";
 import { loadImageAttachment, readClipboardImage, MAX_TUI_IMAGES } from "./image-attachments.ts";
 
 export type ImageHandlerDeps = {
   pendingImages: ImageAttachment[];
   pendingImagesRef: { current: ImageAttachment[] };
-  dispatch: Dispatch<TuiAction>;
+  dispatch: (action: TuiAction) => void;
   cwd: string;
 };
 

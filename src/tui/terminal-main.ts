@@ -30,6 +30,8 @@ import { IncrementalTerminalRenderer, resolveTerminalDisplayMode, ScrollbackTerm
 import { disableMouseTracking, enableMouseTracking } from "./mouse-tracking.ts";
 import { TerminalInputController, type TerminalInputAction } from "./terminal-input-controller.ts";
 import { createAgentSession, type AgentSession } from "./tui-core/index.ts";
+import { createCommandRegistry, type CommandContext } from "./tui-core/commands.ts";
+import { runTodo, runDirectToolCommand, runResume, parseArgs } from "./tui-core/command-runners.ts";
 import { TerminalAutocompleteController } from "./terminal-autocomplete-controller.ts";
 import { SubagentToolsFactory } from "./subagent-tools-factory.ts";
 import { createAnalyzePipelineTool } from "../orchestration/pipeline/planning-engine.ts";
@@ -304,8 +306,17 @@ export async function runTerminalMain(): Promise<void> {
     let animationTimer: ReturnType<typeof setInterval> | undefined;
     let finishLoop: () => void = () => undefined;
     const directAbortRef: { current?: AbortController } = {};
+    const commandRegistry = createCommandRegistry({
+      todo: runTodo,
+      read: runDirectToolCommand,
+      bash: runDirectToolCommand,
+      ls: runDirectToolCommand,
+      find: runDirectToolCommand,
+      grep: runDirectToolCommand,
+      resume: runResume,
+    });
     const input = new TerminalInputController({
-      onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, multiAgentPipelineToolRef, multiAgentTaskPendingRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); }, persistSession: persistSessionSnapshot, onSessionRestore: () => { if (scrollback) scrollbackRenderer.forceNewSegment(); } }),
+      onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, multiAgentPipelineToolRef, multiAgentTaskPendingRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); }, persistSession: persistSessionSnapshot, onSessionRestore: () => { if (scrollback) scrollbackRenderer.forceNewSegment(); }, commandRegistry }),
       getScrollPageSize: () => Math.max(1, (process.stdout.rows || 24) - 8),
     });
     autocomplete = new TerminalAutocompleteController({
@@ -574,6 +585,8 @@ export type InputDeps = {
   };
   /** Commit the current Todo editor draft (Enter in add/edit mode). */
   commitTodoEditor?: () => void;
+  /** P2 command registry with execution bodies wired in terminal-main.ts. */
+  commandRegistry?: import("./tui-core/commands.ts").CommandRegistry;
 };
 
 export type SessionAccess = {
@@ -1140,19 +1153,22 @@ async function submitInput(
   // (wizard state, direct-tool abort plumbing) and move into the shared
   // CommandRegistry (src/tui/tui-core/commands.ts) as entries with `run`
   // bodies in P4, when App.tsx converges onto the same kernel.
-  if (slashCommand?.cmd === "todo") {
-    // Manual Todo edits are local session state: apply them directly instead
-    // of spending an Agent turn or routing through the direct-tool runner.
-    input.recordSubmission(text);
-    input.clear();
-    const result = applyTodoCommand(store.getState().todoItems ?? [], slashCommand.todo);
-    if (result.ok) {
-      store.dispatch({ type: "SET_TODOS", todos: result.todos });
-      void deps.persistTodoState?.(result.todos);
-    } else {
-      store.dispatch({ type: "ADD_NOTICE", title: "Todo", text: result.error });
-    }
-    return;
+  // Delegate /todo, /read, /bash, /ls, /find, /grep, /resume to the
+  // CommandRegistry. These commands have their execution bodies in
+  // command-runners.ts; other slash commands stay inline here.
+  if (slashCommand && deps.commandRegistry) {
+    const args = parseArgs(slashCommand, text);
+    const handled = await deps.commandRegistry.dispatch(text, {
+      store,
+      sessionRef: deps.sessionRef,
+      permissionManager,
+      cwd: deps.cwd,
+      allTools: deps.allTools,
+      recordSubmission: (t) => input.recordSubmission(t),
+      clearInput: () => input.clear(),
+      persistTodoState: deps.persistTodoState,
+    });
+    if (handled) return;
   }
   if (text.trim().match(/^\/multi-agent/i)) {
     // /multi-agent wizard launch: pick the Orchestrator model, then fall
@@ -1183,32 +1199,11 @@ async function submitInput(
     void openRoleSetupWizard(deps);
     return;
   }
-  if (slashCommand) {
-    input.recordSubmission(text);
-    input.clear();
-    store.dispatch({ type: "USER_MESSAGE", text });
-    const abortController = new AbortController();
-    const args = slashCommand.cmd === "read" || slashCommand.cmd === "ls"
-      ? { path: slashCommand.path }
-      : slashCommand.cmd === "bash"
-        ? { command: slashCommand.command }
-        : { pattern: slashCommand.pattern, path: slashCommand.path };
-    deps.directAbortRef.current = abortController;
-    try {
-      const directResult = await runDirectTool(slashCommand.cmd, args, {
-        allTools: deps.allTools,
-        permissionSessionId: deps.sessionRef.current,
-        getPermissionManager: () => permissionManager,
-        abortSignal: abortController.signal,
-        dispatch: store.dispatch,
-      });
-      await service.recordDirectToolTurn(text, directResult.call, directResult.result);
-      store.dispatch({ type: "LOOP_EVENT", event: { type: "done", messages: service.getHistory() } });
-    } finally {
-      if (deps.directAbortRef.current === abortController) deps.directAbortRef.current = undefined;
-    }
-    return;
-  }
+  // Direct-tool commands (read/bash/ls/find/grep) are now handled by
+  // the CommandRegistry in command-runners.ts. This branch is kept as a
+  // fallback for unknown commands but the registry dispatch above runs first.
+  // Kept for backward compatibility if commandRegistry is not provided.
+  // if (slashCommand) { ... }  -- moved to command-runners.ts
   const resumeCommand = parseResumeCommand(text);
   if (resumeCommand) {
     const prefix = resumeCommand.prefix;

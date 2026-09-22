@@ -1,5 +1,4 @@
 import type { PermissionMode } from "../permissions.ts";
-import type { Dispatch, MutableRefObject } from "react";
 import type { TuiAction } from "./state.ts";
 import type { AgentMessage } from "../types.ts";
 import {
@@ -26,10 +25,10 @@ export type PlanOverrideResult = {
 
 export type PlanTurnOverrideDeps = {
   cwd: string;
-  dispatch: Dispatch<TuiAction>;
+  dispatch: (action: TuiAction) => void;
   setInput: (value: string) => void;
-  planCaptureRef: MutableRefObject<{ prompt: string } | null>;
-  execCaptureRef: MutableRefObject<{ mode: "run" | "retry" } | null>;
+  planCaptureRef: { current: { prompt: string } | null };
+  execCaptureRef: { current: { mode: "run" | "retry" } | null };
   permissionManager: import("../permissions.ts").PermissionManager;
 };
 
@@ -195,10 +194,10 @@ export async function parsePlanTurnOverride(
 
 export type FinalizePlanDeps = {
   cwd: string;
-  planCaptureRef: MutableRefObject<{ prompt: string } | null>;
+  planCaptureRef: { current: { prompt: string } | null };
   history: AgentMessage[];
   succeeded: boolean;
-  dispatch: Dispatch<TuiAction>;
+  dispatch: (action: TuiAction) => void;
 };
 
 export async function finalizePlanCapture(deps: FinalizePlanDeps): Promise<void> {
@@ -232,11 +231,11 @@ export async function finalizePlanCapture(deps: FinalizePlanDeps): Promise<void>
 
 export type FinalizeExecCaptureDeps = {
   cwd: string;
-  execCaptureRef: MutableRefObject<{ mode: "run" | "retry" } | null>;
+  execCaptureRef: { current: { mode: "run" | "retry" } | null };
   history: AgentMessage[];
   succeeded: boolean;
   errorMessage?: string;
-  dispatch: Dispatch<TuiAction>;
+  dispatch: (action: TuiAction) => void;
 };
 
 export async function finalizeExecCapture(deps: FinalizeExecCaptureDeps): Promise<void> {

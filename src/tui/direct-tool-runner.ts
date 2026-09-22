@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import type { Dispatch } from "react";
 import type { TuiAction } from "./state.ts";
 import type { PermissionManager } from "../permissions.ts";
 import type { ToolCall } from "../types.ts";
@@ -13,7 +12,7 @@ export type DirectToolRunnerDeps = {
   permissionSessionId: string;
   getPermissionManager: () => PermissionManager;
   abortSignal: AbortSignal;
-  dispatch: Dispatch<TuiAction>;
+  dispatch: (action: TuiAction) => void;
   toolExecutionBroker?: ToolExecutionBroker;
 };
 

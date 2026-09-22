@@ -8,6 +8,8 @@ import { TerminalAutocompleteController } from "../src/tui/terminal-autocomplete
 import { TerminalInputController } from "../src/tui/terminal-input-controller.ts";
 import { createAgentSession } from "../src/tui/tui-core/index.ts";
 import { handleInputAction, type InputDeps } from "../src/tui/terminal-main.ts";
+import { createCommandRegistry } from "../src/tui/tui-core/commands.ts";
+import { runTodo, runDirectToolCommand, runResume } from "../src/tui/tui-core/command-runners.ts";
 import { formatHelpNotice, SLASH_COMMANDS } from "../src/tui/slash-commands.ts";
 import { confirmTodoEditor, type TodoEditorState } from "../src/tui/todo-editor.ts";
 
@@ -70,6 +72,16 @@ function dependencies(): InputDeps {
     runtimeContext: { sessionId: "test", workspaceId: process.cwd() },
     directAbortRef: {},
     setThinkingMode: () => {},
+    persistTodoState: () => {},
+    commandRegistry: createCommandRegistry({
+      todo: runTodo,
+      read: runDirectToolCommand,
+      bash: runDirectToolCommand,
+      ls: runDirectToolCommand,
+      find: runDirectToolCommand,
+      grep: runDirectToolCommand,
+      resume: runResume,
+    }),
   };
 }
 

@@ -30,6 +30,8 @@ export type CommandContext = {
   clearInput: () => void;
   /** Abort the in-flight direct-tool call on Ctrl+C / Esc. */
   abortSignal?: AbortSignal;
+  /** Persist the Todo snapshot after a local mutation. */
+  persistTodoState?: (todos: import("../../todo.ts").TodoItem[]) => void | Promise<void>;
 };
 
 export type ParsedCommandArgs =

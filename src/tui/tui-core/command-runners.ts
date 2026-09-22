@@ -58,8 +58,7 @@ export const runTodo: (ctx: CommandContext, args: ParsedCommandArgs) => Promise<
     const current = ctx.store.getState().todoItems ?? [];
     const result = applyTodoCommand(current, todoCmd.todo);
     if (result.ok) {
-      ctx.store.dispatch({ type: "SET_TODOS", todos: result.todos });
-      // persistTodoState is a terminal-main extension; the kernel-level
+      ctx.store.dispatch({ type: "SET_TODOS", todos: result.todos });      // persistTodoState is a terminal-main extension; the kernel-level
       // context carries it through an optional hook.
       (ctx as unknown as { persistTodoState?: (t: import("../../todo.ts").TodoItem[]) => void }).persistTodoState?.(result.todos);
     } else {
