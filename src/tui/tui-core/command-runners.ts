@@ -42,6 +42,8 @@ function argsFor(parsed: SlashCommand, text: string): ParsedCommandArgs {
       return { cmd: "find", pattern: parsed.pattern, path: parsed.path };
     case "grep":
       return { cmd: "grep", pattern: parsed.pattern, path: parsed.path };
+    case "resume":
+      return { cmd: "resume", raw: parsed.raw ?? "" };
   }
 }
 
@@ -77,30 +79,32 @@ export const runDirectToolCommand: (ctx: CommandContext, args: ParsedCommandArgs
   async (ctx, args) => {
     // Only the five direct-tool commands are handled here; anything
     // else falls through to the agent.
-    const direct = (():
-      | { cmd: "read"; path: string }
-      | { cmd: "bash"; command: string }
-      | { cmd: "ls"; path: string }
-      | { cmd: "find"; pattern: string; path: string }
-      | { cmd: "grep"; pattern: string; path: string }
-      | undefined => {
+    // args may have structured fields (from parseArgs) or raw text
+    // (from dispatch which re-parses and drops structured fields).
+    const raw = ((args as { raw?: string }).raw ?? "").trim();
+    const direct: {
+      cmd: "read" | "bash" | "ls" | "find" | "grep";
+      path?: string;
+      command?: string;
+      pattern?: string;
+    } | null = (() => {
       switch (args.cmd) {
-        case "read": return args as { cmd: "read"; path: string };
-        case "bash": return args as { cmd: "bash"; command: string };
-        case "ls": return args as { cmd: "ls"; path: string };
-        case "find": return args as { cmd: "find"; pattern: string; path: string };
-        case "grep": return args as { cmd: "grep"; pattern: string; path: string };
-        default: return undefined;
+        case "read": return { cmd: "read", path: (args as { path?: string }).path ?? raw.slice(6).trim() };
+        case "bash": return { cmd: "bash", command: (args as { command?: string }).command ?? raw.slice(6).trim() };
+        case "ls": return { cmd: "ls", path: (args as { path?: string }).path ?? "." };
+        case "find": return { cmd: "find", pattern: (args as { pattern?: string }).pattern ?? "*", path: (args as { path?: string }).path ?? "." };
+        case "grep": return { cmd: "grep", pattern: (args as { pattern?: string }).pattern ?? "", path: (args as { path?: string }).path ?? "." };
+        default: return null;
       }
     })();
     if (!direct) return false;
 
     const directArgs: Record<string, unknown> =
-      direct.cmd === "read" ? { path: direct.path }
-      : direct.cmd === "bash" ? { command: direct.command }
-      : direct.cmd === "ls" ? { path: direct.path }
-      : direct.cmd === "find" ? { pattern: direct.pattern, path: direct.path }
-      : { pattern: direct.pattern, path: direct.path };
+      direct.cmd === "read" ? { path: direct.path! }
+      : direct.cmd === "bash" ? { command: direct.command! }
+      : direct.cmd === "ls" ? { path: direct.path! }
+      : direct.cmd === "find" ? { pattern: direct.pattern!, path: direct.path! }
+      : { pattern: direct.pattern!, path: direct.path! };
 
     const rawText =
       direct.cmd === "read" ? ` /read ${direct.path}`

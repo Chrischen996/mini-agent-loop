@@ -59,9 +59,8 @@ export { createTools, createAllTools } from "../../tools/index.ts";
 /**
  * The single sub-assembled, platform-agnostic runtime for a TUI session.
  *
- * Previously every TUI entrypoint (terminal-main.ts, App.tsx, main.ts)
- * re-implemented the same sandbox / codebase / MCP / subagent / skill /
- * profile / budget bootstrap, and `buildRoleLlmConfigs` was copy-pasted
+ * Previously every TUI entrypoint re-implemented the same sandbox /
+ * codebase / MCP / subagent / skill / profile / budget bootstrap, and `buildRoleLlmConfigs` was copy-pasted
  * into terminal-main.ts and main.ts. This factory is the one place that
  * composition happens; entrypoints stay thin wrappers around it.
  *

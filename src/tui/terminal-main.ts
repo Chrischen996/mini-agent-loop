@@ -31,7 +31,7 @@ import { disableMouseTracking, enableMouseTracking } from "./mouse-tracking.ts";
 import { TerminalInputController, type TerminalInputAction } from "./terminal-input-controller.ts";
 import { createAgentSession, type AgentSession } from "./tui-core/index.ts";
 import { createCommandRegistry, type CommandContext } from "./tui-core/commands.ts";
-import { runTodo, runDirectToolCommand, runResume, parseArgs } from "./tui-core/command-runners.ts";
+import { runTodo, runDirectToolCommand, parseArgs } from "./tui-core/command-runners.ts";
 import { TerminalAutocompleteController } from "./terminal-autocomplete-controller.ts";
 import { SubagentToolsFactory } from "./subagent-tools-factory.ts";
 import { createAnalyzePipelineTool } from "../orchestration/pipeline/planning-engine.ts";
@@ -313,7 +313,6 @@ export async function runTerminalMain(): Promise<void> {
       ls: runDirectToolCommand,
       find: runDirectToolCommand,
       grep: runDirectToolCommand,
-      resume: runResume,
     });
     const input = new TerminalInputController({
       onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, multiAgentPipelineToolRef, multiAgentTaskPendingRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); }, persistSession: persistSessionSnapshot, onSessionRestore: () => { if (scrollback) scrollbackRenderer.forceNewSegment(); }, commandRegistry }),
@@ -1148,11 +1147,8 @@ async function submitInput(
     return;
   }
   const slashCommand = parseSlashCommand(text);
-  // P2: /multi-agent and the slash-direct-tool branches stay inline in
-  // terminal-main.ts for now — their execution bodies are terminal-specific
-  // (wizard state, direct-tool abort plumbing) and move into the shared
-  // CommandRegistry (src/tui/tui-core/commands.ts) as entries with `run`
-  // bodies in P4, when App.tsx converges onto the same kernel.
+  // /multi-agent stays inline — its wizard state is terminal-specific.
+  // Direct-tool and todo commands are handled by the CommandRegistry above.
   // Delegate /todo, /read, /bash, /ls, /find, /grep, /resume to the
   // CommandRegistry. These commands have their execution bodies in
   // command-runners.ts; other slash commands stay inline here.
@@ -1199,11 +1195,7 @@ async function submitInput(
     void openRoleSetupWizard(deps);
     return;
   }
-  // Direct-tool commands (read/bash/ls/find/grep) are now handled by
-  // the CommandRegistry in command-runners.ts. This branch is kept as a
-  // fallback for unknown commands but the registry dispatch above runs first.
-  // Kept for backward compatibility if commandRegistry is not provided.
-  // if (slashCommand) { ... }  -- moved to command-runners.ts
+  // Direct-tool commands are handled by the CommandRegistry above.
   const resumeCommand = parseResumeCommand(text);
   if (resumeCommand) {
     const prefix = resumeCommand.prefix;

@@ -7,6 +7,7 @@ export type SlashCommand =
   | { cmd: "find"; pattern: string; path: string }
   | { cmd: "grep"; pattern: string; path: string }
   | { cmd: "todo"; todo: LegacyTodoCommand }
+  | { cmd: "resume"; raw: string }
   | null;
 
 export type CommandDef = {
@@ -89,6 +90,7 @@ export function parseSlashCommand(input: string): SlashCommand {
     case "ls": return { cmd: "ls", path: parts[1] ?? "." };
     case "find": return { cmd: "find", pattern: parts[1] ?? "*", path: parts[2] ?? "." };
     case "grep": { const pattern = parts[1] ?? ""; const path = parts[2] ?? "."; return pattern ? { cmd: "grep", pattern, path } : null; }
+    case "resume": return { cmd: "resume", raw: s.slice(1).trim() };
     default: return null;
   }
 }
