@@ -301,8 +301,8 @@ export async function runTerminalMain(): Promise<void> {
     // to the terminal, so keep the initial width for the append-only path.
     const scrollbackWidth = process.stdout.columns || 80;
     let autocomplete: TerminalAutocompleteController;
-    let render: () => void = () => undefined;
     let animationTimer: ReturnType<typeof setInterval> | undefined;
+    let finishLoop: () => void = () => undefined;
     const directAbortRef: { current?: AbortController } = {};
     const input = new TerminalInputController({
       onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, multiAgentPipelineToolRef, multiAgentTaskPendingRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); }, persistSession: persistSessionSnapshot, onSessionRestore: () => { if (scrollback) scrollbackRenderer.forceNewSegment(); } }),
@@ -414,46 +414,27 @@ export async function runTerminalMain(): Promise<void> {
         renderer = new IncrementalTerminalRenderer(process.stdout);
       }
     }
-    // P3: kernel-level FrameScheduler primitive. The hand-rolled
-    // `renderQueued` flag below is the pi-tui path's equivalent; both
-    // share the same "collapse N dispatches into one paint" contract,
-    // which the scheduler test in test/tui-frame-scheduler.test.ts pins
-    // at the kernel level. The scheduler itself is constructed here so
-    // a future entrypoint can wire
-    // `store.subscribe(() => frameScheduler.invalidate())` without
-    // re-deriving the 16ms cadence.
-    const frameScheduler: FrameScheduler = createFrameScheduler(() => {
-      // The actual paint is driven by the pi-tui requestRender / the
-      // incremental renderer below; the onFrame callback is a no-op in
-      // the P3 seed. P4 moves the paint into the scheduler.
-    }, { intervalMs: 16 });
-    let renderQueued = false;
-    render = () => {
-      if (renderQueued) return;
-      renderQueued = true;
-      const flush = () => {
-        renderQueued = false;
-        if (!screenActive || quitting) return;
-        if (piRuntime) {
-          piRuntime.tui.requestRender();
-          return;
-        }
-        const width = fullscreen ? process.stdout.columns || 80 : scrollbackWidth;
-        renderer.renderLines(buildFrameLines(width, process.stdout.rows || 24));
-      };
-      // requestAnimationFrame exists in browsers; in Node, schedule via setImmediate(0)
-      // which yields to I/O and avoids blocking the event loop.
-      const requestAnimationFrame = (globalThis as typeof globalThis & {
-        requestAnimationFrame?: (callback: () => void) => number;
-      }).requestAnimationFrame;
-      const raf = typeof requestAnimationFrame === "function"
-        ? requestAnimationFrame.bind(globalThis)
-        : (cb: () => void) => setImmediate(cb);
-      raf(flush);
-      // P3: mark the scheduler dirty so a subscribed entrypoint can
-      // coalesce the next store dispatch into the same frame.
-      frameScheduler.invalidate();
+    // P3: kernel-level FrameScheduler primitive. Store updates invalidate
+    // the scheduler, which coalesces high-frequency dispatches into one
+    // paint at the 16ms cadence. The scheduler owns the cadence in one
+    // place; this entrypoint only supplies the render body.
+    let screenActive = false;
+    let quitting = false;
+
+    const render = (): void => {
+      if (!screenActive || quitting) return;
+      if (piRuntime) {
+        piRuntime.tui.requestRender();
+        return;
+      }
+      const width = fullscreen ? process.stdout.columns || 80 : scrollbackWidth;
+      renderer.renderLines(buildFrameLines(width, process.stdout.rows || 24));
     };
+
+    const frameScheduler: FrameScheduler = createFrameScheduler(render, {
+      intervalMs: 16,
+    });
+
     const syncAnimation = () => {
       const shouldAnimate = store.getState().busy || Boolean(store.getState().pendingPermission);
       if (shouldAnimate && !animationTimer) {
@@ -465,13 +446,11 @@ export async function runTerminalMain(): Promise<void> {
         animationTimer = undefined;
       }
     };
+
     const unsubscribe = store.subscribe(() => {
       syncAnimation();
-      render();
+      frameScheduler.invalidate();
     });
-    let screenActive = false;
-    let quitting = false;
-    let finishLoop: () => void = () => undefined;
     const cleanup = () => {
       if (!screenActive) return;
       screenActive = false;

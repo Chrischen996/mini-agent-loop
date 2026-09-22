@@ -37,6 +37,7 @@ if (renderer === "ink" || renderer === "react") {
   // @ts-ignore — sibling dist bundle emitted by build.ts; no .d.ts.
   await import(/* @vite-ignore */ "./tui-ink.js");
 } else if (renderer === "scrollback" || renderer === "ansi" || renderer === "legacy-ansi") {
+  process.env.MINI_AGENT_TUI_MODE = "scrollback";
   // Raw ANSI scrollback renderer, no pi-tui dependency.
   // @ts-ignore — sibling dist bundle emitted by build.ts; no .d.ts.
   await import(/* @vite-ignore */ "./terminal.js");

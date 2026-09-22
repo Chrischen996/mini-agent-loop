@@ -28,13 +28,35 @@ describe("loadAgentsMd", () => {
     }
   });
 
-  it("ignores legacy .agents.md and AGENTS.md files", async () => {
+  it("loads AGENTS.md (legacy filename) when no AGENT.MD is present", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "agents-md-"));
     try {
-      await writeFile(path.join(dir, ".agents.md"), "dot-agents");
-      await writeFile(path.join(dir, "AGENTS.md"), "caps-agents");
+      await writeFile(path.join(dir, "AGENTS.md"), "# Legacy rules\nUse tabs.");
       const result = await loadAgentsMd(dir);
-      assert.equal(result, undefined);
+      assert.equal(result, "# Legacy rules\nUse tabs.");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers AGENT.MD over the legacy AGENTS.md filename", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "agents-md-"));
+    try {
+      await writeFile(path.join(dir, "AGENT.MD"), "new");
+      await writeFile(path.join(dir, "AGENTS.md"), "legacy");
+      const result = await loadAgentsMd(dir);
+      assert.equal(result, "new");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads .agents.md when neither AGENT.MD nor AGENTS.md is present", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "agents-md-"));
+    try {
+      await writeFile(path.join(dir, ".agents.md"), "dot");
+      const result = await loadAgentsMd(dir);
+      assert.equal(result, "dot");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

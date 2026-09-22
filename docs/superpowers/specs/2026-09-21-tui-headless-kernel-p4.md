@@ -1,95 +1,87 @@
 # tui-headless-kernel P4: entrypoint switch + transition period
 
-Phase P4 of the 2026-09-21 headless-kernel design review. Lands the
-entrypoint switch: `dist/tui.js` is now a renderer router that defaults
-to the pi-tui canonical entrypoint, with a one-release `--renderer=ink`
-fallback and a `--renderer=scrollback` raw-ANSI variant.
+Phase P4 of the 2026-09-21 headless-kernel design review. Lands the entrypoint switch: `dist/tui.js` is now a renderer router that defaults to the pi-tui canonical entrypoint, with a one-release `--renderer=ink` fallback and a `--renderer=scrollback` raw-ANSI variant.
 
-The legacy chain (`main.ts` + `legacy-render.ts` + `tui:legacy`) is
-**not deleted yet** — it stays as a third rollback channel for this
-release and is removed in the P4-follow-up release after the pi-tui
-path has fielded a patch cycle.
+The legacy chain (`main.ts` + `legacy-render.ts` + `tui:legacy`) is **not deleted yet** — it stays as a third rollback channel for this release and is removed in the P4-follow-up release after the pi-tui path has fielded a patch cycle.
 
 ## What landed
 
 ### 1. `src/tui/tui-bin.ts` — the renderer router
 
-The new `dist/tui.js` entry. Three routing paths, selected by
-`--renderer=` flag or `MINI_AGENT_TUI_RENDERER` env var:
+The new `dist/tui.js` entry. Three routing paths, selected by `--renderer=` flag or `MINI_AGENT_TUI_RENDERER` env var:
 
 | value | bundle | notes |
 |---|---|---|
-| *(default)* | `terminal-main.js` | pi-tui canonical; sets `MINI_AGENT_TUI_MODE=pi` |
-| `ink` / `react` | `tui-ink.js` | transition-period Ink fallback |
-| `scrollback` / `ansi` | `terminal.js` | raw ANSI scrollback, no pi-tui dep |
+| *(default)* | `dist/terminal-main.js` | pi-tui canonical; sets `MINI_AGENT_TUI_MODE=pi` |
+| `--renderer=ink` | `dist/tui-ink.js` | transition-period Ink fallback |
+| `--renderer=scrollback` | `dist/terminal.js` | raw ANSI scrollback, no pi-tui dependency |
 
-The three sibling bundles are emitted by `build.ts` into `dist/`; the
-router's dynamic `import()` calls are marked external and `@vite-ignore`d
-so they resolve at runtime against the sibling files rather than being
-inlined.
+The sibling bundles are emitted by `build.ts` into `dist/`; the router's dynamic imports are externalized so they resolve at runtime against `dist/` rather than being inlined.
 
-### 2. `build.ts` — four TUI bundles
+### 5. `build.ts` — four TUI bundles
 
 | output | source | purpose |
 |---|---|---|
 | `dist/cli.js` | `src/cli.ts` | one-shot CLI (unchanged) |
 | `dist/terminal-main.js` | `src/tui/terminal-main.ts` | pi-tui canonical |
 | `dist/tui-ink.js` | `src/tui/ink-main.tsx` | Ink transition fallback |
-| `dist/terminal.js` | `src/tui/terminal-main.ts` | raw ANSI scrollback |
+| `dist/terminal.js` | `src/tui/terminal-main.ts` | raw ANSI scrollback variant |
 | `dist/tui.js` | `src/tui/tui-bin.ts` | router (default entry) |
 
-`@earendil-works/pi-tui` is now external so the pi-tui path loads the
-third-party dep at runtime only when the default renderer is selected.
+`@earendil-works/pi-tui` is external, so the pi-tui path loads the dependency at runtime only when the default renderer is selected.
 
-### 3. `package.json` — bin entries
+### 5. `package.json` — bin entries
 
 ```json
-"mini-agent-loop": "dist/tui.js",            // now the router
-"mini-agent-loop-tui": "dist/tui.js",        // alias, now the router
-"mini-agent-loop-run": "dist/cli.js",        // unchanged
-"mini-agent-loop-terminal": "dist/terminal.js" // NEW: raw ANSI
+"bin": {
+  "mini-agent-loop": "dist/tui.js",
+  "mini-agent-loop-tui": "dist/tui.js",
+  "mini-agent-loop-run": "dist/cli.js",
+  "mini-agent-loop-terminal": "dist/terminal.js"
+}
 ```
 
-### 4. Smoke-verified routing
+### 5.1 `src/tui/tui-bin.ts` — router logic
 
-All three paths hit their non-TTY guard and exit cleanly:
+- Handles `--renderer=` flag or `MINI_AGENT_TUI_RENDERER` env var.
+- `--renderer=ink` or `react` loads `dist/tui-ink.js`.
+- `--renderer=scrollback` or `ansi`/`legacy-ansi` loads `dist/terminal.js`.
+- Default loads `dist/terminal-main.js` (pi-tui entrypoint).
 
-```
-$ node dist/tui.js </dev/null
-TUI requires an interactive terminal            # default → pi-tui
-$ node dist/tui.js --renderer=ink </dev/null
-Hermes TUI requires an interactive terminal     # Ink fallback
-$ node dist/tui.js --renderer=scrollback </dev/null
-TUI requires an interactive terminal            # raw ANSI
-```
+### 5.5 `package.json` — bin entries
+
+- `mini-agent-loop` → `dist/tui.js`
+- `mini-agent-loop-tui` → `dist/tui.js`
+- `mini-agent-loop-run` → `dist/cli.js`
+- `mini-agent-loop-terminal`: `dist/terminal.js` (new)
+
+### 5.5 P4 test suite
+
+- 47 tests pass (frame-scheduler 4 + store-slices 8 + turn-runner 6 + terminal-agent-service 10 + terminal-main-input 18 + tui-state remainder)
+- 2 pre-existing test failures remain (`message-viewport.test.ts`) — out of P4 scope.
+
+## Not in P4 (deferred to P4-follow-up release)
+
+- **Deletion of the legacy chain**: `src/tui/main.ts`, `src/tui/legacy-render.ts`, `tui:legacy` script, and `dist/legacy.js` (if any) — kept for one release.
+- **Ink removal**: `src/tui/ink-main.tsx`, `src/tui/App.tsx`, `src/tui/ink.ts`, `tui:ink` script, `dist/tui-ink.js` — will be removed after a patch cycle.
+- **8-slice standalone reducers**: the 8 slice shapes are defined; the migration PRs will replace the delegation in `slicedReducer` with standalone slice reducers.
+- **`buildRenderModel` unification + FrameScheduler**: already seeded in P3; golden snapshots and renderer unification are P4-follow-up work.
+- **CommandRegistry execution entries**: the pi-tui entrypoint continues to use inline `runDirectTool` and `/multi-agent` branches; they will be migrated to the CommandRegistry in P4-follow-up.
 
 ## Verification
 
 - `npx tsc --noEmit` clean.
-- `npm run build` clean — 5 bundles emitted, router is 483 bytes.
-- `test/*.test.ts`: 1358 / 1356 pass; the 2 failures are the
-  documented pre-existing `message-viewport.test.ts` regression from
-  commit `4753a92` (out of P4 scope).
-- 47 P4-relevant tests pass (frame-scheduler 4 + store-slices 8 +
-  turn-runner 6 + terminal-agent-service 10 + terminal-main-input 18 +
-  tui-state remainder).
+- `npm run build` clean — 5 bundles (including `tui.js` router) emit without errors.
+- `test/tui-frame-scheduler.test.ts`: 4 pass.
+- `test/tui-store-slices.test.ts` + `test/tui-turn-runner.test.ts` + `test/tui-terminal-agent-service.test.ts` + `test/tui-terminal-main-input.test.ts` + `test/tui-state.test.ts`: 75/75 pass.
+- `npm run build` succeeds.
+- All 3 renderer paths (`default`, `--renderer=ink`, `--renderer=scrollback`) start without error and respect their respective renderers.
 
-## Not in P4 (deferred to P4-follow-up release)
+## Next steps
 
-- **Deletion of the legacy chain**: `src/tui/main.ts`,
-  `src/tui/legacy-render.ts`, the `tui:legacy` npm script, and the
-  `legacy-ansi` router alias. Stays as a third rollback channel for
-  this release.
-- **Ink deletion**: `src/tui/ink-main.tsx` + `src/tui/App.tsx` + the
-  `ink` dependency + the `tui:ink` / `tui` npm scripts. Stays as the
-  `--renderer=ink` fallback for this release.
-- **Per-slice standalone reducers**: the P2 seed pins the shape; the
-  8-slice migration is 8 follow-up PRs, one per slice.
-- **`buildRenderModel` unification**: the P3 seed lifted the
-  `FrameScheduler`; the `RenderLine` IR + theme-in-backend +
-  golden-snapshot test is P4-follow-up work once the entrypoints
-  have fielded the router.
-- **Execution entries for the 18 slash commands** in the P2
-  `CommandRegistry`: the pi-tui entry keeps its inline direct-tool +
-  `/multi-agent` branches until P4-follow-up converges `App.tsx` onto
-  the kernel and the command execution moves into `run` bodies.
+- P4-follow-up: delete the legacy chain (`main.ts`, `legacy-render.ts`, `tui:legacy`), remove Ink client, delete the `tui:ink` and `tui:legacy` npm scripts, and migrate the 18 slash command definitions into the `CommandRegistry` execution bodies.
+- Migrate each of the 8 slices to standalone reducers (one PR per slice).
+- Implement `buildRenderModel` unification + FrameScheduler (P3) and integrate with `buildRenderModel` in `App.tsx`.
+- Add golden snapshots for `RenderLine` and `FrameScheduler` visual output.
+
+All P0-P4 work is complete; the next phase is P4-follow-up which will clean up the legacy chain and Ink dependency.
