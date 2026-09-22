@@ -7,7 +7,8 @@
   "bin": {
     "mini-agent-loop": "dist/tui.js",
     "mini-agent-loop-tui": "dist/tui.js",
-    "mini-agent-loop-run": "dist/cli.js"
+    "mini-agent-loop-run": "dist/cli.js",
+    "mini-agent-loop-terminal": "dist/terminal.js"
   },
   "files": [
     "version-check.js",

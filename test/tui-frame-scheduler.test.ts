@@ -14,9 +14,9 @@ class FakeTimer {
   private now = 0;
   private idCounter = 0;
 
-  setTimeout(fn: () => void, ms: number): number {
+  setTimeout(fn: () => void, ms?: number): number {
     const id = ++this.idCounter;
-    this.tasks.set(id, { fn, at: this.now + ms });
+    this.tasks.set(id, { fn, at: this.now + (ms ?? 0) });
     return id;
   }
 
@@ -42,20 +42,25 @@ class FakeTimer {
 }
 
 // The scheduler under test captures `setTimeout`/`clearTimeout` at
-// construction time via the module's top-level references. To make the
-// test deterministic we monkey-patch the globals *before* creating the
-// scheduler, then restore them in teardown.
+// call time, so we monkey-patch the globals *before* creating the
+// scheduler and restore them in teardown. The patches are typed
+// loosely enough to satisfy `typeof setTimeout` / `typeof clearTimeout`
+// while still delegating to the deterministic FakeTimer.
 function withFakeTimers(body: (timer: FakeTimer) => void): void {
   const fake = new FakeTimer();
   const originalSet = globalThis.setTimeout;
   const originalClear = globalThis.clearTimeout;
-  (globalThis as unknown as { setTimeout: typeof setTimeout }).setTimeout = (fn: () => void, ms: number) => fake.setTimeout(fn, ms);
-  (globalThis as unknown as { clearTimeout: typeof clearTimeout }).clearTimeout = (id: number) => fake.clearTimeout(id);
+  const patchedSet = (fn: () => void, ms?: number): unknown => fake.setTimeout(fn, ms ?? 0);
+  const patchedClear = (id?: unknown): void => {
+    if (typeof id === "number") fake.clearTimeout(id);
+  };
+  (globalThis as Record<PropertyKey, unknown>).setTimeout = patchedSet;
+  (globalThis as Record<PropertyKey, unknown>).clearTimeout = patchedClear;
   try {
     body(fake);
   } finally {
-    (globalThis as unknown as { setTimeout: typeof setTimeout }).setTimeout = originalSet;
-    (globalThis as unknown as { clearTimeout: typeof clearTimeout }).clearTimeout = originalClear;
+    (globalThis as Record<PropertyKey, unknown>).setTimeout = originalSet;
+    (globalThis as Record<PropertyKey, unknown>).clearTimeout = originalClear;
   }
 }
 

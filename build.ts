@@ -1,6 +1,6 @@
 import { build } from "vite";
 import { nodeResolve } from "@rollup/plugin-node-resolve";
-import { builtinModules } from "module";
+import { builtinModules } from "node:module";
 
 const nodeBuiltins = new Set(
   builtinModules.flatMap((name) => [name, `node:${name}`]),
@@ -10,6 +10,7 @@ async function buildEntry(
   input: string,
   entryFileName: string,
   emptyOutDir: boolean,
+  extraExternals: readonly string[] = [],
 ): Promise<void> {
   await build({
     configFile: false,
@@ -32,7 +33,9 @@ async function buildEntry(
           id === "react" ||
           id === "react-dom" ||
           id === "ink" ||
-          nodeBuiltins.has(id),
+          id === "@earendil-works/pi-tui" ||
+          nodeBuiltins.has(id) ||
+          extraExternals.includes(id),
       },
       minify: process.env.NODE_ENV === "production",
     },
@@ -44,5 +47,17 @@ async function buildEntry(
 
 // Keep the published default aligned with README's one-shot CLI contract.
 await buildEntry("src/cli.ts", "cli.js", true);
-// Publish the interactive Ink client as the package's TUI executable.
-await buildEntry("src/tui/ink-main.tsx", "tui.js", false);
+// P4: the published TUI executable is the renderer router. The default
+// path is the pi-tui canonical entrypoint; `--renderer=ink` falls back to
+// the Ink client for one release, and `--renderer=scrollback` to the raw
+// ANSI variant. The router's dynamic imports are external so the sibling
+// bundles resolve at runtime from dist/ rather than being inlined.
+await buildEntry("src/tui/terminal-main.ts", "terminal-main.js", false);
+await buildEntry("src/tui/ink-main.tsx", "tui-ink.js", false);
+await buildEntry("src/tui/terminal-main.ts", "terminal.js", false);
+await buildEntry(
+  "src/tui/tui-bin.ts",
+  "tui.js",
+  false,
+  ["./tui-ink.js", "./terminal.js", "./terminal-main.js"],
+);
