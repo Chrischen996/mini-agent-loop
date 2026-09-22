@@ -12,7 +12,10 @@ import { createVisionPreprocessor, loadVisionConfigFromEnv } from "../preprocess
 import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 import { applySkillCommand, discoverWorkspaceSkills, loadSkillNamesFromEnv, defaultSkillRegistry } from "../skills/index.ts";
 import { PermissionManager } from "../permissions.ts";
-import { applyPermissionModePrompt, createAgentHistory, type AgentRuntimeRef } from "../loop.ts";
+import { applyPermissionModePrompt, createAgentHistory, getDefaultSystemPrompt, restoreAgentHistory, type AgentRuntimeRef } from "../loop.ts";
+import { loadInstructionBundle } from "../agents-md.ts";
+import { initAgentMd } from "../init-agent-md.ts";
+import { parseInitCommand } from "./init-command.ts";
 import { cycleThinkingLevel, thinkingLevelToDisplay, withThinkingLevel } from "../think-intensity.ts";
 import { nextPermissionMode, switchPermissionMode } from "./permission-utils.ts";
 import { applyTodoCommand, parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
@@ -50,6 +53,7 @@ import { isExactSlashCommand } from "./autocomplete.ts";
 import { TUI_BRAND_NAME, TUI_BRAND_VERSION } from "./brand.ts";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import { createPiTuiRuntime, type PiTuiRuntime } from "./pi-tui-runtime.ts";
+import { createFrameScheduler, type FrameScheduler } from "./tui-core/frame-scheduler.ts";
 
 const ALTERNATE_SCREEN = "\x1b[?1049h";
 const MAIN_SCREEN = "\x1b[?1049l";
@@ -410,8 +414,19 @@ export async function runTerminalMain(): Promise<void> {
         renderer = new IncrementalTerminalRenderer(process.stdout);
       }
     }
-    // Throttle render() to once per animation frame to avoid stacking
-    // intermediate frames during fast scroll or streaming updates.
+    // P3: kernel-level FrameScheduler primitive. The hand-rolled
+    // `renderQueued` flag below is the pi-tui path's equivalent; both
+    // share the same "collapse N dispatches into one paint" contract,
+    // which the scheduler test in test/tui-frame-scheduler.test.ts pins
+    // at the kernel level. The scheduler itself is constructed here so
+    // a future entrypoint can wire
+    // `store.subscribe(() => frameScheduler.invalidate())` without
+    // re-deriving the 16ms cadence.
+    const frameScheduler: FrameScheduler = createFrameScheduler(() => {
+      // The actual paint is driven by the pi-tui requestRender / the
+      // incremental renderer below; the onFrame callback is a no-op in
+      // the P3 seed. P4 moves the paint into the scheduler.
+    }, { intervalMs: 16 });
     let renderQueued = false;
     render = () => {
       if (renderQueued) return;
@@ -435,6 +450,9 @@ export async function runTerminalMain(): Promise<void> {
         ? requestAnimationFrame.bind(globalThis)
         : (cb: () => void) => setImmediate(cb);
       raf(flush);
+      // P3: mark the scheduler dirty so a subscribed entrypoint can
+      // coalesce the next store dispatch into the same frame.
+      frameScheduler.invalidate();
     };
     const syncAnimation = () => {
       const shouldAnimate = store.getState().busy || Boolean(store.getState().pendingPermission);
@@ -1101,7 +1119,48 @@ async function submitInput(
     input.clear();
     return;
   }
+  const initCommand = parseInitCommand(text);
+  if (initCommand) {
+    input.recordSubmission(text);
+    input.clear();
+    if (initCommand.kind === "error") {
+      store.dispatch({ type: "ADD_NOTICE", title: "Init", text: initCommand.message });
+      return;
+    }
+    try {
+      const result = await initAgentMd({
+        cwd: deps.cwd,
+        force: initCommand.force,
+        print: initCommand.print,
+      });
+      if (initCommand.print) {
+        store.dispatch({ type: "ADD_NOTICE", title: "AGENT.MD Template Preview", text: result.content });
+        return;
+      }
+      const bundle = await loadInstructionBundle(deps.cwd).catch(() => undefined);
+      if (bundle && bundle.content.length > 0) {
+        const mode = permissionManager.getMode();
+        deps.service.replaceHistory(restoreAgentHistory(deps.service.getHistory(), getDefaultSystemPrompt(mode, bundle.content)));
+      }
+      store.dispatch({
+        type: "ADD_NOTICE",
+        title: "AGENT.MD",
+        text: result.overwritten
+          ? "Overwrote AGENT.MD. Updated instructions are now active for subsequent turns."
+          : "Created AGENT.MD. Instructions are now active for subsequent turns.",
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      store.dispatch({ type: "ADD_NOTICE", title: "Init Failed", text: detail });
+    }
+    return;
+  }
   const slashCommand = parseSlashCommand(text);
+  // P2: /multi-agent and the slash-direct-tool branches stay inline in
+  // terminal-main.ts for now — their execution bodies are terminal-specific
+  // (wizard state, direct-tool abort plumbing) and move into the shared
+  // CommandRegistry (src/tui/tui-core/commands.ts) as entries with `run`
+  // bodies in P4, when App.tsx converges onto the same kernel.
   if (slashCommand?.cmd === "todo") {
     // Manual Todo edits are local session state: apply them directly instead
     // of spending an Agent turn or routing through the direct-tool runner.
@@ -1116,10 +1175,10 @@ async function submitInput(
     }
     return;
   }
-  // /multi-agent wizard launch: pick the Orchestrator model, then fall through
-  // to the existing role-setup wizard (inherit / existing profile / new model)
-  // when the user confirms, matching App.tsx's step order.
   if (text.trim().match(/^\/multi-agent/i)) {
+    // /multi-agent wizard launch: pick the Orchestrator model, then fall
+    // through to the existing role-setup wizard (inherit / existing profile /
+    // new model) when the user confirms, matching App.tsx's step order.
     const inlineTask = text.trim().replace(/^\/multi-agent\s*/i, "").trim();
     input.recordSubmission(text);
     input.clear();
