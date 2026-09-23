@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { AGENT_FILENAME, buildAgentMdContent, initAgentMd } from "../src/init-agent-md.ts";
+import { AGENT_FILENAME, buildAgentMdContent, initAgentMd, writeAgentMd } from "../src/init-agent-md.ts";
 import { parseInitCommand } from "../src/tui/init-command.ts";
 import { loadAgentsMd } from "../src/agents-md.ts";
 import { SLASH_COMMANDS, formatHelpNotice } from "../src/tui/slash-commands.ts";
@@ -122,15 +122,20 @@ describe("loadAgentsMd recognises AGENT.MD", () => {
 
 describe("parseInitCommand", () => {
   it("parses /init without options", () => {
-    assert.deepEqual(parseInitCommand("/init"), { kind: "ok", force: false, print: false });
+    assert.deepEqual(parseInitCommand("/init"), { kind: "ok", force: false, print: false, template: false });
   });
 
   it("parses /init --force", () => {
-    assert.deepEqual(parseInitCommand("/init --force"), { kind: "ok", force: true, print: false });
+    assert.deepEqual(parseInitCommand("/init --force"), { kind: "ok", force: true, print: false, template: false });
   });
 
   it("parses /init --force --print", () => {
-    assert.deepEqual(parseInitCommand("/init --force --print"), { kind: "ok", force: true, print: true });
+    assert.deepEqual(parseInitCommand("/init --force --print"), { kind: "ok", force: true, print: true, template: false });
+  });
+
+  it("parses /init --template", () => {
+    assert.deepEqual(parseInitCommand("/init --template"), { kind: "ok", force: false, print: false, template: true });
+    assert.deepEqual(parseInitCommand("/init -t"), { kind: "ok", force: false, print: false, template: true });
   });
 
   it("rejects unknown options", () => {
@@ -142,6 +147,44 @@ describe("parseInitCommand", () => {
   it("returns null for non-init input", () => {
     assert.equal(parseInitCommand("/help"), null);
     assert.equal(parseInitCommand("hello"), null);
+  });
+});
+
+describe("writeAgentMd", () => {
+  it("creates the file and reports created=true", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "write-agent-md-"));
+    try {
+      const result = await writeAgentMd({ cwd: dir, content: "# Custom\n" });
+      assert.equal(result.created, true);
+      assert.equal(result.overwritten, false);
+      assert.equal(await readFile(path.join(dir, AGENT_FILENAME), "utf8"), "# Custom\n");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to overwrite without force", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "write-agent-md-"));
+    try {
+      await writeFile(path.join(dir, AGENT_FILENAME), "keep me");
+      await assert.rejects(writeAgentMd({ cwd: dir, content: "new" }), /already exists/);
+      assert.equal(await readFile(path.join(dir, AGENT_FILENAME), "utf8"), "keep me");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("overwrites when force is set", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "write-agent-md-"));
+    try {
+      await writeFile(path.join(dir, AGENT_FILENAME), "keep me");
+      const result = await writeAgentMd({ cwd: dir, content: "new", force: true });
+      assert.equal(result.overwritten, true);
+      assert.equal(result.created, false);
+      assert.equal(await readFile(path.join(dir, AGENT_FILENAME), "utf8"), "new");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

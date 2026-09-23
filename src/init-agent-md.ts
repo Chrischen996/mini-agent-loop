@@ -1,12 +1,13 @@
 /**
- * AGENT.MD generator.
+ * AGENT.MD template generator and writer.
  *
  * Creates a project-local AGENT.MD instruction file in the current
  * workspace. The template is a generic project skeleton (no LLM, no
  * hardcoded mini-agent internals) plus a few light heuristic hints
  * derived from files that already exist in the target directory.
  *
- * The write path is intentionally conservative:
+ * LLM-driven content generation lives in `init-agent.ts`; this module
+ * stays dependency-light and owns the conservative write path:
  * - only writes `path.join(cwd, "AGENT.MD")` (never a caller-supplied path);
  * - default writes use the exclusive `wx` flag so two concurrent `/init`
  *   invocations cannot race into a silent overwrite;
@@ -120,6 +121,34 @@ export async function buildAgentMdContent(cwd: string): Promise<string> {
   return sections.join("\n");
 }
 
+/**
+ * Writes AGENT.MD content into `cwd` using the conservative rules described
+ * in the module header. Shared by the template path (`initAgentMd`) and the
+ * LLM-driven path (`resolveAgentMdContent` in init-agent.ts).
+ */
+export async function writeAgentMd(options: {
+  cwd: string;
+  content: string;
+  force?: boolean;
+}): Promise<{ path: string; created: boolean; overwritten: boolean }> {
+  const targetPath = path.join(path.resolve(options.cwd), AGENT_FILENAME);
+
+  if (options.force) {
+    await writeFile(targetPath, options.content, "utf8");
+    return { path: targetPath, created: false, overwritten: true };
+  }
+
+  try {
+    await writeFile(targetPath, options.content, { encoding: "utf8", flag: "wx" });
+    return { path: targetPath, created: true, overwritten: false };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
+      throw new Error(`${AGENT_FILENAME} already exists. Use /init --force to overwrite.`);
+    }
+    throw error;
+  }
+}
+
 export async function initAgentMd(options: InitAgentMdOptions): Promise<InitAgentMdResult> {
   const targetPath = path.join(path.resolve(options.cwd), AGENT_FILENAME);
   const content = await buildAgentMdContent(options.cwd);
@@ -128,18 +157,6 @@ export async function initAgentMd(options: InitAgentMdOptions): Promise<InitAgen
     return { path: targetPath, content, created: false, overwritten: false };
   }
 
-  if (options.force) {
-    await writeFile(targetPath, content, "utf8");
-    return { path: targetPath, content, created: false, overwritten: true };
-  }
-
-  try {
-    await writeFile(targetPath, content, { encoding: "utf8", flag: "wx" });
-    return { path: targetPath, content, created: true, overwritten: false };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
-      throw new Error(`${AGENT_FILENAME} already exists. Use /init --force to overwrite.`);
-    }
-    throw error;
-  }
+  const written = await writeAgentMd({ cwd: options.cwd, content, force: options.force });
+  return { path: written.path, content, created: written.created, overwritten: written.overwritten };
 }

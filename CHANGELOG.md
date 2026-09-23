@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   windowing policy in `picker-window.ts`: the same page sizes, the same
   tail-anchored scroll, and the same heading, `Showing 1-6 / 20` footer, and
   hint text in both clients.
+- `/init` (TUI and CLI `init`) now analyzes the project with the configured
+  LLM instead of only writing a static skeleton: a short internal loop with
+  read-only tools (`ls`/`read`/`grep`/`find`, capped at 12 turns) explores the
+  workspace and produces tailored AGENT.MD content. When no provider is
+  configured or generation fails, the offline heuristic template is written
+  instead with an explanatory warning; `/init --template` (CLI
+  `--init-template`) keeps the old instant behavior. `/init` is now guarded by
+  the busy check while a turn is running.
 
 ### Added
 
@@ -71,9 +79,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `test/tui-consistency.test.ts`: cross-client presentation regressions
   (status widths, palette alignment, help layout, markdown row budget,
   welcome padding, permission-card rows, single spinner row).
+- `src/init-agent.ts`: LLM-driven AGENT.MD generation (`generateAgentMdWithLlm`,
+  `resolveAgentMdContent`) and `writeAgentMd` split out of `init-agent-md.ts`
+  so the template and LLM paths share one conservative write path.
 
 ### Fixed
 
+- `pnpm-lock.yaml` is back in sync with `package.json` after the react/ink
+  removal, so `pnpm install --frozen-lockfile` (used by CI) succeeds again.
 - OpenAI-compatible catalog streams that close without `finish_reason` now complete when text/tool JSON is intact, and retry as `StreamTruncatedError` when the payload is empty or tool-call arguments are truncated — so gateways that omit the field no longer surface `✗ Stream ended without finish_reason`.
 - Claude/Anthropic thinking blocks, signatures, and reasoning-token usage now
   round-trip through the LLM wire format, session snapshots, and context-budget
