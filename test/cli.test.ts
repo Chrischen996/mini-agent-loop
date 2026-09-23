@@ -210,6 +210,16 @@ describe("parseCliArgs", () => {
     assert.throws(() => parseCliArgs(["--mode", "invalid"]), /Invalid mode/);
     assert.throws(() => parseCliArgs(["--mode"]), /--mode requires an argument/);
   });
+
+  it("defaults init flags to false", () => {
+    const result = parseCliArgs(["init"]);
+    assert.deepEqual(result.init, { force: false, print: false });
+  });
+
+  it("parses all init flags together", () => {
+    const result = parseCliArgs(["init", "--init-force", "--init-print"]);
+    assert.deepEqual(result.init, { force: true, print: true });
+  });
 });
 
 describe("CLI smoke test", () => {

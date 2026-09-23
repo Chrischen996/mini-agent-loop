@@ -4,12 +4,16 @@
  * Returns null for anything that is not an /init invocation so the caller
  * can fall through to the normal command pipeline. Unknown flags surface as
  * a structured error instead of being silently ignored.
+ *
+ * Flags:
+ *   --print / -p  — show what AGENT.MD would contain (via template fallback), don't write
+ *   --force / -f  — allow overwriting an existing AGENT.MD (only relevant with --print)
  */
 
 export type ParsedInitCommand = {
   kind: "ok";
-  force: boolean;
   print: boolean;
+  force: boolean;
 } | {
   kind: "error";
   message: string;

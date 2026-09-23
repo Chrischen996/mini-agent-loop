@@ -15,6 +15,7 @@ import { PermissionManager } from "../permissions.ts";
 import { applyPermissionModePrompt, createAgentHistory, getDefaultSystemPrompt, restoreAgentHistory, type AgentRuntimeRef } from "../loop.ts";
 import { loadInstructionBundle } from "../agents-md.ts";
 import { initAgentMd } from "../init-agent-md.ts";
+import { INIT_PROMPT } from "../init-prompt.ts";
 import { parseInitCommand } from "./init-command.ts";
 import { cycleThinkingLevel, thinkingLevelToDisplay, withThinkingLevel } from "../think-intensity.ts";
 import { nextPermissionMode, switchPermissionMode } from "./permission-utils.ts";
@@ -162,6 +163,8 @@ export async function runTerminalMain(): Promise<void> {
   }
   const planCaptureRef: { current: { prompt: string } | null } = { current: null };
   const execCaptureRef: { current: { mode: "run" | "retry" } | null } = { current: null };
+  // Tracks the permission mode to restore after an /init turn completes.
+  const initModeRestoreRef: { current: { mode: import("../permissions.ts").PermissionMode; revision: number } | null } = { current: null };
   const parentRuntime: AgentRuntimeRef = {};
   const runtimeContext: RuntimeExecutionContext = { sessionId: activeSessionId, workspaceId: cwd };
   let activePermissionTurn: import("../permissions.ts").PermissionTurnContext | undefined;
@@ -315,7 +318,7 @@ export async function runTerminalMain(): Promise<void> {
       grep: runDirectToolCommand,
     });
     const input = new TerminalInputController({
-      onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, multiAgentPipelineToolRef, multiAgentTaskPendingRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); }, persistSession: persistSessionSnapshot, onSessionRestore: () => { if (scrollback) scrollbackRenderer.forceNewSegment(); }, commandRegistry }),
+      onAction: (action) => handleInputAction(action, { store, service, permissionManager, input, cwd, planCaptureRef, execCaptureRef, initModeRestoreRef, autocomplete, sessionAccess: sessionManager, sessionRef, allTools, runtimeContext, directAbortRef, multiAgentPipelineToolRef, multiAgentTaskPendingRef, setThinkingMode: (mode) => { activeThinkingMode = mode; service.setThinkingMode(mode); }, persistSession: persistSessionSnapshot, onSessionRestore: () => { if (scrollback) scrollbackRenderer.forceNewSegment(); }, commandRegistry }),
       getScrollPageSize: () => Math.max(1, (process.stdout.rows || 24) - 8),
     });
     autocomplete = new TerminalAutocompleteController({
@@ -552,6 +555,7 @@ export type InputDeps = {
   cwd: string;
   planCaptureRef: { current: { prompt: string } | null };
   execCaptureRef: { current: { mode: "run" | "retry" } | null };
+  initModeRestoreRef: { current: { mode: import("../permissions.ts").PermissionMode; revision: number } | null };
   autocomplete: TerminalAutocompleteController;
   /** Preferred session boundary used by the production terminal entrypoint. */
   sessionAccess?: SessionAccess;
@@ -1118,31 +1122,67 @@ async function submitInput(
       store.dispatch({ type: "ADD_NOTICE", title: "Init", text: initCommand.message });
       return;
     }
+    if (initCommand.print) {
+      // --print: show template preview without writing or involving LLM
+      try {
+        const result = await initAgentMd({ cwd: deps.cwd, print: true });
+        store.dispatch({
+          type: "ADD_NOTICE",
+          title: "AGENT.MD Preview",
+          text: result.content,
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        store.dispatch({ type: "ADD_NOTICE", title: "Init Failed", text: detail });
+      }
+      return;
+    }
+    // Default /init: submit the init prompt to the agent loop so the LLM
+    // analyzes the project and writes AGENT.MD itself (Claude Code style).
+    // Switch to bypass mode so the LLM's write tool calls are not blocked.
+    const previousMode = permissionManager.getMode();
+    const previousRevision = permissionManager["revision"] as number;
+    permissionManager.setMode("bypass");
+    deps.initModeRestoreRef.current = { mode: previousMode, revision: previousRevision };
+    store.dispatch({
+      type: "ADD_NOTICE",
+      title: "Init",
+      text: previousMode === "plan"
+        ? "Switched to bypass mode for /init — LLM will write AGENT.MD directly."
+        : "Analyzing project and generating AGENT.MD…",
+    });
     try {
-      const result = await initAgentMd({
-        cwd: deps.cwd,
-        force: initCommand.force,
-        print: initCommand.print,
-      });
-      if (initCommand.print) {
-        store.dispatch({ type: "ADD_NOTICE", title: "AGENT.MD Template Preview", text: result.content });
-        return;
+      const result = await deps.service.submit(INIT_PROMPT, { displayText: "/init" });
+      // Restore permission mode after the init turn finishes.
+      if (deps.initModeRestoreRef.current) {
+        const { mode, revision } = deps.initModeRestoreRef.current;
+        if (permissionManager["revision"] as number === revision) {
+          permissionManager.setMode(mode);
+        }
+        deps.initModeRestoreRef.current = null;
       }
-      const bundle = await loadInstructionBundle(deps.cwd).catch(() => undefined);
-      if (bundle && bundle.content.length > 0) {
-        const mode = permissionManager.getMode();
-        deps.service.replaceHistory(restoreAgentHistory(deps.service.getHistory(), getDefaultSystemPrompt(mode, bundle.content)));
+      if (!result.succeeded && result.errorMessage) {
+        store.dispatch({ type: "ADD_NOTICE", title: "Init Failed", text: result.errorMessage });
+      } else {
+        const bundle = await loadInstructionBundle(deps.cwd).catch(() => undefined);
+        if (bundle && bundle.content.length > 0) {
+          const restoredMode = permissionManager.getMode();
+          deps.service.replaceHistory(restoreAgentHistory(deps.service.getHistory(), getDefaultSystemPrompt(restoredMode, bundle.content)));
+        }
+        store.dispatch({ type: "ADD_NOTICE", title: "AGENT.MD", text: "Generated AGENT.MD. Instructions are now active for subsequent turns." });
       }
-      store.dispatch({
-        type: "ADD_NOTICE",
-        title: "AGENT.MD",
-        text: result.overwritten
-          ? "Overwrote AGENT.MD. Updated instructions are now active for subsequent turns."
-          : "Created AGENT.MD. Instructions are now active for subsequent turns.",
-      });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       store.dispatch({ type: "ADD_NOTICE", title: "Init Failed", text: detail });
+    } finally {
+      // Always restore the mode, even on error.
+      if (deps.initModeRestoreRef.current) {
+        const { mode, revision } = deps.initModeRestoreRef.current;
+        if (permissionManager["revision"] as number === revision) {
+          permissionManager.setMode(mode);
+        }
+        deps.initModeRestoreRef.current = null;
+      }
     }
     return;
   }

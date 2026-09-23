@@ -60,7 +60,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "copy", usage: "/copy [last|assistant|input|tool|thinking|user|all]", description: "Copy a message or transcript to the clipboard" },
   { name: "skill", usage: "/skill [on|off|list|clear] [name]", description: "Alias of /skills", alias: true },
   { name: "skills", usage: "/skills [on|off|list|clear] [name]", description: "Manage session skills" },
-  { name: "init", usage: "/init [--force] [--print]", description: "Create AGENT.MD project instructions" },
+  { name: "init", usage: "/init [--force] [--print]", description: "Generate AGENT.MD via LLM (submits init prompt to agent loop); --print shows template preview" },
   { name: "multi-agent", usage: "/multi-agent [task]", description: "启动多智能体任务向导 (planner → worker → reviewer)" },
   { name: "help", usage: "/help", description: "Show help" },
   { name: "exit", usage: "/exit", description: "Alias of /quit", alias: true },

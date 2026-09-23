@@ -68,6 +68,7 @@ function dependencies(): InputDeps {
     sessionRef: { current: "test" },
     planCaptureRef: { current: null },
     execCaptureRef: { current: null },
+    initModeRestoreRef: { current: null },
     allTools: [],
     runtimeContext: { sessionId: "test", workspaceId: process.cwd() },
     directAbortRef: {},
