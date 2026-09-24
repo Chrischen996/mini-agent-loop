@@ -108,8 +108,8 @@ export function shouldSubmitTypedModelCommand(rawInput: string, models = getAllM
 /**
  * Normalize what the model picker holds into a submittable `/model` command.
  *
- * While the picker is open the prompt holds the bare query in both clients, so
- * the empty field can show its `Search models` hint. Enter on a typed reference
+ * While the picker is open the prompt holds the bare query so the empty field
+ * can show its `Search models` hint. Enter on a typed reference
  * must still switch the model instead of sending that reference to the model as
  * a prompt.
  */

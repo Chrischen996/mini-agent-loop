@@ -1,16 +1,8 @@
-// tui-core — FrameScheduler: coalesces high-frequency store updates into
-// at-most-one render per animation frame (16ms cadence), so streaming
-// deltas and fast scroll do not stack intermediate frames.
+// tui-core — optional renderer-agnostic FrameScheduler for headless clients.
 //
-// The pi-tui entrypoint (terminal-main.ts) already does a hand-rolled
-// version of this (a `renderQueued` flag + `requestAnimationFrame`
-// fallback to `setImmediate`). This module is the kernel-level primitive:
-// entrypoints construct one scheduler and hand its `tick` to
-// `store.subscribe`, so the scheduling policy lives in exactly one place.
-//
-// This module is renderer-agnostic: it owns *when* a frame is painted,
-// not *what* is painted. The entrypoint passes its render body as the
-// `onFrame` callback.
+// Coalesces high-frequency store updates into at-most-one frame per 16ms.
+// It owns *when* a frame is painted, not *what* is painted: consumers supply
+// the render callback and can invalidate it from a store subscription.
 
 export type FrameSchedulerOptions = {
   /** Target frame interval in ms. Default 16 (~60fps); the spinner

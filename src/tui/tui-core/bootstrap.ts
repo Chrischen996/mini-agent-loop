@@ -1,13 +1,7 @@
-// tui-core — headless kernel, platform-agnostic.
+// tui-core — platform-agnostic runtime bootstrap for headless consumers.
 //
-// L1: AgentSession = store + TurnRunner + CommandRegistry.
-// This module must not import React, Ink, pi-tui, or any renderer.
-// It is the single agent-turn execution path shared by every TUI client.
-//
-// Consumers:
-//   - src/tui/terminal-main.ts (pi-tui canonical renderer)
-//   - src/tui/App.tsx          (Ink, transition period)
-//   - src/tui/main.ts          (legacy, transition period)
+// This module must not import React, Ink, or any terminal renderer.
+// The shipped Ink TUI and this module both depend on the shared Agent Core.
 
 import type { LlmConfig } from "../../llm/index.ts";
 import { switchLlmModel } from "../../llm/index.ts";
@@ -57,12 +51,11 @@ export type { ToolProvider } from "../../tools/types.ts";
 export { createTools, createAllTools } from "../../tools/index.ts";
 
 /**
- * The single sub-assembled, platform-agnostic runtime for a TUI session.
+ * Platform-agnostic runtime setup for a headless agent session.
  *
- * Previously every TUI entrypoint re-implemented the same sandbox /
- * codebase / MCP / subagent / skill / profile / budget bootstrap, and `buildRoleLlmConfigs` was copy-pasted
- * into terminal-main.ts and main.ts. This factory is the one place that
- * composition happens; entrypoints stay thin wrappers around it.
+ * Composes sandbox, codebase, MCP, subagent, skill, profile, and budget
+ * dependencies for consumers that prefer this factory. The Ink entrypoint
+ * retains its own UI-specific composition over the same Agent Core.
  *
  * Callers must `await close()` on shutdown so the MCP server, codebase
  * index and sandbox process are torn down before the process exits.

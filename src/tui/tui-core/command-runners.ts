@@ -1,17 +1,9 @@
-// tui-core — CommandRegistry execution entries (P4-follow-up).
+// tui-core — optional renderer-agnostic CommandRegistry execution bodies.
 //
-// This is the first batch of `run` bodies that move off the inline
-// `if (slashCommand?.cmd === …)` chains in terminal-main.ts and
-// App.tsx. Each entry is renderer-agnostic: it receives the parsed
-// command args + a `CommandContext`, and returns `true` when the
-// command was fully handled locally, `false` when it should fall
-// through to the agent.
-//
-// The pi-tui entry (terminal-main.ts) still keeps a small number of
-// terminal-specific branches (multi-agent wizard, /init wizard, session
-// resume) inline — those carry UI state that has not yet been lifted
-// into the kernel, and move here one by one as their state gets
-// relocated to slices.
+// Each body receives parsed command arguments and a CommandContext, and
+// returns true when handled locally. The Ink UI keeps overlay-specific
+// command routing in App.tsx; the shared command catalog stays in
+// slash-commands.ts.
 
 import type { SlashCommand } from "../slash-commands.ts";
 import type { CommandContext, ParsedCommandArgs } from "./commands.ts";
@@ -60,8 +52,8 @@ export const runTodo: (ctx: CommandContext, args: ParsedCommandArgs) => Promise<
     const current = ctx.store.getState().todoItems ?? [];
     const result = applyTodoCommand(current, todoCmd.todo);
     if (result.ok) {
-      ctx.store.dispatch({ type: "SET_TODOS", todos: result.todos });      // persistTodoState is a terminal-main extension; the kernel-level
-      // context carries it through an optional hook.
+      ctx.store.dispatch({ type: "SET_TODOS", todos: result.todos });
+      // The headless context carries persistence through an optional hook.
       (ctx as unknown as { persistTodoState?: (t: import("../../todo.ts").TodoItem[]) => void }).persistTodoState?.(result.todos);
     } else {
       ctx.store.dispatch({ type: "ADD_NOTICE", title: "Todo", text: result.error });
@@ -140,9 +132,8 @@ export const runDirectToolCommand: (ctx: CommandContext, args: ParsedCommandArgs
 /**
  * `/resume …` — list saved sessions, resolve a prefix, and either
  * surface an ambiguous notice or load the target session into the
- * current runtime. This is a seed entry: the full restore path (model
- * switch, skill rebind, history rewrite) is still terminal-main
- * specific and stays inline until P4-follow-up converges App.tsx.
+ * current runtime. The Ink UI owns its full session restore path; this
+ * headless seed leaves model/skill rebinds to the caller.
  */
 export const runResume: (ctx: CommandContext, args: ParsedCommandArgs) => Promise<boolean> =
   async (ctx, args) => {
@@ -179,9 +170,7 @@ export const runResume: (ctx: CommandContext, args: ParsedCommandArgs) => Promis
       });
       return true;
     }
-    // Load the target; the rest of the restore (model switch, todo
-    // rewrite) is entrypoint-specific and stays in terminal-main.ts
-    // until P4-follow-up.
+    // Load the target; the caller still owns model and todo restoration.
     const restored = await sessionAccess.load(target.id);
     if (!restored) {
       ctx.store.dispatch({
@@ -198,10 +187,8 @@ export const runResume: (ctx: CommandContext, args: ParsedCommandArgs) => Promis
 
 /**
  * Convenience: build the ParsedCommandArgs for a raw typed line. The
- * entrypoint passes its own parser's result; this mirrors the
- * terminal-main.ts behavior of falling back to a generic
- * `{ cmd: name, raw }` shape for commands without a dedicated parser
- * arm.
+ * caller passes its parser's result; unknown commands fall back to a generic
+ * `{ cmd: name, raw }` shape when no dedicated parser arm exists.
  */
 export function parseArgs(parsed: SlashCommand, text: string): ParsedCommandArgs {
   return argsFor(parsed, text);

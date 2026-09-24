@@ -1,11 +1,8 @@
-// tui-core — L1 headless kernel entry point.
+// tui-core — optional renderer-agnostic session/kernel API.
 //
-// Renderer-agnostic composition of `TuiStore` + `TurnRunner`. Every TUI
-// client (pi-tui canonical, Ink transition, legacy) builds its session
-// through `createAgentSession`; nothing above L1 may re-implement the
-// agent loop.
-//
-// This module MUST NOT import React, Ink, pi-tui or any renderer.
+// Composes `TuiStore` + `TurnRunner` for headless consumers. The sole shipped
+// TUI is the Ink app; both it and this API use the shared agent loop in
+// `src/loop.ts`. Keep this module independent of React and terminal renderers.
 
 export {
   bootstrapTui,

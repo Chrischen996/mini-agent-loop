@@ -32,10 +32,10 @@ export function stripInlineMarkdown(text: string): string {
 /**
  * Plain-text form of one parsed Markdown row.
  *
- * Both clients share this so the ANSI projection and the Ink components cannot
- * drift on markers: fenced code keeps its row budget (one output row per source
- * line, which `estimateMessageHeight` relies on) while losing the literal ```
- * lines, headings get the same `▸`/`·` bullet, and tables arrive pre-aligned.
+ * Ink and headless projections share this: fenced code keeps its row budget
+ * (one output row per source line, which `estimateMessageHeight` relies on)
+ * while losing the literal ``` lines, headings get a `▸`/`·` bullet, and
+ * tables arrive pre-aligned.
  */
 export function markdownRowText(line: MarkdownLine): string {
   switch (line.kind) {

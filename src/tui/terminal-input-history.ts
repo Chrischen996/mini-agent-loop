@@ -1,5 +1,5 @@
 /**
- * Bounded command/prompt history for the standalone terminal input.
+ * Bounded command/prompt history for the Ink prompt and headless input helpers.
  *
  * Navigation keeps the draft that was present before the first Up press, so
  * Down can return to it without touching the Agent history.

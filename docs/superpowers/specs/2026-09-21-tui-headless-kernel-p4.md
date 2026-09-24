@@ -1,5 +1,9 @@
 # tui-headless-kernel P4: entrypoint switch + transition period
 
+> Historical design note, superseded by the single Ink/React TUI. The pi-tui
+> router and renderer flags described below have been removed; see `README.md`
+> and `docs/architecture.md` for current entrypoints.
+
 Phase P4 of the 2026-09-21 headless-kernel design review. Lands the entrypoint switch: `dist/tui.js` is now a renderer router that defaults to the pi-tui canonical entrypoint, with a one-release `--renderer=ink` fallback and a `--renderer=scrollback` raw-ANSI variant.
 
 The legacy chain (`main.ts` + `legacy-render.ts` + `tui:legacy`) is **not deleted yet** — it stays as a third rollback channel for this release and is removed in the P4-follow-up release after the pi-tui path has fielded a patch cycle.

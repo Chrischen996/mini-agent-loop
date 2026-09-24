@@ -4,9 +4,8 @@ import { compactText } from "./text-utils.ts";
 /**
  * Shared picker and overlay chrome.
  *
- * Both clients used to pick their own selection glyph (Ink `▶`, ANSI `❯`) and
- * their own key-hint wording for the same overlay, so the two UIs described the
- * same interaction differently. These constants are the single source.
+ * Shared selection markers and key-hint wording for the Ink overlays and
+ * headless render projections.
  */
 export const PICKER_SELECTED_MARKER = "❯";
 export const PICKER_UNSELECTED_MARKER = " ";
@@ -15,7 +14,7 @@ export const PICKER_UNSELECTED_MARKER = " ";
 export const TODO_EDITOR_SELECT_HINT = "↑↓ move  ·  space/s status  ·  a add  ·  e edit  ·  d delete  ·  esc close";
 export const TODO_EDITOR_DRAFT_HINT = "enter confirm  ·  esc cancel";
 
-/** Human-facing labels used by both the ANSI and Ink presentation paths. */
+/** Human-facing labels used by Ink and headless presentation helpers. */
 export function permissionModeLabel(mode: PermissionMode): string {
   switch (mode) {
     case "plan": return "Plan mode";
@@ -55,9 +54,9 @@ export function statusLabel(status: string, busy = false): string {
   // reasoning level) instead of echoing "Thinking…" on an idle prompt.
   const permissionModeStatus = /^permission mode:\s*(.+)$/i.exec(value);
   if (permissionModeStatus) {
-    // Sources disagree on the payload: the reducer writes the label while the
-    // legacy client writes the raw mode. Resolve both to the pinned label so
-    // the status row can suppress the duplicate.
+    // Persisted status strings may contain either a display label or a raw
+    // permission mode. Resolve both to the pinned label so the status row
+    // can suppress the duplicate.
     const raw = permissionModeStatus[1]!.trim();
     const mode = PERMISSION_MODES.find((candidate) => candidate.toLowerCase() === raw.toLowerCase());
     return mode ? permissionModeLabel(mode) : raw;
