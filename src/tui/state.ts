@@ -157,6 +157,8 @@ export type TuiState = {
    * 0 = stick to bottom (show latest).
    */
   scrollOffset: number;
+  /** Maximum scroll offset allowed by the viewport height and content size. */
+  maxScrollOffset?: number;
 };
 
 export type TuiAction =
@@ -202,7 +204,8 @@ export type TuiAction =
   | { type: "ADD_NOTICE"; title?: string; text: string }
   | { type: "SCROLL_BY"; delta: number }
   | { type: "SCROLL_TO"; offset: number }
-  | { type: "SCROLL_TO_BOTTOM" };
+  | { type: "SCROLL_TO_BOTTOM" }
+  | { type: "SET_MAX_SCROLL_OFFSET"; offset: number };
 
 function toolTarget(args: Record<string, unknown>): string | undefined {
   for (const key of ["path", "file", "pattern", "command", "cmd"]) {
@@ -313,6 +316,9 @@ export function createInitialState(modelName: string): TuiState {
     pendingImages: [],
     contextCompactions: [],
     scrollOffset: 0,
+    // maxScrollOffset is intentionally absent (undefined) until App.tsx
+    // measures the viewport and dispatches SET_MAX_SCROLL_OFFSET. The
+    // reducer falls back to no clamp when it is unset.
     phase: "planning",
     todoPlan: undefined,
     todoItems: undefined,
@@ -1353,17 +1359,29 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     }
 
     case "SCROLL_BY": {
-      const next = Math.max(0, state.scrollOffset + action.delta);
+      const max = state.maxScrollOffset;
+      const next = max === undefined
+        ? Math.max(0, state.scrollOffset + action.delta)
+        : Math.max(0, Math.min(max, state.scrollOffset + action.delta));
       return next === state.scrollOffset ? state : { ...state, scrollOffset: next };
     }
 
     case "SCROLL_TO": {
-      const next = Math.max(0, action.offset);
+      const max = state.maxScrollOffset;
+      const next = max === undefined
+        ? Math.max(0, action.offset)
+        : Math.max(0, Math.min(max, action.offset));
       return next === state.scrollOffset ? state : { ...state, scrollOffset: next };
     }
 
     case "SCROLL_TO_BOTTOM":
       return state.scrollOffset === 0 ? state : { ...state, scrollOffset: 0 };
+
+    case "SET_MAX_SCROLL_OFFSET": {
+      if (state.maxScrollOffset === action.offset) return state;
+      const clamped = Math.max(0, Math.min(action.offset ?? 0, state.scrollOffset));
+      return { ...state, maxScrollOffset: action.offset, scrollOffset: clamped };
+    }
 
     default:
       return state;

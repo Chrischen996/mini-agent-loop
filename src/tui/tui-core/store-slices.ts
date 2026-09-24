@@ -105,6 +105,7 @@ export type ViewSlice = Pick<
   | "expandedThinking"
   | "focusedMessageIndex"
   | "scrollOffset"
+  | "maxScrollOffset"
   | "pendingImages"
 >;
 
@@ -147,7 +148,7 @@ const SLICE_KEYS: Array<[
     "streamingReasoningParts", "turnStartedAt", "lastStreamAt", "busy",
     "modelName", "usedTokens", "contextTokens", "cacheReadTokens", "spinnerMessage",
   ]],
-  ["view", ["expandedThinking", "focusedMessageIndex", "scrollOffset", "pendingImages"]],
+  ["view", ["expandedThinking", "focusedMessageIndex", "scrollOffset", "maxScrollOffset", "pendingImages"]],
   ["notices", ["status", "thinkingMode"]],
 ];
 

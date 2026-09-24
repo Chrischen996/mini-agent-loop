@@ -29,7 +29,7 @@
   },
   "scripts": {
     "start": "tsx src/cli.ts",
-    "tui": "tsx src/tui/ink-main.tsx",
+    "tui": "node --import tsx src/tui/ink-main.tsx",
     "dev": "tsx watch src/server.ts",
     "dev:server": "tsx watch src/server.ts",
     "serve": "tsx src/server.ts",

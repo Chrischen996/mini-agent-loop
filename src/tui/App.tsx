@@ -1802,10 +1802,16 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     // Reducer append actions already preserve the offset for completed message
     // blocks. Only compensate here for streaming growth inside the same
     // messages array; doing this after an append moves the viewport twice.
+    // Also update scrollbar bounds so scroll offset stays clamped.
     if (!messagesUnchanged) {
       // A queued streaming adjustment belongs to the previous message array;
       // never carry it across a completed-message append.
       pendingScrollDeltaRef.current = 0;
+    }
+    const maxScrollApprox = Math.max(0, viewportContentHeight - feedHeight);
+    const shouldUpdateMax = state.maxScrollOffset !== maxScrollApprox && maxScrollApprox >= 0;
+    if (shouldUpdateMax) {
+      dispatch({ type: "SET_MAX_SCROLL_OFFSET", offset: maxScrollApprox });
     }
     if (messagesUnchanged && state.scrollOffset > 0 && viewportContentHeight > previous) {
       pendingScrollDeltaRef.current += viewportContentHeight - previous;
@@ -1822,7 +1828,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         });
       }
     }
-  }, [viewportContentHeight, state.scrollOffset]);
+  }, [viewportContentHeight, state.scrollOffset, feedHeight, state.maxScrollOffset]);
 
   return (
     <Box flexDirection="column" width={termWidth} height={frameHeight} overflow="hidden">

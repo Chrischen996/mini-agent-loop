@@ -33,6 +33,10 @@ export class TerminalInputHistory {
     }
 
     if (direction < 0) {
+      if (this.index === 0) {
+        // At oldest entry — signal scroll to caller
+        return undefined;
+      }
       this.index = Math.max(0, this.index - 1);
     } else {
       this.index = Math.min(this.entries.length, this.index + 1);
