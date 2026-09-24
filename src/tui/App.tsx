@@ -135,7 +135,12 @@ import { TUI_BRAND_VERSION } from "./brand.ts";
 import { getWelcomeHeaderHeight } from "./welcome-panel.ts";
 import { formatAmbiguousSessionNotice, getResumeMessageCandidates, getStartupSessionRequest, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
 
-type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
+type AppProps = {
+  cwd: string;
+  agentTools?: ToolProvider;
+  allTools?: ToolProvider;
+  mcpStatuses?: () => McpServerStatus[];
+};
 const DEFAULT_IMAGE_PROMPT = "Analyze the attached image.";
 
 import {
@@ -143,10 +148,12 @@ import {
   runUpdateUpgrade,
   type UpdateInfo,
 } from "../update-check.ts";
+import { formatMcpStatus } from "../mcp/status.ts";
+import type { McpServerStatus } from "../mcp/types.ts";
 import { UpdateNotice } from "./components/UpdateNotice.tsx";
 import type { Key } from "ink";
 
-export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement {
+export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   // ── Update-check state ────────────────────────────────────────────────────
@@ -200,6 +207,12 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   useInput((input, key) => {
     handleUpdateKey(input, key);
   }, { isActive: update !== null || upgradeResult !== null });
+  const [mcpStatus, setMcpStatus] = useState<string | undefined>(() => formatMcpStatus(mcpStatuses?.() ?? []));
+  useEffect(() => {
+    if (!mcpStatuses) return undefined;
+    const timer = setInterval(() => setMcpStatus(formatMcpStatus(mcpStatuses())), 1_000);
+    return () => clearInterval(timer);
+  }, [mcpStatuses]);
   const termWidth = Math.max(10, stdout?.columns || 80);
   // Leave two terminal rows unused. Ink's renderer adds a trailing newline and
   // can gain a row from borders/wrapping; staying below the terminal height
@@ -2023,6 +2036,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           busy={state.busy}
           status={state.status}
           queuedCount={queuedCount}
+          mcpStatus={mcpStatus}
           permissionMode={state.permissionMode}
           thinkingLevel={llm.thinkingLevel ?? (llm.reasoning ? "medium" : "off")}
           cacheReadTokens={state.cacheReadTokens}

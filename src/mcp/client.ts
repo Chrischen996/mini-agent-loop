@@ -5,10 +5,17 @@ import {
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  PromptListChangedNotificationSchema,
+  ResourceListChangedNotificationSchema,
+  ToolListChangedNotificationSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import type {
   McpCallResult,
   McpClientConnection,
+  McpContentBlock,
+  McpPromptDefinition,
+  McpResourceDefinition,
   McpStdioServerConfig,
   McpToolDefinition,
 } from "./types.ts";
@@ -22,6 +29,7 @@ class SdkMcpClientConnection implements McpClientConnection {
   private lastError: Error | undefined;
   private pendingToolsChanged = false;
   private readonly toolsChangedListeners = new Set<() => void>();
+  private readonly catalogChangedListeners = new Set<() => void>();
   private readonly closeListeners = new Set<(error?: Error) => void>();
   private readonly client: Client;
   private readonly timeoutMs: number;
@@ -80,6 +88,105 @@ class SdkMcpClientConnection implements McpClientConnection {
     return result as McpCallResult;
   }
 
+  async listPrompts(signal?: AbortSignal): Promise<Omit<McpPromptDefinition, "serverId">[]> {
+    const prompts: Omit<McpPromptDefinition, "serverId">[] = [];
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    for (let page = 0; page < MAX_TOOL_PAGES; page++) {
+      const result = await this.client.listPrompts(
+        cursor ? { cursor } : undefined,
+        { signal, timeout: this.timeoutMs },
+      );
+      prompts.push(...result.prompts.map((prompt) => ({
+        name: prompt.name,
+        title: prompt.title,
+        description: prompt.description,
+        arguments: prompt.arguments,
+      })));
+      cursor = result.nextCursor;
+      if (!cursor) return prompts;
+      if (cursors.has(cursor)) throw new Error("MCP prompts/list returned a repeated cursor");
+      cursors.add(cursor);
+    }
+    throw new Error(`MCP prompts/list exceeded ${MAX_TOOL_PAGES} pages`);
+  }
+
+  async getPrompt(
+    name: string,
+    args: Record<string, string>,
+    signal?: AbortSignal,
+  ): Promise<McpCallResult> {
+    const result = await this.client.getPrompt(
+      { name, arguments: args },
+      { signal, timeout: this.timeoutMs },
+    );
+    const content: McpContentBlock[] = [];
+    for (const message of result.messages) {
+      const block = message.content;
+      if (block.type === "text") content.push({ type: "text", text: block.text });
+      else if (block.type === "image") content.push({ type: "image", data: block.data, mimeType: block.mimeType });
+      else if (block.type === "audio") content.push({ type: "audio", data: block.data, mimeType: block.mimeType });
+      else if (block.type === "resource") {
+        content.push({
+          type: "resource",
+          resource: "text" in block.resource
+            ? { uri: block.resource.uri, text: block.resource.text, mimeType: block.resource.mimeType }
+            : { uri: block.resource.uri, blob: block.resource.blob, mimeType: block.resource.mimeType },
+        });
+      } else if (block.type === "resource_link") {
+        content.push({
+          type: "resource_link",
+          uri: block.uri,
+          name: block.name,
+          title: block.title,
+          description: block.description,
+          mimeType: block.mimeType,
+        });
+      } else {
+        content.push({ type: "text", text: `[MCP prompt ${message.role}] unsupported content` });
+      }
+    }
+    return { content, isError: false };
+  }
+
+  async listResources(signal?: AbortSignal): Promise<Omit<McpResourceDefinition, "serverId">[]> {
+    const resources: Omit<McpResourceDefinition, "serverId">[] = [];
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    for (let page = 0; page < MAX_TOOL_PAGES; page++) {
+      const result = await this.client.listResources(
+        cursor ? { cursor } : undefined,
+        { signal, timeout: this.timeoutMs },
+      );
+      resources.push(...result.resources.map((resource) => ({
+        uri: resource.uri,
+        name: resource.name,
+        title: resource.title,
+        description: resource.description,
+        mimeType: resource.mimeType,
+      })));
+      cursor = result.nextCursor;
+      if (!cursor) return resources;
+      if (cursors.has(cursor)) throw new Error("MCP resources/list returned a repeated cursor");
+      cursors.add(cursor);
+    }
+    throw new Error(`MCP resources/list exceeded ${MAX_TOOL_PAGES} pages`);
+  }
+
+  async readResource(uri: string, signal?: AbortSignal): Promise<McpCallResult> {
+    const result = await this.client.readResource(
+      { uri },
+      { signal, timeout: this.timeoutMs },
+    );
+    return {
+      content: result.contents.map((item) => (
+        "text" in item
+          ? { type: "resource" as const, resource: { uri: item.uri, text: item.text, mimeType: item.mimeType } }
+          : { type: "resource" as const, resource: { uri: item.uri, blob: item.blob, mimeType: item.mimeType } }
+      )),
+    };
+  }
+
   onToolsChanged(listener: () => void): () => void {
     this.toolsChangedListeners.add(listener);
     if (this.pendingToolsChanged) {
@@ -89,6 +196,11 @@ class SdkMcpClientConnection implements McpClientConnection {
       });
     }
     return () => this.toolsChangedListeners.delete(listener);
+  }
+
+  onCatalogChanged(listener: () => void): () => void {
+    this.catalogChangedListeners.add(listener);
+    return () => this.catalogChangedListeners.delete(listener);
   }
 
   onClose(listener: (error?: Error) => void): () => void {
@@ -109,6 +221,11 @@ class SdkMcpClientConnection implements McpClientConnection {
       return;
     }
     for (const listener of this.toolsChangedListeners) listener();
+  }
+
+  handleCatalogChanged(): void {
+    if (this.closed) return;
+    for (const listener of this.catalogChangedListeners) listener();
   }
 
   handleError(error: Error): void {
@@ -145,6 +262,8 @@ async function connectMcpClient(
   try {
     await client.connect(transport, { signal, timeout: timeoutMs });
     client.setNotificationHandler(ToolListChangedNotificationSchema, () => connection.handleToolsChanged());
+    client.setNotificationHandler(PromptListChangedNotificationSchema, () => connection.handleCatalogChanged());
+    client.setNotificationHandler(ResourceListChangedNotificationSchema, () => connection.handleCatalogChanged());
     return connection;
   } catch (error) {
     await transport.close().catch(() => undefined);

@@ -5,7 +5,8 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import { contentAsString } from "../src/content.ts";
 import { loadMcpConfig } from "../src/mcp/config.ts";
-import { createMcpApprovalGate } from "../src/mcp/approval.ts";
+import { createMcpApprovalGate, isMcpCallAllowed, parseMcpAllowlist } from "../src/mcp/approval.ts";
+import { formatMcpStatus } from "../src/mcp/status.ts";
 import { createMcpToolName, createMcpTools, mcpResultToToolResult } from "../src/mcp/tool-adapter.ts";
 import { McpRuntime, mergeToolSets } from "../src/mcp/runtime.ts";
 import type {
@@ -196,6 +197,31 @@ describe("MCP approval gate", () => {
     await allow(remoteTool, {});
     await deny({ ...remoteTool, source: { kind: "local" } }, {});
   });
+
+  it("allows one server or one tool without approving every remote call", async () => {
+    const allowlist = parseMcpAllowlist("demo, other/read");
+    assert.deepEqual(allowlist, ["demo", "other/read"]);
+    assert.equal(isMcpCallAllowed("demo", "write", allowlist), true);
+    assert.equal(isMcpCallAllowed("other", "read", allowlist), true);
+    assert.equal(isMcpCallAllowed("other", "write", allowlist), false);
+    assert.throws(() => parseMcpAllowlist("demo/*"), /Invalid MCP allowlist entry/);
+    const gate = createMcpApprovalGate({ allow: false, allowlist, approvalHint: "Allow it." });
+    await gate(remoteTool, {});
+    await assert.rejects(
+      gate({ ...remoteTool, source: { kind: "mcp", serverId: "other", toolName: "write" } }, {}),
+      /requires explicit approval/,
+    );
+  });
+
+  it("formats a compact connection summary", () => {
+    assert.equal(formatMcpStatus([
+      { id: "a", transport: "stdio", required: false, state: "ready", toolCount: 1 },
+      { id: "b", transport: "http", required: false, state: "error", toolCount: 0 },
+    ]), "MCP 1 ready, 1 error");
+    assert.equal(formatMcpStatus([
+      { id: "off", transport: "stdio", required: false, state: "disabled", toolCount: 0 },
+    ]), undefined);
+  });
 });
 
 describe("MCP runtime", () => {
@@ -208,9 +234,11 @@ describe("MCP runtime", () => {
     try {
       const tools = runtime.snapshot();
       assert.deepEqual(
-        tools.map((tool) => tool.source?.kind === "mcp" && tool.source.toolName),
+        tools.filter((tool) => tool.source?.kind === "mcp").map((tool) => tool.source?.kind === "mcp" && tool.source.toolName),
         ["echo", "delay", "refresh-tools", "shutdown"],
       );
+      assert.ok(tools.some((tool) => tool.name === "mcp_prompts"));
+      assert.ok(tools.some((tool) => tool.name === "mcp_resource"));
       assert.equal(runtime.statuses()[0]?.state, "ready");
       assert.match(runtime.statuses()[0]?.warning ?? "", /background-task/);
       const echo = tools.find((tool) => tool.source?.kind === "mcp" && tool.source.toolName === "echo");

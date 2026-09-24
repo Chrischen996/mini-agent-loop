@@ -44,6 +44,13 @@ describe("parseCliArgs", () => {
   it("sets allowMcpTools when --allow-mcp-tools is present", () => {
     const result = parseCliArgs(["--allow-mcp-tools", "do something"]);
     assert.equal(result.allowMcpTools, true);
+    assert.deepEqual(result.mcpAllowlist, []);
+  });
+
+  it("parses per-server and per-tool MCP allow entries", () => {
+    const result = parseCliArgs(["--allow-mcp", "search", "--allow-mcp=docs/read", "go"]);
+    assert.equal(result.allowMcpTools, false);
+    assert.deepEqual(result.mcpAllowlist, ["search", "docs/read"]);
   });
 
   it("parses --tools flag", () => {

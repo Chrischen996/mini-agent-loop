@@ -520,7 +520,8 @@ ACL sandboxing and interactive PTY sessions are not implemented by this change.
 
 ### MCP tools
 
-The agent can load tools from explicitly configured MCP servers over `stdio`.
+The agent can load tools from explicitly configured MCP servers over `stdio`
+or Streamable HTTP (`"transport": "http"`, with `url` and optional `headers`).
 It does not auto-discover project configuration because an MCP stdio entry can
 execute a local command. Set `MINI_AGENT_MCP_CONFIG` to a file you trust:
 
@@ -561,8 +562,11 @@ reconnected with bounded exponential backoff by default. Set `reconnect` to
 ```bash
 export MINI_AGENT_MCP_CONFIG=/absolute/path/to/mcp.json
 
-# The one-shot CLI only registers MCP tools when this invocation opts in.
+# The one-shot CLI registers configured MCP tools on every invocation.
+# Calls stay denied until this process opts in, either for every server or
+# for one server / one tool. MINI_AGENT_MCP_ALLOW accepts the same entries.
 npm start -- --allow-mcp-tools "使用已配置的远端工具查询数据"
+npm start -- --allow-mcp search --allow-mcp docs/read "只允许这些远端调用"
 ```
 
 All clients use the same `PermissionManager` policy. In `bypass`, configured
@@ -576,9 +580,12 @@ the complete paginated catalog. The next inner model turn receives the updated
 tool set without restarting the process. Changes to the MCP JSON configuration
 itself still require a restart.
 
-User-configured MCP tools in this release use stdio. DeepWiki internally uses
-the fixed official Streamable HTTP endpoint. OAuth, resources, prompts,
-sampling, elicitation, and task-required tools remain out of scope.
+User-configured servers use stdio or Streamable HTTP. DeepWiki internally uses
+the fixed official Streamable HTTP endpoint. Connected servers also expose
+`mcp_prompts` and `mcp_resource`, which list and read remote prompts and
+resources as untrusted data. OAuth, sampling, elicitation, and task-required
+tools remain out of scope. The TUI status row shows a compact connection
+summary such as `MCP 2 ready` when servers are configured.
 
 Local API:
 

@@ -74,6 +74,7 @@ async function main(): Promise<void> {
         cwd={cwd}
         agentTools={mcpRuntime.toolProvider(agentTools)}
         allTools={mcpRuntime.toolProvider(createAllTools(cwd, { sandboxRunner }))}
+        mcpStatuses={() => mcpRuntime.statuses()}
       />,
       { stdout: incrementalStdout },
     );

@@ -113,6 +113,17 @@ describe("model selection", () => {
 
     assert.equal(resolveModel("xai/grok-4.6").id, "grok-4.6");
     assert.ok(searchModels("grok-4.6").some((model) => model.provider === "xai" && model.id === "grok-4.6"));
+
+    const grok47 = getAllModels().find((model) => model.provider === "xai" && model.id === "grok-4.7");
+    assert.ok(grok47);
+    assert.equal(grok47.name, "Grok 4.7");
+    assert.equal(grok47.baseUrl, "https://api.x.ai/v1");
+    assert.equal(grok47.reasoning, true);
+    assert.deepEqual(grok47.capabilities.input, ["text", "image"]);
+    assert.equal(grok47.contextWindow, 500000);
+    assert.equal(grok47.maxTokens, 500000);
+    assert.equal(resolveModel("xai/grok-4.7").id, "grok-4.7");
+    assert.ok(searchModels("grok-4.7").some((model) => model.provider === "xai" && model.id === "grok-4.7"));
   });
 
   it("registers both regional Kimi K3 models with their documented metadata", () => {

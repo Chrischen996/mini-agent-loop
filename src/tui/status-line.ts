@@ -22,6 +22,7 @@ export type StatusSegmentRole =
   | "thinking"
   | "context"
   | "status"
+  | "mcp"
   | "queued"
   | "cache";
 
@@ -43,6 +44,8 @@ export type StatusLineInput = {
   busy: boolean;
   status?: string;
   queuedCount?: number;
+  /** Compact MCP connection summary, for example `MCP 2 ready`. */
+  mcpStatus?: string;
   cacheReadTokens?: number;
   promptTokens?: number;
   /** Total row budget. Optional segments are dropped when the row would not fit. */
@@ -213,6 +216,7 @@ export function buildStatusSegments(input: StatusLineInput): StatusSegment[] {
   // Ordered from most to least important; the fitter drops from the end.
   const optional: ContentSegment[] = [
     ...(tailLabel ? [{ role: "status", text: tailLabel, color: C.muted, dim: true } satisfies ContentSegment] : []),
+    ...(input.mcpStatus ? [{ role: "mcp", text: input.mcpStatus, color: input.mcpStatus.includes("error") ? C.error : C.muted, dim: true } satisfies ContentSegment] : []),
     ...((input.queuedCount ?? 0) > 0 ? [{ role: "queued", text: `${input.queuedCount} queued`, color: C.running, dim: true } satisfies ContentSegment] : []),
     ...(showCache && cacheLabel ? [{ role: "cache", text: cacheLabel, color: C.info, dim: true } satisfies ContentSegment] : []),
   ];

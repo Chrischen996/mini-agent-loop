@@ -62,6 +62,8 @@ export type TerminalRenderOptions = {
   /** Active model context window shown in the stable LLM metadata row. */
   contextWindow?: number;
   queuedCount?: number;
+  /** Compact MCP connection summary for the status row. */
+  mcpStatus?: string;
   /** Active reasoning level shown in the wide status row. */
   thinkingLevel?: ModelThinkingLevel;
   /** Optional Todo editor overlay for consumers of this projection. */
@@ -276,6 +278,7 @@ export function buildTerminalRenderLines(
       busy: state.busy,
       status: state.status,
       queuedCount: options.queuedCount,
+      mcpStatus: options.mcpStatus,
       cacheReadTokens: state.cacheReadTokens,
       promptTokens: state.contextTokens,
       width,

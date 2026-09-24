@@ -13,6 +13,7 @@ type StatusBarProps = {
   busy: boolean;
   status?: string;
   queuedCount?: number;
+  mcpStatus?: string;
   permissionMode: PermissionMode;
   thinkingLevel: ModelThinkingLevel;
   cacheReadTokens?: number;
@@ -25,7 +26,7 @@ type StatusBarProps = {
  * Segment order, separators, truncation, and colors come from the
  * `status-line` module. This component maps those segments onto Ink text nodes.
  */
-export const StatusBar = React.memo(function StatusBar({ modelName, cwd, width = 80, tokenEstimate, contextWindow, busy, status = "Ready", queuedCount = 0, permissionMode, thinkingLevel, cacheReadTokens, promptTokens }: StatusBarProps): React.ReactElement {
+export const StatusBar = React.memo(function StatusBar({ modelName, cwd, width = 80, tokenEstimate, contextWindow, busy, status = "Ready", queuedCount = 0, mcpStatus, permissionMode, thinkingLevel, cacheReadTokens, promptTokens }: StatusBarProps): React.ReactElement {
   const segments = buildStatusSegments({
     modelName,
     cwd,
@@ -36,6 +37,7 @@ export const StatusBar = React.memo(function StatusBar({ modelName, cwd, width =
     busy,
     status,
     queuedCount,
+    mcpStatus,
     cacheReadTokens,
     promptTokens,
     width,

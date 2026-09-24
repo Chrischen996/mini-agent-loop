@@ -1,11 +1,14 @@
 import type { Tool } from "../tools/types.ts";
 import { loadMcpConfigFromEnv } from "./config.ts";
 import { createStdioMcpClient, createStreamableHttpMcpClient } from "./client.ts";
+import { createMcpCatalogTools } from "./catalog.ts";
 import { createMcpTools } from "./tool-adapter.ts";
 import type {
   LoadedMcpConfig,
   McpClientConnection,
   McpClientFactory,
+  McpPromptDefinition,
+  McpResourceDefinition,
   McpServerConfig,
   McpServerStatus,
   McpStdioServerConfig,
@@ -39,6 +42,8 @@ type ServerRuntime = {
   status: McpServerStatus;
   client?: McpClientConnection;
   definitions: McpToolDefinition[];
+  prompts: McpPromptDefinition[];
+  resources: McpResourceDefinition[];
   reconnectAttempt: number;
   reconnectTimer?: NodeJS.Timeout;
   stableTimer?: NodeJS.Timeout;
@@ -47,6 +52,7 @@ type ServerRuntime = {
   refreshPromise?: Promise<void>;
   refreshAgain?: boolean;
   unsubscribeToolsChanged?: () => void;
+  unsubscribeCatalogChanged?: () => void;
   unsubscribeClose?: () => void;
 };
 
@@ -87,6 +93,8 @@ export class McpRuntime {
       const server: ServerRuntime = {
         config,
         definitions: [],
+        prompts: [],
+        resources: [],
         reconnectAttempt: 0,
         status: {
           id: config.id,
@@ -162,7 +170,10 @@ export class McpRuntime {
     for (const [identity, name] of catalog.assignedNames) {
       this.assignedToolNames.set(identity, name);
     }
-    this.runtimeTools.splice(0, this.runtimeTools.length, ...catalog.tools);
+    const catalogTools = this.servers.some((entry) => entry.client)
+      ? createMcpCatalogTools(this.servers, () => this.refreshCatalog())
+      : [];
+    this.runtimeTools.splice(0, this.runtimeTools.length, ...catalog.tools, ...catalogTools);
     for (const entry of this.servers) {
       entry.status.toolCount = catalog.counts.get(entry) ?? 0;
     }
@@ -210,14 +221,44 @@ export class McpRuntime {
 
   private attachConnectionListeners(server: ServerRuntime, client: McpClientConnection): void {
     server.unsubscribeToolsChanged = client.onToolsChanged?.(() => this.queueToolRefresh(server, client));
+    server.unsubscribeCatalogChanged = client.onCatalogChanged?.(() => this.queueToolRefresh(server, client));
     server.unsubscribeClose = client.onClose?.((error) => this.handleDisconnect(server, client, error));
   }
 
   private detachConnectionListeners(server: ServerRuntime): void {
     server.unsubscribeToolsChanged?.();
+    server.unsubscribeCatalogChanged?.();
     server.unsubscribeClose?.();
     server.unsubscribeToolsChanged = undefined;
+    server.unsubscribeCatalogChanged = undefined;
     server.unsubscribeClose = undefined;
+  }
+
+  private async refreshCatalog(): Promise<void> {
+    await Promise.all(this.servers.map((server) => this.loadCatalog(server, server.client)));
+    if (this.runtimeTools.length > 0) {
+      this.runtimeTools.splice(
+        0,
+        this.runtimeTools.length,
+        ...this.runtimeTools.filter((tool) => tool.name !== "mcp_prompts" && tool.name !== "mcp_resource"),
+        ...createMcpCatalogTools(this.servers, () => this.refreshCatalog()),
+      );
+    }
+  }
+
+  private async loadCatalog(server: ServerRuntime, client: McpClientConnection | undefined): Promise<void> {
+    if (!client) {
+      server.prompts = [];
+      server.resources = [];
+      return;
+    }
+    const [prompts, resources] = await Promise.all([
+      client.listPrompts?.().catch(() => []),
+      client.listResources?.().catch(() => []),
+    ]);
+    if (server.client !== client) return;
+    server.prompts = (prompts ?? []).map((prompt) => ({ ...prompt, serverId: server.config.id }));
+    server.resources = (resources ?? []).map((resource) => ({ ...resource, serverId: server.config.id }));
   }
 
   private async connectServer(
@@ -243,6 +284,15 @@ export class McpRuntime {
     try {
       client = await this.clientFactory(server.config, connectAbort.signal);
       const definitions = await client.listTools(connectAbort.signal);
+      if (this.closed) {
+        await client.close().catch(() => undefined);
+        return;
+      }
+      if (connectAbort.signal.aborted) {
+        await client.close().catch(() => undefined);
+        throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
+      }
+      await this.loadCatalog(server, client);
       if (this.closed) {
         await client.close().catch(() => undefined);
         return;
@@ -326,6 +376,8 @@ export class McpRuntime {
     try {
       const definitions = await client.listTools();
       if (this.closed || server.client !== client) return;
+      await this.loadCatalog(server, client);
+      if (this.closed || server.client !== client) return;
       this.commitCatalog(server, client, definitions);
       server.status.state = "ready";
       delete server.status.error;
@@ -363,6 +415,8 @@ export class McpRuntime {
       if (server.client) clients.push(server.client);
       server.client = undefined;
       server.definitions = [];
+      server.prompts = [];
+      server.resources = [];
       if (server.status.state !== "disabled") server.status.state = "closed";
       server.status.toolCount = 0;
       delete server.status.reconnectAttempt;

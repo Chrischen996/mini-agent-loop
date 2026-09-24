@@ -49,6 +49,7 @@ import {
 } from "./preprocessors/index.ts";
 import { createTools, createToolsWithSandbox, type ToolName } from "./tools/index.ts";
 import { type SandboxConfig } from "./sandbox/index.ts";
+import { createMcpApprovalGate, mcpAllowlistFromEnv, mcpAutoApproveFromEnv, parseMcpAllowlist } from "./mcp/approval.ts";
 import { createMcpRuntimeFromEnv } from "./mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
 import {
@@ -176,6 +177,8 @@ export type ParsedCliArgs = {
   tools?: ToolName[];
   excludeTools?: ToolName[];
   allowMcpTools: boolean;
+  /** serverId or serverId/toolName entries from repeated --allow-mcp flags. */
+  mcpAllowlist: string[];
   mode: PermissionMode;
   modeExplicit: boolean;
   planOnly: boolean;
@@ -207,6 +210,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let tools: ToolName[] | undefined;
   let excludeTools: ToolName[] | undefined;
   let allowMcpTools = false;
+  const mcpAllowlist: string[] = [];
   let mode: PermissionMode = "plan";
   let modeExplicit = false;
   let planOnly = false;
@@ -254,6 +258,12 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     }
     if (arg === "--allow-mcp-tools") {
       allowMcpTools = true;
+      continue;
+    }
+    if (arg === "--allow-mcp" || arg.startsWith("--allow-mcp=")) {
+      const value = arg === "--allow-mcp" ? argv[++i] : arg.slice("--allow-mcp=".length);
+      if (!value || value.startsWith("--")) throw new Error("--allow-mcp requires serverId or serverId/toolName");
+      mcpAllowlist.push(...parseMcpAllowlist(value));
       continue;
     }
     if (arg === "--plan") {
@@ -413,6 +423,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     tools,
     excludeTools,
     allowMcpTools,
+    mcpAllowlist,
     mode,
     modeExplicit,
     planOnly,
@@ -504,6 +515,7 @@ async function main(): Promise<void> {
     tools: selectedTools,
     excludeTools,
     allowMcpTools,
+    mcpAllowlist,
     mode,
     modeExplicit,
     planOnly,
@@ -829,9 +841,23 @@ async function main(): Promise<void> {
       sandbox: sandboxConfig,
     });
     sandboxCleanup = cleanup;
+    const mcpApproval = createMcpApprovalGate({
+      allow: allowMcpTools || mcpAutoApproveFromEnv(),
+      allowlist: [...mcpAllowlist, ...mcpAllowlistFromEnv()],
+      approvalHint: "Pass --allow-mcp-tools, --allow-mcp <server[/tool]>, or set MINI_AGENT_MCP_ALLOW.",
+    });
     tools = () => {
-      const available = resolveToolProvider(configuredTools);
-      return allowMcpTools ? available : available.filter((tool) => tool.source?.kind !== "mcp");
+      const available = resolveToolProvider(mcpRuntime.toolProvider(configuredTools));
+      return available.map((tool) => {
+        if (tool.source?.kind !== "mcp" && tool.name !== "mcp_prompts" && tool.name !== "mcp_resource") return tool;
+        return {
+          ...tool,
+          execute: async (args: Record<string, unknown>, signal?: AbortSignal) => {
+            await mcpApproval(tool, args, signal);
+            return tool.execute(args, signal);
+          },
+        };
+      });
     };
     tools();
   } catch (error) {

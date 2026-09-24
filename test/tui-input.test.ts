@@ -94,6 +94,23 @@ describe("TUI input utils", () => {
     assert.equal(trigger.replaceFn("src/tui/App.tsx"), "src/tui/App.tsx");
   });
 
+  it("does not trigger file completion for version strings or filenames without path separators", () => {
+    assert.equal(extractFileAcTrigger("v1.2.3"), null);
+    assert.equal(extractFileAcTrigger("package.json"), null);
+    assert.equal(extractFileAcTrigger("README.md"), null);
+    assert.equal(extractFileAcTrigger("hello.world"), null);
+  });
+
+  it("triggers file completion for relative paths starting with ./ or ../", () => {
+    const trigger1 = extractFileAcTrigger("./src/app");
+    assert.ok(trigger1);
+    assert.equal(trigger1.fragment, "./src/app");
+
+    const trigger2 = extractFileAcTrigger("../lib/utils");
+    assert.ok(trigger2);
+    assert.equal(trigger2.fragment, "../lib/utils");
+  });
+
   it("collects multiple @refs including Chinese and spaced names", () => {
     assert.deepEqual(
       parseAtRefs("see @中文.md and @foo bar.ts"),

@@ -43,10 +43,10 @@ export function extractBareFileAcTrigger(input: string): FileAcTrigger | null {
   if (/\s/.test(fragment)) return null;
   if (!/^[\p{L}\p{N}._/\\()+\-]+$/u.test(fragment)) return null;
   if (!/[\p{L}\p{N}]/u.test(fragment)) return null;
-  // Require an explicit path indicator (separator or extension dot) so that
-  // ordinary English words never open a file picker. Bare words like "app"
-  // or "hello" would otherwise trigger file-completion on every keystroke.
-  if (!/[./\\]/.test(fragment)) return null;
+  // Only trigger file completion for actual paths: those containing a separator
+  // or starting with ./ or ../.  Plain tokens like "package.json" or version
+  // strings like "v1.2.3" must not open the picker.
+  if (!/[\/\\]/.test(fragment) && !/^\.\.?\//.test(fragment)) return null;
   return {
     fragment,
     replaceFn: (chosen) => chosen,

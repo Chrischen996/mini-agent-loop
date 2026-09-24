@@ -75,6 +75,29 @@ export type McpCallResult = {
   isError?: boolean;
 };
 
+export type McpPromptArgument = {
+  name: string;
+  description?: string;
+  required?: boolean;
+};
+
+export type McpPromptDefinition = {
+  serverId: string;
+  name: string;
+  title?: string;
+  description?: string;
+  arguments?: McpPromptArgument[];
+};
+
+export type McpResourceDefinition = {
+  serverId: string;
+  uri: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+};
+
 export type McpClientConnection = {
   listTools(signal?: AbortSignal): Promise<McpToolDefinition[]>;
   callTool(
@@ -82,6 +105,15 @@ export type McpClientConnection = {
     args: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<McpCallResult>;
+  onCatalogChanged?(listener: () => void): () => void;
+  listPrompts?(signal?: AbortSignal): Promise<Omit<McpPromptDefinition, "serverId">[]>;
+  getPrompt?(
+    name: string,
+    args: Record<string, string>,
+    signal?: AbortSignal,
+  ): Promise<McpCallResult>;
+  listResources?(signal?: AbortSignal): Promise<Omit<McpResourceDefinition, "serverId">[]>;
+  readResource?(uri: string, signal?: AbortSignal): Promise<McpCallResult>;
   onToolsChanged?(listener: () => void): () => void;
   onClose?(listener: (error?: Error) => void): () => void;
   close(): Promise<void>;

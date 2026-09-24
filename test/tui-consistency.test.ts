@@ -108,7 +108,7 @@ describe("shared TUI presentation", () => {
       assert.equal(line.startsWith("· "), true, line);
     }
 
-    const canonical = ["marker", "model", "cwd", "mode", "thinking", "context", "status", "queued", "cache"];
+    const canonical = ["marker", "model", "cwd", "mode", "thinking", "context", "status", "mcp", "queued", "cache"];
     const segments = buildStatusSegments({ ...input, width: 120 });
     const roles = segments.filter((segment) => segment.role !== "sep").map((segment) => segment.role);
     const positions = roles.map((role) => canonical.indexOf(role));
