@@ -25,10 +25,9 @@ export type CommandDef = {
 /**
  * The single command catalog.
  *
- * Both clients render their palette, their `/help` output, and their unknown
- * command guard from this list. It used to live inside an Ink component, which
- * made the ANSI entrypoint depend on a React module for plain data and left
- * `/help` describing a different set of commands than the palette offered.
+ * The Ink UI and headless command helpers derive their palette, `/help`, and
+ * unknown-command guard from this list. Keep command metadata outside React
+ * components so help and autocomplete agree.
  */
 export const SLASH_COMMANDS: CommandDef[] = [
   { name: "model", usage: "/model [ref] [url] [key] [--protocol]", description: "Switch model and gateway" },
@@ -60,7 +59,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "copy", usage: "/copy [last|assistant|input|tool|thinking|user|all]", description: "Copy a message or transcript to the clipboard" },
   { name: "skill", usage: "/skill [on|off|list|clear] [name]", description: "Alias of /skills", alias: true },
   { name: "skills", usage: "/skills [on|off|list|clear] [name]", description: "Manage session skills" },
-  { name: "init", usage: "/init [--force] [--print]", description: "Generate AGENT.MD via LLM (submits init prompt to agent loop); --print shows template preview" },
+  { name: "init", usage: "/init [--force] [--print]", description: "Generate AGENT.MD from project files; --print previews the template" },
   { name: "multi-agent", usage: "/multi-agent [task]", description: "启动多智能体任务向导 (planner → worker → reviewer)" },
   { name: "help", usage: "/help", description: "Show help" },
   { name: "exit", usage: "/exit", description: "Alias of /quit", alias: true },
@@ -123,9 +122,8 @@ export const COMMAND_USAGE_COLUMN_MAX = 46;
 /**
  * Shared usage-column width for the command palette.
  *
- * Both clients pad the usage to this column so descriptions line up; computing
- * it per renderer is what made the Ink palette ragged while the ANSI overlay
- * was aligned.
+ * Ink's command palette and `/help` use one usage-column width, so their
+ * descriptions stay aligned.
  */
 export function commandUsageColumn(commands: readonly CommandDef[]): number {
   if (commands.length === 0) return 0;
@@ -164,7 +162,7 @@ function packHints(hints: readonly string[], width: number): string[] {
 }
 
 /**
- * Help body shared by both clients; previously each wrote its own summary.
+ * Help body derived from the same command catalog as the Ink palette.
  *
  * `width` keeps the notice inside the terminal: wide screens get aligned
  * usage/description columns, narrow ones stack the description under its

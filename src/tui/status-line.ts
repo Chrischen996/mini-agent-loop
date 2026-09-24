@@ -9,12 +9,8 @@ import { terminalStringWidth, truncateTerminalPath } from "./terminal-width.ts";
 /**
  * One shared description of the stable status chrome.
  *
- * The Ink client and the standalone ANSI renderer used to compose this row
- * independently and drifted apart: Ink omitted the separator between model and
- * cwd, moved the permission mode behind the context counter, and converted the
- * context window with 1024-based units (`128000 -> 125K`). Both paths now
- * consume the same segments, so ordering, separators, truncation, and colors
- * cannot diverge again.
+ * Centralizes the Ink status bar's ordering, separators, truncation, and
+ * colors. Context-window values use decimal thousands (128000 -> 128K).
  */
 
 export type StatusSegmentRole =
@@ -267,7 +263,7 @@ export function formatStatusLine(input: StatusLineInput): string {
  * `Ctrl+R` cycles the effort levels the active model supports. A model without
  * reasoning has a single level, so the cycle clamps to `off` and the previous
  * `Thinking level: off` read as though the keypress had changed something.
- * Both clients now say plainly that the model has no levels to cycle.
+ * Report plainly that the model has no levels to cycle.
  */
 export function thinkingLevelStatusText(
   config: Pick<LlmConfig, "reasoning" | "piModel"> & { model?: string },

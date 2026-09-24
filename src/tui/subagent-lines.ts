@@ -154,7 +154,7 @@ function compactResult(value: string, max = 150): string {
 /**
  * Project one subagent lifecycle state into Claude Code-style transcript rows.
  * This function is presentation-only: it never changes the agent history or
- * the reducer state, and is shared by Ink and the ANSI terminal entrypoint.
+ * the reducer state. Ink's SubagentCard uses the projected rows.
  */
 export function subagentRenderLines(
   message: SubagentMessage,

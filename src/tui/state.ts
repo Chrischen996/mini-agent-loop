@@ -942,7 +942,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
 
         case "plan_act_event":
           // Keep plan lifecycle events on the same reducer path regardless of
-          // whether they arrive from Ink or the standalone terminal service.
+          // which agent-loop consumer dispatched them.
           return tuiReducer(state, { type: "PLAN_ACT_EVENT", event: event.event });
 
         case "auto_subagent":
@@ -1376,7 +1376,7 @@ export type TuiStore = {
   subscribe: (listener: () => void) => () => void;
 };
 
-/** Store adapter shared by React Ink and the standalone terminal entrypoint. */
+/** Headless store adapter over the same reducer used by the Ink UI. */
 export function createTuiStore(initialState: TuiState): TuiStore {
   let current = initialState;
   const listeners = new Set<() => void>();

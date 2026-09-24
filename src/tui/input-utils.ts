@@ -93,9 +93,8 @@ export type PromptPlaceholderContext = {
 /**
  * The hint an empty prompt shows.
  *
- * Both clients render the same cascade. The ANSI prompt used to print a bare
- * cursor with no hint at all, so `/model`'s search field, the API-key field, and
- * the idle prompt gave the user nothing to go on.
+ * The Ink prompt uses this cascade for `/model` search, API-key entry, and
+ * the idle composer, so each empty field shows a useful hint.
  */
 export function promptPlaceholder(context: PromptPlaceholderContext = {}): string {
   if (context.busy) return "Working; type a message to queue";

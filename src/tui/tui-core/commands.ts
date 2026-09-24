@@ -1,16 +1,9 @@
-// tui-core — SlashCommand registry (P2).
+// tui-core — optional headless SlashCommand execution registry.
 //
-// The registry is the single source of truth for what a typed `/name`
-// resolves to. Each entry is a `CommandDef` with an optional `run(ctx,
-// args)` body. The pi-tui entrypoint (terminal-main.ts) and the Ink
-// entrypoint (App.tsx) both pull their command handling from this
-// registry, so a new command is added in one place and both clients
-// pick it up.
-//
-// The current `slash-commands.ts` catalog (name/usage/description) is
-// re-exported as the "static metadata" surface: palette + `/help` +
-// unknown-command guard. The P2 `CommandRegistry` layers execution on
-// top of that catalog.
+// The shipped Ink UI and this registry both use `slash-commands.ts` as the
+// command metadata catalog (palette, /help, unknown-command guard). Ink
+// handles its UI-specific commands in App.tsx; this registry supplies
+// renderer-independent execution bodies for other consumers.
 
 import type { SlashCommand } from "../slash-commands.ts";
 import type { TuiStore } from "../state.ts";
@@ -56,8 +49,8 @@ export type CommandDef = {
    */
   confirm?: boolean;
   /**
-   * Execution body. Must be renderer-agnostic: no React, no Ink, no
-   * pi-tui. Receives the command context + parsed args. Returns `true`
+   * Execution body. Must be renderer-agnostic: no React or Ink.
+   * Receives the command context + parsed args. Returns `true`
    * when the command was handled entirely locally (no agent turn),
    * `false` when the command should fall through to the agent.
    */

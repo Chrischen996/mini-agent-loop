@@ -41,7 +41,7 @@ export function loadingLabel(status: string, spinnerMessage?: string): string {
   return /\.{3}$/.test(status.trim()) ? "Working…" : normalized;
 }
 
-/** Small injectable interval wrapper shared by the ANSI and Ink entries. */
+/** Small injectable interval wrapper for Ink's loading spinner. */
 export function createSpinnerTicker(
   onFrame: (frame: number) => void,
   timer: SpinnerTimer = defaultSpinnerTimer,

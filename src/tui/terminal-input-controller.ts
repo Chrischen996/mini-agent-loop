@@ -18,7 +18,7 @@ export type TerminalInputControllerOptions = {
   getScrollPageSize?: () => number;
 };
 
-/** Raw stdin controller for the standalone ANSI TUI entrypoint. */
+/** Headless raw-stdin controller; the Ink UI uses its own input hooks. */
 export class TerminalInputController {
   private value = "";
   private cursor = 0;
@@ -276,7 +276,7 @@ type ProtocolKey =
   | { type: "insert"; value: string }
   | { type: "action"; action: ProtocolAction };
 
-/** Parse printable and Alt shortcuts without loading the pi-tui runtime. */
+/** Parse printable and Alt shortcuts without requiring a renderer. */
 function parseProtocolKey(data: string): ProtocolKey | undefined {
   const kitty = /^\x1b\[(\d+)(?::(\d*))?(?::(\d+))?(?:;(\d+))?(?::(\d+))?u$/.exec(data);
   if (kitty) {

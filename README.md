@@ -638,21 +638,16 @@ reviewing a complete plan before execution.
 npm run tui
 ```
 
-The default `npm run tui` entry uses the React + Ink renderer. It renders the
-same shared Agent Core, reducer state, streaming events, permission flow,
-autocomplete, and session persistence as the rest of the TUI components. The
-previous standalone ANSI renderer remains available under the explicit
-`tui:terminal` alias:
-
-```bash
-npm run tui:terminal
-```
-
-`npm run tui:ink` remains available as an explicit alias for the same Ink
-implementation.
+`npm run tui` and the installed `mini-agent-loop` / `mini-agent-loop-tui`
+commands run the same **React + Ink** terminal UI (`src/tui/ink-main.tsx`,
+packaged as `dist/tui.js`). It uses a Claude Code-inspired layout but is this
+project's own client, not Anthropic's `claude` CLI. There is no pi-tui, legacy,
+or standalone ANSI terminal entrypoint and no `--renderer` switch. The Ink
+client uses the shared Agent Core, reducer, tool registry, permissions, and
+session persistence.
 
 Use `/model`, `/profiles`, `/sessions`, `/resume [id]` (or `resume [id]`), `/clear`, `/quit`, or `Ctrl+C`
-inside the Ink client. Typing `/sessions` or `/resume` opens the saved-session
+inside the TUI. Typing `/sessions` or `/resume` opens the saved-session
 picker with IDs, message counts, and prompt previews. Enter on `/resume` restores
 the selected session; `/resume <id-prefix>` selects a specific one directly.
 Startup flags mirror the CLI: `npm run tui -- --continue`,
@@ -660,10 +655,8 @@ Startup flags mirror the CLI: `npm run tui -- --continue`,
 `/model` also accepts `--base-url`, `--api-key-env`, and temporary `--api-key`
 overrides. Sessions are persisted under the shared `AGENT_DATA_DIR` root and
 restore history, tool results, Todo/Plan state, permission mode, and model
-settings on the next start. The standalone frame follows the Claude Code
-conversation layout and remains available through `npm run tui:terminal`; the
-previous dependency-free compatibility client remains available as
-`npm run tui:legacy`.
+settings on the next start. The Ink interface follows the Claude Code-style
+conversation layout.
 TUI supports plan workflow slash commands: `/plan`, `/plan-show`, `/plan-approve`,
 `/plan-reject`, `/plan-run`, `/plan-retry`, `/plan-history`, `/plan-archive`.
 Terminal input follows the Claude Code-style priority order: `Tab`/`↑↓` first
@@ -754,7 +747,7 @@ mini-agent-loop/
     loop.ts                    # core agent turn/loop
     cli.ts  server.ts          # CLI and HTTP entry points
     server/routes/             # HTTP routes split by domain
-    tui/                       # Ink / pi-tui terminal client
+    tui/                       # single Ink/React terminal client
     llm/  pi-ai/               # model calls and the vendored provider layer
     tools/  runtime/           # built-in tools and the execution broker
     permissions.ts             # permission modes and approval requests

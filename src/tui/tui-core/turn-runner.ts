@@ -1,19 +1,10 @@
-// tui-core — TurnRunner: the single agent-turn execution path.
+// tui-core — renderer-agnostic TurnRunner for headless consumers.
 //
-// Consolidates the auto-continue / timeout / permission / persistence
-// orchestration that is duplicated in terminal-main.ts (via
-// TerminalAgentService), App.tsx (inline) and main.ts (inline). This
-// module is renderer-agnostic: it takes a `TuiStore`, a `PermissionManager`
-// and a tool provider, and owns the mutable `AgentMessage[]` history.
-//
-// The store still owns presentation state; the runner owns agent-loop state.
-// `LOOP_EVENT` dispatch is the only bridge between the two, which keeps
-// the kernel testable with a scripted faux provider and a stub store.
-//
-// Consumers:
-//   - src/tui/terminal-main.ts (pi-tui canonical renderer)
-//   - src/tui/App.tsx (Ink, transition period)
-//   - src/tui/main.ts (legacy, transition period)
+// Composes auto-continue, timeout, permission, and persistence around the
+// shared runAgentTurn core. The store owns presentation state while this
+// runner owns AgentMessage history; LOOP_EVENT dispatch connects the two.
+// The shipped Ink TUI invokes the same core directly for its UI-specific
+// lifecycle; this runner remains available for headless integration.
 
 import type { LlmConfig, ChatFn } from "../../llm/index.ts";
 import {

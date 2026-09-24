@@ -64,13 +64,13 @@ export type TerminalRenderOptions = {
   queuedCount?: number;
   /** Active reasoning level shown in the wide status row. */
   thinkingLevel?: ModelThinkingLevel;
-  /** Optional Todo editor overlay owned by the standalone terminal entrypoint. */
+  /** Optional Todo editor overlay for consumers of this projection. */
   todoEditor?: TodoEditorState;
 };
 
 /**
- * Build the complete chat frame as presentation data only. This is the
- * boundary used by the standalone ANSI entrypoint; it never mutates TuiState.
+ * Project the complete chat frame into presentation data for headless consumers
+ * and tests. This does not mutate TuiState; the Ink UI renders React directly.
  */
 export function buildTerminalRenderLines(
   state: TuiState,
@@ -265,8 +265,7 @@ export function buildTerminalRenderLines(
     });
   }
   if (options.includeStatus !== false) {
-    // Shared with the Ink StatusBar: one segment list owns order, separators,
-    // truncation, and colors so the two clients cannot drift apart again.
+    // Reuse the Ink StatusBar's segment definitions for the headless projection.
     const segments = buildStatusSegments({
       modelName: state.modelName,
       cwd: options.header?.cwd?.trim() || undefined,
@@ -379,11 +378,8 @@ function toolCardRenderLines(
   index: number,
   _width?: number,
 ): RenderLine[] {
-  // One compact tool-use row plus a single nested result gutter, matching the
-  // Ink feed and Claude Code's AssistantToolUseMessage/MessageResponse pair.
-  // The fullscreen path used to draw a full-width three-row box for every tool
-  // call, so the same run looked completely different between the two clients
-  // (and buried the transcript under borders).
+  // One compact tool-use row plus a nested result gutter, matching Ink's feed
+  // and Claude Code's AssistantToolUseMessage/MessageResponse pair.
   const summary = toolArgumentSummary(message.name, message.rawArgs, message.args).replace(/^\$\s*/, "");
   const tone = message.status === "error" ? "error" : undefined;
   const prefixTone = message.status === "error" ? "error" : message.status === "running" ? "running" : "success";
@@ -542,10 +538,9 @@ function splitGraphemes(value: string): string[] {
 /**
  * Project Markdown onto terminal rows.
  *
- * Row text comes from `markdownRowText` so the ANSI client and the Ink
- * `MarkdownText` component cannot drift: fenced code renders behind a `▌`
- * gutter instead of literal ``` markers, headings keep their `▸`/`·` bullet,
- * and tables arrive column-aligned instead of showing raw `| --- | --- |`.
+ * Row text comes from `markdownRowText`, also used by the Ink `MarkdownText`
+ * component. Fenced code renders behind a `▌` gutter instead of literal ```
+ * markers; headings keep their `▸`/`·` bullet and tables are column-aligned.
  */
 function markdownLines(text: string, prefix: string, width?: number): RenderLine[] {
   return parseMarkdownLines(text).map((line, index) => ({
