@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { getDataRoot } from "./session-store.ts";
 
 const PACKAGE_NAME = "@krischen99999/mini-agent-loop";
-const REGISTRY_URL = `https://registry.npmjs.org/${encodeURIComponent(PACKAGE_NAME)}@latest`;
+export const UPDATE_CHECK_REGISTRY_URL = `https://registry.npmjs.org/${encodeURIComponent(PACKAGE_NAME)}/latest`;
 export const UPDATE_CHECK_CACHE_MS = 24 * 60 * 60 * 1000; // 24h
 const FETCH_TIMEOUT_MS = 4000;
 const CACHE_FILE = "update-check.json";
@@ -156,7 +156,7 @@ export async function fetchLatestVersion(): Promise<string | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(REGISTRY_URL, {
+    const res = await fetch(UPDATE_CHECK_REGISTRY_URL, {
       signal: controller.signal,
       headers: { Accept: "application/json" },
     });
