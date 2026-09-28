@@ -1,6 +1,15 @@
 import { sanitizeInput } from "./input-utils.ts";
 import { parseSgrMouseWheel } from "./mouse-events.ts";
 import { TerminalInputHistory } from "./terminal-input-history.ts";
+import {
+  clampCursor,
+  moveToLineEnd,
+  moveToLineStart,
+  moveVertical,
+  moveWordLeft,
+  moveWordRight,
+  splitGraphemes,
+} from "./input-editing.ts";
 
 export type TerminalInputAction =
   | { type: "submit"; value: string }
@@ -16,6 +25,8 @@ export type TerminalInputAction =
 export type TerminalInputControllerOptions = {
   onAction: (action: TerminalInputAction) => void;
   getScrollPageSize?: () => number;
+  /** Enable the migration's new word/Home/End editing behavior. */
+  enhancedEditingEnabled?: boolean;
 };
 
 /** Headless raw-stdin controller; the Ink UI uses its own input hooks. */
@@ -24,6 +35,7 @@ export class TerminalInputController {
   private cursor = 0;
   private readonly onAction: (action: TerminalInputAction) => void;
   private readonly getScrollPageSize: () => number;
+  private readonly enhancedEditingEnabled: boolean;
   private pendingEscape = "";
   private preferredColumn: number | undefined;
   private skipNextLf = false;
@@ -32,6 +44,7 @@ export class TerminalInputController {
   constructor(options: TerminalInputControllerOptions) {
     this.onAction = options.onAction;
     this.getScrollPageSize = options.getScrollPageSize ?? (() => 10);
+    this.enhancedEditingEnabled = options.enhancedEditingEnabled ?? false;
     this.history = new TerminalInputHistory();
   }
 
@@ -44,9 +57,9 @@ export class TerminalInputController {
     this.preferredColumn = undefined;
     this.history.resetNavigation();
   }
-  setValue(value: string, cursor = graphemes(value).length): void {
+  setValue(value: string, cursor = splitGraphemes(value).length): void {
     this.value = value;
-    this.cursor = Math.max(0, Math.min(graphemes(value).length, cursor));
+    this.cursor = clampCursor(cursor, splitGraphemes(value).length);
     this.pendingEscape = "";
     this.preferredColumn = undefined;
     this.history.resetNavigation();
@@ -63,7 +76,7 @@ export class TerminalInputController {
     const next = this.history.navigate(direction, this.value);
     if (next === undefined) return false;
     this.value = next;
-    this.cursor = graphemes(next).length;
+    this.cursor = splitGraphemes(next).length;
     this.pendingEscape = "";
     this.preferredColumn = undefined;
     return true;
@@ -79,24 +92,11 @@ export class TerminalInputController {
 
   /** Move within a multi-line draft while preserving the requested column. */
   moveVertical(direction: -1 | 1): boolean {
-    const parts = graphemes(this.value);
+    const parts = splitGraphemes(this.value);
     if (!parts.includes("\n")) return false;
-    const { start, end } = lineBounds(parts, this.cursor);
-    const column = this.preferredColumn ?? this.cursor - start;
-    if (direction < 0) {
-      if (start === 0) return true;
-      const previousEnd = start - 1;
-      let previousStart = previousEnd;
-      while (previousStart > 0 && parts[previousStart - 1] !== "\n") previousStart--;
-      this.cursor = Math.min(previousStart + column, previousEnd);
-    } else {
-      if (end >= parts.length) return true;
-      const nextStart = end + 1;
-      let nextEnd = nextStart;
-      while (nextEnd < parts.length && parts[nextEnd] !== "\n") nextEnd++;
-      this.cursor = Math.min(nextStart + column, nextEnd);
-    }
-    this.preferredColumn = column;
+    const moved = moveVertical(parts, this.cursor, direction, this.preferredColumn);
+    this.cursor = moved.cursor;
+    this.preferredColumn = moved.preferredColumn;
     return true;
   }
 
@@ -181,7 +181,19 @@ export class TerminalInputController {
     if (!match) return -1;
     const params = match[1] ?? "";
     const final = match[2];
-    if (final === "D") this.move(-1);
+    if (final === "D" && params === "1;5") {
+      if (this.enhancedEditingEnabled) this.moveWord(-1);
+    }
+    else if (final === "C" && params === "1;5") {
+      if (this.enhancedEditingEnabled) this.moveWord(1);
+    }
+    else if (final === "u" && params === "57358;5") {
+      if (this.enhancedEditingEnabled) this.moveWord(-1);
+    }
+    else if (final === "u" && params === "57359;5") {
+      if (this.enhancedEditingEnabled) this.moveWord(1);
+    }
+    else if (final === "D") this.move(-1);
     else if (final === "C") this.move(1);
     // Kitty keyboard protocol preserves the Shift modifier for Ctrl+Shift+T
     // as CSI 116;6u. A few xterm-compatible terminals use modifyOtherKeys
@@ -208,8 +220,18 @@ export class TerminalInputController {
       if (this.hasNewline()) this.emit({ type: "cursor", direction: "down" });
       else this.emit({ type: "scroll", delta: -1 });
     }
-    else if (final === "H") this.cursor = 0;
-    else if (final === "F") this.cursor = graphemes(this.value).length;
+    else if (final === "H") {
+      this.cursor = this.enhancedEditingEnabled
+        ? moveToLineStart(splitGraphemes(this.value), this.cursor)
+        : 0;
+      this.preferredColumn = undefined;
+    }
+    else if (final === "F") {
+      this.cursor = this.enhancedEditingEnabled
+        ? moveToLineEnd(splitGraphemes(this.value), this.cursor)
+        : splitGraphemes(this.value).length;
+      this.preferredColumn = undefined;
+    }
     else if (final === "~" && params === "5") this.emit({ type: "scroll", delta: this.getScrollPageSize() });
     else if (final === "~" && params === "6") this.emit({ type: "scroll", delta: -this.getScrollPageSize() });
     else if (final === "Z") this.emit({ type: "shortcut", name: "permission" });
@@ -217,8 +239,8 @@ export class TerminalInputController {
   }
 
   private insert(value: string): void {
-    const parts = graphemes(this.value);
-    const inserted = graphemes(value);
+    const parts = splitGraphemes(this.value);
+    const inserted = splitGraphemes(value);
     parts.splice(this.cursor, 0, ...inserted);
     this.value = parts.join("");
     this.cursor += inserted.length;
@@ -229,7 +251,7 @@ export class TerminalInputController {
 
   private backspace(): void {
     if (this.cursor === 0) return;
-    const parts = graphemes(this.value);
+    const parts = splitGraphemes(this.value);
     parts.splice(this.cursor - 1, 1);
     this.cursor--;
     this.value = parts.join("");
@@ -239,7 +261,16 @@ export class TerminalInputController {
   }
 
   private move(direction: -1 | 1): void {
-    this.cursor = Math.max(0, Math.min(graphemes(this.value).length, this.cursor + direction));
+    this.cursor = clampCursor(this.cursor + direction, splitGraphemes(this.value).length);
+    this.preferredColumn = undefined;
+    this.emit({ type: "cursor", direction: direction < 0 ? "left" : "right" });
+  }
+
+  private moveWord(direction: -1 | 1): void {
+    const parts = splitGraphemes(this.value);
+    this.cursor = direction < 0
+      ? moveWordLeft(parts, this.cursor)
+      : moveWordRight(parts, this.cursor);
     this.preferredColumn = undefined;
     this.emit({ type: "cursor", direction: direction < 0 ? "left" : "right" });
   }
@@ -255,19 +286,6 @@ export class TerminalInputController {
   }
 
   private emit(action: TerminalInputAction): void { this.onAction(action); }
-}
-
-/** Module-level singleton – Intl.Segmenter construction is expensive. */
-const _graphemeSegmenter: Intl.Segmenter | undefined =
-  typeof Intl !== "undefined" && "Segmenter" in Intl
-    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
-    : undefined;
-
-function graphemes(value: string): string[] {
-  if (_graphemeSegmenter) {
-    return [..._graphemeSegmenter.segment(value)].map((part) => part.segment);
-  }
-  return [...value];
 }
 
 type ProtocolShortcut = Omit<Extract<TerminalInputAction, { type: "shortcut" }>, "type">;
@@ -361,12 +379,4 @@ function altShortcut(codepoint: number, modifier: number): ProtocolShortcut | un
 
 function isPrintableCodepoint(codepoint: number): boolean {
   return Number.isInteger(codepoint) && codepoint >= 32 && codepoint !== 127 && codepoint <= 0x10ffff;
-}
-
-function lineBounds(parts: string[], cursor: number): { start: number; end: number } {
-  let start = cursor;
-  while (start > 0 && parts[start - 1] !== "\n") start--;
-  let end = cursor;
-  while (end < parts.length && parts[end] !== "\n") end++;
-  return { start, end };
 }

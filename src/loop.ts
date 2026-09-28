@@ -1576,6 +1576,8 @@ async function runAgentTurnInternal(
     }
 
     timeoutRetries = 0;
+    truncatedStreamRetries = 0;
+    retryCoordinator.resetAfterSuccess();
 
     const afterToolResults = messages
       .slice()

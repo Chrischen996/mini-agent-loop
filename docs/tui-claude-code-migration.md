@@ -10,7 +10,7 @@
 
 - 输入区域的视觉容器和语义化边框色。
 - `Ctrl+Left` / `Ctrl+Right` 词级导航。
-- 当前行级别的 `Home` / `End` 行为。
+- 当前行级别的 `Home` / `End` 行为（增强模式开启时）。
 - 多行输入视口和光标可见性验证。
 - 输入快捷键路由、终端协议降级和测试补齐。
 
@@ -161,7 +161,7 @@ App.tsx
 - 确定边框只改变 Ink 界面，还是同时改变 headless 渲染模型。
 - 为目标终端准备手工测试清单：Terminal.app、iTerm2、VS Code Terminal、常见 xterm 兼容终端，以及支持 kitty keyboard protocol 的终端。
 
-**验收**：未启用开关时，渲染、按键和现有快照均不发生变化。
+**完成状态（2026-09-28）**：已完成。`TUI_CLAUDE_STYLE_INPUT=1` 同时启用 Ink 输入容器与新增的词级/当前行编辑；关闭时新增按键序列安全无动作，保留既有渲染、按键和快照行为。手工终端矩阵仍待执行。
 
 ### 阶段 1：抽取并测试纯编辑 helper
 
@@ -173,7 +173,7 @@ App.tsx
 - 使用 `string[]` + grapheme cursor 索引作为输入输出；不引入可变 `Cursor` 类。
 - 词边界规则先采用“空白和非空白”策略，并明确这不是语言学分词；后续再按用户反馈支持标点边界。
 
-**验收**：中文、emoji、组合字符、空白串、标点、行首/行尾和多行草稿均不出现越界或 Unicode 拆分。
+**完成状态（2026-09-28）**：已完成自动化覆盖。共享 `input-editing.ts` 使用 grapheme 索引；中文、emoji、组合字符、多行和空白/非空白词边界均有测试。标点继续按“非空白的一部分”处理。
 
 ### 阶段 2：接入局部编辑快捷键
 
@@ -185,7 +185,7 @@ App.tsx
 - 加入 Home/End 的当前行处理；若 Ink 未可靠提供对应 `Key` 字段，再在 headless controller 的协议解析层补充。
 - 不改变 PageUp/PageDown、Esc 或 Shift+Tab 的既有所有权。
 
-**验收**：新增键在无补全、无 Todo、无权限弹层时有效；存在覆盖层时不会穿透并修改草稿。
+**完成状态（2026-09-28）**：已完成自动化覆盖。Ink 路径在开关开启时处理 Ctrl+方向键；xterm 与 kitty raw-stdin 序列有 controller 测试；自动补全通过 `disableArrowNavigation` 保持箭头键所有权。关闭增强模式时，headless controller 保留旧的整段 Home/End 行为；开启后才切换为当前行语义。真实 Ink harness 当前取决于可选 `ink-testing-library` 可被运行环境解析。
 
 ### 阶段 3：输入容器视觉层
 
@@ -198,7 +198,7 @@ App.tsx
 - 保持 `PromptInput` 的 `flexGrow` / `minWidth`，不传 `columns - 3` 宽度。
 - 测试最小宽度、长 placeholder、长模式文本、图片附件和多行输入。
 
-**验收**：80、40、20 列终端中不截断提示符、不与状态栏重叠、不导致 Ink 清屏闪烁。
+**完成状态（2026-09-28）**：布局预算和 20 列降级逻辑已实现：边框只在至少 20 列时启用，消息视口和 picker 都预留两条边框行。80/40/20 列、长 placeholder、图片附件、多行输入和短终端高度的 Ink 测试已补入，但受当前缺少 `ink-testing-library` 影响尚未实际执行；手工终端验证仍待完成。
 
 ### 阶段 4：渲染模型一致性
 
@@ -210,7 +210,7 @@ App.tsx
 - 若为 Ink-only 视觉增强：在文档和测试中明确 headless 输出不保证边框一致，并不修改 RenderLine 快照。
 - 若 headless 也应体现边框：新增稳定的 `RenderLine` 表达，调整相应快照和宽度测试，避免使用 ANSI 拼接绕过格式化层。
 
-**验收**：选择有文档记录；测试明确覆盖该选择，避免 live Ink UI 与 headless/snapshot 结果无意漂移。
+**完成状态（2026-09-28）**：已选择 **Ink-only**。`TUI_CLAUDE_STYLE_INPUT` 只影响 Ink TUI；`terminal-render-model.ts` 保持既有稳定 RenderLine 协议，不输出输入边框。该选择有独立 render-model 测试固定，避免影响 headless 消费者和快照。
 
 ### 阶段 5：发布验证与回退
 
@@ -222,7 +222,7 @@ App.tsx
 - 收集终端类型、键序列、IME 行为和输入丢字/错位问题。
 - 逐步默认开启；异常时通过环境变量立即回退。
 
-**验收**：没有 P0 输入丢失、无法提交、快捷键穿透或窄终端崩坏问题；关闭开关后可恢复原体验。
+**完成状态（2026-09-28）**：代码级回退和自动化测试已完成；发布验证尚未完成，仍需收集终端类型、实际键序列及 IME preedit 行为后再考虑默认开启。
 
 ## 5. 终端协议与 IME 兼容性
 
@@ -253,17 +253,31 @@ App.tsx
 | 控制器测试 | `test/tui-input.test.ts` / controller 对应测试 | xterm/kitty 序列、Ctrl+箭头、未完整 CSI 序列缓存和降级。 |
 | 路由测试 | `test/tui-input.test.ts`、`test/tui-consistency.test.ts` | 补全、Todo、权限、busy Esc、PageUp/Down 不被输入框抢占。 |
 | 渲染模型测试 | `test/tui-consistency.test.ts` | 仅当阶段 4 选择同步边框时更新 RenderLine 断言。 |
-| Ink 渲染测试 | 复用现有 Ink 测试 harness（若可用） | 边框宽度、窄终端、多行/附件不溢出。 |
+| Ink 渲染测试 | `test/tui-ink-app.test.ts` | `ink-testing-library` 可用时验证 20/40/80 列边框与低于 20 列的降级；后续补充多行/附件场景。 |
 
-### 6.2 手工终端矩阵
+### 6.2 Ink 测试环境
 
-每次涉及按键协议或边框布局的变更，都至少验证：
+`ink-testing-library` 是已锁定的开发依赖。测试文件使用 ESM 兼容的 `createRequire(import.meta.url)` 加载它：依赖存在时必须执行 Ink 集成测试；仅在开发环境缺少该可选测试依赖时跳过该 suite，不能静默吞掉其他加载错误。
 
-- Terminal.app、iTerm2、VS Code Terminal。
-- xterm 兼容终端，以及启用 kitty keyboard protocol 的终端。
-- 20、40、80、120 列，短终端高度和正常高度。
+恢复完整依赖树后运行：
+
+```bash
+pnpm install --frozen-lockfile
+npx tsx --test test/tui-ink-app.test.ts
+```
+
+当前自动化 Ink 覆盖：20、40、80 列显示容器边框；19 列回退到无边框输入行；Ctrl+方向键与自动补全所有权；多行草稿、长 placeholder、图片附件和短终端高度场景已补入测试。由于当前环境缺少 `ink-testing-library`，上述 Ink 场景尚未在本机实际执行。
+
+### 6.3 手工终端矩阵
+
+发布前按以下清单记录终端名称、版本、结果和实际收到的异常键序列：
+
+- Terminal.app、iTerm2、VS Code Terminal、一个 xterm 兼容终端，以及启用 kitty keyboard protocol 的终端。
+- 20、40、80、120 列；正常高度和短终端高度。
 - 英文、中文、emoji、组合字符、长路径和多行粘贴。
-- 普通、busy、补全、Todo、权限确认、plan review 状态。
+- 普通、busy、自动补全、Todo、权限确认和 plan review 状态。
+- Ctrl+Left/Right、Home/End、Esc、PageUp/PageDown、Shift+Tab；确认没有输入丢失、光标错位或快捷键穿透。
+- macOS/Linux IME preedit 候选框在单行、多行和边框启用时的位置。
 
 ## 7. 风险与回退
 
@@ -281,7 +295,7 @@ App.tsx
 const useClaudeStyleInput = process.env.TUI_CLAUDE_STYLE_INPUT === "1";
 ```
 
-该开关应覆盖视觉容器和新键行为的启用路径；默认值为关闭。出现输入阻塞、协议误解析或布局异常时，可不发布新代码而通过环境变量关闭功能。
+该开关覆盖视觉容器和新增词级/当前行编辑行为；默认值为关闭。出现输入阻塞、协议误解析或布局异常时，可不发布新代码而通过环境变量关闭功能。
 
 ## 8. 文件影响清单
 
@@ -303,10 +317,10 @@ const useClaudeStyleInput = process.env.TUI_CLAUDE_STYLE_INPUT === "1";
 
 - 功能开关关闭时，现有输入行为和现有测试全部保持不变。
 - 开启时，边框在 20 列以上终端不溢出，提示符和输入不重叠。
-- Ctrl+Left/Right、当前行 Home/End 对 Unicode 文本正确工作，并在未识别终端协议下安全降级。
+- 开启增强模式时，Ctrl+Left/Right、当前行 Home/End 对 Unicode 文本正确工作；关闭时保留旧 Home/End 行为，未识别新协议安全降级。
 - Esc、PageUp/PageDown、Shift+Tab、权限确认、Todo、补全和 busy 取消生成仍由原有所有者处理。
-- 自动化测试和手工终端矩阵均通过。
-- 对 headless 渲染是否同步边框有明确、已测试的决策。
+- 纯函数、controller、render-model 和可用环境中的 Ink 自动化测试通过；手工终端矩阵仍是发布前必做项。
+- 已明确并测试 Ink-only 决策：headless 渲染不输出输入边框。
 
 ## 参考
 
@@ -317,7 +331,10 @@ const useClaudeStyleInput = process.env.TUI_CLAUDE_STYLE_INPUT === "1";
 
 ---
 
-**文档版本**：v1.1  
-**最后更新**：2026-09-24  
-**更新说明**：根据当前 TUI 代码审计补充并修正迁移边界、快捷键路由、布局、测试、headless 渲染与终端协议兼容性。  
-**代码状态**：本次仅更新文档，未修改运行时代码，也未创建提交。
+**文档版本**：v1.2
+
+**最后更新**：2026-09-28
+
+**更新说明**：记录实现后的 feature flag 回退、Ink-only 渲染决策、Ink 测试依赖加载策略、尺寸与多行输入覆盖、断联恢复增强和发布前终端矩阵。
+
+**代码状态**：输入迁移与 LLM 断联恢复增强已实现，当前工作区改动尚未提交。

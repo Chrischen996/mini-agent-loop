@@ -15,6 +15,17 @@ describe("LLM retry coordinator", () => {
     assert.equal(coordinator.attemptsFor("network"), 2);
   });
 
+  it("resets transient retry budgets after a successful request", () => {
+    const coordinator = new LlmRetryCoordinator();
+    assert.equal(coordinator.next(new Error("LLM network error: ECONNRESET"))?.attempt, 1);
+    assert.equal(coordinator.attemptsFor("network"), 1);
+
+    coordinator.resetAfterSuccess();
+
+    assert.equal(coordinator.attemptsFor("network"), 0);
+    assert.equal(coordinator.next(new Error("LLM network error: ECONNRESET"))?.attempt, 1);
+  });
+
   it("leaves timeout and context overflow recovery to the loop", () => {
     const coordinator = new LlmRetryCoordinator();
     assert.equal(coordinator.next(new Error("context window exceeded")), undefined);

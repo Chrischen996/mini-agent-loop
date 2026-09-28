@@ -12,5 +12,10 @@ declare module "ink-testing-library" {
     unmount(): void;
   }
 
-  export function render(element: React.ReactElement): RenderResult;
+  interface RenderOptions {
+    columns?: number;
+    rows?: number;
+  }
+
+  export function render(element: React.ReactElement, options?: RenderOptions): RenderResult;
 }

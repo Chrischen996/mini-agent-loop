@@ -11,6 +11,16 @@ import { TerminalInputHistory } from "../src/tui/terminal-input-history.ts";
 import type { AcMode } from "../src/tui/input-utils.ts";
 import type { AutocompleteNavKey } from "../src/tui/autocomplete.ts";
 import type { ResumeMessageCandidate } from "../src/tui/session-serialization.ts";
+import {
+  lineBounds,
+  moveToLineEnd,
+  moveToLineStart,
+  moveWordLeft,
+  moveWordRight,
+  splitGraphemes,
+} from "../src/tui/input-editing.ts";
+import { inputContainerBorderColor, useClaudeStyleInput } from "../src/tui/input-container.ts";
+import { TUI_COLORS as C } from "../src/tui/theme.ts";
 
 const nextFrame = () => new Promise((resolve) => setTimeout(resolve, 25));
 
@@ -50,6 +60,46 @@ describe("TUI input utils", () => {
 
   it("does not strip Chinese or emoji", () => {
     assert.equal(sanitizeInput("你好😀\n世界"), "你好😀\n世界");
+  });
+
+  it("keeps emoji and combining characters as single editable graphemes", () => {
+    assert.deepEqual(splitGraphemes("a你😀e\u0301"), ["a", "你", "😀", "e\u0301"]);
+    assert.deepEqual(splitGraphemes("A👨‍👩‍👧‍👦B"), ["A", "👨‍👩‍👧‍👦", "B"]);
+  });
+
+  it("moves Home and End within the current logical line", () => {
+    const parts = splitGraphemes("ab\n你😀z\nxy");
+    const middleLineCursor = 5;
+
+    assert.deepEqual(lineBounds(parts, middleLineCursor), { start: 3, end: 6 });
+    assert.equal(moveToLineStart(parts, middleLineCursor), 3);
+    assert.equal(moveToLineEnd(parts, middleLineCursor), 6);
+    assert.equal(moveToLineStart(parts, 7), 7);
+    assert.equal(moveToLineEnd(parts, 7), 9);
+  });
+
+  it("moves between whitespace-delimited words without splitting graphemes", () => {
+    const parts = splitGraphemes("one  你😀-two\nthree");
+
+    assert.equal(moveWordRight(parts, 0), 5);
+    assert.equal(moveWordRight(parts, 5), 12);
+    assert.equal(moveWordRight(parts, 12), parts.length);
+    assert.equal(moveWordLeft(parts, parts.length), 12);
+    assert.equal(moveWordLeft(parts, 12), 5);
+    assert.equal(moveWordLeft(parts, 5), 0);
+  });
+
+  it("enables the Claude-style input only for an explicit feature flag", () => {
+    assert.equal(useClaudeStyleInput({ TUI_CLAUDE_STYLE_INPUT: "1" }), true);
+    assert.equal(useClaudeStyleInput({ TUI_CLAUDE_STYLE_INPUT: "true" }), false);
+    assert.equal(useClaudeStyleInput({}), false);
+  });
+
+  it("uses semantic input border colors with urgent states first", () => {
+    assert.equal(inputContainerBorderColor({ permissionMode: "plan", busy: false, pendingPermission: false }), C.planMode);
+    assert.equal(inputContainerBorderColor({ permissionMode: "bypass", busy: true, pendingPermission: false }), C.running);
+    assert.equal(inputContainerBorderColor({ permissionMode: "plan", busy: true, pendingPermission: true }), C.error);
+    assert.equal(inputContainerBorderColor({ permissionMode: "bypass", busy: false, pendingPermission: false }), C.border);
   });
 
   it("normalizes carriage returns to newlines", () => {

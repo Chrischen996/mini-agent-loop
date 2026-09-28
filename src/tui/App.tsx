@@ -98,6 +98,7 @@ import { SubagentToolsFactory } from "./subagent-tools-factory.ts";
 import { useKeyboardHandler } from "./hooks/useKeyboardHandler.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
+import { inputContainerBorderColor, useClaudeStyleInput } from "./input-container.ts";
 import { PromptInput } from "./components/PromptInput.tsx";
 import { TerminalInputHistory } from "./terminal-input-history.ts";
 import {
@@ -214,6 +215,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
     return () => clearInterval(timer);
   }, [mcpStatuses]);
   const termWidth = Math.max(10, stdout?.columns || 80);
+  const useClaudeStyleInputBorder = useClaudeStyleInput() && termWidth >= 20;
   // Leave two terminal rows unused. Ink's renderer adds a trailing newline and
   // can gain a row from borders/wrapping; staying below the terminal height
   // prevents its visible `clearTerminal` fallback during streamed updates.
@@ -627,6 +629,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
     permissionRows,
     planApprovalRows,
     updateRows,
+    hasInputBorder: useClaudeStyleInputBorder,
   });
   const feedHeight = getMessageFeedHeight({
     termRows: stdout?.rows,
@@ -638,6 +641,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
     permissionRows,
     planApprovalRows,
     updateRows,
+    hasInputBorder: useClaudeStyleInputBorder,
   });
 
   const copyResolvedText = useCallback(async (target: import("./copy-text.ts").CopyTarget = "auto") => {
@@ -1952,9 +1956,18 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
         )}
         {/* The Todo tip renders inside the feed's single loading row. */}
         <Box
+          borderStyle={useClaudeStyleInputBorder ? "round" : undefined}
+          borderColor={useClaudeStyleInputBorder
+            ? inputContainerBorderColor({
+              permissionMode: state.permissionMode,
+              busy: state.busy,
+              pendingPermission: Boolean(state.pendingPermission),
+            })
+            : undefined}
           paddingX={1}
           gap={1}
           flexShrink={0}
+          width={termWidth}
         >
           <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : "❯"}</Text>
           <Box flexGrow={1} minWidth={0}>
@@ -1969,6 +1982,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               inputHistory={promptInputHistoryRef.current}
               disableArrowNavigation={Boolean(acMode)}
+              enhancedEditingEnabled={useClaudeStyleInputBorder}
               onScrollContext={(direction) => {
                 // Scrolling the transcript remains available while a turn is
                 // running; only overlays that own the input block it.

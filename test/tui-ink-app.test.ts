@@ -1,27 +1,21 @@
-// @ts-ignore - ink-testing-library not installed, using local type stub
 /// <reference types="../ink-testing-library.d.ts" />
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import React from "react";
+import React, { useState } from "react";
 import { App } from "../src/tui/App.tsx";
+import { PromptInput } from "../src/tui/components/PromptInput.tsx";
 
-// Try to load ink-testing-library; skip the entire suite if unavailable
-let render: (element: React.ReactElement) => {
-  lastFrame: () => string | undefined;
-  stdin: { write: (s: string) => void };
-  cleanup: () => void;
-};
+const require = createRequire(import.meta.url);
+let render: typeof import("ink-testing-library").render | undefined;
 try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  ({ render } = require("ink-testing-library"));
-} catch {
-  render = undefined as unknown as typeof render;
+  ({ render } = require("ink-testing-library") as typeof import("ink-testing-library"));
+} catch (error: unknown) {
+  if (!(error instanceof Error) || !("code" in error) || error.code !== "MODULE_NOT_FOUND") throw error;
 }
-
-const shouldSkip = !render;
 
 const waitForRender = () => new Promise<void>((resolve) => setTimeout(resolve, 60));
 
@@ -32,10 +26,10 @@ const overrides = {
   MINI_AGENT_UPDATE_CHECK: "0",
   OPENAI_MODEL: "openai/gpt-4o",
   OPENAI_API_KEY: "not-a-real-key",
+  TUI_CLAUDE_STYLE_INPUT: "1",
 } as const;
 
-// Skip the entire suite if ink-testing-library is not installed
-const suiteDescriptor = shouldSkip ? describe.skip : describe;
+const suiteDescriptor = render ? describe : describe.skip;
 
 suiteDescriptor("the single Ink terminal", () => {
   let cwd: string;
@@ -59,8 +53,8 @@ suiteDescriptor("the single Ink terminal", () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  function open() {
-    return render!(React.createElement(App, { cwd, agentTools: [], allTools: [] }));
+  function open(dimensions: { columns?: number; rows?: number } = {}) {
+    return render!(React.createElement(App, { cwd, agentTools: [], allTools: [] }), dimensions);
   }
 
   async function submit(view: ReturnType<typeof open>, command: string) {
@@ -72,14 +66,168 @@ suiteDescriptor("the single Ink terminal", () => {
     await waitForRender();
   }
 
+  it("moves PromptInput by words for Ctrl+Arrow without modifying the draft", async () => {
+    function PromptHarness(): React.ReactElement {
+      const [value, setValue] = useState("one two");
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+        enhancedEditingEnabled: true,
+      });
+    }
+
+    const view = render!(React.createElement(PromptHarness));
+    try {
+      await waitForRender();
+      view.stdin.write("\x1b[1;5D");
+      await waitForRender();
+      view.stdin.write("X");
+      await waitForRender();
+
+      assert.match(view.lastFrame() ?? "", /one Xtwo/);
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  it("does not let word navigation modify an overlay-owned prompt", async () => {
+    function PromptHarness(): React.ReactElement {
+      const [value, setValue] = useState("one two");
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+        enhancedEditingEnabled: true,
+        disableArrowNavigation: true,
+      });
+    }
+
+    const view = render!(React.createElement(PromptHarness));
+    try {
+      await waitForRender();
+      view.stdin.write("\x1b[1;5D");
+      await waitForRender();
+      view.stdin.write("X");
+      await waitForRender();
+
+      assert.match(view.lastFrame() ?? "", /one twoX/);
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  it("renders the Claude-style input container at supported terminal widths", () => {
+    for (const columns of [20, 40, 80]) {
+      const view = open({ columns, rows: 24 });
+      try {
+        const frame = view.lastFrame() ?? "";
+        assert.match(frame, /╭/);
+        assert.match(frame, /❯/);
+      } finally {
+        view.cleanup();
+      }
+    }
+  });
+
+  it("falls back to the unbordered prompt below the minimum input width", () => {
+    const view = open({ columns: 19, rows: 24 });
+    try {
+      const frame = view.lastFrame() ?? "";
+      assert.doesNotMatch(frame, /╭/);
+      assert.match(frame, /❯/);
+    } finally {
+      view.cleanup();
+    }
+  });
+
   it("uses Ink for the same Claude Code-style welcome and prompt as the released UI", () => {
-    const view = open();
+    const view = open({ columns: 80, rows: 24 });
     try {
       const frame = view.lastFrame() ?? "";
       assert.match(frame, /mini-agent v/);
       assert.match(frame, /Welcome back!/);
       assert.match(frame, /❯ Message, \/command, or @file reference/);
       assert.match(frame, /Plan mode/);
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  it("preserves multiline editing and renders the active line", async () => {
+    function PromptHarness(): React.ReactElement {
+      const [value, setValue] = useState("one");
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+        enhancedEditingEnabled: true,
+      });
+    }
+
+    const view = render!(React.createElement(PromptHarness));
+    try {
+      await waitForRender();
+      view.stdin.write("\x1b[13;2u");
+      await waitForRender();
+      view.stdin.write("two");
+      await waitForRender();
+
+      assert.match(view.lastFrame() ?? "", /one/);
+      assert.match(view.lastFrame() ?? "", /two/);
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  it("keeps a long placeholder visible at the supported minimum width", () => {
+    function PromptHarness(): React.ReactElement {
+      return React.createElement(PromptInput, {
+        value: "",
+        onChange: () => {},
+        onSubmit: () => {},
+        placeholder: "Message, /command, or @file reference with a long hint",
+      });
+    }
+
+    const view = render!(React.createElement(PromptHarness), { columns: 20, rows: 8 });
+    try {
+      const frame = view.lastFrame() ?? "";
+      assert.match(frame, /Message, \/command/);
+      assert.match(frame, /@file reference/);
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  it("keeps image attachments and the prompt visible together", () => {
+    function PromptHarness(): React.ReactElement {
+      return React.createElement(PromptInput, {
+        value: "draft text",
+        onChange: () => {},
+        onSubmit: () => {},
+        attachments: ["first-image.png", "a-very-long-second-image-name.png"],
+        placeholder: "Message",
+      });
+    }
+
+    const view = render!(React.createElement(PromptHarness), { columns: 20, rows: 8 });
+    try {
+      const frame = view.lastFrame() ?? "";
+      assert.match(frame, /Image #1/);
+      assert.match(frame, /Image #2/);
+      assert.match(frame, /draft text/);
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  it("keeps the prompt mounted in a short terminal", () => {
+    const view = open({ columns: 40, rows: 6 });
+    try {
+      const frame = view.lastFrame() ?? "";
+      assert.notEqual(frame.trim(), "");
+      assert.match(frame, /❯/);
     } finally {
       view.cleanup();
     }

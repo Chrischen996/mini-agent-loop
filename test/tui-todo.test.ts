@@ -191,6 +191,12 @@ describe("TodoPanel formatting", () => {
     assert.equal(base - withTodos, 4);
   });
 
+  it("reserves border rows from the message feed when the input container is enabled", () => {
+    const base = getMessageFeedHeight({ termRows: 24 });
+    const withBorder = getMessageFeedHeight({ termRows: 24, hasInputBorder: true });
+    assert.equal(base - withBorder, 2);
+  });
+
   it("reserves todo rows when sizing autocomplete pickers", () => {
     const withoutTodos = getPickerLayout({ termRows: 20, requestedItems: 12, extraRows: 3 });
     const withTodos = getPickerLayout({ termRows: 20, requestedItems: 12, todoRows: 4, extraRows: 3 });

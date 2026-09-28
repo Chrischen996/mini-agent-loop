@@ -38,6 +38,13 @@ export class LlmRetryCoordinator {
     };
   }
 
+  /** Clear transient request failures after a completed assistant turn. */
+  resetAfterSuccess(): void {
+    this.attempts.delete("rate_limit");
+    this.attempts.delete("server_overload");
+    this.attempts.delete("network");
+  }
+
   attemptsFor(errorType: RetryableErrorType): number {
     return this.attempts.get(errorType) ?? 0;
   }
