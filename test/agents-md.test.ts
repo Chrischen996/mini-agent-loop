@@ -7,7 +7,7 @@ import { loadAgentsMd, loadInstructionBundle } from "../src/agents-md.ts";
 import { buildSystemPrompt } from "../src/loop.ts";
 
 describe("loadAgentsMd", () => {
-  it("returns undefined when no agents file exists", async () => {
+  it("returns undefined when no AGENT.MD file exists", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "agents-md-"));
     try {
       const result = await loadAgentsMd(dir);
@@ -17,10 +17,10 @@ describe("loadAgentsMd", () => {
     }
   });
 
-  it("loads .agents.md content", async () => {
+  it("loads AGENT.MD content", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "agents-md-"));
     try {
-      await writeFile(path.join(dir, ".agents.md"), "# Custom Rules\nAlways write tests.");
+      await writeFile(path.join(dir, "AGENT.MD"), "# Custom Rules\nAlways write tests.");
       const result = await loadAgentsMd(dir);
       assert.equal(result, "# Custom Rules\nAlways write tests.");
     } finally {
@@ -28,36 +28,47 @@ describe("loadAgentsMd", () => {
     }
   });
 
-  it("prefers .agents.md over AGENTS.md", async () => {
+  it("loads AGENTS.md (legacy filename) when no AGENT.MD is present", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "agents-md-"));
     try {
-      await writeFile(path.join(dir, ".agents.md"), "dot-agents");
-      await writeFile(path.join(dir, "AGENTS.md"), "caps-agents");
+      await writeFile(path.join(dir, "AGENTS.md"), "# Legacy rules\nUse tabs.");
       const result = await loadAgentsMd(dir);
-      assert.equal(result, "dot-agents");
+      assert.equal(result, "# Legacy rules\nUse tabs.");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  it("loads AGENTS.md when .agents.md is absent", async () => {
+  it("prefers AGENT.MD over the legacy AGENTS.md filename", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "agents-md-"));
     try {
-      await writeFile(path.join(dir, "AGENTS.md"), "caps content");
+      await writeFile(path.join(dir, "AGENT.MD"), "new");
+      await writeFile(path.join(dir, "AGENTS.md"), "legacy");
       const result = await loadAgentsMd(dir);
-      assert.equal(result, "caps content");
+      assert.equal(result, "new");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  it("merges ancestor instructions from low to high precedence", async () => {
+  it("loads .agents.md when neither AGENT.MD nor AGENTS.md is present", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "agents-md-"));
+    try {
+      await writeFile(path.join(dir, ".agents.md"), "dot");
+      const result = await loadAgentsMd(dir);
+      assert.equal(result, "dot");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("merges ancestor AGENT.MD instructions from low to high precedence", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "agents-bundle-"));
     const nested = path.join(root, "repo", "src");
     try {
       await mkdir(nested, { recursive: true });
-      await writeFile(path.join(root, "repo", "AGENTS.md"), "repo rules");
-      await writeFile(path.join(nested, ".agents.md"), "src rules");
+      await writeFile(path.join(root, "repo", "AGENT.MD"), "repo rules");
+      await writeFile(path.join(nested, "AGENT.MD"), "src rules");
       const bundle = await loadInstructionBundle(nested, { includeGlobal: false });
       assert.deepEqual(bundle.sources.map((source) => source.content), ["repo rules", "src rules"]);
       assert.ok(bundle.content.indexOf("repo rules") < bundle.content.indexOf("src rules"));

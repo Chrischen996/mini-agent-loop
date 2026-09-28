@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-const entrypoint = fileURLToPath(new URL("../src/tui/terminal-main.ts", import.meta.url));
+const entrypoint = fileURLToPath(new URL("../src/tui/ink-main.tsx", import.meta.url));
 const nodeArgs = ["--import", "tsx", entrypoint];
 const useWinpty = process.platform === "win32"
   && !(process.stdin.isTTY && process.stdout.isTTY)

@@ -10,6 +10,8 @@ import { getTodoPanelRows, resolveTodoItems } from "./todo-format.ts";
 import { taskSummaryRows, taskSummaryViewMode } from "./task-summary.ts";
 import { formatHelpNotice, parseSlashCommand, parseUnknownSlashCommand, SLASH_COMMANDS } from "./slash-commands.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
+import { parseInitCommand } from "./init-command.ts";
+import { initAgentMd } from "../init-agent-md.ts";
 
 /** Human-readable message for an LlmTimeoutError, with partial-response preview. */
 function formatLlmTimeoutMessage(err: InstanceType<typeof LlmTimeoutError>): string {
@@ -32,9 +34,12 @@ import {
   createAgentHistory,
   MaxTurnsExceededError,
   runAgentTurn,
+  restoreAgentHistory,
+  getDefaultSystemPrompt,
   type AgentRuntimeRef,
   type LoopEvent,
 } from "../loop.ts";
+import { loadInstructionBundle } from "../agents-md.ts";
 import { LlmTimeoutError } from "../llm/retry.ts";
 import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
 import {
@@ -93,6 +98,7 @@ import { SubagentToolsFactory } from "./subagent-tools-factory.ts";
 import { useKeyboardHandler } from "./hooks/useKeyboardHandler.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
+import { inputContainerBorderColor, useClaudeStyleInput } from "./input-container.ts";
 import { PromptInput } from "./components/PromptInput.tsx";
 import { TerminalInputHistory } from "./terminal-input-history.ts";
 import {
@@ -130,7 +136,12 @@ import { TUI_BRAND_VERSION } from "./brand.ts";
 import { getWelcomeHeaderHeight } from "./welcome-panel.ts";
 import { formatAmbiguousSessionNotice, getResumeMessageCandidates, getStartupSessionRequest, parseResumeCommand, resolveSessionByPrefix, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
 
-type AppProps = { cwd: string; agentTools?: ToolProvider; allTools?: ToolProvider };
+type AppProps = {
+  cwd: string;
+  agentTools?: ToolProvider;
+  allTools?: ToolProvider;
+  mcpStatuses?: () => McpServerStatus[];
+};
 const DEFAULT_IMAGE_PROMPT = "Analyze the attached image.";
 
 import {
@@ -138,10 +149,12 @@ import {
   runUpdateUpgrade,
   type UpdateInfo,
 } from "../update-check.ts";
+import { formatMcpStatus } from "../mcp/status.ts";
+import type { McpServerStatus } from "../mcp/types.ts";
 import { UpdateNotice } from "./components/UpdateNotice.tsx";
 import type { Key } from "ink";
 
-export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement {
+export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   // ── Update-check state ────────────────────────────────────────────────────
@@ -195,7 +208,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   useInput((input, key) => {
     handleUpdateKey(input, key);
   }, { isActive: update !== null || upgradeResult !== null });
+  const [mcpStatus, setMcpStatus] = useState<string | undefined>(() => formatMcpStatus(mcpStatuses?.() ?? []));
+  useEffect(() => {
+    if (!mcpStatuses) return undefined;
+    const timer = setInterval(() => setMcpStatus(formatMcpStatus(mcpStatuses())), 1_000);
+    return () => clearInterval(timer);
+  }, [mcpStatuses]);
   const termWidth = Math.max(10, stdout?.columns || 80);
+  const useClaudeStyleInputBorder = useClaudeStyleInput() && termWidth >= 20;
   // Leave two terminal rows unused. Ink's renderer adds a trailing newline and
   // can gain a row from borders/wrapping; staying below the terminal height
   // prevents its visible `clearTerminal` fallback during streamed updates.
@@ -227,7 +247,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     // Resolve per-role LlmConfigs from the persisted profile store so that
     // /multi-agent role bindings (subagentRoles → ModelProfile) actually take
     // effect at dispatch time. Missing store or invalid profile → empty map,
-    // which makes every role fall back to parentLlm (matches terminal-main.ts).
+    // which makes every role fall back to parentLlm.
     let roleLlmConfigs: Record<string, LlmConfig> = {};
     try {
       const store = loadProfileStoreSync();
@@ -275,14 +295,14 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     sessionManagerRef.current = new SessionManager({ workspaceId: cwd, sessionId: conversationId });
   }
   const thinkingPolicyRef = useRef<"fixed" | "adaptive">(loadThinkingModeFromEnv());
-  
+
   const pendingImagesRef = useRef<ImageAttachment[]>([]);
   pendingImagesRef.current = state.pendingImages;
   const promptQueueRef = useRef<string[]>([]);
   const [queuedCount, setQueuedCount] = useState(0);
   const [input, setInput] = useState("");
-  // Bump to remount the text input so ink-text-input resets cursorOffset to value.length
-  // after programmatic completions (Tab @file / slash commands).
+  // Remount PromptInput after programmatic completions so the cursor moves
+  // to the end of the accepted file or slash-command text.
   const [inputEpoch, setInputEpoch] = useState(0);
   const promptInputHistoryRef = useRef(new TerminalInputHistory());
   const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "plan"));
@@ -296,8 +316,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const execCaptureRef = useRef<{ mode: "run" | "retry" } | null>(null);
   const pendingPermissionRef = useRef(false);
   pendingPermissionRef.current = Boolean(state.pendingPermission);
-  // ink-text-input still receives the same keystroke as useInput; after Ctrl/Alt+T
-  // it may append "t" (or a control char). Swallow that one onChange tick.
+  // PromptInput also sees keystrokes handled by the global shortcuts. Swallow
+  // the next onChange tick after Ctrl/Alt+T so it does not append a stray key.
   const suppressInputEchoRef = useRef(false);
 
   // Buffer deltas per turn so a late provider callback cannot update a newer
@@ -321,6 +341,13 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
   const getPermissionManager = useCallback(() => {
     return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("plan"));
   }, []);
+
+  const refreshInstructionPrompt = useCallback(async () => {
+    const bundle = await loadInstructionBundle(cwd).catch(() => undefined);
+    if (!bundle || bundle.content.length === 0) return;
+    const mode = getPermissionManager().getMode();
+    historyRef.current = restoreAgentHistory(historyRef.current, getDefaultSystemPrompt(mode, bundle.content));
+  }, [cwd, getPermissionManager]);
 
   const addPendingImageRef = useCallback((image: ImageAttachment): boolean => {
     return addPendingImage(image, { pendingImages: pendingImagesRef.current, pendingImagesRef, dispatch, cwd });
@@ -543,8 +570,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     dispatch({ type: "SET_STATUS", status: thinkingLevelStatusText(next, nextLevel) });
   }, [state.busy, state.pendingPermission]);
 
-  // Row caps live in `picker-window` so the ANSI renderer asks for the same
-  // page sizes and clips its lists at the same row.
+  // Row caps live in `picker-window` so all Ink picker overlays share the
+  // same paging and clipping policy.
   const pickerCandidateCounts: Partial<Record<NonNullable<AcMode>, number>> = {
     command: cmdCandidates.length,
     file: fileCandidates.length,
@@ -602,6 +629,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     permissionRows,
     planApprovalRows,
     updateRows,
+    hasInputBorder: useClaudeStyleInputBorder,
   });
   const feedHeight = getMessageFeedHeight({
     termRows: stdout?.rows,
@@ -613,6 +641,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     permissionRows,
     planApprovalRows,
     updateRows,
+    hasInputBorder: useClaudeStyleInputBorder,
   });
 
   const copyResolvedText = useCallback(async (target: import("./copy-text.ts").CopyTarget = "auto") => {
@@ -805,8 +834,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       setAcMode("multi-agent-mode");
       dispatch({
         type: "ADD_NOTICE",
-        title: "多智能体向导 — 选择模式",
-        text: "输入编号选择执行模式:\n  1) planner_worker_reviewer            — 规划 → 执行 → 审查（推荐，LLM 动态驱动）\n  2) agent_turn                       — 单轮 Agent，自动委托子 Agent\n  3) planner_worker_reviewer_forced — 100% 确定性：代码直接驱动 H3+H4 流水线，不经过 LLM 决策",
+        title: "Multi-agent setup — choose mode",
+        text: "Choose an execution mode:\n  1) planner_worker_reviewer — plan, execute, review (LLM-driven)\n  2) agent_turn — one agent turn with automatic delegation\n  3) planner_worker_reviewer_forced — deterministic H3+H4 pipeline",
       });
       setInput("");
       return;
@@ -823,8 +852,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       setAcMode("multi-agent-roles");
       dispatch({
         type: "ADD_NOTICE",
-        title: "多智能体向导 — 子角色模型配置",
-        text: "为每个角色选择模型（0=继承主模型，1..n=已有 profile，n+1=新建）。",
+        title: "Multi-agent setup — role models",
+        text: "Choose a model for each role (0=inherit, 1..n=profile, n+1=new).",
       });
       setInput("");
       return;
@@ -861,8 +890,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         setAcMode("multi-agent-role-new");
         dispatch({
           type: "ADD_NOTICE",
-          title: `多智能体向导 — 为 ${currentRole} 新建模型`,
-          text: "输入: <modelId> <baseUrl> <apiKey>（空格分隔）",
+          title: `Multi-agent setup — new model for ${currentRole}`,
+          text: "Enter: <modelId> <baseUrl> <apiKey> (space-separated)",
         });
         setInput("");
         return;
@@ -871,11 +900,11 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         if (idx >= 1 && idx <= optionCount) {
           assignments[currentRole] = { type: "profile", profileName: profileNames[idx - 1]! };
         } else {
-          dispatch({ type: "ADD_NOTICE", title: "多智能体向导", text: `无效编号，范围 0..${optionCount + 1}（0=继承，${optionCount + 1}=新建）` });
+          dispatch({ type: "ADD_NOTICE", title: "Multi-agent setup", text: `Invalid choice; use 0..${optionCount + 1} (0=inherit, ${optionCount + 1}=new)` });
           return;
         }
       } else {
-        dispatch({ type: "ADD_NOTICE", title: "多智能体向导", text: `输入 0..${optionCount + 1}：0=继承主模型，1..${optionCount}=已有 profile，${optionCount + 1}=新建` });
+        dispatch({ type: "ADD_NOTICE", title: "Multi-agent setup", text: `Enter 0..${optionCount + 1}: 0=inherit, 1..${optionCount}=profile, ${optionCount + 1}=new` });
         return;
       }
 
@@ -889,8 +918,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         });
         dispatch({
           type: "ADD_NOTICE",
-          title: "多智能体向导 — 子角色模型配置",
-          text: `${currentRole} 已配置 → 下一角色: ${roles[nextRoleIndex]}\n输入 0=继承主模型，1..${optionCount}=已有 profile，${optionCount + 1}=新建`,
+          title: "Multi-agent setup — role models",
+          text: `${currentRole} configured → next role: ${roles[nextRoleIndex]}\nEnter 0=inherit, 1..${optionCount}=profile, ${optionCount + 1}=new`,
         });
       } else {
         setMultiAgentSetup({
@@ -901,8 +930,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         setAcMode("multi-agent-task");
         dispatch({
           type: "ADD_NOTICE",
-          title: "多智能体向导 — 输入任务",
-          text: `全部角色配置完成，模式: ${multiAgentSetup.mode}\n现在请描述你的任务，输入完成后按 Enter 启动。`,
+          title: "Multi-agent setup — enter task",
+          text: `All roles configured; mode: ${multiAgentSetup.mode}\nDescribe the task, then press Enter to start.`,
         });
       }
       setInput("");
@@ -913,7 +942,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     if (acMode === "multi-agent-role-new" && multiAgentSetup) {
       const inputParts = trimmed.trim().split(/\s+/);
       if (inputParts.length < 3 || !inputParts[0]) {
-        dispatch({ type: "ADD_NOTICE", title: "多智能体向导", text: "格式: <modelId> <baseUrl> <apiKey>" });
+        dispatch({ type: "ADD_NOTICE", title: "Multi-agent setup", text: "Format: <modelId> <baseUrl> <apiKey>" });
         return;
       }
       const [modelId, baseUrl, apiKey] = inputParts;
@@ -935,8 +964,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         setAcMode("multi-agent-roles");
         dispatch({
           type: "ADD_NOTICE",
-          title: "多智能体向导 — 子角色模型配置",
-          text: `${currentRole} → 新建 ${modelId}\n下一角色: ${roles[nextRoleIndex]}`,
+          title: "Multi-agent setup — role models",
+          text: `${currentRole} → new model ${modelId}\nNext role: ${roles[nextRoleIndex]}`,
         });
       } else {
         setMultiAgentSetup({
@@ -947,8 +976,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         setAcMode("multi-agent-task");
         dispatch({
           type: "ADD_NOTICE",
-          title: "多智能体向导 — 输入任务",
-          text: `全部角色配置完成，模式: ${multiAgentSetup.mode}\n现在请描述你的任务。`,
+          title: "Multi-agent setup — enter task",
+          text: `All roles configured; mode: ${multiAgentSetup.mode}\nDescribe the task.`,
         });
       }
       setInput("");
@@ -961,8 +990,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
       if (!task) {
         dispatch({
           type: "ADD_NOTICE",
-          title: "多智能体向导",
-          text: "任务描述不能为空，请输入任务内容。",
+          title: "Multi-agent setup",
+          text: "Task cannot be empty; describe the task to continue.",
         });
         setInput("");
         return;
@@ -1127,7 +1156,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         streamBuffer.finish(runId);
         dispatch({
           type: "ADD_NOTICE",
-          title: "多智能体任务错误",
+          title: "Multi-agent task failed",
           text: err instanceof Error ? err.message : String(err),
         });
       } finally {
@@ -1338,8 +1367,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         setInput(inlineTask);
         dispatch({
           type: "ADD_NOTICE",
-          title: "多智能体向导",
-          text: `模型: ${llm.model}\n模式: planner_worker_reviewer\n\n任务已预填，按 Enter 启动，或修改后再按 Enter。`,
+          title: "Multi-agent setup",
+          text: `Model: ${llm.model}\nMode: planner_worker_reviewer\n\nTask prefilled. Press Enter to start, or edit it first.`,
         });
       } else {
         // Full wizard: start at model selection
@@ -1348,8 +1377,8 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         setInput("");
         dispatch({
           type: "ADD_NOTICE",
-          title: "多智能体向导 — 选择 Orchestrator 模型",
-          text: `当前模型: ${llm.model}\n\n直接按 Enter 使用当前模型，或输入其他模型 ID (如 openai/gpt-4o-mini)。`,
+          title: "Multi-agent setup — orchestrator model",
+          text: `Current model: ${llm.model}\n\nPress Enter to use it, or type another model ID (for example openai/gpt-4o-mini).`,
         });
       }
       return;
@@ -1385,6 +1414,53 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         const match = findExactModelReferenceMatch(parsed.reference, getAllModels());
         if (match?.ambiguous) openModelPicker(parsed.reference);
         else selectModelRef(parsed.reference, parsed.overrides);
+      }
+      return;
+    }
+
+    // /init uses the bounded LLM project snapshot from initAgentMd. Unlike
+    // an agent tool turn, this writes only AGENT.MD and does not temporarily
+    // bypass the active permission mode. --print never calls the model.
+    const initCommand = parseInitCommand(trimmed);
+    if (initCommand) {
+      setInput("");
+      if (initCommand.kind === "error") {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "Init",
+          text: initCommand.message,
+        });
+        return;
+      }
+      try {
+        const result = await initAgentMd({
+          cwd,
+          force: initCommand.force,
+          print: initCommand.print,
+          llm: !initCommand.print,
+          llmConfig: llm,
+        });
+        if (initCommand.print) {
+          dispatch({
+            type: "ADD_NOTICE",
+            title: "AGENT.MD Template Preview",
+            text: result.content,
+          });
+          return;
+        }
+        await refreshInstructionPrompt();
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "AGENT.MD",
+          text: `${result.overwritten ? "Overwrote" : "Created"} AGENT.MD. Instructions are now active for subsequent turns.${result.llmFallback ? " Model generation failed; used the template instead." : ""}`,
+        });
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "Init Failed",
+          text: detail,
+        });
       }
       return;
     }
@@ -1743,10 +1819,16 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
     // Reducer append actions already preserve the offset for completed message
     // blocks. Only compensate here for streaming growth inside the same
     // messages array; doing this after an append moves the viewport twice.
+    // Also update scrollbar bounds so scroll offset stays clamped.
     if (!messagesUnchanged) {
       // A queued streaming adjustment belongs to the previous message array;
       // never carry it across a completed-message append.
       pendingScrollDeltaRef.current = 0;
+    }
+    const maxScrollApprox = Math.max(0, viewportContentHeight - feedHeight);
+    const shouldUpdateMax = state.maxScrollOffset !== maxScrollApprox && maxScrollApprox >= 0;
+    if (shouldUpdateMax) {
+      dispatch({ type: "SET_MAX_SCROLL_OFFSET", offset: maxScrollApprox });
     }
     if (messagesUnchanged && state.scrollOffset > 0 && viewportContentHeight > previous) {
       pendingScrollDeltaRef.current += viewportContentHeight - previous;
@@ -1763,7 +1845,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         });
       }
     }
-  }, [viewportContentHeight, state.scrollOffset]);
+  }, [viewportContentHeight, state.scrollOffset, feedHeight, state.maxScrollOffset]);
 
   return (
     <Box flexDirection="column" width={termWidth} height={frameHeight} overflow="hidden">
@@ -1874,9 +1956,18 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
         )}
         {/* The Todo tip renders inside the feed's single loading row. */}
         <Box
+          borderStyle={useClaudeStyleInputBorder ? "round" : undefined}
+          borderColor={useClaudeStyleInputBorder
+            ? inputContainerBorderColor({
+              permissionMode: state.permissionMode,
+              busy: state.busy,
+              pendingPermission: Boolean(state.pendingPermission),
+            })
+            : undefined}
           paddingX={1}
           gap={1}
           flexShrink={0}
+          width={termWidth}
         >
           <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : "❯"}</Text>
           <Box flexGrow={1} minWidth={0}>
@@ -1891,6 +1982,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               inputHistory={promptInputHistoryRef.current}
               disableArrowNavigation={Boolean(acMode)}
+              enhancedEditingEnabled={useClaudeStyleInputBorder}
               onScrollContext={(direction) => {
                 // Scrolling the transcript remains available while a turn is
                 // running; only overlays that own the input block it.
@@ -1958,6 +2050,7 @@ export function App({ cwd, agentTools, allTools }: AppProps): React.ReactElement
           busy={state.busy}
           status={state.status}
           queuedCount={queuedCount}
+          mcpStatus={mcpStatus}
           permissionMode={state.permissionMode}
           thinkingLevel={llm.thinkingLevel ?? (llm.reasoning ? "medium" : "off")}
           cacheReadTokens={state.cacheReadTokens}

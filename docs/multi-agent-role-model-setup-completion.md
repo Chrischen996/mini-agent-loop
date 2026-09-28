@@ -1,5 +1,8 @@
 # /multi-agent 角色模型配置 + H3/H4 引擎 · 开发文档（完成版）
 
+> 历史实现记录：下文提及的 `terminal-main.ts` / `main.ts` 终端入口已移除，
+> 当前唯一的交互式终端为 `src/tui/ink-main.tsx` + `App.tsx`（Ink）。
+
 > 更新日期：2026-09-18
 > 范围：`/multi-agent` 向导内子角色模型配置（角色矩阵 + 新建模型子流程）、H3 多步规划 / H4 自我反思引擎及其与 TUI 的完整接线、三端（App.tsx / terminal-main.ts / main.ts）运行时的 `roleLlmConfigs` 注入一致性，以及代码评审后的 P1/P2 缺陷修复。
 > 参考设计：`docs/multi-agent-orchestration-design.md` §4/§6/§7，`docs/superpowers/specs/2026-09-17-multi-agent-role-model-setup-design.md`

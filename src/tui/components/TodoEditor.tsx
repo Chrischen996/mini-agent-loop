@@ -9,9 +9,8 @@ import { PICKER_SELECTED_MARKER, PICKER_UNSELECTED_MARKER, TODO_EDITOR_DRAFT_HIN
 /**
  * Interactive Todo overlay.
  *
- * Status glyphs, the selection marker, and the key hints come from the same
- * modules the ANSI overlay uses, so both clients describe one interaction. The
- * selected row is amber-on-default like every other picker: it previously used
+ * Status glyphs, selection markers, and key hints come from shared presentation
+ * modules. The selected row is amber-on-default like every other picker: it previously used
  * `C.selection`, which is a dark background blue and rendered almost
  * invisibly as foreground text.
  */

@@ -1,5 +1,4 @@
-import type { CommandDef } from "./components/FileAutocomplete.tsx";
-import { ARGUMENT_COMMANDS, PATH_COMMANDS } from "./slash-commands.ts";
+import { ARGUMENT_COMMANDS, PATH_COMMANDS, SLASH_COMMANDS, type CommandDef } from "./slash-commands.ts";
 import { listCandidates } from "./file-completion.ts";
 import { modelChoices } from "./model-command.ts";
 import type { ModelRef } from "../models.ts";
@@ -14,7 +13,6 @@ import {
   resolveAutocompleteNav,
   type AutocompleteNavKey,
 } from "./autocomplete.ts";
-import { SLASH_COMMANDS } from "./slash-commands.ts";
 
 export type TerminalAutocompleteState = {
   mode: AcMode;
@@ -69,7 +67,7 @@ const EMPTY_STATE: TerminalAutocompleteState = {
   sessionLoading: false,
 };
 
-/** Non-React counterpart of useAutocomplete for the ANSI entrypoint. */
+/** Headless autocomplete controller; the Ink UI uses useAutocomplete. */
 export class TerminalAutocompleteController {
   private state: TerminalAutocompleteState = { ...EMPTY_STATE };
   private fileTrigger: FileAcTrigger | null = null;
@@ -211,10 +209,8 @@ export class TerminalAutocompleteController {
 
   openModelPicker(query = "", models?: ModelRef[]): void {
     const choices = modelChoices(query, models);
-    // The picker owns the prompt while it is open: the input holds the bare
-    // query (empty shows the `Search models` placeholder), exactly like Ink's
-    // `openModelPicker`. Keeping `/model ` in the prompt hid the placeholder and
-    // made the two clients type different text into the same field.
+    // Match Ink's openModelPicker: keep a bare query so empty input displays
+    // the `Search models` placeholder rather than `/model `.
     this.options.setInput(query);
     this.setState({ ...EMPTY_STATE, mode: "model-picker", modelQuery: query, models: choices.references, modelContextWindows: choices.contextWindows });
   }

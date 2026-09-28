@@ -15,7 +15,7 @@ import {
   resolveAutocompleteNav,
   sessionListCommand,
 } from "../src/tui/autocomplete.ts";
-import { SLASH_COMMANDS } from "../src/tui/components/FileAutocomplete.tsx";
+import { SLASH_COMMANDS } from "../src/tui/slash-commands.ts";
 
 describe("autocomplete index helpers", () => {
   it("wraps around a non-empty list", () => {

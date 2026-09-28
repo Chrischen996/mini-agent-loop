@@ -12,6 +12,13 @@ import { buildWelcomePanelRows } from "../src/tui/welcome-panel.ts";
 import type { TerminalAutocompleteState } from "../src/tui/terminal-autocomplete-controller.ts";
 
 describe("standalone terminal render model", () => {
+  it("keeps the Claude-style input container Ink-only", () => {
+    const lines = buildTerminalRenderLines(createInitialState("test-model"), { width: 80, input: "draft" });
+
+    assert.equal(lines.filter((line) => line.key.startsWith("input-")).length, 1);
+    assert.equal(lines.some((line) => line.key.startsWith("input-border-")), false);
+  });
+
   it("uses the mini-agent mark and name for the default welcome row", () => {
     const lines = buildTerminalRenderLines(createInitialState("test-model"), { header: {} });
 

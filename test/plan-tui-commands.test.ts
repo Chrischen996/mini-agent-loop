@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { SLASH_COMMANDS } from "../src/tui/components/FileAutocomplete.tsx";
+import { SLASH_COMMANDS } from "../src/tui/slash-commands.ts";
 import {
   createAndSavePlan,
   loadPlanDocument,

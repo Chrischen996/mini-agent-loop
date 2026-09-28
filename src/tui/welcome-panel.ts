@@ -47,9 +47,9 @@ export function getWelcomeHeaderHeight(width: number | undefined, showWelcome: b
 }
 
 /**
- * Build the fixed-width welcome frame used by ANSI, legacy, and Ink paths.
- * Keeping the row geometry here prevents one entrypoint from drifting on
- * narrow terminals or when a model/path contains wide characters.
+ * Build the fixed-width welcome frame used by the Ink UI.
+ * Keeping the row geometry here handles narrow terminals and wide characters
+ * in model references or paths.
  */
 export function buildWelcomePanelRows(width: number, data: WelcomePanelData = {}): WelcomePanelRow[] {
   const safeWidth = Math.max(WELCOME_PANEL_MIN_WIDTH, Math.floor(width));

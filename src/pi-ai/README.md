@@ -15,17 +15,12 @@ thin patch on top of the published `@earendil-works/pi-ai` package. It owns:
 
 ## Dependency boundary
 
-The repository **does not import `@earendil-works/pi-ai` at runtime**. That
-package, along with `@earendil-works/pi-agent-core` and
-`@earendil-works/pi-coding-agent`, was previously declared as a dependency while
-never being imported; those three declarations have been removed. The only
-`@earendil-works` package actually imported is `@earendil-works/pi-tui`, used by
-`src/tui/pi-tui-frame.ts` and `src/tui/pi-tui-runtime.ts` for alternate-screen
-rendering.
-
-The `overrides` block in `package.json` still pins the `@earendil-works/*`
-versions, because `pi-web-access` pulls `pi-tui` transitively and the pin keeps
-a single deduped copy.
+The repository **does not import `@earendil-works/pi-ai` or
+`@earendil-works/pi-tui` directly at runtime**. The provider layer is vendored
+here, and the sole terminal UI is Ink/React. `pi-web-access` still brings in
+`@earendil-works/*` packages (including `pi-tui`) transitively for its web
+access integration; their presence in a lockfile does not make pi-tui the TUI
+renderer. The `overrides` block pins its pi-agent-core/pi-ai peer versions.
 
 Practical consequence: **upgrading the upstream npm package does nothing to this
 directory.** Changes here are local edits to vendored source and must be

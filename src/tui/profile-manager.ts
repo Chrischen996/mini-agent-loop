@@ -1,4 +1,4 @@
-import type { Dispatch } from "react";
+
 import type { TuiAction } from "./state.ts";
 import type { LlmConfig, ModelSwitchOverrides } from "../llm/index.ts";
 import type { ModelRef } from "../models.ts";
@@ -12,12 +12,12 @@ export type ProfileManagerDeps = {
   llm: LlmConfig;
   setLlm: (llm: LlmConfig) => void;
   setModelSetup: (setup: ModelSetupState | undefined) => void;
-  setAcMode: React.Dispatch<React.SetStateAction<any>>;
+  setAcMode: (value: any) => void;
   setInput: (input: string) => void;
   setAcIndex: (index: number) => void;
-  setProfileListState: React.Dispatch<React.SetStateAction<any>>;
-  dispatch: Dispatch<TuiAction>;
-  historyRef: React.MutableRefObject<AgentMessage[]>;
+  setProfileListState: (value: any) => void;
+  dispatch: (action: TuiAction) => void;
+  historyRef: { current: AgentMessage[] };
   /** Persist the adapted transcript immediately after a model switch. */
   persistSession?: (history: AgentMessage[]) => Promise<void>;
 };

@@ -88,13 +88,9 @@ export function panelBottomLine(key: string, width?: number): RenderLine {
 }
 
 /**
- * Terminal row model for the same permission card rendered by Ink.
- *
- * Row-for-row identical to `PermissionPanel.tsx`: the caption lives in the
- * border, then the tool, the risk, the question, and one options row carrying
- * the key hints. The previous seven-row variant repeated "Permission required"
- * inside the card and split the choices from their keys, so the two clients
- * reserved a different number of rows for the same overlay.
+ * Headless row model for the permission card rendered by Ink.
+ * The caption lives in the border, followed by the tool, risk, question,
+ * and one options row with its key hints.
  */
 export function permissionPanelRenderLines(request?: PendingPermissionState, width?: number): RenderLine[] {
   if (!request) return [];
@@ -304,9 +300,7 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState, conte
   }
 
   const argumentPalette = Boolean(state.argumentCandidates && state.argumentPrefix);
-  // The command palette shows the same `usage  description` columns as the Ink
-  // FileAutocomplete overlay; it used to list bare names, so the two clients
-  // advertised the catalog differently.
+  // The headless command palette uses Ink's `usage  description` column layout.
   const values = argumentPalette
     ? state.argumentCandidates!
     : state.mode === "command" ? state.commands.map((item) => item.usage)

@@ -186,7 +186,7 @@ export function classifyError(error: unknown): RetryableErrorType | null {
   }
 
   // Network failures
-  if (/network error|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|fetch failed|ECONNRESET/i.test(message)) {
+  if (/network error|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|fetch failed|ECONNRESET|EPIPE|ECONNABORTED|EHOSTUNREACH|ENETUNREACH|UND_ERR_SOCKET|UND_ERR_CONNECT_TIMEOUT|socket hang up/i.test(message)) {
     return "network";
   }
 

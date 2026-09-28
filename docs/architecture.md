@@ -57,7 +57,7 @@ Loop invariants:
 | `src/cli.ts` | One-shot and resumable CLI entry point |
 | `src/server.ts` | `createAgentServer` factory: session state, streaming turn endpoint, wiring |
 | `src/server/routes/` | HTTP route modules by domain (see below) |
-| `src/tui/` | Ink and pi-tui terminal client: render models, input, autocomplete, overlays |
+| `src/tui/` | Sole Ink/React terminal client: UI components, input, autocomplete, overlays |
 | `src/llm/` | Chat/stream calls, retries, recovery, timeouts, vision |
 | `src/pi-ai/` | Vendored provider layer — see `src/pi-ai/README.md` |
 | `src/tools/` | Built-in tools: bash, read/write/edit, grep/find/ls, git, todo, validation |

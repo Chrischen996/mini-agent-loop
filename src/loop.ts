@@ -394,7 +394,7 @@ const MAX_MEMORY_SECTION_CHARS = 2_000;
 export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string, memorySection?: string): string {
   const parts: string[] = [];
   if (agentsMd) {
-    parts.push(`# Repository Agent Instructions (from AGENTS.md)\n${agentsMd}\n`);
+    parts.push(`# Repository Agent Instructions (from AGENT.MD)\n${agentsMd}\n`);
   }
   if (memorySection && memorySection.trim()) {
     let section = memorySection.trim();
@@ -422,6 +422,7 @@ export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string, memo
     "",
     "### Permission Mode Awareness",
     "- plan mode: you CANNOT write. Say \"我当前处于计划模式，无权限改代码。\" and output a clear plan for user review.",
+    "- If a requested action requires a different permission mode, tell the user to switch to a suitable mode, such as bypass, before continuing.",
     "- bypass mode: all registered tools may run without approval; sandbox rules still apply.",
     "- When a tool call is blocked, adapt and inform the user about the mode constraint.",
     "",
@@ -1575,6 +1576,8 @@ async function runAgentTurnInternal(
     }
 
     timeoutRetries = 0;
+    truncatedStreamRetries = 0;
+    retryCoordinator.resetAfterSuccess();
 
     const afterToolResults = messages
       .slice()

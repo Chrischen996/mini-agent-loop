@@ -3,16 +3,9 @@ import { PICKER_SELECTED_MARKER } from "./claude-style.ts";
 /**
  * One windowing policy for every picker overlay.
  *
- * The Ink client and the standalone ANSI renderer each decided how many
- * candidates to list, whether the selection stayed on screen, and how a
- * clipped list was announced. The same `/` therefore showed six commands in
- * Ink and twelve in ANSI, the ANSI palette stopped scrolling after its twelfth
- * row (arrowing further moved the marker off screen behind a footer that still
- * read `Showing 12 / 20`), and Ink's history picker listed every candidate it
- * was given, which could push the prompt past the last terminal row.
- *
- * Both clients now ask this module how many rows a picker gets, which slice is
- * visible, and what the surrounding chrome says.
+ * The Ink UI uses this module to decide how many candidates to list, keep
+ * selections on screen, and announce clipped lists. Centralizing the policy
+ * also keeps history pickers from pushing the prompt past the last row.
  */
 
 /** Candidate rows each picker shows before it clips. */
@@ -110,14 +103,14 @@ export function pickerVisibleWindow<T>(
   return { visible: items.slice(start, start + count), start };
 }
 
-/** `Showing 11-16 / 20`, printed under a clipped picker in both clients. */
+/** `Showing 11-16 / 20`, printed under a clipped picker. */
 export function pickerRangeText(start: number, visibleCount: number, total: number): string {
   const end = Math.min(start + Math.max(0, visibleCount), total);
   const from = Math.min(start + 1, Math.max(1, end));
   return `Showing ${from}-${end} / ${total}`;
 }
 
-/** Palette heading, without the per-client decoration (`──` in Ink, `⌘` in ANSI). */
+/** Palette heading, without Ink's decorative frame. */
 export function pickerTitleText(
   mode: string,
   context?: { filter?: string; query?: string; fragment?: string; argumentPrefix?: string },
@@ -138,7 +131,7 @@ export function pickerTitleText(
   }
 }
 
-/** Navigation hint under a picker; identical wording in both clients. */
+/** Navigation hint under a picker. */
 export function pickerHintText(mode: string, options?: { argumentPalette?: boolean }): string {
   if (options?.argumentPalette) return "Tab/Enter select  ↑↓ navigate  Esc close";
   switch (mode) {
@@ -165,11 +158,9 @@ export function modelNameColumn(visibleModels: readonly string[]): number {
 }
 
 /**
- * `✓ provider/model` — the label both clients pad into the shared name column.
- * Ink pads to `column - 1` because its `Box gap={1}` supplies the last column;
- * the ANSI renderer pads to `column`. The active model is marked in both
- * clients; the ANSI picker used to list bare references with no way to tell
- * which one was in use.
+ * `✓ provider/model` — label for the model picker. Ink pads to `column - 1`
+ * because its `Box gap={1}` supplies the final column. Mark the active model
+ * so it is distinguishable from other references.
  */
 export function modelNameLabel(model: string, active: boolean): string {
   return `${active ? "✓ " : "  "}${model}`;
@@ -177,9 +168,7 @@ export function modelNameLabel(model: string, active: boolean): string {
 
 /**
  * One saved-session row after the selection marker: a short id, the message
- * count, and a bounded preview. Ink truncates by terminal width, the ANSI
- * renderer used to clip the preview itself, so the two disagreed on long
- * previews; both now print this string verbatim.
+ * count, and a bounded preview. Ink also truncates rows to terminal width.
  */
 export function sessionRowContent(session: { id: string; messageCount: number; preview: string }): string {
   const preview = session.preview.replace(/\s+/g, " ").trim();
@@ -190,7 +179,7 @@ export function sessionRowContent(session: { id: string; messageCount: number; p
   return `${session.id.slice(0, 12)}  ${detail}`;
 }
 
-/** One model-profile row, identical in both clients. */
+/** One model-profile row for the picker. */
 export function profileRowText(
   profile: { name: string; model: string; baseUrl?: string; active?: boolean },
   selected: boolean,

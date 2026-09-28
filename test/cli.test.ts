@@ -44,6 +44,13 @@ describe("parseCliArgs", () => {
   it("sets allowMcpTools when --allow-mcp-tools is present", () => {
     const result = parseCliArgs(["--allow-mcp-tools", "do something"]);
     assert.equal(result.allowMcpTools, true);
+    assert.deepEqual(result.mcpAllowlist, []);
+  });
+
+  it("parses per-server and per-tool MCP allow entries", () => {
+    const result = parseCliArgs(["--allow-mcp", "search", "--allow-mcp=docs/read", "go"]);
+    assert.equal(result.allowMcpTools, false);
+    assert.deepEqual(result.mcpAllowlist, ["search", "docs/read"]);
   });
 
   it("parses --tools flag", () => {
@@ -209,6 +216,16 @@ describe("parseCliArgs", () => {
   it("throws for invalid mode", () => {
     assert.throws(() => parseCliArgs(["--mode", "invalid"]), /Invalid mode/);
     assert.throws(() => parseCliArgs(["--mode"]), /--mode requires an argument/);
+  });
+
+  it("defaults init flags to false", () => {
+    const result = parseCliArgs(["init"]);
+    assert.deepEqual(result.init, { force: false, print: false });
+  });
+
+  it("parses all init flags together", () => {
+    const result = parseCliArgs(["init", "--init-force", "--init-print"]);
+    assert.deepEqual(result.init, { force: true, print: true });
   });
 });
 

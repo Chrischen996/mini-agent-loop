@@ -321,8 +321,9 @@ export function estimateMessageHeight(
       return 1 + Math.max(
         1,
         thinkingRows(message.reasoning, thinkingMode, expandedThinking.has(index), width) +
-          // feed paddingX={1} (−2) + "⏺ " marker (−2) = width − 4 available.
-          countTerminalRows(message.text, Math.max(10, width - 4)),
+          // Mirror countMarkdownRenderRows so scroll window and drawn rows use
+          // the same row space (blank lines / inline syntax don't inflate).
+          countMarkdownRenderRows(message.text, width),
       );
     case "notice":
       // +1 for the marginTop={1} row. Divider-style notice: optional title

@@ -22,7 +22,7 @@ const MAIN_SCREEN = "\x1b[?1049l";
 const args = process.argv.slice(2);
 
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
-  process.stderr.write("Hermes TUI requires an interactive terminal\n");
+  process.stderr.write("mini-agent TUI requires an interactive terminal\n");
   process.exit(1);
 }
 
@@ -74,6 +74,7 @@ async function main(): Promise<void> {
         cwd={cwd}
         agentTools={mcpRuntime.toolProvider(agentTools)}
         allTools={mcpRuntime.toolProvider(createAllTools(cwd, { sandboxRunner }))}
+        mcpStatuses={() => mcpRuntime.statuses()}
       />,
       { stdout: incrementalStdout },
     );

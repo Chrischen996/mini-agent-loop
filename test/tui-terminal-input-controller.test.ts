@@ -65,6 +65,29 @@ describe("terminal input controller", () => {
     assert.equal(controller.getValue(), "");
   });
 
+  it("moves by whitespace-delimited words for xterm and kitty Ctrl+Arrow sequences", () => {
+    const controller = new TerminalInputController({ onAction: () => {}, enhancedEditingEnabled: true });
+    controller.setValue("one  你😀-two\nthree", 0);
+
+    controller.handle("\x1b[1;5C");
+    assert.equal(controller.getCursor(), 5);
+    controller.handle("\x1b[57359;5u");
+    assert.equal(controller.getCursor(), 12);
+    controller.handle("\x1b[1;5D");
+    assert.equal(controller.getCursor(), 5);
+    controller.handle("\x1b[57358;5u");
+    assert.equal(controller.getCursor(), 0);
+  });
+
+  it("preserves document-wide Home and End when enhanced editing is disabled", () => {
+    const controller = new TerminalInputController({ onAction: () => {} });
+    controller.setValue("one\ntwo", 4);
+    controller.handle("\x1b[H");
+    assert.equal(controller.getCursor(), 0);
+    controller.handle("\x1b[F");
+    assert.equal(controller.getCursor(), 7);
+  });
+
   it("does not use Ctrl+Up or Ctrl+Down as transcript scrolling shortcuts", () => {
     const actions: TerminalInputAction[] = [];
     const controller = new TerminalInputController({ onAction: (action) => actions.push(action) });
@@ -193,8 +216,7 @@ describe("terminal input controller", () => {
   it("moves vertically through a multiline draft while preserving the column", () => {
     const actions: TerminalInputAction[] = [];
     const controller = new TerminalInputController({ onAction: (action) => actions.push(action) });
-    controller.handle("abc\ndefgh\nxy");
-    controller.handle("\x1b[H");
+    controller.setValue("abc\ndefgh\nxy", 0);
     controller.handle("\x1b[C\x1b[C");
     assert.equal(controller.getCursor(), 2);
 
@@ -214,6 +236,23 @@ describe("terminal input controller", () => {
       { type: "cursor", direction: "down" },
       { type: "cursor", direction: "up" },
     ]);
+  });
+
+  it("moves Home and End within the current multiline line", () => {
+    const controller = new TerminalInputController({ onAction: () => {}, enhancedEditingEnabled: true });
+    controller.setValue("ab\n你😀z\nxy", 5);
+
+    controller.handle("\x1b[H");
+    assert.equal(controller.getCursor(), 3);
+
+    controller.handle("\x1b[F");
+    assert.equal(controller.getCursor(), 6);
+
+    controller.setValue("a\n\nb", 2);
+    controller.handle("\x1b[H");
+    assert.equal(controller.getCursor(), 2);
+    controller.handle("\x1b[F");
+    assert.equal(controller.getCursor(), 2);
   });
 
   it("recalls bounded submissions and restores the pre-navigation draft", () => {

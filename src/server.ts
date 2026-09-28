@@ -44,6 +44,7 @@ import { createTodoTool, validateTodoSnapshot, type TodoItem } from "./tools/tod
 import { resolveToolProvider, type Tool, type ToolProvider } from "./tools/types.ts";
 import type { SandboxRunner } from "./sandbox/types.ts";
 import type { AgentMessage, ContentPart, ImageMimeType, MessageContent } from "./types.ts";
+import { createMcpApprovalGate, mcpAllowlistFromEnv, mcpAutoApproveFromEnv } from "./mcp/approval.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
 import type { McpServerStatus } from "./mcp/types.ts";
 import {
@@ -863,10 +864,25 @@ export function createAgentServer(options: AgentServerOptions): Express {
       sandbox: options.sandbox,
       sandboxRunner: options.sandboxRunner,
     });
+    const mcpApproval = createMcpApprovalGate({
+      allow: mcpAutoApproveFromEnv(),
+      allowlist: mcpAllowlistFromEnv(),
+      approvalHint: "Set MINI_AGENT_MCP_AUTO_APPROVE=1 or MINI_AGENT_MCP_ALLOW=server[/tool].",
+    });
+    const gateMcp = (tool: Tool): Tool => {
+      if (tool.source?.kind !== "mcp" && tool.name !== "mcp_prompts" && tool.name !== "mcp_resource") return tool;
+      return {
+        ...tool,
+        execute: async (args, signal) => {
+          await mcpApproval(tool, args, signal);
+          return tool.execute(args, signal);
+        },
+      };
+    };
     tools = () => mergeToolSets(
       localTools,
       resolveToolProvider(options.mcpTools ?? []),
-    );
+    ).map(gateMcp);
   }
   const documentStore = new DocumentStore(path.join(dataRoot, "documents"));
   const sessionManager = new SessionManager({

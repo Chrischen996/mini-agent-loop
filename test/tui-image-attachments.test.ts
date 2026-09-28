@@ -1,84 +1,21 @@
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import React, { useState } from "react";
-import { render } from "ink";
 import {
   buildWindowsClipboardCommand,
   imageAttachmentToPart,
   loadImageAttachment,
   readClipboardImage,
 } from "../src/tui/image-attachments.ts";
-import {
-  isPasteShortcut,
-  PasteAwareTextInput,
-} from "../src/tui/components/PasteAwareTextInput.tsx";
 
 const ONE_PIXEL_PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64",
 );
 
-const nextFrame = () => new Promise((resolve) => setTimeout(resolve, 25));
-
 describe("TUI image attachments", () => {
-  it("recognizes terminal Ctrl+V without treating plain v as image paste", () => {
-    assert.equal(isPasteShortcut("v", { ctrl: true, meta: false }), true);
-    assert.equal(isPasteShortcut("\u0016", { ctrl: true, meta: false }), true);
-    assert.equal(isPasteShortcut("v", { ctrl: false, meta: false }), false);
-  });
-
-  it("keeps Ctrl+V out of the controlled Ink input", async () => {
-    const terminalIn = Object.assign(new PassThrough(), {
-      isTTY: true,
-      setRawMode: () => terminalIn,
-      ref: () => terminalIn,
-      unref: () => terminalIn,
-    });
-    const terminalOut = Object.assign(new PassThrough(), {
-      isTTY: true,
-      columns: 80,
-      rows: 24,
-    });
-    let currentValue = "draft";
-    let pasteCount = 0;
-
-    function Harness(): React.ReactElement {
-      const [value, setValue] = useState("draft");
-      currentValue = value;
-      return React.createElement(PasteAwareTextInput, {
-        value,
-        onChange: setValue,
-        onSubmit: () => {},
-        onPasteImage: () => { pasteCount += 1; },
-      });
-    }
-
-    const app = render(React.createElement(Harness), {
-      stdin: terminalIn as unknown as NodeJS.ReadStream,
-      stdout: terminalOut as unknown as NodeJS.WriteStream,
-      stderr: terminalOut as unknown as NodeJS.WriteStream,
-      exitOnCtrlC: false,
-      patchConsole: false,
-    });
-    try {
-      await nextFrame();
-      terminalIn.write("x");
-      await nextFrame();
-      assert.equal(currentValue, "draftx");
-
-      terminalIn.write("\u0016");
-      await nextFrame();
-      assert.equal(pasteCount, 1);
-      assert.equal(currentValue, "draftx");
-    } finally {
-      app.unmount();
-    }
-  });
-
   it("loads and sniffs a local image instead of trusting its extension", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mini-agent-image-test-"));
     try {

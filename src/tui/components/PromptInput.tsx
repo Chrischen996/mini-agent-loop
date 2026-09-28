@@ -2,6 +2,15 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useInput, useStdin } from "ink";
 import { isSgrMouseEvent, parseSgrMouseWheel } from "../mouse-events.ts";
 import { TUI_COLORS as C } from "../theme.ts";
+import {
+  clampCursor,
+  moveToLineEnd,
+  moveToLineStart,
+  moveVertical,
+  moveWordLeft,
+  moveWordRight,
+  splitGraphemes,
+} from "../input-editing.ts";
 import type { TerminalInputHistory } from "../terminal-input-history.ts";
 
 export function isPasteShortcut(input: string, key?: { ctrl?: boolean; meta?: boolean }): boolean {
@@ -25,30 +34,16 @@ export type PromptInputProps = {
   inputHistory?: TerminalInputHistory;
   /** Prevent prompt editing from consuming arrows owned by an overlay. */
   disableArrowNavigation?: boolean;
+  /** Enable the migration's new word/Home/End editing behavior. */
+  enhancedEditingEnabled?: boolean;
   /** Called when an empty single-line prompt has no history entry to navigate. */
   onScrollContext?: (direction: "up" | "down") => void;
 };
 
 const MAX_VISIBLE_LINES = 10;
 
-const graphemeSegmenter = typeof Intl !== "undefined" && "Segmenter" in Intl
-  ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
-  : undefined;
-
-export function splitGraphemes(value: string): string[] {
-  if (!value) return [];
-  if (graphemeSegmenter) {
-    return [...graphemeSegmenter.segment(value)].map((part) => part.segment);
-  }
-  return [...value];
-}
-
 function joinGraphemes(parts: string[]): string {
   return parts.join("");
-}
-
-function clampCursor(index: number, count: number): number {
-  return Math.max(0, Math.min(index, count));
 }
 
 function insertAt(parts: string[], cursor: number, text: string): { next: string; cursor: number } {
@@ -61,31 +56,6 @@ function deleteBefore(parts: string[], cursor: number): { next: string; cursor: 
   if (cursor <= 0) return { next: joinGraphemes(parts), cursor };
   const nextParts = [...parts.slice(0, cursor - 1), ...parts.slice(cursor)];
   return { next: joinGraphemes(nextParts), cursor: cursor - 1 };
-}
-
-function lineBounds(parts: string[], cursor: number): { start: number; end: number } {
-  let start = cursor;
-  while (start > 0 && parts[start - 1] !== "\n") start--;
-  let end = cursor;
-  while (end < parts.length && parts[end] !== "\n") end++;
-  return { start, end };
-}
-
-function moveVertical(parts: string[], cursor: number, direction: -1 | 1): number {
-  const { start, end } = lineBounds(parts, cursor);
-  const column = cursor - start;
-  if (direction < 0) {
-    if (start === 0) return cursor;
-    const prevEnd = start - 1;
-    let prevStart = prevEnd;
-    while (prevStart > 0 && parts[prevStart - 1] !== "\n") prevStart--;
-    return Math.min(prevStart + column, prevEnd);
-  }
-  if (end >= parts.length) return cursor;
-  const nextStart = end + 1;
-  let nextEnd = nextStart;
-  while (nextEnd < parts.length && parts[nextEnd] !== "\n") nextEnd++;
-  return Math.min(nextStart + column, nextEnd);
 }
 
 function renderInverse(text: string): React.ReactElement {
@@ -105,6 +75,7 @@ export function PromptInput({
   attachments,
   inputHistory,
   disableArrowNavigation = false,
+  enhancedEditingEnabled = false,
   onScrollContext,
 }: PromptInputProps): React.ReactElement {
   const { internal_eventEmitter } = useStdin();
@@ -189,9 +160,27 @@ export function PromptInput({
         return;
       }
 
+      if (enhancedEditingEnabled && !disableArrowNavigation && key.ctrl && key.leftArrow) {
+        setCursor(moveWordLeft(currentParts, currentCursor));
+        return;
+      }
+      if (enhancedEditingEnabled && !disableArrowNavigation && key.ctrl && key.rightArrow) {
+        setCursor(moveWordRight(currentParts, currentCursor));
+        return;
+      }
+
       // Leave other Ctrl/Meta chords to the app (thinking, scroll, exit).
       if (key.ctrl || key.meta) return;
 
+      const navigationKey = key as typeof key & { home?: boolean; end?: boolean };
+      if (enhancedEditingEnabled && navigationKey.home) {
+        setCursor(moveToLineStart(currentParts, currentCursor));
+        return;
+      }
+      if (enhancedEditingEnabled && navigationKey.end) {
+        setCursor(moveToLineEnd(currentParts, currentCursor));
+        return;
+      }
       if (key.leftArrow) {
         setCursor(clampCursor(currentCursor - 1, currentParts.length));
         return;
@@ -209,9 +198,9 @@ export function PromptInput({
         if (isMultiLine) {
           // In multi-line mode: only use history navigation when cursor is
           // already at the very first character (can't go up further in text).
-          const newCursor = moveVertical(currentParts, currentCursor, key.upArrow ? -1 : 1);
-          if (newCursor !== currentCursor) {
-            setCursor(newCursor);
+          const moved = moveVertical(currentParts, currentCursor, key.upArrow ? -1 : 1);
+          if (moved.cursor !== currentCursor) {
+            setCursor(moved.cursor);
             return;
           }
         }

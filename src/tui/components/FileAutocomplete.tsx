@@ -33,7 +33,7 @@ type CommandPaletteProps = {
 
 export function CommandPalette({ filter, selectedIndex, candidates, maxVisible = pickerMaxVisibleItems("command"), width }: CommandPaletteProps): React.ReactElement | null {
   const { visible, start } = pickerVisibleWindow(candidates, selectedIndex, maxVisible);
-  // Same column the ANSI palette and `/help` use, so descriptions line up.
+  // Use the same command-usage column as `/help` to align descriptions.
   const usageColumn = commandUsageColumn(candidates);
 
   return (
@@ -165,7 +165,7 @@ export function formatContextWindow(value: number): string {
 
 export function ModelPicker({ candidates, contextWindows, selectedIndex, query, current, maxVisible = pickerMaxVisibleItems("model"), width }: ModelPickerProps): React.ReactElement | null {
   const { visible, start } = pickerVisibleWindow(candidates, selectedIndex, maxVisible);
-  // Fixed name column so the context sizes line up (and match the ANSI picker).
+  // Fixed name column keeps model context sizes aligned.
   const nameColumn = modelNameColumn(visible);
   return (
     <Box flexDirection="column" paddingX={2} width={width} minWidth={0} overflow="hidden">

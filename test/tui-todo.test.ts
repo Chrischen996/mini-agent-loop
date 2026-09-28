@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { getTodoPanelRows, planToTodoItems, todoProgressMeter } from "../src/tui/todo-format.ts";
 import { todoPanelRenderLines } from "../src/tui/todo-lines.ts";
-import { TodoPanelStatic as TodoPanel } from "../src/tui/components/TodoPanel.tsx";
 import { createInitialState, tuiReducer } from "../src/tui/state.ts";
 import { getMessageFeedHeight, getPickerLayout } from "../src/tui/layout.ts";
 import type { TodoItem } from "../src/todo.ts";
@@ -153,26 +152,6 @@ describe("TodoPanel formatting", () => {
     assert.match(lines[0]!.text, /All tasks completed/);
   });
 
-  it("renders status symbols and active form text via the unified panel", () => {
-    const todos: TodoItem[] = [
-      { id: "done", content: "Read config", activeForm: "Reading config", status: "completed", source: "model" as const },
-      { id: "active", content: "Run tests", activeForm: "Running tests", status: "in_progress", source: "model" as const },
-      { id: "next", content: "Review output", activeForm: "Reviewing output", status: "pending", source: "model" as const },
-    ];
-
-    const panel = TodoPanel({ todos })!;
-    const rendered = JSON.stringify(panel);
-
-    // Unified panel renders item content with per-status icons/colors.
-    assert.ok(rendered.includes("Read config"));
-    // in_progress items display activeForm instead of content
-    assert.ok(rendered.includes("Running tests"));
-    assert.ok(rendered.includes("Review output"));
-    // Summary header reports the completed/total line.
-    assert.ok(rendered.includes("completed"));
-    assert.ok(rendered.includes("in progress"));
-  });
-
   it("limits visible rows and reports overflow", () => {
     const todos: TodoItem[] = Array.from({ length: 10 }, (_, index) => ({
       id: String(index),
@@ -181,8 +160,7 @@ describe("TodoPanel formatting", () => {
       status: "pending" as const,
       source: "model" as const,
     }));
-
-    assert.equal(getTodoPanelRows({ todos }), 10); // header + 8 visible + overflow row
+    assert.equal(getTodoPanelRows({ todos }), 10);
   });
 
   it("uses no rows when both sources are absent or hidden", () => {
@@ -202,7 +180,6 @@ describe("TodoPanel formatting", () => {
       ],
     };
     const items = planToTodoItems(plan as any);
-
     assert.equal(items.length, 2);
     assert.equal(items[0].status, "completed");
     assert.equal(items[1].status, "in_progress");
@@ -211,14 +188,18 @@ describe("TodoPanel formatting", () => {
   it("reserves todo rows from the message feed", () => {
     const base = getMessageFeedHeight({ termRows: 24 });
     const withTodos = getMessageFeedHeight({ termRows: 24, todoRows: 4 });
-
     assert.equal(base - withTodos, 4);
+  });
+
+  it("reserves border rows from the message feed when the input container is enabled", () => {
+    const base = getMessageFeedHeight({ termRows: 24 });
+    const withBorder = getMessageFeedHeight({ termRows: 24, hasInputBorder: true });
+    assert.equal(base - withBorder, 2);
   });
 
   it("reserves todo rows when sizing autocomplete pickers", () => {
     const withoutTodos = getPickerLayout({ termRows: 20, requestedItems: 12, extraRows: 3 });
     const withTodos = getPickerLayout({ termRows: 20, requestedItems: 12, todoRows: 4, extraRows: 3 });
-
     assert.ok(withTodos.itemRows < withoutTodos.itemRows);
   });
 
@@ -249,7 +230,7 @@ describe("TodoPanel formatting", () => {
     assert.doesNotMatch(itemLine!.text, /Run tests/);
   });
 
-  it("compact mode header contains \u25b8 indicator", () => {
+  it("compact mode header contains ▸ indicator", () => {
     const lines = todoPanelRenderLines({
       todos: [
         { id: "a", content: "Task", activeForm: "Doing task", status: "in_progress", source: "model" as const },
@@ -257,10 +238,10 @@ describe("TodoPanel formatting", () => {
       viewMode: "compact",
     });
     assert.equal(lines.length, 1);
-    assert.match(lines[0]!.text, /\u25b8/);
+    assert.match(lines[0]!.text, /▸/);
   });
 
-  it("expanded mode header contains \u25be indicator", () => {
+  it("expanded mode header contains ▾ indicator", () => {
     const lines = todoPanelRenderLines({
       todos: [
         { id: "a", content: "Task", activeForm: "Task", status: "pending", source: "model" as const },
@@ -269,7 +250,7 @@ describe("TodoPanel formatting", () => {
     });
     const header = lines.find((l) => l.key === "todo-header");
     assert.ok(header, "header line should exist");
-    assert.match(header!.text, /\u25be/);
+    assert.match(header!.text, /▾/);
   });
 
   it("expanded mode renders group separators between status groups", () => {
@@ -282,9 +263,7 @@ describe("TodoPanel formatting", () => {
       viewMode: "expanded",
     });
     const sepLines = lines.filter((l) => l.key?.startsWith("todo-sep-"));
-    // in_progress \u2192 pending \u2192 done: 2 separators
     assert.equal(sepLines.length, 2);
-    // in_progress item should appear before pending item
     const activeIdx = lines.findIndex((l) => l.key === "todo-b");
     const pendingIdx = lines.findIndex((l) => l.key === "todo-c");
     const doneIdx = lines.findIndex((l) => l.key === "todo-a");

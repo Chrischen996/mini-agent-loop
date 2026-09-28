@@ -25,7 +25,7 @@ export type SessionPickerState = {
   loading: boolean;
 };
 
-/** Keep the session picker contract identical across Ink and ANSI renderers. */
+/** Navigation hint for the Ink session picker. */
 export const SESSION_PICKER_HINT = "Tab fill /resume  ·  Enter resume selected  ↑↓ navigate  Esc close";
 
 export function createSessionPickerState(
@@ -61,7 +61,7 @@ export function parseResumeCommand(value: string): { prefix: string } | undefine
   return match ? { prefix: match[1]?.trim() ?? "" } : undefined;
 }
 
-/** Parse startup session flags shared by the ANSI, legacy, and Ink entrypoints. */
+/** Parse startup session flags for the Ink TUI and headless callers. */
 export function getStartupSessionRequest(
   argv: readonly string[] = process.argv.slice(2),
   env: { MINI_AGENT_SESSION_ID?: string } = process.env,

@@ -1,7 +1,8 @@
 export { loadMcpConfig, loadMcpConfigFromEnv } from "./config.ts";
-export { createMcpApprovalGate, mcpAutoApproveFromEnv } from "./approval.ts";
+export { createMcpApprovalGate, isMcpCallAllowed, mcpAllowlistFromEnv, mcpAutoApproveFromEnv, parseMcpAllowlist } from "./approval.ts";
 export { createStdioMcpClient, createStreamableHttpMcpClient } from "./client.ts";
 export { createMcpToolName, createMcpTools, mcpResultToToolResult } from "./tool-adapter.ts";
+export { createMcpCatalogTools } from "./catalog.ts";
 export { createMcpRuntimeFromEnv, McpRuntime, mergeToolSets } from "./runtime.ts";
 export type {
   LoadedMcpConfig,

@@ -4,7 +4,7 @@ import { toolVisualName } from "./tool-lines.ts";
 import { CLAUDE_SPINNER_FRAMES, SPINNER_INTERVAL_MS, getSpinnerFrame, spinnerTipLabel } from "./loading.ts";
 
 /**
- * One spinner for both clients.
+ * One spinner for the Ink terminal client.
  *
  * This module previously kept a second glyph set whose first frame was `·`,
  * which was indistinguishable from the `·` separators in the status row right

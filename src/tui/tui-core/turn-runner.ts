@@ -1,30 +1,60 @@
-import type { ChatFn, LlmConfig } from "../llm/index.ts";
-import { LlmTimeoutError } from "../llm/retry.ts";
+// tui-core — renderer-agnostic TurnRunner for headless consumers.
+//
+// Composes auto-continue, timeout, permission, and persistence around the
+// shared runAgentTurn core. The store owns presentation state while this
+// runner owns AgentMessage history; LOOP_EVENT dispatch connects the two.
+// The shipped Ink TUI invokes the same core directly for its UI-specific
+// lifecycle; this runner remains available for headless integration.
+
+import type { LlmConfig, ChatFn } from "../../llm/index.ts";
 import {
-  createAgentHistory,
   MaxTurnsExceededError,
   runAgentTurn,
+  createAgentHistory,
   type AgentRuntimeRef,
   type LoopEvent,
-} from "../loop.ts";
-import { PermissionModeChangedError, type PermissionManager, type PermissionTurnContext } from "../permissions.ts";
-import type { AgentMessage, MessageContent, ToolCall } from "../types.ts";
-import type { MessagePreprocessor } from "../preprocessors/index.ts";
-import type { ToolProvider, ToolResult } from "../tools/types.ts";
-import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
-import type { AutoSubagentOptions } from "../subagent/auto.ts";
-import { TurnEventBuffer } from "./stream-buffer.ts";
-import type { TuiAction, TuiStore } from "./state.ts";
-import { resolveAtRefs } from "./at-refs-resolver.ts";
-import { imageAttachmentToPart } from "./image-attachments.ts";
+} from "../../loop.ts";
+import { LlmTimeoutError } from "../../llm/retry.ts";
+import {
+  PermissionModeChangedError,
+  type PermissionManager,
+  type PermissionTurnContext,
+} from "../../permissions.ts";
+import type { AgentMessage, MessageContent } from "../../types.ts";
+import type { ToolProvider } from "../../tools/types.ts";
+import type { RuntimeExecutionContext } from "../../runtime/policy-types.ts";
+import type { AutoSubagentOptions } from "../../subagent/auto.ts";
+import type { MessagePreprocessor } from "../../preprocessors/index.ts";
+import type { SkillRegistry } from "../../skills/types.ts";
+import { TurnEventBuffer } from "../stream-buffer.ts";
+import { resolveAtRefs } from "../at-refs-resolver.ts";
+import { imageAttachmentToPart } from "../image-attachments.ts";
+import type { ImageAttachment, TuiAction, TuiStore } from "../state.ts";
 
-export type TerminalAgentServiceOptions = {
+export type TerminalSubmitOptions = {
+  userContent?: MessageContent;
+  displayText?: string;
+  images?: ImageAttachment[];
+};
+
+export type TerminalTurnResult = {
+  succeeded: boolean;
+  history: AgentMessage[];
+  errorMessage?: string;
+};
+
+export type TurnRunnerOptions = {
   store: TuiStore;
   llm: LlmConfig;
   tools: ToolProvider;
   permissionManager: PermissionManager;
-  permissionSessionId?: string;
+  /**
+   * Resolve the permission session on every call so `/resume` and `/clear`
+   * keep permission requests scoped to the active session id.
+   */
   getPermissionSessionId?: () => string;
+  permissionSessionId?: string;
+  /** Seed the runner with a restored AgentMessage[] history. */
   history?: AgentMessage[];
   autoSubagent?: AutoSubagentOptions;
   preprocessors?: MessagePreprocessor[];
@@ -36,9 +66,12 @@ export type TerminalAgentServiceOptions = {
   autoValidate?: boolean;
   autoCheckpoint?: boolean;
   skillNames?: string[];
-  skillRegistry?: import("../skills/types.ts").SkillRegistry;
+  skillRegistry?: SkillRegistry;
   sessionId?: string;
   chat?: ChatFn;
+  /** Cap on auto-continues. Default 5, matching both entrypoints. */
+  maxContinues?: number;
+
   onLlmChange?: (llm: LlmConfig) => void;
   onPermissionTurnChange?: (turn: PermissionTurnContext | undefined) => void;
   /** Persist the user message before the first model request. */
@@ -46,24 +79,14 @@ export type TerminalAgentServiceOptions = {
   onTurnFinished?: (result: TerminalTurnResult) => void | Promise<void>;
 };
 
-export type TerminalSubmitOptions = {
-  userContent?: MessageContent;
-  displayText?: string;
-  images?: import("./state.ts").ImageAttachment[];
-};
-
-export type TerminalTurnResult = {
-  succeeded: boolean;
-  history: AgentMessage[];
-  errorMessage?: string;
-};
-
 /**
- * Owns the single mutable AgentMessage history for the standalone terminal
- * entrypoint. UI code only dispatches actions; it never reimplements the
- * agent loop or appends model/tool messages itself.
+ * Owns the single mutable AgentMessage history for a TUI session. UI code
+ * only dispatches actions; it never reimplements the agent loop or appends
+ * model/tool messages itself.
+ *
+ * API-compatible with the `createAgentSession` entry in `index.ts`.
  */
-export class TerminalAgentService {
+export class TurnRunner {
   private history: AgentMessage[];
   private activeLlm: LlmConfig;
   private activeThinkingMode: "fixed" | "adaptive";
@@ -74,10 +97,11 @@ export class TerminalAgentService {
     options: TerminalSubmitOptions;
     resolve: (result: TerminalTurnResult) => void;
   }> = [];
-  private readonly options: TerminalAgentServiceOptions;
+  private readonly options: TurnRunnerOptions;
   private readonly streamBuffer: TurnEventBuffer;
+  private abortController?: AbortController;
 
-  constructor(options: TerminalAgentServiceOptions) {
+  constructor(options: TurnRunnerOptions) {
     this.options = options;
     this.activeLlm = options.llm;
     this.activeThinkingMode = options.thinkingMode ?? "fixed";
@@ -127,10 +151,14 @@ export class TerminalAgentService {
   /**
    * Record a direct slash-tool invocation in the same history used by agent
    * turns. Direct tools do not ask the model for an assistant message, but a
-   * synthetic tool call/result pair keeps `/resume` faithful to what the user
-   * actually ran and lets the normal persistence hook save it.
+   * synthetic tool call/result pair keeps `/resume` faithful to what the
+   * user actually ran and lets the normal persistence hook save it.
    */
-  async recordDirectToolTurn(prompt: string, call: ToolCall, result: ToolResult): Promise<TerminalTurnResult> {
+  async recordDirectToolTurn(
+    prompt: string,
+    call: import("../../types.ts").ToolCall,
+    result: import("../../tools/types.ts").ToolResult,
+  ): Promise<TerminalTurnResult> {
     this.history = [
       ...this.history,
       { role: "user", content: prompt },
@@ -194,7 +222,11 @@ export class TerminalAgentService {
       const next = this.queuedSubmissions.shift();
       if (!next) return;
       this.submit(next.prompt, next.options).then(next.resolve, (error) => {
-        next.resolve({ succeeded: false, history: this.history, errorMessage: error instanceof Error ? error.message : String(error) });
+        next.resolve({
+          succeeded: false,
+          history: this.history,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
       });
     });
     this.activeTurn = tracked;
@@ -204,7 +236,9 @@ export class TerminalAgentService {
   abort(): void {
     this.abortController?.abort();
     const queued = this.queuedSubmissions.splice(0);
-    for (const item of queued) item.resolve({ succeeded: false, history: this.history, errorMessage: "turn aborted" });
+    for (const item of queued) {
+      item.resolve({ succeeded: false, history: this.history, errorMessage: "turn aborted" });
+    }
   }
 
   resolvePermission(decision: "allow" | "deny"): boolean {
@@ -218,8 +252,6 @@ export class TerminalAgentService {
     if (resolved) this.dispatch({ type: "CLEAR_PENDING_PERMISSION" });
     return resolved;
   }
-
-  private abortController?: AbortController;
 
   private dispatch(action: TuiAction): void {
     this.options.store.dispatch(action);
@@ -245,8 +277,8 @@ export class TerminalAgentService {
       (request) => this.dispatch({ type: "LOOP_EVENT", event: { type: "permission_required", request } }),
       abortController.signal,
     );
-      this.options.onPermissionTurnChange?.(permissionTurn);
-      const runId = this.streamBuffer.start();
+    this.options.onPermissionTurnChange?.(permissionTurn);
+    const runId = this.streamBuffer.start();
     let currentPrompt = prompt;
     let turnLlm = this.activeLlm;
     let userContent = submitOptions.userContent;
@@ -267,12 +299,17 @@ export class TerminalAgentService {
         userContent = await resolveAtRefs(text, permissionTurn, this.options.tools);
       }
       if (submitOptions.images?.length) {
-        const imageParts = await Promise.all(submitOptions.images.map((image) => imageAttachmentToPart(image)));
-        const textParts = typeof userContent === "string"
-          ? [{ type: "text" as const, text: userContent }]
-          : userContent;
+        const imageParts = await Promise.all(
+          submitOptions.images.map((image) => imageAttachmentToPart(image)),
+        );
+        const textParts =
+          typeof userContent === "string"
+            ? [{ type: "text" as const, text: userContent }]
+            : userContent;
         userContent = [...textParts, ...imageParts];
       }
+
+      const maxContinues = this.options.maxContinues ?? 5;
       while (true) {
         try {
           this.history = await runAgentTurn(this.history, currentPrompt, {
@@ -295,11 +332,11 @@ export class TerminalAgentService {
             onEvent: (event) => {
               if (event.type === "aborted") aborted = true;
               if (event.type === "thinking_policy") {
-                // Adaptive escalation is local to this turn; keep the
-                // session-owned level unchanged for persistence and shortcuts.
+                // Adaptive escalation is local to this turn; the session-owned
+                // level is unchanged for persistence and shortcuts.
                 turnLlm = { ...turnLlm, thinkingLevel: event.level };
               }
-              this.handleEvent(runId, event);
+              this.streamBuffer.handle(runId, event);
             },
           });
           succeeded = !aborted;
@@ -308,14 +345,13 @@ export class TerminalAgentService {
           if (error instanceof MaxTurnsExceededError) {
             this.history = error.messages;
             continueCount += 1;
-            const maxContinues = 5;
             if (continueCount >= maxContinues || abortController.signal.aborted) {
               if (abortController.signal.aborted) {
-                this.emitTerminalEvent(runId, this.abortEvent(this.history, abortController.signal.reason));
+                this.streamBuffer.handle(runId, this.abortEvent(this.history, abortController.signal.reason));
                 aborted = true;
               } else {
                 errorMessage = `Auto-continue limit reached (${maxContinues} turns)`;
-                this.emitTerminalEvent(runId, { type: "error", message: errorMessage });
+                this.streamBuffer.handle(runId, { type: "error", message: errorMessage });
               }
               break;
             }
@@ -326,17 +362,17 @@ export class TerminalAgentService {
           }
           if (error instanceof LlmTimeoutError && error.messages) {
             this.history = error.messages;
-            errorMessage = formatTimeout(error);
-            this.emitTerminalEvent(runId, { type: "error", message: errorMessage });
+            errorMessage = formatLlmTimeoutMessage(error);
+            this.streamBuffer.handle(runId, { type: "error", message: errorMessage });
             break;
           }
           if (error instanceof PermissionModeChangedError || abortController.signal.aborted) {
             aborted = true;
-            this.emitTerminalEvent(runId, this.abortEvent(this.history, abortController.signal.reason));
+            this.streamBuffer.handle(runId, this.abortEvent(this.history, abortController.signal.reason));
             break;
           }
           errorMessage = error instanceof Error ? error.message : String(error);
-          this.emitTerminalEvent(runId, { type: "error", message: errorMessage });
+          this.streamBuffer.handle(runId, { type: "error", message: errorMessage });
           break;
         }
       }
@@ -346,7 +382,11 @@ export class TerminalAgentService {
       this.options.onPermissionTurnChange?.(undefined);
       this.abortController?.abort();
       this.abortController = undefined;
-      const result = { succeeded, history: this.history, ...(errorMessage ? { errorMessage } : {}) } satisfies TerminalTurnResult;
+      const result: TerminalTurnResult = {
+        succeeded,
+        history: this.history,
+        ...(errorMessage ? { errorMessage } : {}),
+      };
       try {
         await this.options.onTurnFinished?.(result);
       } catch {
@@ -356,17 +396,10 @@ export class TerminalAgentService {
     }
   }
 
-  private handleEvent(runId: number, event: LoopEvent): void {
-    // `runAgentTurn` emits terminal events itself. The service only forwards
-    // them, so it must not synthesize a second completion event in finally.
-    this.streamBuffer.handle(runId, event);
-  }
-
-  private emitTerminalEvent(runId: number, event: LoopEvent): void {
-    this.streamBuffer.handle(runId, event);
-  }
-
-  private abortEvent(history: AgentMessage[], reason: unknown): Extract<LoopEvent, { type: "aborted" }> {
+  private abortEvent(
+    history: AgentMessage[],
+    reason: unknown,
+  ): Extract<LoopEvent, { type: "aborted" }> {
     if (reason instanceof PermissionModeChangedError) {
       return {
         type: "aborted",
@@ -380,8 +413,15 @@ export class TerminalAgentService {
   }
 }
 
-function formatTimeout(error: LlmTimeoutError): string {
-  const phase = error.phase === "first_response" ? "first response" : error.phase === "stream_idle" ? "stream idle" : error.phase === "total" ? "total request" : "request";
+function formatLlmTimeoutMessage(error: LlmTimeoutError): string {
+  const phase =
+    error.phase === "first_response"
+      ? "first response"
+      : error.phase === "stream_idle"
+        ? "stream idle"
+        : error.phase === "total"
+          ? "total request"
+          : "request";
   const duration = error.timeoutMs === undefined ? "" : `, ${Math.ceil(error.timeoutMs / 1000)}s`;
   const preview = error.partialContent?.replace(/\s+/g, " ").trim().slice(0, 80);
   return preview

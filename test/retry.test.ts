@@ -70,6 +70,12 @@ describe("classifyError", () => {
     assert.equal(classifyError(new Error("ECONNRESET")), "network");
   });
 
+  it("classifies common transient disconnect errors as network failures", () => {
+    for (const message of ["socket hang up", "EPIPE", "ECONNABORTED", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT"]) {
+      assert.equal(classifyError(new Error(message)), "network", message);
+    }
+  });
+
   it("classifies internal timeout errors", () => {
     assert.equal(classifyError(new Error("timed out after 30000ms")), "timeout");
   });

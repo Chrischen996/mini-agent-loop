@@ -1,6 +1,6 @@
 import { build } from "vite";
 import { nodeResolve } from "@rollup/plugin-node-resolve";
-import { builtinModules } from "module";
+import { builtinModules } from "node:module";
 
 const nodeBuiltins = new Set(
   builtinModules.flatMap((name) => [name, `node:${name}`]),
@@ -42,7 +42,6 @@ async function buildEntry(
   });
 }
 
-// Keep the published default aligned with README's one-shot CLI contract.
+// One-shot CLI and the single Ink terminal client are the only executables.
 await buildEntry("src/cli.ts", "cli.js", true);
-// Publish the interactive Ink client as the package's TUI executable.
 await buildEntry("src/tui/ink-main.tsx", "tui.js", false);

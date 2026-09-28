@@ -1,7 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { resolvePendingPermissionDecision } from "../src/tui/pending-permission.ts";
-import type { Key } from "ink";
+// Native Key type for test assertions.
+type Key = { escape?: boolean; return?: boolean; ctrl?: boolean; shift?: boolean };
 
 describe("pending permission input", () => {
   it("treats Enter as deny and A/D as explicit choices", () => {

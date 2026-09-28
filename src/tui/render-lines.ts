@@ -5,9 +5,8 @@ export type RenderLineBackground = "user" | "selection" | "badge";
 /**
  * One independently colored run inside a row.
  *
- * Chrome rows such as the status line need several colors on a single physical
- * row. Without inline segments the ANSI renderer had to flatten the whole row
- * to one color, which is why its status line could not match the Ink client.
+ * Headless render projections can preserve several colors on a single physical
+ * row (for example, each semantic segment of a status line).
  */
 export type RenderSegment = {
   text: string;

@@ -11,8 +11,8 @@ import { markdownRowText, markdownRuleText, parseMarkdownLines } from "../markdo
  * dropping lines), so `countTerminalRows(rawText)` in message-viewport.ts stays
  * an accurate height estimate — unlike the previous regex-based
  * formatAssistantText which injected newlines and caused viewport clipping
- * drift. Row text comes from the shared `markdownRowText` helper, which is also
- * what the ANSI projection uses, so the two clients render the same markdown.
+ * drift. Row text comes from the shared `markdownRowText` helper, also used by
+ * headless render projections.
  */
 
 /** Parse inline `code` and **bold** spans into styled Text nodes. */

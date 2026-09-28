@@ -1005,6 +1005,7 @@ describe("runAgentTurn", () => {
     assert.ok(!prompt.includes("manual mode"));
     assert.ok(!prompt.includes("auto mode"));
     assert.ok(prompt.includes("CANNOT write"));
+    assert.ok(prompt.includes("requires a different permission mode"));
     for (const mode of ["plan", "bypass"] as const) {
       assert.ok(buildSystemPrompt(mode).includes(`mode=${mode}`));
     }

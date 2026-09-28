@@ -9,12 +9,8 @@ import { terminalStringWidth, truncateTerminalPath } from "./terminal-width.ts";
 /**
  * One shared description of the stable status chrome.
  *
- * The Ink client and the standalone ANSI renderer used to compose this row
- * independently and drifted apart: Ink omitted the separator between model and
- * cwd, moved the permission mode behind the context counter, and converted the
- * context window with 1024-based units (`128000 -> 125K`). Both paths now
- * consume the same segments, so ordering, separators, truncation, and colors
- * cannot diverge again.
+ * Centralizes the Ink status bar's ordering, separators, truncation, and
+ * colors. Context-window values use decimal thousands (128000 -> 128K).
  */
 
 export type StatusSegmentRole =
@@ -26,6 +22,7 @@ export type StatusSegmentRole =
   | "thinking"
   | "context"
   | "status"
+  | "mcp"
   | "queued"
   | "cache";
 
@@ -47,6 +44,8 @@ export type StatusLineInput = {
   busy: boolean;
   status?: string;
   queuedCount?: number;
+  /** Compact MCP connection summary, for example `MCP 2 ready`. */
+  mcpStatus?: string;
   cacheReadTokens?: number;
   promptTokens?: number;
   /** Total row budget. Optional segments are dropped when the row would not fit. */
@@ -217,6 +216,7 @@ export function buildStatusSegments(input: StatusLineInput): StatusSegment[] {
   // Ordered from most to least important; the fitter drops from the end.
   const optional: ContentSegment[] = [
     ...(tailLabel ? [{ role: "status", text: tailLabel, color: C.muted, dim: true } satisfies ContentSegment] : []),
+    ...(input.mcpStatus ? [{ role: "mcp", text: input.mcpStatus, color: input.mcpStatus.includes("error") ? C.error : C.muted, dim: true } satisfies ContentSegment] : []),
     ...((input.queuedCount ?? 0) > 0 ? [{ role: "queued", text: `${input.queuedCount} queued`, color: C.running, dim: true } satisfies ContentSegment] : []),
     ...(showCache && cacheLabel ? [{ role: "cache", text: cacheLabel, color: C.info, dim: true } satisfies ContentSegment] : []),
   ];
@@ -267,7 +267,7 @@ export function formatStatusLine(input: StatusLineInput): string {
  * `Ctrl+R` cycles the effort levels the active model supports. A model without
  * reasoning has a single level, so the cycle clamps to `off` and the previous
  * `Thinking level: off` read as though the keypress had changed something.
- * Both clients now say plainly that the model has no levels to cycle.
+ * Report plainly that the model has no levels to cycle.
  */
 export function thinkingLevelStatusText(
   config: Pick<LlmConfig, "reasoning" | "piModel"> & { model?: string },

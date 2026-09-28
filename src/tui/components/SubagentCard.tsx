@@ -21,7 +21,7 @@ function lineColor(line: RenderLine): string {
 /**
  * SubagentCard renders a subagent invocation in the TUI message feed.
  *
- * Render the same Claude Code-style subagent rows used by the ANSI terminal.
+ * Render Claude Code-style subagent rows from the shared presentation model.
  * This component intentionally has no border or independent layout model;
  * conversation semantics remain owned by the reducer and agent service.
  */

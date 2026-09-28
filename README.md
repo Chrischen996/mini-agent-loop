@@ -520,7 +520,8 @@ ACL sandboxing and interactive PTY sessions are not implemented by this change.
 
 ### MCP tools
 
-The agent can load tools from explicitly configured MCP servers over `stdio`.
+The agent can load tools from explicitly configured MCP servers over `stdio`
+or Streamable HTTP (`"transport": "http"`, with `url` and optional `headers`).
 It does not auto-discover project configuration because an MCP stdio entry can
 execute a local command. Set `MINI_AGENT_MCP_CONFIG` to a file you trust:
 
@@ -561,8 +562,11 @@ reconnected with bounded exponential backoff by default. Set `reconnect` to
 ```bash
 export MINI_AGENT_MCP_CONFIG=/absolute/path/to/mcp.json
 
-# The one-shot CLI only registers MCP tools when this invocation opts in.
+# The one-shot CLI registers configured MCP tools on every invocation.
+# Calls stay denied until this process opts in, either for every server or
+# for one server / one tool. MINI_AGENT_MCP_ALLOW accepts the same entries.
 npm start -- --allow-mcp-tools "使用已配置的远端工具查询数据"
+npm start -- --allow-mcp search --allow-mcp docs/read "只允许这些远端调用"
 ```
 
 All clients use the same `PermissionManager` policy. In `bypass`, configured
@@ -576,9 +580,12 @@ the complete paginated catalog. The next inner model turn receives the updated
 tool set without restarting the process. Changes to the MCP JSON configuration
 itself still require a restart.
 
-User-configured MCP tools in this release use stdio. DeepWiki internally uses
-the fixed official Streamable HTTP endpoint. OAuth, resources, prompts,
-sampling, elicitation, and task-required tools remain out of scope.
+User-configured servers use stdio or Streamable HTTP. DeepWiki internally uses
+the fixed official Streamable HTTP endpoint. Connected servers also expose
+`mcp_prompts` and `mcp_resource`, which list and read remote prompts and
+resources as untrusted data. OAuth, sampling, elicitation, and task-required
+tools remain out of scope. The TUI status row shows a compact connection
+summary such as `MCP 2 ready` when servers are configured.
 
 Local API:
 
@@ -638,21 +645,16 @@ reviewing a complete plan before execution.
 npm run tui
 ```
 
-The default `npm run tui` entry uses the React + Ink renderer. It renders the
-same shared Agent Core, reducer state, streaming events, permission flow,
-autocomplete, and session persistence as the rest of the TUI components. The
-previous standalone ANSI renderer remains available under the explicit
-`tui:terminal` alias:
-
-```bash
-npm run tui:terminal
-```
-
-`npm run tui:ink` remains available as an explicit alias for the same Ink
-implementation.
+`npm run tui` and the installed `mini-agent-loop` / `mini-agent-loop-tui`
+commands run the same **React + Ink** terminal UI (`src/tui/ink-main.tsx`,
+packaged as `dist/tui.js`). It uses a Claude Code-inspired layout but is this
+project's own client, not Anthropic's `claude` CLI. There is no pi-tui, legacy,
+or standalone ANSI terminal entrypoint and no `--renderer` switch. The Ink
+client uses the shared Agent Core, reducer, tool registry, permissions, and
+session persistence.
 
 Use `/model`, `/profiles`, `/sessions`, `/resume [id]` (or `resume [id]`), `/clear`, `/quit`, or `Ctrl+C`
-inside the Ink client. Typing `/sessions` or `/resume` opens the saved-session
+inside the TUI. Typing `/sessions` or `/resume` opens the saved-session
 picker with IDs, message counts, and prompt previews. Enter on `/resume` restores
 the selected session; `/resume <id-prefix>` selects a specific one directly.
 Startup flags mirror the CLI: `npm run tui -- --continue`,
@@ -660,10 +662,8 @@ Startup flags mirror the CLI: `npm run tui -- --continue`,
 `/model` also accepts `--base-url`, `--api-key-env`, and temporary `--api-key`
 overrides. Sessions are persisted under the shared `AGENT_DATA_DIR` root and
 restore history, tool results, Todo/Plan state, permission mode, and model
-settings on the next start. The standalone frame follows the Claude Code
-conversation layout and remains available through `npm run tui:terminal`; the
-previous dependency-free compatibility client remains available as
-`npm run tui:legacy`.
+settings on the next start. The Ink interface follows the Claude Code-style
+conversation layout.
 TUI supports plan workflow slash commands: `/plan`, `/plan-show`, `/plan-approve`,
 `/plan-reject`, `/plan-run`, `/plan-retry`, `/plan-history`, `/plan-archive`.
 Terminal input follows the Claude Code-style priority order: `Tab`/`↑↓` first
@@ -754,7 +754,7 @@ mini-agent-loop/
     loop.ts                    # core agent turn/loop
     cli.ts  server.ts          # CLI and HTTP entry points
     server/routes/             # HTTP routes split by domain
-    tui/                       # Ink / pi-tui terminal client
+    tui/                       # single Ink/React terminal client
     llm/  pi-ai/               # model calls and the vendored provider layer
     tools/  runtime/           # built-in tools and the execution broker
     permissions.ts             # permission modes and approval requests

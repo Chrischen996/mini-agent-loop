@@ -1,4 +1,5 @@
-import type { Key } from "ink";
+// Native key type — no Ink dependency needed for permission decision logic.
+type Key = { escape?: boolean; return?: boolean; ctrl?: boolean; shift?: boolean };
 import type { PermissionDecision } from "../permissions.ts";
 
 /**

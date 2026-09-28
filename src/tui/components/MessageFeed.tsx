@@ -427,7 +427,7 @@ export function MessageFeed({
 }: MessageFeedProps): React.ReactElement {
   const effectiveMode: ThinkingDisplayMode =
     thinkingMode ?? (showThinking ? "summary" : "hidden");
-  
+
   const viewport = selectMessageViewport({
     messages,
     subagentById,

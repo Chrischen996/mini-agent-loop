@@ -28,11 +28,14 @@ export function getMessageFeedHeight(options: {
   planApprovalRows?: number;
   /** Rows reserved for the upgrade notice while it is on screen. */
   updateRows?: number;
+  /** Whether the input is wrapped in a two-row border. */
+  hasInputBorder?: boolean;
 }): number {
   const viewport = getTuiViewportHeight(options.termRows);
   const chrome =
     (options.hasHeader === false ? 0 : options.headerRows ?? TUI_BRAND_HEADER_HEIGHT) + // welcome identity
     2 + // input row
+    (options.hasInputBorder ? 2 : 0) +
     1 + // stable model/context metadata row; activity stays in the feed
     (options.hasPendingImages ? 1 : 0) +
     (options.todoRows ?? 0) +
@@ -54,10 +57,12 @@ export function getPickerLayout(options: {
   permissionRows?: number;
   planApprovalRows?: number;
   updateRows?: number;
+  /** Whether the input is wrapped in a two-row border. */
+  hasInputBorder?: boolean;
 }): { itemRows: number; totalRows: number } {
   const viewport = getTuiViewportHeight(options.termRows);
   const fixedChrome =
-    (options.hasHeader === false ? 0 : options.headerRows ?? TUI_BRAND_HEADER_HEIGHT) + 2 + 1 + (options.hasPendingImages ? 1 : 0) + (options.todoRows ?? 0) +
+    (options.hasHeader === false ? 0 : options.headerRows ?? TUI_BRAND_HEADER_HEIGHT) + 2 + (options.hasInputBorder ? 2 : 0) + 1 + (options.hasPendingImages ? 1 : 0) + (options.todoRows ?? 0) +
     (options.permissionRows ?? 0) + (options.planApprovalRows ?? 0) + (options.updateRows ?? 0);
   const extraRows = options.extraRows ?? 2;
   const maxTotal = Math.max(0, viewport - fixedChrome - 3);

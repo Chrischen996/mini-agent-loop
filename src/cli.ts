@@ -11,6 +11,7 @@ import type { ImageMimeType } from "./types.ts";
 import { loadLlmConfigFromEnv, switchLlmModel } from "./llm/index.ts";
 import { MaxTurnsExceededError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
 import { loadInstructionBundle } from "./agents-md.ts";
+import { initAgentMd } from "./init-agent-md.ts";
 import { getDataRoot, type PersistedSession } from "./session-store.ts";
 import {
   formatSessionCandidates,
@@ -48,6 +49,7 @@ import {
 } from "./preprocessors/index.ts";
 import { createTools, createToolsWithSandbox, type ToolName } from "./tools/index.ts";
 import { type SandboxConfig } from "./sandbox/index.ts";
+import { createMcpApprovalGate, mcpAllowlistFromEnv, mcpAutoApproveFromEnv, parseMcpAllowlist } from "./mcp/approval.ts";
 import { createMcpRuntimeFromEnv } from "./mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
 import {
@@ -169,12 +171,14 @@ function isPathInsideCwd(resolvedPath: string, cwd: string): boolean {
   );
 }
 
-export function parseCliArgs(argv: string[]): {
+export type ParsedCliArgs = {
   prompt: string;
   imagePaths: string[];
   tools?: ToolName[];
   excludeTools?: ToolName[];
   allowMcpTools: boolean;
+  /** serverId or serverId/toolName entries from repeated --allow-mcp flags. */
+  mcpAllowlist: string[];
   mode: PermissionMode;
   modeExplicit: boolean;
   planOnly: boolean;
@@ -196,12 +200,17 @@ export function parseCliArgs(argv: string[]): {
   resumeSessionId?: string;
   /** With --resume/--continue: start a new session seeded with old messages. */
   forkSession: boolean;
-} {
+  /** Run the /init generator and exit without starting the agent loop. */
+  init?: { force: boolean; print: boolean };
+};
+
+export function parseCliArgs(argv: string[]): ParsedCliArgs {
   const imagePaths: string[] = [];
   const rest: string[] = [];
   let tools: ToolName[] | undefined;
   let excludeTools: ToolName[] | undefined;
   let allowMcpTools = false;
+  const mcpAllowlist: string[] = [];
   let mode: PermissionMode = "plan";
   let modeExplicit = false;
   let planOnly = false;
@@ -220,6 +229,7 @@ export function parseCliArgs(argv: string[]): {
   let resumeSessionId: string | undefined;
   let forkSession = false;
   let sandboxEnabled = process.env.MINI_AGENT_SANDBOX !== "0";
+  let init: ParsedCliArgs["init"] | undefined;
   const validTools = new Set<ToolName>([
     "read", "bash", "edit", "write", "grep", "find", "ls",
     "codebase_open", "codebase_search", "codebase_read", "codebase_explain",
@@ -248,6 +258,12 @@ export function parseCliArgs(argv: string[]): {
     }
     if (arg === "--allow-mcp-tools") {
       allowMcpTools = true;
+      continue;
+    }
+    if (arg === "--allow-mcp" || arg.startsWith("--allow-mcp=")) {
+      const value = arg === "--allow-mcp" ? argv[++i] : arg.slice("--allow-mcp=".length);
+      if (!value || value.startsWith("--")) throw new Error("--allow-mcp requires serverId or serverId/toolName");
+      mcpAllowlist.push(...parseMcpAllowlist(value));
       continue;
     }
     if (arg === "--plan") {
@@ -303,6 +319,20 @@ export function parseCliArgs(argv: string[]): {
     }
     if (arg === "--plan-archive") {
       planArchive = true;
+      continue;
+    }
+    if (arg === "init") {
+      init = { force: false, print: false };
+      continue;
+    }
+    if (arg === "--init-force") {
+      if (!init) init = { force: false, print: false };
+      init.force = true;
+      continue;
+    }
+    if (arg === "--init-print") {
+      if (!init) init = { force: false, print: false };
+      init.print = true;
       continue;
     }
     if (arg === "--yes") {
@@ -393,6 +423,7 @@ export function parseCliArgs(argv: string[]): {
     tools,
     excludeTools,
     allowMcpTools,
+    mcpAllowlist,
     mode,
     modeExplicit,
     planOnly,
@@ -411,7 +442,27 @@ export function parseCliArgs(argv: string[]): {
     continueSession,
     resumeSessionId,
     forkSession,
+    init,
   };
+}
+
+async function runInitCommand(options: { force: boolean; print: boolean; cwd: string }): Promise<number> {
+  try {
+    const result = await initAgentMd({
+      cwd: options.cwd,
+      force: options.force,
+      print: options.print,
+    });
+    if (options.print) {
+      process.stdout.write(`${result.content}`);
+      return 0;
+    }
+    process.stdout.write(`${result.overwritten ? "Overwrote" : "Created"} ${result.path}\n`);
+    return 0;
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
 }
 
 async function loadImagePart(
@@ -464,6 +515,7 @@ async function main(): Promise<void> {
     tools: selectedTools,
     excludeTools,
     allowMcpTools,
+    mcpAllowlist,
     mode,
     modeExplicit,
     planOnly,
@@ -482,7 +534,12 @@ async function main(): Promise<void> {
     continueSession,
     resumeSessionId,
     forkSession,
+    init: initOptions,
   } = parsed;
+  if (initOptions) {
+    const cwd = process.cwd();
+    process.exit(await runInitCommand({ ...initOptions, cwd }));
+  }
   const sandboxConfig: SandboxConfig | undefined = sandboxEnabled && process.env.MINI_AGENT_SANDBOX !== "false"
     ? {
         enabled: true,
@@ -784,9 +841,23 @@ async function main(): Promise<void> {
       sandbox: sandboxConfig,
     });
     sandboxCleanup = cleanup;
+    const mcpApproval = createMcpApprovalGate({
+      allow: allowMcpTools || mcpAutoApproveFromEnv(),
+      allowlist: [...mcpAllowlist, ...mcpAllowlistFromEnv()],
+      approvalHint: "Pass --allow-mcp-tools, --allow-mcp <server[/tool]>, or set MINI_AGENT_MCP_ALLOW.",
+    });
     tools = () => {
-      const available = resolveToolProvider(configuredTools);
-      return allowMcpTools ? available : available.filter((tool) => tool.source?.kind !== "mcp");
+      const available = resolveToolProvider(mcpRuntime.toolProvider(configuredTools));
+      return available.map((tool) => {
+        if (tool.source?.kind !== "mcp" && tool.name !== "mcp_prompts" && tool.name !== "mcp_resource") return tool;
+        return {
+          ...tool,
+          execute: async (args: Record<string, unknown>, signal?: AbortSignal) => {
+            await mcpApproval(tool, args, signal);
+            return tool.execute(args, signal);
+          },
+        };
+      });
     };
     tools();
   } catch (error) {

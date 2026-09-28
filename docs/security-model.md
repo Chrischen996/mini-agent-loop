@@ -99,7 +99,8 @@ the container or network layer rather than relying on the agent.
 - Provide an explicit sandbox runner so `bash` is containerized with
   `allowNetwork: false`.
 - Leave `MINI_AGENT_MCP_AUTO_APPROVE` unset — setting it to `1` removes the
-  approval prompt for remote tools.
+  approval prompt for every remote tool. Prefer `MINI_AGENT_MCP_ALLOW` (or
+  `--allow-mcp server[/tool]`) to approve one server or one tool.
 - Restrict `EXTERNAL_CODEBASE_ENABLED=0` if repository fetching is not needed.
 - Run the process with a workspace-scoped user and enforce egress rules
   externally.
