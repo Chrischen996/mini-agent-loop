@@ -8,6 +8,7 @@ import {
   compareVersions,
   fetchLatestVersion,
   formatUpdateNotice,
+  UPDATE_CHECK_REGISTRY_URL,
   resolveInstalledVersion,
   UPDATE_CHECK_CACHE_MS,
 } from "../src/update-check.ts";
@@ -133,6 +134,26 @@ describe("update-check", () => {
     assert.equal(info, null);
   });
 
+  it("refetches after a cached registry failure instead of suppressing updates for a day", async () => {
+    const cacheFile = await makeCacheFile();
+    await writeFile(
+      cacheFile,
+      JSON.stringify({ checkedAt: Date.now(), latest: null, current: "1.0.0" }),
+    );
+    let fetched = false;
+    const info = await checkForUpdate({
+      fetchLatest: async () => {
+        fetched = true;
+        return "2.0.0";
+      },
+      currentVersion: "1.0.0",
+      cacheFile,
+    });
+    assert.equal(fetched, true);
+    assert.ok(info);
+    assert.equal(info.latest, "2.0.0");
+  });
+
   it("falls back to the network when the cache file is missing or corrupt", async () => {
     const cacheFile = await makeCacheFile();
     let fetched = false;
@@ -171,9 +192,14 @@ describe("update-check", () => {
     assert.equal(typeof version, "string");
   });
 
-  it("fetchLatestVersion degrades to null on non-OK responses without throwing", async () => {
-    // Point the fetch at a bogus port via a failing global fetch override is
-    // not available here; instead assert the contract: it never throws.
+  it("targets npm's latest metadata endpoint", () => {
+    assert.equal(
+      UPDATE_CHECK_REGISTRY_URL,
+      "https://registry.npmjs.org/%40krischen99999%2Fmini-agent-loop/latest",
+    );
+  });
+
+  it("fetchLatestVersion degrades to null on network failures without throwing", async () => {
     let threw = false;
     try {
       await fetchLatestVersion();

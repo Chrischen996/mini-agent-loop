@@ -248,6 +248,20 @@ suiteDescriptor("the single Ink terminal", () => {
     }
   });
 
+  it("/init --print previews the deterministic template without the model or a write", async () => {
+    const view = open();
+    try {
+      await submit(view, "/init --print");
+      const frame = view.lastFrame() ?? "";
+      assert.match(frame, /AGENT\.MD Template Preview/);
+      // The print path must stay model-free and write-free.
+      assert.doesNotMatch(frame, /Working…/);
+      assert.equal(existsSync(path.join(cwd, "AGENT.MD")), false);
+    } finally {
+      view.cleanup();
+    }
+  });
+
   it("opens the Ink model picker instead of submitting a model turn", async () => {
     const view = open();
     try {
