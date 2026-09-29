@@ -6,8 +6,8 @@
  * a structured error instead of being silently ignored.
  *
  * Flags:
- *   --print / -p  — show what AGENT.MD would contain (via template fallback), don't write
- *   --force / -f  — allow overwriting an existing AGENT.MD (only relevant with --print)
+ *   --print / -p  — deterministic template preview; never calls the model, never writes
+ *   --force / -f  — tells the agent turn it may replace an existing AGENT.MD wholesale
  */
 
 export type ParsedInitCommand = {

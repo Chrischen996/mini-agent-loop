@@ -12,6 +12,7 @@ import { formatHelpNotice, parseSlashCommand, parseUnknownSlashCommand, SLASH_CO
 import { isExactSlashCommand } from "./autocomplete.ts";
 import { parseInitCommand } from "./init-command.ts";
 import { initAgentMd } from "../init-agent-md.ts";
+import { buildInitAgentPrompt } from "../init-prompt.ts";
 
 /** Human-readable message for an LlmTimeoutError, with partial-response preview. */
 function formatLlmTimeoutMessage(err: InstanceType<typeof LlmTimeoutError>): string {
@@ -115,6 +116,7 @@ import {
   finalizeExecCapture,
   finalizePlanCapture,
   parsePlanTurnOverride,
+  type PlanOverrideResult,
 } from "./plan-commands.ts";
 import { loadPlanDocument } from "../plan/index.ts";
 import {
@@ -1345,7 +1347,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
       return;
     }
 
-    const planTurnOverride = await parsePlanTurnOverride(trimmed, {
+    let planTurnOverride: PlanOverrideResult | null | undefined = await parsePlanTurnOverride(trimmed, {
       cwd,
       dispatch,
       setInput,
@@ -1418,9 +1420,12 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
       return;
     }
 
-    // /init uses the bounded LLM project snapshot from initAgentMd. Unlike
-    // an agent tool turn, this writes only AGENT.MD and does not temporarily
-    // bypass the active permission mode. --print never calls the model.
+    // /init runs as an agent turn: the LLM surveys the project with its
+    // tools and writes AGENT.MD itself. The turn temporarily forces the
+    // bypass permission mode and restores the user's mode afterwards
+    // (planTurnOverride.restoreMode). --print stays deterministic:
+    // template preview, no model call, no write.
+    let initTurn = false;
     const initCommand = parseInitCommand(trimmed);
     if (initCommand) {
       setInput("");
@@ -1432,37 +1437,32 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
         });
         return;
       }
-      try {
-        const result = await initAgentMd({
-          cwd,
-          force: initCommand.force,
-          print: initCommand.print,
-          llm: !initCommand.print,
-          llmConfig: llm,
-        });
-        if (initCommand.print) {
+      if (initCommand.print) {
+        try {
+          const result = await initAgentMd({ cwd, print: true, llm: false });
           dispatch({
             type: "ADD_NOTICE",
             title: "AGENT.MD Template Preview",
             text: result.content,
           });
-          return;
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          dispatch({
+            type: "ADD_NOTICE",
+            title: "Init Failed",
+            text: detail,
+          });
         }
-        await refreshInstructionPrompt();
-        dispatch({
-          type: "ADD_NOTICE",
-          title: "AGENT.MD",
-          text: `${result.overwritten ? "Overwrote" : "Created"} AGENT.MD. Instructions are now active for subsequent turns.${result.llmFallback ? " Model generation failed; used the template instead." : ""}`,
-        });
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        dispatch({
-          type: "ADD_NOTICE",
-          title: "Init Failed",
-          text: detail,
-        });
+        return;
       }
-      return;
+      initTurn = true;
+      planTurnOverride = {
+        displayText: initCommand.force ? "/init --force" : "/init",
+        prompt: buildInitAgentPrompt({ force: initCommand.force }),
+        forceMode: "bypass",
+        restoreMode: getPermissionManager().getMode(),
+      };
+      // Fall through: the standard agent pipeline runs this turn.
     }
 
     // Slash commands → direct tool
@@ -1694,6 +1694,21 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
         if (permissionManager.getMode() !== restore) {
           permissionManager.setMode(restore);
           dispatch({ type: "SET_PERMISSION_MODE", mode: restore });
+        }
+      }
+
+      // /init agent turn: once the new AGENT.MD has landed, activate it
+      // for subsequent turns.
+      if (initTurn && turnSucceeded) {
+        try {
+          await refreshInstructionPrompt();
+          dispatch({
+            type: "ADD_NOTICE",
+            title: "AGENT.MD",
+            text: "AGENT.MD was written by the agent turn. Instructions are now active for subsequent turns.",
+          });
+        } catch {
+          // Non-fatal: the turn already succeeded; keep the session as-is.
         }
       }
 
