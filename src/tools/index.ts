@@ -11,6 +11,8 @@ import { createGitTools } from "./git.ts";
 import { createValidationTool } from "./validation.ts";
 import { createTodoWriteTool } from "./todo-write.ts";
 import { createSandboxRunner, DEFAULT_SANDBOX_CONFIG, type SandboxConfig, type SandboxRunner } from "../sandbox/index.ts";
+import { createBgTaskTools } from "../bg-tasks/tools.js";
+import { BgTaskManager } from "../bg-tasks/manager.js";
 
 export type { JsonSchema, Tool, ToolCapabilities, ToolResult } from "./types.ts";
 export type { ReadArgs } from "./read.ts";
@@ -181,4 +183,21 @@ export async function createToolsWithSandbox(
     if (sandboxRunner) await sandboxRunner.cleanup();
   };
   return { tools, cleanup };
+}
+
+/**
+ * Create background-task tools and a manager instance for a project cwd.
+ *
+ * The returned `dispose` function must be called on shutdown to close
+ * file watchers and clear timers.
+ */
+export async function createBgTaskSuite(
+  cwd: string,
+  options: { instanceId?: string } = {},
+): Promise<{ tools: Tool[]; manager: BgTaskManager; dispose: () => void }> {
+  const instanceId = options.instanceId ?? `run_${new Date().toISOString().replace(/[-:.]/g, "")}_p${process.pid}`;
+  const manager = new BgTaskManager(cwd, instanceId);
+  await manager.initialize();
+  const tools = createBgTaskTools(manager);
+  return { tools, manager, dispose: () => manager.dispose() };
 }

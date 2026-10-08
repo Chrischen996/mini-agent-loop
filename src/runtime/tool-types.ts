@@ -3,10 +3,12 @@ import type { Tool, ToolCapabilities } from "../tools/types.ts";
 const READ_TOOLS = new Set([
   "read", "grep", "find", "ls", "list", "search", "git_status", "git_diff",
   "codebase_open", "codebase_search", "codebase_read", "codebase_explain",
+  "bg_status", "bg_logs", "bg_wait",
 ]);
 const WRITE_TOOLS = new Set([
   "write", "edit", "patch", "mkdir", "copy", "move", "delete", "document_edit",
   "git_checkpoint", "git_undo", "git_branch_isolate",
+  "bg_send",
 ]);
 const WEB_TOOLS = new Set(["web_search", "fetch_content", "get_search_content", "source_check"]);
 const DESTRUCTIVE_TOOLS = new Set(["delete", "move", "git_undo"]);
@@ -44,10 +46,18 @@ export function resolveToolCapabilities(
     inferred.externalData = true;
     inferred.requiresApproval = true;
   }
-  if (tool.name === "bash") {
+  if (tool.name === "bash" || tool.name === "bg_start") {
     Object.assign(inferred, commandCapabilities(typeof args.command === "string" ? args.command : ""));
   }
   if (tool.name === "validate_workspace") inferred.executeProcess = true;
+  if (tool.name === "bg_kill") {
+    inferred.executeProcess = true;
+  }
+  if (tool.name === "bg_send") {
+    inferred.executeProcess = true;
+    inferred.writeWorkspace = true;
+    inferred.requiresApproval = true;
+  }
 
   if (tool.source?.kind === "web") {
     inferred.network = true;

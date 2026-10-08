@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { runChildProcess } from "./child-process.ts";
 
 export type ClipboardWriteResult = {
@@ -115,6 +116,45 @@ export async function writeClipboardText(
     method: "none",
     error: "Every clipboard method failed",
   };
+}
+
+export async function readClipboardText(
+  io: ClipboardIo = {},
+): Promise<{ ok: boolean; text?: string; error?: string; method?: string }> {
+  const platform = io.platform ?? process.platform;
+  const env = io.env ?? process.env;
+
+  const candidates: { method: string; command: string; args: string[] }[] = [];
+  if (platform === "win32") {
+    candidates.push({ method: "powershell", command: "powershell", args: ["-NoProfile", "-Command", "Get-Clipboard"] });
+  } else if (platform === "darwin") {
+    candidates.push({ method: "pbpaste", command: "pbpaste", args: [] });
+  } else {
+    const wayland = Boolean(env.WAYLAND_DISPLAY);
+    const x11 = Boolean(env.DISPLAY);
+    if (wayland || !x11) candidates.push({ method: "wl-paste", command: "wl-paste", args: [] });
+    if (x11 || !wayland) candidates.push({ method: "xclip", command: "xclip", args: ["-selection", "clipboard", "-o"] });
+  }
+
+  for (const c of candidates) {
+    try {
+      const text = await new Promise<string>((resolve, reject) => {
+        const child = spawn(c.command, c.args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+        let stdout = "";
+        child.stdout?.on("data", (d) => { stdout += d.toString(); });
+        child.stderr?.resume();
+        child.once("error", (e) => reject(e));
+        child.once("close", (code) => {
+          if (code === 0) resolve(stdout);
+          else reject(new Error(`${c.command} exited ${code}`));
+        });
+      });
+      return { ok: true, text, method: c.method };
+    } catch {
+      /* try next */
+    }
+  }
+  return { ok: false, error: "Every clipboard read method failed" };
 }
 
 export function osc52Payload(text: string): string {
