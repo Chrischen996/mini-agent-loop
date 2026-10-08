@@ -24,6 +24,12 @@ export function toolVisualName(name: string): string {
     ls: "List",
     list: "List",
     delete: "Delete",
+    bg_start: "BgStart",
+    bg_status: "BgStatus",
+    bg_logs: "BgLogs",
+    bg_send: "BgSend",
+    bg_wait: "BgWait",
+    bg_kill: "BgKill",
   };
   return labels[normalized.toLowerCase()] ?? normalized;
 }

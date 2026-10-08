@@ -2,7 +2,7 @@
 import React from "react";
 import { render } from "ink";
 import { App } from "./App.tsx";
-import { createAllTools, createTools } from "../tools/index.ts";
+import { createAllTools, createTools, createBgTaskSuite } from "../tools/index.ts";
 import { createSandboxRunner } from "../sandbox/index.ts";
 import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
@@ -60,6 +60,18 @@ async function main(): Promise<void> {
   }
 
   try {
+    let bgTaskDispose: (() => void) | undefined;
+    let bgTools: import("../tools/types.ts").Tool[] = [];
+    const bgEnabled = process.env.MINI_AGENT_BG_TASKS !== "0" && process.env.MINI_AGENT_BG_TASKS !== "false";
+    if (bgEnabled) {
+      try {
+        const bg = await createBgTaskSuite(cwd);
+        bgTools = bg.tools;
+        bgTaskDispose = bg.dispose;
+      } catch (bgError) {
+        console.error(`[bg-tasks] failed to initialize: ${bgError instanceof Error ? bgError.message : String(bgError)}\n`);
+      }
+    }
     const agentTools = createTools(cwd, {
       codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
       codebaseStore: codebaseRuntime.store,
@@ -72,13 +84,14 @@ async function main(): Promise<void> {
     const app = render(
       <App
         cwd={cwd}
-        agentTools={mcpRuntime.toolProvider(agentTools)}
-        allTools={mcpRuntime.toolProvider(createAllTools(cwd, { sandboxRunner }))}
+        agentTools={mcpRuntime.toolProvider([...agentTools, ...bgTools])}
+        allTools={mcpRuntime.toolProvider([...createAllTools(cwd, { sandboxRunner }), ...bgTools])}
         mcpStatuses={() => mcpRuntime.statuses()}
       />,
       { stdout: incrementalStdout },
     );
     await app.waitUntilExit();
+    bgTaskDispose?.();
   } finally {
     disableMouseTracking(process.stdout);
     process.stdout.write(MAIN_SCREEN);

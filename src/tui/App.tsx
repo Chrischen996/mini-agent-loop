@@ -10,6 +10,7 @@ import { getTodoPanelRows, resolveTodoItems } from "./todo-format.ts";
 import { taskSummaryRows, taskSummaryViewMode } from "./task-summary.ts";
 import { formatHelpNotice, parseSlashCommand, parseUnknownSlashCommand, SLASH_COMMANDS } from "./slash-commands.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
+import { BgTaskManager } from "../bg-tasks/manager.js";
 import { parseInitCommand } from "./init-command.ts";
 import { initAgentMd } from "../init-agent-md.ts";
 import { buildInitAgentPrompt } from "../init-prompt.ts";
@@ -112,6 +113,7 @@ import {
 } from "./image-attachments.ts";
 import { writeClipboardText } from "./clipboard.ts";
 import { formatCopyResultNotice, parseCopyCommand, resolveCopyTarget } from "./copy-text.ts";
+import { tryReplaceLongPaste, expandPastedTextRefs, countLines } from "./pasted-text.ts";
 import {
   finalizeExecCapture,
   finalizePlanCapture,
@@ -236,6 +238,45 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
   const allToolsRef = useRef<ToolProvider>(allTools ?? createAllTools(cwd));
   const agentToolsRef = useRef<ToolProvider>(agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
 
+  // Lazy background-task manager for the /bg-tasks slash command. Created on
+  // first use so TUI startup is not blocked when tmux is unavailable.
+  const bgManagerRef = useRef<BgTaskManager | null | "unavailable">(null);
+  const getBgManager = useCallback((): BgTaskManager | null => {
+    if (bgManagerRef.current === "unavailable") return null;
+    if (bgManagerRef.current) return bgManagerRef.current;
+    const bgEnabled = process.env.MINI_AGENT_BG_TASKS !== "0" && process.env.MINI_AGENT_BG_TASKS !== "false";
+    if (!bgEnabled) {
+      bgManagerRef.current = "unavailable";
+      return null;
+    }
+    try {
+      const instanceId = `tui_${randomUUID().slice(0, 8)}`;
+      bgManagerRef.current = new BgTaskManager(cwd, instanceId);
+      return bgManagerRef.current;
+    } catch {
+      bgManagerRef.current = "unavailable";
+      return null;
+    }
+  }, [cwd]);
+  const [bgTaskCount, setBgTaskCount] = useState(0);
+  const refreshBgTaskCount = useCallback(async () => {
+    const manager = getBgManager();
+    if (!manager) return;
+    try {
+      await manager.initialize();
+      const tasks = await manager.list();
+      const count = tasks.filter((task) => task.status === "running" || task.status === "starting").length;
+      setBgTaskCount(count);
+    } catch {
+      // Count is decorative; never fail the command on a read error.
+    }
+  }, [getBgManager]);
+  useEffect(() => {
+    if (bgTaskCount === 0) return;
+    const timer = setInterval(() => void refreshBgTaskCount(), 1000);
+    return () => clearInterval(timer);
+  }, [bgTaskCount, refreshBgTaskCount]);
+
   // Create the subagent tool — dispatches SubagentEvents to the TUI reducer.
   // Memoized so the factory survives re-renders instead of rebuilding every
   // render, and the vision preprocessor keeps its image cache across turns.
@@ -302,6 +343,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
   pendingImagesRef.current = state.pendingImages;
   const promptQueueRef = useRef<string[]>([]);
   const [queuedCount, setQueuedCount] = useState(0);
+  const [pastedContents, setPastedContents] = useState<Record<number, string>>({});
   const [input, setInput] = useState("");
   // Remount PromptInput after programmatic completions so the cursor moves
   // to the end of the accepted file or slash-command text.
@@ -369,10 +411,16 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
 
   const setInputSafe = useCallback((value: string) => {
     if (pendingPermissionRef.current) return;
-    // PromptInput ignores Ctrl/Meta chords, so do not swallow the next character.
     suppressInputEchoRef.current = false;
-    setInput(sanitizeInput(value));
-  }, []);
+    const clean = sanitizeInput(value);
+    const result = tryReplaceLongPaste(clean, pastedContents, 800);
+    if (result.longPaste) {
+      setPastedContents(result.updatedContents);
+      setInput(result.display);
+    } else {
+      setInput(clean);
+    }
+  }, [pastedContents]);
 
   // ── autocomplete hook ────────────────────────────────────────────────────
   const resetInputCursorToEnd = useCallback(() => {
@@ -716,7 +764,8 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
     knownSession?: PersistedSessionMeta,
     knownSessions?: PersistedSessionMeta[],
   ) => {
-    const trimmed = text.trim();
+    const expandedInput = expandPastedTextRefs(text.trim(), pastedContents);
+    const trimmed = expandedInput.trim();
     const allowEmptyModelSetup = acMode === "model-setup" && Boolean(modelSetup);
     const hasPendingImages = pendingImagesRef.current.length > 0;
     if (!trimmed && !allowEmptyModelSetup && !hasPendingImages) return;
@@ -1190,6 +1239,47 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
             .map((session) => session.id.slice(0, 8) + "  " + session.messageCount + " msgs  " + session.preview)
             .join("\n"),
       });
+      setInput("");
+      return;
+    }
+    if (trimmed === "/bg-tasks") {
+      const manager = getBgManager();
+      if (!manager) {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "Background tasks",
+          text: process.env.MINI_AGENT_BG_TASKS === "0" || process.env.MINI_AGENT_BG_TASKS === "false"
+            ? "Background tasks are disabled (MINI_AGENT_BG_TASKS=0)."
+            : "Background tasks are unavailable in this session.",
+        });
+        setInput("");
+        return;
+      }
+      try {
+        await manager.initialize();
+        const tasks = await manager.list();
+        if (tasks.length === 0) {
+          dispatch({ type: "ADD_NOTICE", title: "Background tasks", text: "No background tasks started yet." });
+        } else {
+          const lines = tasks.map((task) => {
+            const duration = task.durationMs !== undefined ? ` · ${Math.round(task.durationMs / 1000)}s` : "";
+            const exit = task.exitCode !== null && task.exitCode !== undefined ? ` · exit ${task.exitCode}` : "";
+            return `${task.status.padEnd(11)} ${task.taskId.slice(0, 8)}  ${task.name}${duration}${exit}`;
+          });
+          dispatch({
+            type: "ADD_NOTICE",
+            title: `Background tasks (${tasks.length})`,
+            text: lines.join("\n"),
+          });
+        }
+        void refreshBgTaskCount();
+      } catch (error) {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "Background tasks",
+          text: error instanceof Error ? error.message : String(error),
+        });
+      }
       setInput("");
       return;
     }
@@ -2066,6 +2156,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
           status={state.status}
           queuedCount={queuedCount}
           mcpStatus={mcpStatus}
+          bgTaskCount={bgTaskCount}
           permissionMode={state.permissionMode}
           thinkingLevel={llm.thinkingLevel ?? (llm.reasoning ? "medium" : "off")}
           cacheReadTokens={state.cacheReadTokens}

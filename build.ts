@@ -45,3 +45,4 @@ async function buildEntry(
 // One-shot CLI and the single Ink terminal client are the only executables.
 await buildEntry("src/cli.ts", "cli.js", true);
 await buildEntry("src/tui/ink-main.tsx", "tui.js", false);
+await buildEntry("src/bg-tasks/runner.ts", "runner.js", false);

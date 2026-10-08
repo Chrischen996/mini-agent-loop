@@ -47,7 +47,7 @@ import {
   createVisionPreprocessor,
   loadVisionConfigFromEnv,
 } from "./preprocessors/index.ts";
-import { createTools, createToolsWithSandbox, type ToolName } from "./tools/index.ts";
+import { createTools, createToolsWithSandbox, createBgTaskSuite, type ToolName } from "./tools/index.ts";
 import { type SandboxConfig } from "./sandbox/index.ts";
 import { createMcpApprovalGate, mcpAllowlistFromEnv, mcpAutoApproveFromEnv, parseMcpAllowlist } from "./mcp/approval.ts";
 import { createMcpRuntimeFromEnv } from "./mcp/runtime.ts";
@@ -823,6 +823,7 @@ async function main(): Promise<void> {
   });
   let tools;
   let sandboxCleanup: (() => Promise<void>) | undefined;
+  let bgTaskDispose: (() => void) | undefined;
   const parentRuntime: AgentRuntimeRef = {};
   const runtimeContext: RuntimeExecutionContext = {
     sessionId: resumedSessionId ?? sessionManager.sessionId,
@@ -841,6 +842,22 @@ async function main(): Promise<void> {
       sandbox: sandboxConfig,
     });
     sandboxCleanup = cleanup;
+
+    // Optional background task suite (tmux-backed), controlled by env flag
+    let bgTools: import("./tools/types.ts").Tool[] = [];
+    const bgEnabled = process.env.MINI_AGENT_BG_TASKS !== "0" && process.env.MINI_AGENT_BG_TASKS !== "false";
+    if (bgEnabled) {
+      try {
+        const bg = await createBgTaskSuite(cwd);
+        bgTools = bg.tools;
+        bgTaskDispose = bg.dispose;
+      } catch (bgError) {
+        console.error(
+          `[bg-tasks] failed to initialize: ${bgError instanceof Error ? bgError.message : String(bgError)}\n`,
+        );
+      }
+    }
+
     const mcpApproval = createMcpApprovalGate({
       allow: allowMcpTools || mcpAutoApproveFromEnv(),
       allowlist: [...mcpAllowlist, ...mcpAllowlistFromEnv()],
@@ -848,16 +865,19 @@ async function main(): Promise<void> {
     });
     tools = () => {
       const available = resolveToolProvider(mcpRuntime.toolProvider(configuredTools));
-      return available.map((tool) => {
-        if (tool.source?.kind !== "mcp" && tool.name !== "mcp_prompts" && tool.name !== "mcp_resource") return tool;
-        return {
-          ...tool,
-          execute: async (args: Record<string, unknown>, signal?: AbortSignal) => {
-            await mcpApproval(tool, args, signal);
-            return tool.execute(args, signal);
-          },
-        };
-      });
+      return [
+        ...available.map((tool) => {
+          if (tool.source?.kind !== "mcp" && tool.name !== "mcp_prompts" && tool.name !== "mcp_resource") return tool;
+          return {
+            ...tool,
+            execute: async (args: Record<string, unknown>, signal?: AbortSignal) => {
+              await mcpApproval(tool, args, signal);
+              return tool.execute(args, signal);
+            },
+          };
+        }),
+        ...bgTools,
+      ];
     };
     tools();
   } catch (error) {
@@ -1007,6 +1027,7 @@ async function main(): Promise<void> {
     }
   } finally {
     activePermissionTurn.close();
+    bgTaskDispose?.();
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close(), sandboxCleanup?.() ?? Promise.resolve()]);
   }
 

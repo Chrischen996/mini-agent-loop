@@ -101,6 +101,7 @@ const WRITE_TOOLS = new Set([
   "git_checkpoint",
   "git_undo",
   "git_branch_isolate",
+  "bg_send",
 ]);
 
 const DANGEROUS_COMMANDS = new Set([
@@ -317,9 +318,12 @@ export function getRiskLevel(
   // Plan mode: analysis only. Writes and dangerous shell stay high risk.
   if (mode === "plan") {
     if (tool.name === "validate_workspace") return "high";
-    if (tool.name === "bash") {
+    if (tool.name === "bash" || tool.name === "bg_start") {
       const command = typeof args.command === "string" ? args.command : "";
       return isDangerousBashCommand(command) ? "high" : "safe";
+    }
+    if (tool.name === "bg_kill" || tool.name === "bg_wait" || tool.name === "bg_status" || tool.name === "bg_logs") {
+      return "safe";
     }
     if (WRITE_TOOLS.has(tool.name)) return "high";
     if (tool.source?.kind === "mcp") return "high";
@@ -524,7 +528,7 @@ export class PermissionManager {
     if (tool.source?.kind === "mcp") {
       // MCP is always remote/untrusted, even when its advertised name is a
       // local-looking tool such as `read` or `bash`.
-    } else if (tool.name === "bash") {
+    } else if (tool.name === "bash" || tool.name === "bg_start") {
       const command = typeof args.command === "string" ? args.command : "";
       if (!isDangerousBashCommand(command)) return;
     } else if (!WRITE_TOOLS.has(tool.name) && tool.name !== "validate_workspace") {
