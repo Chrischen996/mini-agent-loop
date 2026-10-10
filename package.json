@@ -43,7 +43,10 @@
     "tui:inspect-brk": "tsx src/tui/ink-main.tsx --inspect-brk=9229",
     "test": "tsx --test \"test/*.test.ts\"",
     "test:coverage": "c8 tsx --test \"test/*.test.ts\"",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "web:dev": "vite --host 127.0.0.1 --port 5173",
+    "web:build": "vite build",
+    "web:typecheck": "tsc -p apps/web/tsconfig.json --noEmit"
   },
   "engines": {
     "node": ">=22.19.0"
@@ -58,6 +61,7 @@
     "@types/multer": "^2.2.0",
     "@types/node": "^22.13.10",
     "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.7",
     "@types/supertest": "^7.2.1",
     "c8": "^12.0.0",
     "ink-testing-library": "4.0.0",
@@ -88,6 +92,7 @@
     "pdf-parse": "^1.1.1",
     "pi-web-access": "0.18.0",
     "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "typebox": "1.1.38"
   }
 }

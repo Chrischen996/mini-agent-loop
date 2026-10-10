@@ -2011,6 +2011,21 @@ export function createAgentServer(options: AgentServerOptions): Express {
     },
   );
 
+  // Web workbench (P2): when a production build exists, serve it from Express.
+  // In dev mode the Vite dev server (npm run web:dev) serves the UI instead.
+  const webDistDir = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "dist",
+    "web",
+  );
+  if (existsSync(webDistDir)) {
+    app.use(express.static(webDistDir));
+    app.get(/^(?!\/api\/).+$/, (_request: Request, response: Response) => {
+      response.sendFile(path.join(webDistDir, "index.html"));
+    });
+  }
+
   app.use((request, response) => {
     response.status(404).json({ error: "Not found", path: request.path });
   });

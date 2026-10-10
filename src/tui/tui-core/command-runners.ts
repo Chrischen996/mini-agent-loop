@@ -36,6 +36,8 @@ function argsFor(parsed: SlashCommand, text: string): ParsedCommandArgs {
       return { cmd: "grep", pattern: parsed.pattern, path: parsed.path };
     case "resume":
       return { cmd: "resume", raw: parsed.raw ?? "" };
+    default:
+      return { cmd: parsed.cmd, raw: text };
   }
 }
 

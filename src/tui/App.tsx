@@ -10,6 +10,8 @@ import { getTodoPanelRows, resolveTodoItems } from "./todo-format.ts";
 import { taskSummaryRows, taskSummaryViewMode } from "./task-summary.ts";
 import { formatHelpNotice, parseSlashCommand, parseUnknownSlashCommand, SLASH_COMMANDS } from "./slash-commands.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
+import { WebUiManager } from "./web-ui-manager.ts";
+import { executeWebUiCommand } from "./web-ui-command.ts";
 import { BgTaskManager } from "../bg-tasks/manager.js";
 import { parseInitCommand } from "./init-command.ts";
 import { initAgentMd } from "../init-agent-md.ts";
@@ -241,6 +243,8 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
   // Lazy background-task manager for the /bg-tasks slash command. Created on
   // first use so TUI startup is not blocked when tmux is unavailable.
   const bgManagerRef = useRef<BgTaskManager | null | "unavailable">(null);
+  // Lazy web workbench manager for the /web-ui slash command (P1/P3).
+  const webUiManagerRef = useRef<WebUiManager | null>(null);
   const getBgManager = useCallback((): BgTaskManager | null => {
     if (bgManagerRef.current === "unavailable") return null;
     if (bgManagerRef.current) return bgManagerRef.current;
@@ -1566,6 +1570,12 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
         case "ls":   await runDirectToolRef("ls",   { path: slashCmd.path }); break;
         case "find": await runDirectToolRef("find", { pattern: slashCmd.pattern, path: slashCmd.path }); break;
         case "grep": await runDirectToolRef("grep", { pattern: slashCmd.pattern, path: slashCmd.path }); break;
+        case "web-ui": {
+          if (!webUiManagerRef.current) webUiManagerRef.current = new WebUiManager();
+          const result = await executeWebUiCommand({ raw: slashCmd.raw }, webUiManagerRef.current);
+          dispatch({ type: "ADD_NOTICE", title: "Web UI", text: result.text });
+          break;
+        }
       }
       dispatch({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
       return;

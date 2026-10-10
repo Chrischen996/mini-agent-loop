@@ -8,6 +8,7 @@ export type SlashCommand =
   | { cmd: "grep"; pattern: string; path: string }
   | { cmd: "todo"; todo: LegacyTodoCommand }
   | { cmd: "resume"; raw: string }
+  | { cmd: "web-ui"; raw: string }
   | null;
 
 export type CommandDef = {
@@ -62,6 +63,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "skills", usage: "/skills [on|off|list|clear] [name]", description: "Manage session skills" },
   { name: "init", usage: "/init [--force] [--print]", description: "Agent turn: LLM surveys the repo and writes AGENT.MD; --force may overwrite; --print previews the template without the model" },
   { name: "multi-agent", usage: "/multi-agent [task]", description: "启动多智能体任务向导 (planner → worker → reviewer)" },
+  { name: "web-ui", usage: "/web-ui [--no-open] [--port N]", description: "Start local Web workbench (DeepSeek Harness-style)" },
   { name: "help", usage: "/help", description: "Show help" },
   { name: "exit", usage: "/exit", description: "Alias of /quit", alias: true },
   { name: "quit", usage: "/quit", description: "Exit" },
@@ -91,6 +93,7 @@ export function parseSlashCommand(input: string): SlashCommand {
     case "find": return { cmd: "find", pattern: parts[1] ?? "*", path: parts[2] ?? "." };
     case "grep": { const pattern = parts[1] ?? ""; const path = parts[2] ?? "."; return pattern ? { cmd: "grep", pattern, path } : null; }
     case "resume": return { cmd: "resume", raw: s.slice(1).trim() };
+    case "web-ui": return { cmd: "web-ui", raw: s.slice(1).trim() };
     default: return null;
   }
 }
