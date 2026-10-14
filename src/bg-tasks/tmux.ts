@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { shellQuote } from "./utils.js";
 
@@ -19,7 +21,14 @@ export class BgTmuxBackend {
   }
 
   async start(sessionName: string, cwd: string, taskDir: string): Promise<void> {
-    const runnerCommand = `${shellQuote(process.execPath)} ${shellQuote(this.runnerPath)} ${shellQuote(taskDir)}`;
+    // Source checkouts run through tsx, while packaged builds contain a plain
+    // JavaScript runner. Keep both entry points usable without changing the
+    // persisted task format.
+    const tsxLoader = join(dirname(this.runnerPath), "../../node_modules/tsx/dist/loader.mjs");
+    const runnerLoader = this.runnerPath.endsWith(".ts")
+      ? ` --import ${shellQuote(existsSync(tsxLoader) ? tsxLoader : "tsx")}`
+      : "";
+    const runnerCommand = `${shellQuote(process.execPath)}${runnerLoader} ${shellQuote(this.runnerPath)} ${shellQuote(taskDir)}`;
     await this.run([
       "new-session",
       "-d",

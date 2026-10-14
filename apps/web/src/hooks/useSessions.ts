@@ -28,10 +28,10 @@ export function useSessions() {
     void refresh();
   }, [refresh]);
 
-  const createSession = useCallback(async (): Promise<string | null> => {
+  const createSession = useCallback(async (workspaceId?: string): Promise<string | null> => {
     setCreating(true);
     try {
-      const created = await api.createSession();
+      const created = await api.createSession(workspaceId);
       await refresh();
       setActiveId(created.id);
       return created.id;

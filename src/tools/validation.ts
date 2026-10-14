@@ -1,5 +1,5 @@
 import { formatValidationReport, runValidation, type ValidationStepName } from "../validation.ts";
-import type { Tool } from "./types.ts";
+import type { Tool, ToolExecutionOptions } from "./types.ts";
 
 export function createValidationTool(cwd: string): Tool {
   return {
@@ -15,13 +15,13 @@ export function createValidationTool(cwd: string): Tool {
       },
       additionalProperties: false,
     },
-    execute: async (args, signal) => {
+    execute: async (args, signal, options?: ToolExecutionOptions) => {
       const input = args as { steps?: unknown; timeoutMs?: unknown };
       const steps = Array.isArray(input.steps)
         ? input.steps.filter((value): value is ValidationStepName => value === "test" || value === "typecheck" || value === "build")
         : undefined;
       const report = await runValidation({
-        workspace: cwd,
+        workspace: options?.cwd ?? cwd,
         steps,
         timeoutMs: typeof input.timeoutMs === "number" ? input.timeoutMs : undefined,
         signal,

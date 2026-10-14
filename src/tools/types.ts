@@ -12,6 +12,13 @@ export type ToolResult = {
   todoUpdate?: TodoItem[];
 };
 
+/** Caller-owned execution identity passed to tools at invocation time. */
+export type ToolExecutionOptions = {
+  signal?: AbortSignal;
+  /** Session project cwd. Relative filesystem paths resolve from this directory. */
+  cwd?: string;
+};
+
 export type FileArtifact = {
   id: string;
   name: string;
@@ -58,7 +65,7 @@ export type Tool<TArgs = Record<string, unknown>> = {
   capabilities?: ToolCapabilities;
   /** OpenAI function parameters object (JSON Schema). */
   parameters: JsonSchema;
-  execute: (args: TArgs, signal?: AbortSignal) => Promise<ToolResult>;
+  execute: (args: TArgs, signal?: AbortSignal, options?: ToolExecutionOptions) => Promise<ToolResult>;
 };
 
 export type ToolProvider = Tool[] | (() => Tool[]);

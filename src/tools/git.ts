@@ -1,12 +1,13 @@
 import { GitWorkflow } from "../git/workflow.ts";
-import type { Tool } from "./types.ts";
+import type { Tool, ToolExecutionOptions } from "./types.ts";
 
 function textResult(content: string) {
   return { content: content || "(no output)" };
 }
 
 export function createGitTools(cwd: string): Tool[] {
-  const workflow = new GitWorkflow(cwd);
+  const workflowFor = (options?: ToolExecutionOptions): GitWorkflow =>
+    new GitWorkflow(options?.cwd ?? cwd);
   return [
     {
       name: "git_status",
@@ -14,7 +15,7 @@ export function createGitTools(cwd: string): Tool[] {
       source: { kind: "local" },
       annotations: { readOnlyHint: true, idempotentHint: true },
       parameters: { type: "object", properties: {}, additionalProperties: false },
-      execute: async () => textResult(JSON.stringify(await workflow.status(), null, 2)),
+      execute: async (_args, _signal, options) => textResult(JSON.stringify(await workflowFor(options).status(), null, 2)),
     },
     {
       name: "git_diff",
@@ -26,7 +27,7 @@ export function createGitTools(cwd: string): Tool[] {
         properties: { staged: { type: "boolean" }, path: { type: "string" } },
         additionalProperties: false,
       },
-      execute: async (args) => textResult(await workflow.diff(args as { staged?: boolean; path?: string })),
+      execute: async (args, _signal, options) => textResult(await workflowFor(options).diff(args as { staged?: boolean; path?: string })),
     },
     {
       name: "git_checkpoint",
@@ -34,7 +35,7 @@ export function createGitTools(cwd: string): Tool[] {
       source: { kind: "local" },
       annotations: { idempotentHint: false },
       parameters: { type: "object", properties: { label: { type: "string" } }, additionalProperties: false },
-      execute: async (args) => textResult(JSON.stringify(await workflow.createCheckpoint(String((args as { label?: string }).label ?? "agent-change")), null, 2)),
+      execute: async (args, _signal, options) => textResult(JSON.stringify(await workflowFor(options).createCheckpoint(String((args as { label?: string }).label ?? "agent-change")), null, 2)),
     },
     {
       name: "git_undo",
@@ -42,7 +43,7 @@ export function createGitTools(cwd: string): Tool[] {
       source: { kind: "local" },
       annotations: { destructiveHint: true },
       parameters: { type: "object", required: ["checkpointId"], properties: { checkpointId: { type: "string" } }, additionalProperties: false },
-      execute: async (args) => textResult(JSON.stringify(await workflow.undo(String((args as { checkpointId: string }).checkpointId)), null, 2)),
+      execute: async (args, _signal, options) => textResult(JSON.stringify(await workflowFor(options).undo(String((args as { checkpointId: string }).checkpointId)), null, 2)),
     },
     {
       name: "git_branch_isolate",
@@ -50,7 +51,7 @@ export function createGitTools(cwd: string): Tool[] {
       source: { kind: "local" },
       annotations: { destructiveHint: false },
       parameters: { type: "object", properties: { label: { type: "string" } }, additionalProperties: false },
-      execute: async (args) => textResult(JSON.stringify(await workflow.createIsolatedBranch(String((args as { label?: string }).label ?? "task")), null, 2)),
+      execute: async (args, _signal, options) => textResult(JSON.stringify(await workflowFor(options).createIsolatedBranch(String((args as { label?: string }).label ?? "task")), null, 2)),
     },
   ];
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { WebUiManager } from "../src/tui/web-ui-manager.ts";
+import { WebUiManager, resolveWebLauncherCommand } from "../src/tui/web-ui-manager.ts";
 
 /**
  * State-machine tests that do NOT spawn processes (doc §11.1). The real
@@ -30,5 +30,12 @@ describe("web ui manager state machine (P1 review fix)", () => {
     assert.equal(st.port, 3080);
     // url is only exposed while running
     assert.equal(st.url, undefined);
+  });
+
+  it("resolves the source Web launcher for the source TUI entry", () => {
+    const command = resolveWebLauncherCommand(new URL("../src/tui/web-ui-manager.ts", import.meta.url).href);
+    assert.equal(command.command, process.execPath);
+    assert.deepEqual(command.args.slice(0, 2), ["--import", "tsx"]);
+    assert.match(command.args[2] ?? "", /src\/web-launcher\.ts$/);
   });
 });

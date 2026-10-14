@@ -232,6 +232,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let init: ParsedCliArgs["init"] | undefined;
   const validTools = new Set<ToolName>([
     "read", "bash", "edit", "write", "grep", "find", "ls",
+    "bg_start", "bg_status", "bg_logs", "bg_send", "bg_wait", "bg_kill",
     "codebase_open", "codebase_search", "codebase_read", "codebase_explain",
     "web_search", "fetch_content", "get_search_content", "source_check",
     "subagent", "git_status", "git_diff", "git_checkpoint", "git_undo", "git_branch_isolate",
@@ -849,7 +850,10 @@ async function main(): Promise<void> {
     if (bgEnabled) {
       try {
         const bg = await createBgTaskSuite(cwd);
-        bgTools = bg.tools;
+        bgTools = bg.tools.filter((tool) =>
+          (!selectedTools || selectedTools.includes(tool.name as ToolName))
+          && !excludeTools?.includes(tool.name as ToolName),
+        );
         bgTaskDispose = bg.dispose;
       } catch (bgError) {
         console.error(

@@ -7,6 +7,30 @@ import {
 import type { HistoryMessage } from "../apps/web/src/types/api.ts";
 
 describe("web ui event adapter (P3)", () => {
+  it("keeps uploaded file names in the user message without exposing document text", () => {
+    const items = historyToItems([{
+      role: "user",
+      content: [
+        { type: "text", text: "Summarize these files" },
+        { type: "image", mimeType: "image/png", data: "hidden-image-data", source: "diagram.png" },
+        { type: "text", text: "[Attached document: notes.pdf, 2 page(s), attachmentId=a1]\nprivate document body\n[End attached document: notes.pdf]" },
+      ],
+    }]);
+    assert.deepEqual(items, [{
+      id: items[0]?.id,
+      kind: "user",
+      text: "Summarize these files",
+      attachments: ["diagram.png", "notes.pdf"],
+    }]);
+    assert.equal(items[0]?.kind === "user" && items[0].text.includes("private document body"), false);
+  });
+
+  it("shows uploaded file names from the live message event", () => {
+    const state = new ChatStreamState();
+    state.apply({ type: "user", content: "Review these files", images: ["chart.webp"], documents: ["report.docx"] });
+    assert.deepEqual(state.items[0], { id: state.items[0]?.id, kind: "user", text: "Review these files", attachments: ["chart.webp", "report.docx"] });
+  });
+
   it("pairs assistant tool calls with tool result messages from history", () => {
     const messages: HistoryMessage[] = [
       { role: "user", content: "run ls" },
@@ -27,6 +51,24 @@ describe("web ui event adapter (P3)", () => {
       assert.equal(tool.toolCallId, "t1");
       assert.equal(tool.status, "ok");
       assert.match(tool.preview, /file\.txt/);
+    }
+  });
+
+  it("numbers a read result from the call offset", () => {
+    const items = historyToItems([
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "r1", name: "read", arguments: { path: "src/loop.ts", offset: 12 } }],
+      },
+      { role: "tool", toolCallId: "r1", name: "read", content: "alpha\nbeta\n", isError: false },
+    ]);
+    const tool = items.find((item) => item.kind === "tool");
+    assert.ok(tool);
+    if (tool?.kind === "tool") {
+      assert.equal(tool.path, "src/loop.ts");
+      assert.equal(tool.startLine, 12);
+      assert.match(tool.preview, /alpha/);
     }
   });
 

@@ -99,6 +99,23 @@
 - `npm run web:build`：41 modules, 423ms
 - 无新增安全绕过路径（API Key 审计、路径穿越、权限复验均已验证）
 
+## Web 发布入口（2026-10-13）
+
+Web UI 采用增量发布方式，不替换原有 TUI 和单次 CLI：
+
+- `mini-agent-loop` 继续指向 `dist/tui.js`。
+- `mini-agent-loop-run` 继续指向 `dist/cli.js`。
+- 新增 `mini-agent-loop-web`，指向 `dist/web-launcher.js`。
+- 发布包同时包含 `dist/server.js` 和 `dist/web/`，由启动器拉起本地 Server 并托管 Web UI。
+
+开发模式仍使用 `npm run dev`；发布包验证使用 `npm run build:package`，然后执行：
+
+```bash
+mini-agent-loop-web --workspace /absolute/path/to/project
+```
+
+启动器支持 `--port <number>` 和 `--no-open`。Server、Session、工具和项目文件读取仍在 Node 进程内执行，浏览器只访问 HTTP API，因此没有把文件读取逻辑迁移到前端，也不会改变旧 CLI/TUI 的运行方式。
+
 ## 遗留事项
 
 - [ ] **pnpm-lock.yaml 未同步**：`react-dom@18.3.1`、`@types/react-dom@18.3.7` 为手工装入 node_modules。网络恢复后 `pnpm add react-dom@18.3.1 && pnpm add -D @types/react-dom@18.3.7` 同步 lockfile
@@ -114,9 +131,55 @@
    - 移除前端乐观 user echo，用户消息一律以服务端 NDJSON 首帧 `user` 事件为准（displayPrompt 为源数据），彻底消除重复气泡。
 2. **P1 遗留：TUI `/web-ui` 无响应 + Manager 启动命令错误**：
    - `src/tui/App.tsx` slash switch 补 `case "web-ui"`（惰性 `WebUiManager` ref，结果经 `ADD_NOTICE` 展示）；
-   - `WebUiManager.start` 改为 spawn `npm run serve`（`tsx src/server.ts`，env `PORT`，detached 进程组）；`dist/web` 缺失时先按需 `web:build`；就绪判定改为真实轮询 `/api/health`（同时校验自身进程存活，防止外部端口占用造成假阳性）；`stop()` 改为 SIGTERM 宽限 + SIGKILL 整组清理；默认端口 5173 → 3001（工作台 = Express 本体）。
+   - `WebUiManager.start` 改为 spawn 共享的 Web launcher（打包运行时为 `dist/web-launcher.js`，源码运行时为 `src/web-launcher.ts`，env `PORT`，detached 进程组）；`dist/web` 缺失时先按需 `web:build`；就绪判定改为真实轮询 `/api/health`（同时校验自身进程存活，防止外部端口占用造成假阳性）；`stop()` 改为 SIGTERM 宽限 + SIGKILL 整组清理；默认端口 5173 → 3001（工作台 = Express 本体）。
 3. **`assistant` 无 delta 兜底 + 会话列表不刷新**（`apps/web/src/lib/event-adapter.ts`、前端 `App.tsx`）：
    - `case "assistant"` 在无 delta（非流式/空 delta）时用事件 content 回填或新建完成态 assistant item（delta 已填充时不重复追加）；
    - 前端 App 在 phase 进入 done/error/aborted 时调用 `refresh()` 刷新会话列表，messageCount/lastActiveAt 保持更新。
 
 验证：root/web typecheck 0 错误；web-ui 专项单测 19/19（含新增多轮种子、assistant 兜底、管理器状态机用例）；全量 1341 pass / 0 fail（连跑 2 次，首次 1 个 flaky 为既有测试偶发）；vite build 通过；Manager 真实 E2E（端口 3101：start 健康检查就绪 → status 带 PID → 重启去重提示 → stop 后端口确认释放）。
+
+## Harness Web 布局对齐（2026-10-12）
+
+参考 `deepseek-ai/deepseek-harness` 提交 `d743267` 的 `ui-layout`、`ui-sidebar` 和
+`ui-conversation` 源码，将工作台从固定三栏调整为会话导航 + 聊天主区 + 按需工作区面板：
+
+- 左栏默认 280px，可拖动至 264–420px；小于 1024px 自动折叠为 56px 图标栏，仍可手动展开。
+- 右栏默认关闭，Files / Activity / Plan 切换；首次打开宽度为视口的 45%，支持拖动、全屏、关闭及 Escape。
+- 聊天至少保留 400px；不足以容纳 300px 右栏时，面板覆盖显示，窄屏仍可访问文件、工具及计划。
+- 空会话将标题、工作区入口和输入卡片居中；有消息后输入卡片固定在聊天区底部。
+- 模型选择移至输入卡片底部，圆形发送 / 停止按钮保留现有流式协议；Enter 发送、Shift+Enter 换行，输入法组合输入不会误发送。
+- 会话支持本地搜索；文件预览沿用现有安全 API。面板选项卡支持左右箭头，拖动分隔条支持键盘调整。
+- 权限审批拆为独立 React 组件，避免权限消息增减造成 Hooks 调用顺序变化。
+
+这是现有功能范围内的布局对齐，保留 Mini Agent 品牌；Harness 的插件市场、终端、浏览器和设置等功能未增加。
+聊天 Markdown 渲染仍沿用现有纯文本实现。
+
+验证：`test/web-ui-layout.test.ts` 覆盖折叠、拖动边界及覆盖布局；运行 Web 专项测试、全量测试、root/web 类型检查和构建。
+浏览器使用独立临时数据目录与离线模型检查发送、文件预览、选项卡和响应式布局，避免消耗真实模型 API。
+
+## 多 Workspace 支持（2026-10-12）
+
+- `POST /api/workspaces` 显式登记本机目录，记录存入 `AGENT_DATA_DIR/workspaces.json`（默认 `~/.mini-agent/workspaces.json`）；路径以真实路径规范化并按目录去重。
+- 创建 Session 时通过 `{ workspaceId }` 绑定项目；会话列表与详情返回 `workspaceId`，fork 继承原项目。旧会话继续归到服务启动时的默认目录。
+- 每个 Session 保存自己的 `cwd`（对应 Harness 的 `SessionHeader.cwd`）；工具执行 broker 在每次调用时把这个 cwd 显式传给本地文件工具、Shell、Git 和验证工具，而不是让文件工具读取服务进程的全局 cwd。
+- Agent 文件工具、bash 和 Web 文件浏览都从同一个 session cwd 解析相对路径；解析前先确定真实 cwd，并对目标做 symlink 越界校验，避免 `symlink/..` 导致三者读取不同文件。
+
+### 项目作用域会话存储（2026-10-13）
+
+参考 DeepSeek Harness 的 project/session 目录模型，服务端现在将新会话存储为：
+
+```text
+AGENT_DATA_DIR/sessions/projects/<可读项目路径>/<sessionId>/events.jsonl
+AGENT_DATA_DIR/sessions/projects/<可读项目路径>/<sessionId>/meta.json
+```
+
+- 项目目录由规范化的本地绝对路径生成，保留可读路径前缀并限制长度；会话目录仍由安全的 session ID 命名。
+- 会话的持久化目录、工具 cwd、文件浏览、Git 和计划执行都从同一个 workspace/session 作用域解析。
+- 工具集合可以在 server 级共享，但项目目录只由调用时的 session context 决定；这样多个 session 可同时使用同名相对路径而不会串项目。
+- 启动时会读取旧版 `AGENT_DATA_DIR/sessions/<sessionId>/` 平铺会话，并按其 workspaceId 或默认项目迁移到新目录；迁移不会刷新原会话的活跃时间。
+- `/api/sessions?workspaceId=...` 支持按项目查询；文件接口同时收到 `sessionId` 与不匹配的 `workspaceId` 时返回 `409`，防止前端状态串项目。
+- Web 侧栏可切换项目并按项目显示会话，也可通过本机绝对路径登记目录；新会话沿用当前项目。
+- 路径登记是显式动作；登记后的每个 Workspace 仍使用既有根目录和 symlink 越界校验。
+- `Select Workspace Directory` 首次打开时以 Server 当前项目目录为起点；手工输入支持绝对路径、相对当前项目路径和 `~/...`。无效路径会清空当前选择并禁用 `Open`，不会误提交上一次有效目录。
+
+验证：服务端集成测试覆盖目录登记、会话文件浏览与 `read` 工具的项目隔离；分组全量测试为 `1426 passed, 2 skipped`，`orchestration-server.test.ts` 单独为 `4 passed`；服务端/前端类型检查及服务端/Web 构建通过。当前 `npm test` 单命令会在 orchestration 相关测试并行装载阶段卡住，需按上述方式分组运行。

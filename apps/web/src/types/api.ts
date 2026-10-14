@@ -9,6 +9,8 @@
 
 export type SessionSummary = {
   id: string;
+  workspaceId?: string;
+  workspaceName?: string;
   createdAt: number;
   lastActiveAt: number;
   busy: boolean;
@@ -16,6 +18,11 @@ export type SessionSummary = {
   forkedFromMessage: string | null;
   forkedFromMessageId: string | null;
   messageCount: number;
+  preview?: string;
+  title?: string;
+  pinned?: boolean;
+  archived?: boolean;
+  permissionMode?: string;
   modelId?: string | null; // absent until the session overrides the default model
   thinkingLevel: string;
   thinkingMode: string;
@@ -23,6 +30,7 @@ export type SessionSummary = {
 
 export type CreateSessionResponse = {
   id: string;
+  workspaceId?: string;
   createdAt: number;
   permissionMode: string;
 };
@@ -71,10 +79,26 @@ export type WorkspaceEntry = {
   type: "file" | "dir";
 };
 
+export type WorkspaceRecord = { id: string; name: string; path: string };
+
 export type WorkspaceListResponse = {
   path: string;
   entries: WorkspaceEntry[];
   truncated: boolean;
+};
+
+export type WorkspaceFilePreview = {
+  path: string;
+  name: string;
+  size: number;
+  truncated: boolean;
+  binary: boolean;
+  /** text, or an image the preview can draw from a same-origin URL. */
+  kind?: "text" | "image";
+  content: string;
+  /** 1-based line number of content[0]. */
+  startLine: number;
+  eof?: boolean;
 };
 
 // ── Models (P4) ───────────────────────────────────────────────────────────────
@@ -88,11 +112,24 @@ export type ModelOption = {
   contextWindow: number;
   maxTokens: number;
   reasoning: boolean;
+  thinkingLevels: string[];
 };
 
 export type ModelsListResponse = {
   models: ModelOption[];
   defaultModel: string;
+};
+
+export type ModelSelectionResponse = {
+  model: string;
+  qualifiedId: string;
+  provider: string;
+  thinkingLevel: string;
+};
+
+export type ThinkingLevelResponse = {
+  thinkingLevel: string;
+  thinkingLevels: string[];
 };
 
 // ── Plan-Act events (P4) ──────────────────────────────────────────────────────

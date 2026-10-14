@@ -21,6 +21,7 @@ export type { SandboxConfig } from "../sandbox/index.ts";
 export type { BashArgs } from "./bash.ts";
 export type { TodoWriteArgs } from "./todo-write.ts";
 export { createTodoWriteTool } from "./todo-write.ts";
+export { createBgTaskTools } from "../bg-tasks/tools.js";
 export { createBashTool } from "./bash.ts";
 export { createReadTool } from "./read.ts";
 export { createWriteTool } from "./write.ts";
@@ -42,6 +43,7 @@ export {
 
 export type ToolName =
   | "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls"
+  | "bg_start" | "bg_status" | "bg_logs" | "bg_send" | "bg_wait" | "bg_kill"
   | "codebase_open" | "codebase_search" | "codebase_read" | "codebase_explain"
   | "web_search" | "fetch_content" | "get_search_content" | "source_check"
   | "subagent" | "git_status" | "git_diff" | "git_checkpoint" | "git_undo" | "git_branch_isolate"

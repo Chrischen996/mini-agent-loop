@@ -20,6 +20,26 @@ async function withWorkspace(
 }
 
 describe("read text bounds", () => {
+  it("resolves the caller session cwd at execution time", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "mini-agent-read-cwd-"));
+    const first = path.join(root, "first");
+    const second = path.join(root, "second");
+    await mkdir(first);
+    await mkdir(second);
+    await writeFile(path.join(first, "same.txt"), "first", "utf8");
+    await writeFile(path.join(second, "same.txt"), "second", "utf8");
+
+    try {
+      const tool = createReadTool(first);
+      const result = await tool.execute({ path: "same.txt" }, undefined, { cwd: second });
+      assert.equal(result.isError, undefined);
+      assert.match(contentAsString(result.content), /second/);
+      assert.doesNotMatch(contentAsString(result.content), /first/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("applies 1-based offset and limit windows", async () => {
     await withWorkspace(async (workspace) => {
       await writeFile(

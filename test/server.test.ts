@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -7,6 +7,8 @@ import request from "supertest";
 import { contentAsString } from "../src/content.ts";
 import { makeLlmConfig } from "../src/llm/index.ts";
 import { createAgentServer } from "../src/server.ts";
+import { projectDirectoryName } from "../src/session-store.ts";
+import { SessionManager } from "../src/session-manager.ts";
 import type { Tool } from "../src/tools/types.ts";
 import type { AgentMessage, AssistantMessage } from "../src/types.ts";
 
@@ -17,6 +19,195 @@ const llm = makeLlmConfig({
 });
 
 describe("agent server", () => {
+  it("exposes background task tools in the default server tool registry", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "mini-agent-server-bg-tools-"));
+    const workspace = path.join(root, "workspace");
+    await mkdir(workspace);
+    let toolNames: string[] = [];
+    try {
+      const app = createAgentServer({
+        llm,
+        workspace,
+        dataDir: root,
+        backgroundTasks: true,
+        chat: async (_config, _messages, tools) => {
+          toolNames = tools?.map((tool) => tool.name) ?? [];
+          return { role: "assistant", content: "ok" };
+        },
+      });
+      const created = await request(app).post("/api/sessions");
+      const sessionId = (created.body as { id: string }).id;
+      const response = await request(app)
+        .post(`/api/sessions/${sessionId}/messages`)
+        .field("prompt", "show available tools");
+      assert.equal(response.status, 200);
+      assert.ok(toolNames.includes("bg_start"));
+      assert.ok(toolNames.includes("bg_status"));
+      assert.ok(toolNames.includes("bg_logs"));
+      assert.ok(toolNames.includes("bg_send"));
+      assert.ok(toolNames.includes("bg_wait"));
+      assert.ok(toolNames.includes("bg_kill"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("registers multiple workspaces and binds new sessions and file browsing to one root", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-workspaces-"));
+    const firstRoot = path.join(dataDir, "project-one");
+    const secondRoot = path.join(dataDir, "project-two");
+    await mkdir(firstRoot);
+    await mkdir(secondRoot);
+    await writeFile(path.join(firstRoot, "project.txt"), "one");
+    await writeFile(path.join(secondRoot, "project.txt"), "two");
+    const app = createAgentServer({ llm, tools: [], workspace: firstRoot, dataDir });
+    try {
+      const initial = await request(app).get("/api/workspaces");
+      assert.equal(initial.status, 200);
+      const first = (initial.body as { workspaces: Array<{ id: string; path: string }> }).workspaces[0]!;
+      assert.equal(first.path, await realpath(firstRoot));
+
+      const defaultDirectoryBrowser = await request(app).get("/api/workspaces/directories");
+      assert.equal(defaultDirectoryBrowser.status, 200);
+      assert.equal(
+        (defaultDirectoryBrowser.body as { path: string }).path,
+        await realpath(firstRoot),
+      );
+
+      const relativeDirectoryBrowser = await request(app)
+        .get("/api/workspaces/directories?path=.");
+      assert.equal(relativeDirectoryBrowser.status, 200);
+      assert.equal(
+        (relativeDirectoryBrowser.body as { path: string }).path,
+        await realpath(firstRoot),
+      );
+
+      const directoryBrowser = await request(app).get(`/api/workspaces/directories?path=${encodeURIComponent(dataDir)}`);
+      assert.equal(directoryBrowser.status, 200);
+      const browsed = directoryBrowser.body as { directories: Array<{ name: string }>; path: string };
+      assert.equal(browsed.path, await realpath(dataDir));
+      assert.ok(browsed.directories.some((item) => item.name === "project-one"));
+      assert.ok(browsed.directories.some((item) => item.name === "project-two"));
+
+      const added = await request(app).post("/api/workspaces").send({ path: secondRoot });
+      assert.equal(added.status, 201);
+      const second = (added.body as { workspace: { id: string } }).workspace;
+      const session = await request(app).post("/api/sessions").send({ workspaceId: second.id });
+      assert.equal(session.status, 201);
+      assert.equal((session.body as { workspaceId: string }).workspaceId, second.id);
+      const presentation = await request(app).patch(`/api/sessions/${session.body.id}/presentation`).send({ title: "Project two", pinned: true });
+      assert.equal(presentation.status, 200);
+      const summary = await request(app).get("/api/sessions");
+      const summarySession = (summary.body as { sessions: Array<{ id: string; title: string; pinned: boolean }> }).sessions.find((item) => item.id === session.body.id);
+      assert.equal(summarySession?.title, "Project two");
+      assert.equal(summarySession?.pinned, true);
+
+      const listing = await request(app).get(`/api/workspace/list?sessionId=${session.body.id}`);
+      assert.equal(listing.status, 200);
+      assert.equal((listing.body as { entries: Array<{ name: string }> }).entries[0]?.name, "project.txt");
+      const preview = await request(app).get(`/api/workspace/file?sessionId=${session.body.id}&path=project.txt`);
+      assert.equal(preview.status, 200);
+      assert.equal((preview.body as { content: string }).content, "two");
+      const mismatchedScope = await request(app)
+        .get(`/api/workspace/file?sessionId=${session.body.id}&workspaceId=${first.id}&path=project.txt`);
+      assert.equal(mismatchedScope.status, 409);
+      await access(path.join(
+        dataDir,
+        "sessions",
+        "projects",
+        projectDirectoryName(await realpath(secondRoot)),
+        session.body.id,
+        "events.jsonl",
+      ));
+      const summaries = await request(app).get("/api/sessions");
+      assert.equal((summaries.body as { sessions: Array<{ workspaceId: string }> }).sessions[0]?.workspaceId, second.id);
+
+      const restoredApp = createAgentServer({ llm, tools: [], workspace: firstRoot, dataDir });
+      const restoredWorkspaces = await request(restoredApp).get("/api/workspaces");
+      assert.ok((restoredWorkspaces.body as { workspaces: Array<{ id: string }> }).workspaces.some((item) => item.id === second.id));
+      const restoredPreview = await request(restoredApp).get(`/api/workspace/file?sessionId=${session.body.id}&path=project.txt`);
+      assert.equal((restoredPreview.body as { content: string }).content, "two");
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates legacy flat sessions into the selected project's session directory", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-session-migration-"));
+    const workspace = path.join(dataDir, "project");
+    await mkdir(workspace);
+    try {
+      const legacy = new SessionManager({ dataDir: path.join(dataDir, "sessions") });
+      await legacy.save({
+        id: "legacy-session",
+        createdAt: 123,
+        lastActiveAt: 456,
+        messages: [{ role: "user", content: "legacy prompt" }],
+      });
+
+      const app = createAgentServer({ llm, tools: [], workspace, dataDir });
+      const restored = await request(app).get("/api/sessions/legacy-session");
+      assert.equal(restored.status, 200);
+      assert.match(restored.text, /legacy prompt/);
+      const projectSession = path.join(
+        dataDir,
+        "sessions",
+        "projects",
+        projectDirectoryName(await realpath(workspace)),
+        "legacy-session",
+        "events.jsonl",
+      );
+      await access(projectSession);
+      await assert.rejects(access(path.join(dataDir, "sessions", "legacy-session", "events.jsonl")));
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("builds local read tools against each session workspace", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "mini-agent-workspace-tools-"));
+    const firstRoot = path.join(dataDir, "first");
+    const secondRoot = path.join(dataDir, "second");
+    await mkdir(firstRoot);
+    await mkdir(secondRoot);
+    await writeFile(path.join(firstRoot, "same.txt"), "from first");
+    await writeFile(path.join(secondRoot, "same.txt"), "from second");
+    let calls = 0;
+    const readResults: string[] = [];
+    const app = createAgentServer({
+      llm,
+      workspace: firstRoot,
+      dataDir,
+      permissionMode: "bypass",
+      chat: async (_config, messages) => {
+        calls += 1;
+        if (calls === 1 || calls === 3) {
+          return { role: "assistant", content: "", toolCalls: [{ id: `read-${calls}`, name: "read", arguments: { path: "same.txt" } }] };
+        }
+        const result = [...messages].reverse().find((message) => message.role === "tool");
+        readResults.push(result ? contentAsString(result.content) : "missing tool result");
+        return { role: "assistant", content: "done" };
+      },
+    });
+    try {
+      const workspaces = await request(app).get("/api/workspaces");
+      const secondWorkspace = await request(app).post("/api/workspaces").send({ path: secondRoot });
+      const firstId = (workspaces.body as { workspaces: Array<{ id: string }> }).workspaces[0]!.id;
+      const secondId = (secondWorkspace.body as { workspace: { id: string } }).workspace.id;
+      const firstSession = await request(app).post("/api/sessions").send({ workspaceId: firstId });
+      const secondSession = await request(app).post("/api/sessions").send({ workspaceId: secondId });
+      for (const session of [firstSession, secondSession]) {
+        const id = (session.body as { id: string }).id;
+        const response = await request(app).post(`/api/sessions/${id}/messages`).field("prompt", "read same.txt");
+        assert.equal(response.status, 200);
+      }
+      assert.match(readResults[0]!, /from first/);
+      assert.match(readResults[1]!, /from second/);
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects the removed approval environment mode instead of silently defaulting", () => {
     const previous = process.env.MINI_AGENT_PERMISSION_MODE;
     process.env.MINI_AGENT_PERMISSION_MODE = "approval";
@@ -240,6 +431,8 @@ describe("agent server", () => {
       "done",
     ]);
     assert.equal(firstEvents[1]?.content, "server turn 1");
+    const listed = await request(app).get("/api/sessions");
+    assert.equal((listed.body as { sessions: Array<{ preview: string }> }).sessions[0]?.preview, "first");
 
     const second = await request(app)
       .post(`/api/sessions/${sessionId}/messages`)
@@ -438,6 +631,47 @@ describe("agent server", () => {
     const historyMessages = (history.body as { messages: Array<{ role: string; content: string }> }).messages;
     assert.equal(historyMessages.find((message) => message.role === "user")?.content, "inspect this");
     assert.doesNotMatch(history.text, /\/think:high/);
+  });
+
+  it("publishes model-specific thinking levels and persists a validated selection", async () => {
+    const previousKey = process.env.DEEPSEEK_API_KEY;
+    process.env.DEEPSEEK_API_KEY = "test-deepseek-key";
+    try {
+      const deepseekLlm = makeLlmConfig({
+        apiKey: "test-deepseek-key",
+        baseUrl: "https://api.deepseek.com",
+        model: "deepseek-v4-flash",
+      });
+      const app = createAgentServer({
+        llm: deepseekLlm,
+        tools: [],
+        chat: async () => ({ role: "assistant" as const, content: "done" }),
+      });
+
+      const catalog = await request(app).get("/api/models");
+      const deepseek = (catalog.body as { models: Array<{ qualifiedId: string; thinkingLevels: string[] }> }).models
+        .find((model) => model.qualifiedId === "deepseek/deepseek-v4-flash");
+      assert.deepEqual(deepseek?.thinkingLevels, ["off", "high", "max"]);
+
+      const created = await request(app).post("/api/sessions");
+      const sessionId = (created.body as { id: string }).id;
+      const selected = await request(app)
+        .put(`/api/sessions/${sessionId}/thinking-level`)
+        .send({ thinkingLevel: "high" });
+      assert.equal(selected.status, 200);
+      assert.equal((selected.body as { thinkingLevel: string }).thinkingLevel, "high");
+
+      const unsupported = await request(app)
+        .put(`/api/sessions/${sessionId}/thinking-level`)
+        .send({ thinkingLevel: "low" });
+      assert.equal(unsupported.status, 400);
+
+      const session = await request(app).get(`/api/sessions/${sessionId}`);
+      assert.equal((session.body as { thinkingLevel: string }).thinkingLevel, "high");
+    } finally {
+      if (previousKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+      else process.env.DEEPSEEK_API_KEY = previousKey;
+    }
   });
 
   it("resolves a dynamic tool provider for each HTTP message", async () => {

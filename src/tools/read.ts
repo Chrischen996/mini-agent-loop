@@ -3,7 +3,7 @@ import path from "node:path";
 import { imagePart, textPart } from "../content.ts";
 import type { ImageMimeType } from "../types.ts";
 import { resolveWorkspacePath } from "../workspace.ts";
-import type { Tool, ToolResult } from "./types.ts";
+import type { Tool, ToolResult, ToolExecutionOptions } from "./types.ts";
 
 export type ReadArgs = {
   path: string;
@@ -149,7 +149,7 @@ export function createReadTool(cwd: string): Tool<ReadArgs> {
       required: ["path"],
       additionalProperties: false,
     },
-    async execute(args: ReadArgs, signal?: AbortSignal): Promise<ToolResult> {
+    async execute(args: ReadArgs, signal?: AbortSignal, execution?: ToolExecutionOptions): Promise<ToolResult> {
       if (signal?.aborted) {
         const err = new Error("Aborted");
         err.name = "AbortError";
@@ -160,7 +160,8 @@ export function createReadTool(cwd: string): Tool<ReadArgs> {
           return { content: "path must be a non-empty string", isError: true };
         }
 
-        const resolved = await resolveWorkspacePath(resolvedCwd, args.path);
+        const cwd = execution?.cwd ?? resolvedCwd;
+        const resolved = await resolveWorkspacePath(cwd, args.path);
         if (!resolved.ok) {
           if (resolved.code === "ENOENT") {
             return { content: `File not found: ${args.path}`, isError: true };

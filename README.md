@@ -99,6 +99,7 @@ catalog value → env var → default. See [Per-model timeouts](#per-model-timeo
 | `MINI_AGENT_MCP_CONFIG` | no | — |
 | `MINI_AGENT_PERMISSION_MODE` | no | `plan` (or `bypass`) |
 | `MINI_AGENT_SUBAGENT` | no | `1` in CLI/server, TUI always on |
+| `MINI_AGENT_BG_TASKS` | no | `1`; set `0`/`false` to remove tmux-backed `bg_*` tools |
 | `MINI_AGENT_GLOBAL_TOKEN_BUDGET` | no | unlimited; shared by parent and nested subagents |
 | `MINI_AGENT_GLOBAL_CONCURRENCY_LIMIT` | no | unlimited; applies across overlapping batches |
 | `MINI_AGENT_AUTO_SUBAGENT` | no | enabled by default; set `0`/`false`/`off` to disable |
@@ -447,7 +448,20 @@ npm run dev
 # production build, then serve GUI + API together on 127.0.0.1:3001
 npm run build
 npm run serve
+
+# packaged Web entry: starts the local API and opens the bundled Web UI
+npm run build:package
+node dist/web-launcher.js
+
+# after installing the package globally, the same entry is:
+mini-agent-loop-web --workspace /absolute/path/to/project
 ```
+
+The Web launcher is an additional entry point. It does not replace the
+existing `mini-agent-loop` Ink client or `mini-agent-loop-run` one-shot CLI.
+Use `--no-open` to keep the browser closed, or `--port <number>` to choose a
+different local port. `--workspace <path>` sets the default project directory
+for new sessions; individual sessions can still use the Web workspace picker.
 
 Optional server environment:
 
@@ -463,7 +477,12 @@ the sidebar only adds a path reference; the agent still uses the `read` tool to
 load contents. Sessions are persisted under `AGENT_DATA_DIR` (workspace-scoped,
 with a 30-day default TTL) and are restored when the server restarts.
 
-The tool registry follows Pi Agent's seven-tool vocabulary:
+When `tmux` is installed, the CLI, TUI, and Web server expose `bg_start`,
+`bg_status`, `bg_logs`, `bg_send`, `bg_wait`, and `bg_kill` for persistent
+background terminals. The Web server initializes this suite when the first
+`bg_*` call is made; set `MINI_AGENT_BG_TASKS=0` to disable it.
+
+The core tool registry follows Pi Agent's seven-tool vocabulary:
 
 - `read`: read text files and supported images.
 - `bash`: execute commands in the workspace with timeout and cancellation.

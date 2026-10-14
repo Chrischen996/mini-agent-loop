@@ -7,7 +7,7 @@ import type { HistoryMessage, PlanSummary, WireEvent } from "../types/api.ts";
  * Unknown event types are ignored so newer server events never break the UI.
  */
 export type ChatItem =
-  | { id: string; kind: "user"; text: string }
+  | { id: string; kind: "user"; text: string; attachments?: string[] }
   | { id: string; kind: "assistant"; text: string; reasoning: string; streaming: boolean }
   | {
       id: string;
@@ -16,6 +16,10 @@ export type ChatItem =
       name: string;
       status: "running" | "ok" | "error";
       preview: string;
+      /** Workspace path for read-family rows. Presentation only. */
+      path?: string;
+      /** 1-based line the read call started from. Presentation only. */
+      startLine?: number;
     }
   | { id: string; kind: "permission"; requestId: string; tool: string; risk: string; status: "pending" | "resolved" }
   | { id: string; kind: "note"; tone: "info" | "warn" | "error"; text: string };
@@ -48,13 +52,51 @@ export function extractText(content: unknown): string {
   return "";
 }
 
+function extractUserText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => {
+    if (!part || typeof part !== "object") return "";
+    const record = part as Record<string, unknown>;
+    if (record.type !== "text" || typeof record.text !== "string") return "";
+    return record.text.replace(/\[Attached document:[\s\S]*?\[End attached document:[^\]]+\]/g, "").trim();
+  }).filter(Boolean).join("\n").trim();
+}
+
+function attachmentNames(content: unknown): string[] {
+  if (!Array.isArray(content)) return [];
+  const names = content.flatMap((part) => {
+    if (!part || typeof part !== "object") return [];
+    const record = part as Record<string, unknown>;
+    if (record.type === "image" && typeof record.source === "string") return [record.source];
+    if (record.type === "text" && typeof record.text === "string") {
+      const name = record.text.match(/^\[Attached document:\s*([^,\]\n]+)/)?.[1];
+      return name ? [name] : [];
+    }
+    return [];
+  });
+  return [...new Set(names)];
+}
+
+
+function readCallMeta(name: string, args: unknown): { path?: string; startLine?: number } {
+  if (name.trim().toLowerCase() !== "read" || !args || typeof args !== "object") return {};
+  const record = args as Record<string, unknown>;
+  const path = typeof record.path === "string" && record.path.trim() ? record.path : undefined;
+  const offset = typeof record.offset === "number" && Number.isFinite(record.offset)
+    ? Math.max(1, Math.floor(record.offset))
+    : undefined;
+  return { path, startLine: offset ?? (path ? 1 : undefined) };
+}
+
 /** Convert persisted session history (GET /api/sessions/:id) into view items. */
 export function historyToItems(messages: HistoryMessage[]): ChatItem[] {
   const items: ChatItem[] = [];
   for (const message of messages) {
     if (message.role === "user") {
-      const text = extractText(message.content);
-      if (text) items.push({ id: message.id ?? uid(), kind: "user", text });
+      const text = extractUserText(message.content);
+      const attachments = attachmentNames(message.content);
+      if (text || attachments.length) items.push({ id: message.id ?? uid(), kind: "user", text, attachments });
     } else if (message.role === "assistant") {
       const text = extractText(message.content);
       if (text) {
@@ -68,6 +110,7 @@ export function historyToItems(messages: HistoryMessage[]): ChatItem[] {
       }
       for (const call of message.toolCalls ?? []) {
         // Refined later when the matching tool result message arrives.
+        const meta = readCallMeta(call.name, call.arguments);
         items.push({
           id: `t-${call.id}`,
           kind: "tool",
@@ -75,6 +118,7 @@ export function historyToItems(messages: HistoryMessage[]): ChatItem[] {
           name: call.name,
           status: "ok",
           preview: "",
+          ...meta,
         });
       }
     } else {
@@ -120,7 +164,8 @@ export class ChatStreamState {
     switch (event.type) {
       case "user": {
         const text = extractText(event.content);
-        if (text) this.items.push({ id: uid(), kind: "user", text });
+        const attachments = [...(Array.isArray(event.images) ? event.images : []), ...(Array.isArray(event.documents) ? event.documents : [])].filter((name): name is string => typeof name === "string");
+        if (text || attachments.length) this.items.push({ id: uid(), kind: "user", text, attachments });
         this.phase = "streaming";
         break;
       }
@@ -159,7 +204,11 @@ export class ChatStreamState {
         );
         if (existing) {
           existing.status = "running";
+          const meta = readCallMeta(String(event.name ?? existing.name), event.arguments);
+          if (meta.path) existing.path = meta.path;
+          if (meta.startLine) existing.startLine = meta.startLine;
         } else {
+          const meta = readCallMeta(String(event.name ?? "tool"), event.arguments);
           this.items.push({
             id: `t-${toolCallId}`,
             kind: "tool",
@@ -167,6 +216,7 @@ export class ChatStreamState {
             name: String(event.name ?? "tool"),
             status: "running",
             preview: "",
+            ...meta,
           });
         }
         break;
@@ -177,9 +227,12 @@ export class ChatStreamState {
           (candidate): candidate is Extract<ChatItem, { kind: "tool" }> =>
             candidate.kind === "tool" && candidate.toolCallId === toolCallId,
         );
+        const meta = readCallMeta(String(event.name ?? item?.name ?? ""), event.arguments);
         if (item) {
           item.status = event.isError ? "error" : "ok";
           item.preview = String(event.preview ?? "").slice(0, 500);
+          if (!item.path && meta.path) item.path = meta.path;
+          if (!item.startLine && meta.startLine) item.startLine = meta.startLine;
         }
         break;
       }

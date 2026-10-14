@@ -1,12 +1,16 @@
 import type {
   CreateSessionResponse,
   ModelOption,
+  ModelSelectionResponse,
   ModelsListResponse,
   PlanSummary,
   SessionDetail,
   SessionSummary,
+  ThinkingLevelResponse,
   WorkspaceEntry,
+  WorkspaceFilePreview,
   WorkspaceListResponse,
+  WorkspaceRecord,
 } from "../types/api.ts";
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -39,12 +43,23 @@ export const api = {
     return body.sessions;
   },
 
-  createSession: (): Promise<CreateSessionResponse> =>
+  createSession: (workspaceId?: string): Promise<CreateSessionResponse> =>
     requestJson<CreateSessionResponse>("/api/sessions", {
       method: "POST",
       headers: json,
-      body: "{}",
+      body: JSON.stringify(workspaceId ? { workspaceId } : {}),
     }),
+
+  listWorkspaces: async (): Promise<WorkspaceRecord[]> => {
+    const body = await requestJson<{ workspaces: WorkspaceRecord[] }>("/api/workspaces");
+    return body.workspaces;
+  },
+
+  addWorkspace: (path: string): Promise<{ workspace: WorkspaceRecord }> =>
+    requestJson("/api/workspaces", { method: "POST", headers: json, body: JSON.stringify({ path }) }),
+
+  browseWorkspaceDirectories: (path?: string): Promise<{ path: string; parent: string | null; directories: Array<{ name: string; path: string }> }> =>
+    requestJson(`/api/workspaces/directories${path ? `?path=${encodeURIComponent(path)}` : ""}`),
 
   getSession: (id: string): Promise<SessionDetail> =>
     requestJson<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`),
@@ -64,11 +79,23 @@ export const api = {
     }
   },
 
-  setModel: (id: string, model: string): Promise<unknown> =>
-    requestJson(`/api/sessions/${encodeURIComponent(id)}/model`, {
+  updateSessionPresentation: (id: string, patch: { title?: string; pinned?: boolean; archived?: boolean }): Promise<{ title: string; pinned: boolean; archived: boolean }> =>
+    requestJson(`/api/sessions/${encodeURIComponent(id)}/presentation`, {
+      method: "PATCH", headers: json, body: JSON.stringify(patch),
+    }),
+
+  setModel: (id: string, model: string): Promise<ModelSelectionResponse> =>
+    requestJson<ModelSelectionResponse>(`/api/sessions/${encodeURIComponent(id)}/model`, {
       method: "PUT",
       headers: json,
       body: JSON.stringify({ model }),
+    }),
+
+  setThinkingLevel: (id: string, thinkingLevel: string): Promise<ThinkingLevelResponse> =>
+    requestJson<ThinkingLevelResponse>(`/api/sessions/${encodeURIComponent(id)}/thinking-level`, {
+      method: "PUT",
+      headers: json,
+      body: JSON.stringify({ thinkingLevel }),
     }),
 
   getPermissionMode: (id: string): Promise<{ mode: string }> =>
@@ -80,6 +107,12 @@ export const api = {
       headers: json,
       body: JSON.stringify({ mode }),
     }),
+
+  getSessionSkills: (id: string): Promise<{ available: Array<{ name: string; description: string }>; active: string[]; missing: string[] }> =>
+    requestJson(`/api/sessions/${encodeURIComponent(id)}/skills`),
+
+  updateSessionSkills: (id: string, patch: { add?: string[]; remove?: string[] }): Promise<{ available: Array<{ name: string; description: string }>; active: string[]; missing: string[] }> =>
+    requestJson(`/api/sessions/${encodeURIComponent(id)}/skills`, { method: "PUT", headers: json, body: JSON.stringify(patch) }),
 
   /** P4 wires approve/deny buttons to this; the server always re-validates (doc §9.2). */
   resolvePermission: (id: string, requestId: string, decision: "allow" | "deny"): Promise<{ resolved: boolean }> =>
@@ -94,20 +127,44 @@ export const api = {
    * Aborting `signal` cancels the backend task (server maps the closed
    * request to its internal AbortController).
    */
-  sendPrompt: (id: string, prompt: string, signal?: AbortSignal): Promise<Response> =>
-    fetch(`/api/sessions/${encodeURIComponent(id)}/messages`, {
-      method: "POST",
-      headers: json,
-      body: JSON.stringify({ prompt }),
-      signal,
-    }),
+  sendPrompt: (id: string, prompt: string, files: File[] = [], signal?: AbortSignal): Promise<Response> => {
+    if (files.length === 0) {
+      return fetch(`/api/sessions/${encodeURIComponent(id)}/messages`, {
+        method: "POST",
+        headers: json,
+        body: JSON.stringify({ prompt }),
+        signal,
+      });
+    }
+    const body = new FormData();
+    body.set("prompt", prompt);
+    for (const file of files) {
+      const isImage = ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type) || /\.(png|jpe?g|gif|webp)$/i.test(file.name);
+      body.append(isImage ? "images" : "documents", file, file.name);
+    }
+    return fetch(`/api/sessions/${encodeURIComponent(id)}/messages`, { method: "POST", body, signal });
+  },
 
   // ── Workspace (P4) ───────────────────────────────────────────────────────
 
-  listWorkspace: (relativePath = ""): Promise<WorkspaceListResponse> =>
+  listWorkspace: (relativePath = "", sessionId?: string, workspaceId?: string): Promise<WorkspaceListResponse> =>
     requestJson<WorkspaceListResponse>(
-      `/api/workspace/list?path=${encodeURIComponent(relativePath)}`,
+      `/api/workspace/list?path=${encodeURIComponent(relativePath)}${sessionId ? `&sessionId=${encodeURIComponent(sessionId)}` : workspaceId ? `&workspaceId=${encodeURIComponent(workspaceId)}` : ""}`,
     ),
+
+  readWorkspaceFile: (
+    relativePath: string,
+    sessionId?: string,
+    workspaceId?: string,
+    window?: { offset?: number; limit?: number },
+  ): Promise<WorkspaceFilePreview> => {
+    const query = new URLSearchParams({ path: relativePath });
+    if (sessionId) query.set("sessionId", sessionId);
+    else if (workspaceId) query.set("workspaceId", workspaceId);
+    if (window?.offset) query.set("offset", String(window.offset));
+    if (window?.limit) query.set("limit", String(window.limit));
+    return requestJson<WorkspaceFilePreview>(`/api/workspace/file?${query.toString()}`);
+  },
 
   // ── Models (P4) ──────────────────────────────────────────────────────────
 

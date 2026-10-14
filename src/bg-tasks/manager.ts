@@ -67,6 +67,13 @@ function completeUtf8PrefixLength(buffer: Buffer): number {
   return buffer.length - lead < expected ? lead : buffer.length;
 }
 
+function defaultRunnerPath(): string {
+  const javascriptRunner = fileURLToPath(new URL("./runner.js", import.meta.url));
+  if (existsSync(javascriptRunner)) return javascriptRunner;
+  const typescriptRunner = fileURLToPath(new URL("./runner.ts", import.meta.url));
+  return existsSync(typescriptRunner) ? typescriptRunner : javascriptRunner;
+}
+
 export class BgTaskManager extends EventEmitter {
   readonly store: BgTaskStore;
   readonly backend: BgTmuxBackend;
@@ -87,7 +94,7 @@ export class BgTaskManager extends EventEmitter {
     this.store = new BgTaskStore(projectCwd, instanceId);
     this.backend = new BgTmuxBackend(
       `pi-bg-${instanceId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 56)}`,
-      runnerPath ?? fileURLToPath(new URL("./runner.js", import.meta.url)),
+      runnerPath ?? defaultRunnerPath(),
     );
 
     this.cleanupHandler = () => {

@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { imagePart, textPart } from "../content.ts";
 import { resolveWorkspacePath } from "../workspace.ts";
 import type { ContentPart, ImageMimeType } from "../types.ts";
-import type { Tool, ToolResult } from "../tools/types.ts";
+import type { Tool, ToolResult, ToolExecutionOptions } from "../tools/types.ts";
 
 const MAX_RESULT_CHARS = 30_000;
 const MAX_SEARCH_QUERIES = 8;
@@ -449,7 +449,7 @@ export function createWebAccessTools(cwd: string, options: WebAccessToolOptions 
     source: WEB_SOURCE,
     annotations: { readOnlyHint: true, openWorldHint: true },
     parameters: searchSchema(),
-    async execute(rawArgs, signal) {
+    async execute(rawArgs, signal, execution?: ToolExecutionOptions) {
       const args = asRecord(rawArgs);
       try {
         throwIfAborted(signal);
@@ -529,13 +529,13 @@ export function createWebAccessTools(cwd: string, options: WebAccessToolOptions 
     source: WEB_SOURCE,
     annotations: { readOnlyHint: true, openWorldHint: true },
     parameters: fetchSchema(),
-    async execute(rawArgs, signal) {
+    async execute(rawArgs, signal, execution?: ToolExecutionOptions) {
       const args = asRecord(rawArgs);
       try {
         throwIfAborted(signal);
         const urls = stringList(args.urls ?? args.url, "url", MAX_FETCH_URLS);
         if (urls.length === 0) return makeToolResult("url or urls is required", true);
-        await validateFetchTargets(urls, resolvedCwd);
+        await validateFetchTargets(urls, execution?.cwd ?? resolvedCwd);
         const mode = args.mode === undefined ? undefined : args.mode;
         if (mode !== undefined && mode !== "readable" && mode !== "raw") {
           return makeToolResult('mode must be "readable" or "raw"; answer mode is not available in the native adapter', true);

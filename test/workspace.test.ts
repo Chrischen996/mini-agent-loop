@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, symlink, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, symlink, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -109,5 +109,24 @@ describe("workspace path sandbox", () => {
       assert.equal(resolved.ok, true);
       if (resolved.ok) assert.equal(resolved.relative, "src/a.ts");
     });
+  });
+
+  it("resolves relative paths from the physical cwd when cwd is a symlink", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "mini-agent-workspace-symlink-cwd-"));
+    const physical = path.join(root, "physical");
+    const alias = path.join(root, "alias");
+    await mkdir(physical);
+    await writeFile(path.join(physical, "value.txt"), "physical", "utf8");
+    await symlink(physical, alias);
+    try {
+      const resolved = await resolveWorkspacePath(alias, "value.txt");
+      assert.equal(resolved.ok, true);
+      if (resolved.ok) {
+        assert.equal(resolved.realTarget, await realpath(path.join(physical, "value.txt")));
+        assert.equal(resolved.relative, "value.txt");
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

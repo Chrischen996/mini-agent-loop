@@ -14,7 +14,7 @@ import {
   resolveWorkspacePath,
   resolveWorkspaceWritePath,
 } from "../workspace.ts";
-import type { Tool, ToolResult } from "./types.ts";
+import type { Tool, ToolResult, ToolExecutionOptions } from "./types.ts";
 
 type PathArgs = { path: string };
 type SearchArgs = { query: string; path?: string; maxResults?: number };
@@ -39,6 +39,10 @@ const MAX_PATCH_BYTES = 512 * 1024;
 const DEFAULT_GREP_LIMIT = 100;
 const DEFAULT_FIND_LIMIT = 1000;
 const DEFAULT_LS_LIMIT = 500;
+
+function executionCwd(defaultCwd: string, options?: ToolExecutionOptions): string {
+  return options?.cwd ?? defaultCwd;
+}
 
 function result(content: string, isError = false): ToolResult {
   return isError ? { content, isError: true } : { content };
@@ -131,11 +135,11 @@ export function createLsTool(cwd: string): Tool<LsArgs> {
       required: [],
       additionalProperties: false,
     },
-    async execute(args, signal) {
+    async execute(args, signal, options) {
       if (signal?.aborted) throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
       const relativePath = validatePath(args.path) ?? ".";
       try {
-        const resolved = await resolveWorkspacePath(cwd, relativePath);
+        const resolved = await resolveWorkspacePath(executionCwd(cwd, options), relativePath);
         if (!resolved.ok) return result(resolved.error, true);
         const info = await stat(resolved.realTarget);
         if (!info.isDirectory()) return result(`Not a directory: ${relativePath}`, true);
@@ -172,7 +176,7 @@ export function createGrepTool(cwd: string): Tool<GrepArgs> {
       required: ["pattern"],
       additionalProperties: false,
     },
-    async execute(args, signal) {
+    async execute(args, signal, options) {
       if (!validatePath(args.pattern)) return result("pattern must be a non-empty string", true);
       const limit = Math.min(Math.max(args.limit ?? DEFAULT_GREP_LIMIT, 1), DEFAULT_GREP_LIMIT);
       let matcher: RegExp;
@@ -186,7 +190,7 @@ export function createGrepTool(cwd: string): Tool<GrepArgs> {
       const context = Math.max(0, args.context ?? 0);
       try {
         const start = validatePath(args.path) ?? ".";
-        const resolved = await resolveWorkspacePath(cwd, start);
+        const resolved = await resolveWorkspacePath(executionCwd(cwd, options), start);
         if (!resolved.ok) return result(resolved.error, true);
         const visit = async (absolute: string, relative: string) => {
           if (output.length >= limit) return true;
@@ -229,13 +233,13 @@ export function createFindTool(cwd: string): Tool<FindArgs> {
       required: ["pattern"],
       additionalProperties: false,
     },
-    async execute(args, signal) {
+    async execute(args, signal, options) {
       if (!validatePath(args.pattern)) return result("pattern must be a non-empty string", true);
       const found: string[] = [];
       const limit = Math.min(Math.max(args.limit ?? DEFAULT_FIND_LIMIT, 1), DEFAULT_FIND_LIMIT);
       try {
         const start = validatePath(args.path) ?? ".";
-        const resolved = await resolveWorkspacePath(cwd, start);
+        const resolved = await resolveWorkspacePath(executionCwd(cwd, options), start);
         if (!resolved.ok) return result(resolved.error, true);
         const visit = async (absolute: string, relative: string) => {
           if (matchesGlob(relative, args.pattern)) found.push(relative);
@@ -265,10 +269,10 @@ export function createEditTool(cwd: string): Tool<EditArgs> {
       required: ["path", "edits"],
       additionalProperties: false,
     },
-    async execute(args) {
+    async execute(args, _signal, options) {
       if (!validatePath(args.path) || !Array.isArray(args.edits) || args.edits.length === 0) return result("path and a non-empty edits array are required", true);
       try {
-        const file = await existingFile(cwd, args.path);
+        const file = await existingFile(executionCwd(cwd, options), args.path);
         if (!file.ok) return result(file.error, true);
         const current = await readFile(file.realTarget, "utf8");
         let updated = current;
@@ -297,10 +301,10 @@ export function createListTool(cwd: string): Tool<PathArgs> {
       required: [],
       additionalProperties: false,
     },
-    async execute(args) {
+    async execute(args, _signal, options) {
       const relativePath = validatePath(args.path) ?? ".";
       try {
-        const resolved = await resolveWorkspacePath(cwd, relativePath);
+        const resolved = await resolveWorkspacePath(executionCwd(cwd, options), relativePath);
         if (!resolved.ok) return result(resolved.error, true);
         const info = await stat(resolved.realTarget);
         if (!info.isDirectory()) return result(`Path is not a directory: ${relativePath}`, true);
@@ -330,12 +334,12 @@ export function createSearchTool(cwd: string): Tool<SearchArgs> {
       required: ["query"],
       additionalProperties: false,
     },
-    async execute(args, signal) {
+    async execute(args, signal, options) {
       if (!validatePath(args.query)) return result("query must be a non-empty string", true);
       const maxResults = Math.min(Math.max(args.maxResults ?? MAX_SEARCH_RESULTS, 1), MAX_SEARCH_RESULTS);
       const start = validatePath(args.path) ?? ".";
       try {
-        const resolved = await resolveWorkspacePath(cwd, start);
+        const resolved = await resolveWorkspacePath(executionCwd(cwd, options), start);
         if (!resolved.ok) return result(resolved.error, true);
         const info = await stat(resolved.realTarget);
         const matches: string[] = [];
@@ -367,18 +371,19 @@ export function createMkdirTool(cwd: string): Tool<PathArgs> {
     name: "mkdir",
     description: "Create a directory and its missing parent directories inside the workspace.",
     parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false },
-    async execute(args) {
+    async execute(args, _signal, options) {
       if (!validatePath(args.path) || args.path === ".") return result("path must be a non-empty directory path", true);
       try {
         if (isProtectedRelative(args.path)) return result(`Refusing to create protected path: ${args.path}`, true);
-        const existing = await resolveWorkspacePath(cwd, args.path);
+        const activeCwd = executionCwd(cwd, options);
+        const existing = await resolveWorkspacePath(activeCwd, args.path);
         if (existing.ok) {
           const info = await stat(existing.realTarget);
           return info.isDirectory()
             ? result(`Directory already exists: ${existing.relative}`)
             : result(`Path is a file: ${args.path}`, true);
         }
-        const target = await resolveWorkspaceWritePath(cwd, args.path);
+        const target = await resolveWorkspaceWritePath(activeCwd, args.path);
         if (!target.ok) return result(target.error, true);
         await mkdir(target.realTarget, { recursive: true });
         return result(`Created directory ${args.path}`);
@@ -394,10 +399,10 @@ export function createDeleteTool(cwd: string): Tool<PathArgs> {
     name: "delete",
     description: "Permanently delete a workspace file or directory. Protected paths are refused.",
     parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false },
-    async execute(args) {
+    async execute(args, _signal, options) {
       if (!validatePath(args.path) || args.path === ".") return result("Refusing to delete workspace root", true);
       try {
-        const resolved = await existingEntry(cwd, args.path);
+        const resolved = await existingEntry(executionCwd(cwd, options), args.path);
         if (!resolved.ok) return result(resolved.error, true);
         if (isProtectedRelative(resolved.relative)) return result(`Refusing to delete protected path: ${resolved.relative}`, true);
         await rm(resolved.realTarget, { recursive: true, force: false });
@@ -436,7 +441,7 @@ export function createMoveTool(cwd: string): Tool<TransferArgs> {
     name: "move",
     description: "Move a workspace file or directory to another relative path.",
     parameters: { type: "object", properties: { source: { type: "string" }, destination: { type: "string" }, overwrite: { type: "boolean" } }, required: ["source", "destination"], additionalProperties: false },
-    async execute(args) { try { return await transfer(cwd, args, "move"); } catch (error) { return result(`Failed to move: ${error instanceof Error ? error.message : String(error)}`, true); } },
+    async execute(args, _signal, options) { try { return await transfer(executionCwd(cwd, options), args, "move"); } catch (error) { return result(`Failed to move: ${error instanceof Error ? error.message : String(error)}`, true); } },
   };
 }
 
@@ -445,7 +450,7 @@ export function createCopyTool(cwd: string): Tool<TransferArgs> {
     name: "copy",
     description: "Copy a workspace file or directory to another relative path.",
     parameters: { type: "object", properties: { source: { type: "string" }, destination: { type: "string" }, overwrite: { type: "boolean" } }, required: ["source", "destination"], additionalProperties: false },
-    async execute(args) { try { return await transfer(cwd, args, "copy"); } catch (error) { return result(`Failed to copy: ${error instanceof Error ? error.message : String(error)}`, true); } },
+    async execute(args, _signal, options) { try { return await transfer(executionCwd(cwd, options), args, "copy"); } catch (error) { return result(`Failed to copy: ${error instanceof Error ? error.message : String(error)}`, true); } },
   };
 }
 
@@ -454,11 +459,11 @@ export function createPatchTool(cwd: string): Tool<PatchArgs> {
     name: "patch",
     description: "Replace exact text in a UTF-8 workspace file. The match count must equal expectedReplacements (default 1).",
     parameters: { type: "object", properties: { path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" }, expectedReplacements: { type: "integer", minimum: 1 } }, required: ["path", "oldText", "newText"], additionalProperties: false },
-    async execute(args) {
+    async execute(args, _signal, options) {
       if (!validatePath(args.path) || typeof args.oldText !== "string" || typeof args.newText !== "string") return result("path, oldText and newText are required", true);
       if (Buffer.byteLength(args.oldText, "utf8") > MAX_PATCH_BYTES || Buffer.byteLength(args.newText, "utf8") > MAX_PATCH_BYTES) return result(`patch text exceeds ${MAX_PATCH_BYTES} bytes`, true);
       try {
-        const file = await existingFile(cwd, args.path);
+        const file = await existingFile(executionCwd(cwd, options), args.path);
         if (!file.ok) return result(file.error, true);
         const current = await readFile(file.realTarget, "utf8");
         const count = args.oldText === "" ? 0 : current.split(args.oldText).length - 1;

@@ -206,6 +206,13 @@ export class SessionManager {
     return this.store.upsert(session);
   }
 
+  async importSession(session: PersistedSession): Promise<PersistedSession> {
+    return this.store.importSession({
+      ...session,
+      workspaceId: session.workspaceId ?? this.workspaceId,
+    });
+  }
+
   /** Persist the user input before the provider is called. */
   async saveTurnStart(
     input: SessionSnapshotInput & { content: MessageContent },

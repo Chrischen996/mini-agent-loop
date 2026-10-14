@@ -28,6 +28,7 @@ type SessionCreatedEvent = {
   forkedFromMessage?: number;
   forkedFromMessageId?: string;
   workspaceId?: string;
+  cwd?: string;
 };
 
 type SessionSnapshotEvent = {
@@ -50,6 +51,7 @@ type SessionSnapshotEvent = {
   forkedFromMessage?: number;
   forkedFromMessageId?: string;
   workspaceId?: string;
+  cwd?: string;
 };
 
 type SessionEvent = SessionCreatedEvent | SessionSnapshotEvent;
@@ -73,6 +75,8 @@ export type PersistedSession = {
   currentPlan?: ExecutionPlan;
   /** Stable project/workspace scope used to prevent cross-project resume. */
   workspaceId?: string;
+  /** Session-bound project cwd, equivalent to Harness SessionHeader.cwd. */
+  cwd?: string;
   messages: AgentMessage[];
   todos?: TodoItem[];
   todoVersion?: number;
@@ -93,6 +97,7 @@ export type PersistedSessionMeta = {
   parentSessionId?: string;
   forkedFromMessageId?: string;
   workspaceId?: string;
+  cwd?: string;
   preview: string;
 };
 
@@ -127,6 +132,8 @@ export type SessionStoreOptions = {
   compactThreshold?: number;
   /** Only expose sessions belonging to this workspace when set. */
   workspaceId?: string;
+  /** Store this workspace under a readable project directory. */
+  projectPath?: string;
 };
 
 const DEFAULT_MAX_SESSIONS = 100;
@@ -136,6 +143,40 @@ const LOCK_RETRY_MS = 25;
 const LOCK_TIMEOUT_MS = 10_000;
 const LOCK_STALE_MS = 30_000;
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
+const MAX_PROJECT_DIRECTORY_BYTES = 200;
+
+/** Build a bounded, readable directory component from an absolute project path. */
+export function projectDirectoryName(projectPath: string): string {
+  const normalized = path.resolve(projectPath);
+  let readable = "";
+  for (const character of normalized) {
+    if (character === "/" || character === "\\" || character === ":") {
+      readable += "-";
+      continue;
+    }
+    const code = character.codePointAt(0)!;
+    if (/[<>"|?*]/.test(character) || code < 32) {
+      readable += `~${code.toString(16).toUpperCase().padStart(4, "0")}`;
+      continue;
+    }
+    readable += character;
+  }
+
+  const bounded: string[] = [];
+  let bytes = 0;
+  for (const character of readable) {
+    const size = Buffer.byteLength(character);
+    if (bytes + size > MAX_PROJECT_DIRECTORY_BYTES) break;
+    bounded.push(character);
+    bytes += size;
+  }
+  return bounded.join("").replace(/^-+|-+$/g, "") || "root";
+}
+
+export function projectSessionDirectory(dataDir: string, projectPath: string): string {
+  return path.join(path.resolve(dataDir), "projects", projectDirectoryName(projectPath));
+}
 
 export function isValidSessionId(sessionId: string): boolean {
   return SESSION_ID_PATTERN.test(sessionId);
@@ -161,9 +202,12 @@ export class SessionStore {
   private readonly snapshotCounts = new Map<string, number>();
 
   constructor(dataDir?: string, options: SessionStoreOptions = {}) {
-    this.root = path.resolve(
+    const configuredRoot = path.resolve(
       dataDir ?? process.env.AGENT_DATA_DIR ?? path.join(os.homedir(), ".mini-agent", "sessions"),
     );
+    this.root = options.projectPath
+      ? projectSessionDirectory(configuredRoot, options.projectPath)
+      : configuredRoot;
     this.maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
     this.sessionTtlMs = options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
     this.compactThreshold = options.compactThreshold ?? DEFAULT_COMPACT_THRESHOLD;
@@ -350,7 +394,27 @@ export class SessionStore {
     return persisted;
   }
 
-  private async createLocked(session: PersistedSession): Promise<void> {
+  /** Import a legacy session without making migration look like new activity. */
+  async importSession(session: PersistedSession): Promise<PersistedSession> {
+    this.assertSessionId(session.id);
+    let imported = session;
+    await this.withSessionLock(session.id, async () => {
+      const existing = await this.parseEventsFile(session.id);
+      if (existing) {
+        imported = existing;
+        return;
+      }
+      imported = {
+        ...session,
+        lastActiveAt: session.lastActiveAt ?? session.createdAt,
+        workspaceId: this.workspaceId ?? session.workspaceId,
+      };
+      await this.createLocked(imported, false);
+    });
+    return imported;
+  }
+
+  private async createLocked(session: PersistedSession, updateActivity = true): Promise<void> {
     this.snapshotCounts.set(session.id, 0);
     await this.append({
       type: "session_created",
@@ -369,8 +433,9 @@ export class SessionStore {
       forkedFromMessage: session.forkedFromMessage,
       forkedFromMessageId: session.forkedFromMessageId,
       workspaceId: session.workspaceId ?? this.workspaceId,
+      cwd: session.cwd,
     });
-    await this.saveLocked(session);
+    await this.saveLocked(session, updateActivity);
   }
 
   async save(session: PersistedSession): Promise<void> {
@@ -382,9 +447,11 @@ export class SessionStore {
     });
   }
 
-  private async saveLocked(session: PersistedSession): Promise<void> {
+  private async saveLocked(session: PersistedSession, updateActivity = true): Promise<void> {
     this.ensureMessageIds(session.messages);
-    const lastActiveAt = Date.now();
+    const lastActiveAt = updateActivity
+      ? Date.now()
+      : session.lastActiveAt ?? session.createdAt;
     await this.append({
       type: "session_snapshot",
       sessionId: session.id,
@@ -404,6 +471,7 @@ export class SessionStore {
       forkedFromMessage: session.forkedFromMessage,
       forkedFromMessageId: session.forkedFromMessageId,
       workspaceId: session.workspaceId ?? this.workspaceId,
+      cwd: session.cwd,
     });
     await this.writeMeta(this.sessionMeta({ ...session, lastActiveAt }));
     // Keep the append-only log bounded (Claude Code-style transcript compaction).
@@ -465,6 +533,7 @@ export class SessionStore {
       forkedFromMessage: session.forkedFromMessage,
       forkedFromMessageId: session.forkedFromMessageId,
       workspaceId: session.workspaceId ?? this.workspaceId,
+      cwd: session.cwd,
       // null is intentional: it clears a previously persisted plan.
       currentPlan: session.currentPlan ?? null,
     };
@@ -507,6 +576,7 @@ export class SessionStore {
             forkedFromMessage: parsed.forkedFromMessage,
             forkedFromMessageId: parsed.forkedFromMessageId,
             workspaceId: parsed.workspaceId,
+            cwd: parsed.cwd,
           };
         } else if (Array.isArray(parsed.messages)) {
           snapshotCount += 1;
@@ -531,6 +601,7 @@ export class SessionStore {
             forkedFromMessage: parsed.forkedFromMessage ?? current?.forkedFromMessage,
             forkedFromMessageId: parsed.forkedFromMessageId ?? current?.forkedFromMessageId,
             workspaceId: parsed.workspaceId ?? current?.workspaceId,
+            cwd: parsed.cwd ?? current?.cwd,
           };
         }
       } catch {
@@ -596,6 +667,7 @@ export class SessionStore {
       parentSessionId: session.parentSessionId,
       forkedFromMessageId: session.forkedFromMessageId,
       workspaceId: session.workspaceId ?? this.workspaceId,
+      cwd: session.cwd,
       preview: firstUser ? contentAsString(firstUser.content).slice(0, 80) : "",
     };
   }

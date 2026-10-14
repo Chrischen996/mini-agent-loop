@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { PermissionTurnContext } from "../permissions.ts";
-import type { Tool, ToolResult, ToolSource } from "../tools/types.ts";
+import type { Tool, ToolResult, ToolSource, ToolExecutionOptions } from "../tools/types.ts";
 import { createExecutionId } from "./ids.ts";
 import {
   NetworkPolicyError,
@@ -64,7 +64,7 @@ export async function executeToolWithBroker(input: {
     beforeExecute: input.beforeExecute,
     ...(input.onAudit ? { onAudit: input.onAudit } : {}),
   });
-}
+  }
 
 function abortError(reason?: unknown): Error {
   if (reason instanceof Error) return reason;
@@ -85,6 +85,7 @@ export function createToolExecutionFingerprint(
   const material = stableStringify({
     taskId: context.taskId ?? null,
     workspaceId: context.workspaceId ?? null,
+    cwd: context.cwd ?? null,
     toolName: tool.name,
     normalizedArguments: args,
     source: sourceForFingerprint(tool.source),
@@ -148,6 +149,7 @@ export class ToolExecutionBroker {
           args,
           execution.signal,
           beforeExecute,
+          toolExecutionOptions(execution),
         );
       } else {
         await execution.authorizeTool?.(tool, args, execution.signal);
@@ -155,7 +157,7 @@ export class ToolExecutionBroker {
         await execution.beforeExecute?.();
         this.assertCurrent(execution, policyRevision, capabilities, tool.name);
         audit({ type: "started" });
-        result = await tool.execute(args, execution.signal);
+        result = await tool.execute(args, execution.signal, toolExecutionOptions(execution));
       }
 
       this.assertCurrent(execution, policyRevision, capabilities, tool.name);
@@ -208,4 +210,8 @@ export class ToolExecutionBroker {
       throw new SandboxPolicyError(context.sandboxMode, context.sandboxIsolation);
     }
   }
+}
+
+function toolExecutionOptions(execution: ToolExecutionContext): ToolExecutionOptions {
+  return execution.cwd === undefined ? {} : { cwd: execution.cwd };
 }

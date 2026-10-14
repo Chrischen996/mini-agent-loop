@@ -1,6 +1,7 @@
 import { spawn, exec, ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 type WebUiStatus = "stopped" | "starting" | "running" | "stopping" | "failed";
 
@@ -21,14 +22,14 @@ const BUILD_TIMEOUT_MS = 120_000;
 /**
  * Lifecycle manager for the local Web workbench (doc 1.md §5).
  *
- * - Spawns the production server (`npm run serve` = `tsx src/server.ts`) with
- *   `PORT=<port>`; the server binds 127.0.0.1 and serves the packaged UI from
- *   `dist/web` when present (P2 static wiring in src/server.ts).
+ * - Spawns the shared Web launcher (`dist/web-launcher.js` in a package build,
+ *   or `src/web-launcher.ts` from source) with `PORT=<port>`; the launcher
+ *   starts the server and the server serves the packaged UI from `dist/web`.
  * - Readiness is decided by a real `/api/health` poll, never by a PID alone
  *   (doc §5.2). If our process dies early (e.g. EADDRINUSE on a foreign port
  *   owner) the health loop detects it and reports the captured stderr tail.
- * - stop() terminates the whole process group (npm -> tsx -> node) with a
- *   SIGTERM grace period, then SIGKILL.
+ * - stop() terminates the whole launcher/server process group with a SIGTERM
+ *   grace period, then SIGKILL.
  */
 export class WebUiManager {
   private state: WebUiStatus = "stopped";
@@ -67,9 +68,13 @@ export class WebUiManager {
     this.lastError = null;
     const packageRoot = process.cwd();
     try {
+      const launcher = resolveWebLauncherCommand(import.meta.url);
       // doc §4.3: the production workbench is Express + packaged static assets,
       // so the UI build must exist first. Build on demand once.
-      const webDist = path.resolve(packageRoot, "dist", "web");
+      const launcherEntry = launcher.args.at(-1);
+      const webDist = launcherEntry?.endsWith(".js")
+        ? path.resolve(path.dirname(launcherEntry), "web")
+        : path.resolve(packageRoot, "dist", "web");
       let notice: string | undefined;
       if (!existsSync(webDist)) {
         const build = await this.runCommand("npm", ["run", "web:build"], packageRoot, BUILD_TIMEOUT_MS);
@@ -84,7 +89,12 @@ export class WebUiManager {
         notice = "Built the Web UI on demand (dist/web was missing).";
       }
 
-      this.proc = spawn("npm", ["run", "serve"], {
+      this.proc = spawn(launcher.command, [
+        ...launcher.args,
+        "--port",
+        String(this.port),
+        "--no-open",
+      ], {
         cwd: packageRoot,
         env: { ...process.env, PORT: String(this.port) },
         stdio: ["ignore", "pipe", "pipe"],
@@ -109,10 +119,10 @@ export class WebUiManager {
           // stop() owns the final state transition.
         } else if (this.state === "starting") {
           this.state = "failed";
-          this.lastError = `server exited early (code ${code}). ${stderrTail.slice(-300)}`.trim();
+          this.lastError = `Web launcher exited early (code ${code}). ${stderrTail.slice(-300)}`.trim();
         } else if (this.state === "running") {
           this.state = "failed";
-          this.lastError = `server exited unexpectedly (code ${code}).`;
+          this.lastError = `Web launcher exited unexpectedly (code ${code}).`;
         } else {
           this.state = "stopped";
         }
@@ -240,4 +250,27 @@ export class WebUiManager {
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
+}
+
+export type WebLauncherCommand = {
+  command: string;
+  args: string[];
+};
+
+/** Resolve the bundled launcher first, while keeping source execution usable. */
+export function resolveWebLauncherCommand(moduleUrl: string): WebLauncherCommand {
+  const moduleDirectory = path.dirname(fileURLToPath(moduleUrl));
+  const bundledLauncher = path.join(moduleDirectory, "web-launcher.js");
+  if (existsSync(bundledLauncher)) {
+    return { command: process.execPath, args: [bundledLauncher] };
+  }
+
+  const sourceLauncher = path.resolve(moduleDirectory, "..", "web-launcher.ts");
+  if (existsSync(sourceLauncher)) {
+    return { command: process.execPath, args: ["--import", "tsx", sourceLauncher] };
+  }
+
+  throw new Error(
+    `Web launcher not found next to ${moduleDirectory}; run the package build before using /web-ui.`,
+  );
 }

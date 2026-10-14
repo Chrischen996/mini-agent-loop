@@ -21,6 +21,8 @@ export type RuntimeExecutionContext = {
   jobId?: JobId | string;
   sessionId?: SessionId | string;
   workspaceId?: WorkspaceId | string;
+  /** Physical project cwd supplied to each session-bound tool invocation. */
+  cwd?: string;
   policyRevision?: number;
   sandboxMode?: SandboxMode;
   sandboxIsolation?: SandboxIsolation;

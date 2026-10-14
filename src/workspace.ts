@@ -1,4 +1,4 @@
-import { readdir, realpath, stat } from "node:fs/promises";
+import { open, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 export const MAX_DIR_ENTRIES = 500;
@@ -71,19 +71,22 @@ export async function resolveWorkspacePath(
 ): Promise<ResolvedWorkspacePath> {
   const resolvedCwd = path.resolve(cwd);
   const trimmed = relativePath.trim();
-  const target = trimmed === ""
-    ? resolvedCwd
-    : path.resolve(resolvedCwd, trimmed);
-
-  if (!isPathInsideCwd(target, resolvedCwd)) {
-    return {
-      ok: false,
-      error: `Path escapes workspace cwd: ${relativePath || "."}`,
-    };
-  }
 
   try {
+    // Resolve the caller cwd first. This keeps relative paths consistent with
+    // bash when the cwd itself is a symlink or the path contains `..`.
     const realCwd = await realpath(resolvedCwd);
+    const target = trimmed === ""
+      ? realCwd
+      : path.isAbsolute(trimmed)
+        ? path.resolve(trimmed)
+        : path.resolve(realCwd, trimmed);
+    if (!isPathInsideCwd(target, realCwd)) {
+      return {
+        ok: false,
+        error: `Path escapes workspace cwd: ${relativePath || "."}`,
+      };
+    }
     const realTarget = await realpath(target);
     if (!isPathInsideCwd(realTarget, realCwd)) {
       return {
@@ -211,6 +214,118 @@ export async function listWorkspaceDirectory(
   };
 }
 
+export const MAX_PREVIEW_BYTES = 512 * 1024;
+
+const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"]);
+
+const BINARY_EXTENSIONS = new Set([
+  "pdf", "zip", "gz", "tgz",
+  "tar", "7z", "rar", "woff", "woff2", "ttf", "otf", "mp3", "mp4", "mov", "webm",
+  "wasm", "exe", "dll", "so", "dylib", "bin", "lockb",
+]);
+
+export type WorkspaceFilePreview = {
+  path: string;
+  name: string;
+  size: number;
+  truncated: boolean;
+  binary: boolean;
+  kind: "text" | "image";
+  content: string;
+  /** 1-based line number of the first returned line. */
+  startLine: number;
+  eof: boolean;
+};
+
+/** Read a workspace file for the web preview. Refuses escapes and binaries. */
+export async function readWorkspaceFile(
+  cwd: string,
+  relativePath: string,
+  options?: { offset?: number; limit?: number },
+): Promise<WorkspaceFilePreview> {
+  const resolved = await resolveWorkspacePath(cwd, relativePath);
+  if (!resolved.ok) {
+    const error = new Error(resolved.error) as Error & { status?: number; code?: string };
+    error.status = resolved.code === "ENOENT" ? 404 : 400;
+    error.code = resolved.code;
+    throw error;
+  }
+
+  let info;
+  try {
+    info = await stat(resolved.realTarget);
+  } catch (err) {
+    const error = new Error(
+      `Failed to stat ${relativePath || "."}: ${err instanceof Error ? err.message : String(err)}`,
+    ) as Error & { status?: number };
+    error.status = 400;
+    throw error;
+  }
+
+  if (!info.isFile()) {
+    const error = new Error(`Path is not a file: ${resolved.relative || "."}`) as Error & { status?: number };
+    error.status = 400;
+    throw error;
+  }
+
+  const name = path.basename(resolved.relative);
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1).toLowerCase() : "";
+  if (IMAGE_EXTENSIONS.has(ext)) {
+    return {
+      path: resolved.relative, name, size: info.size, truncated: false, binary: true,
+      kind: "image", content: "", startLine: 1, eof: true,
+    };
+  }
+  if (BINARY_EXTENSIONS.has(ext)) {
+    return {
+      path: resolved.relative, name, size: info.size, truncated: false, binary: true,
+      kind: "text", content: "", startLine: 1, eof: true,
+    };
+  }
+
+  const truncated = info.size > MAX_PREVIEW_BYTES;
+  const handle = await open(resolved.realTarget, "r");
+  try {
+    const length = Math.min(info.size, MAX_PREVIEW_BYTES);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, 0);
+    if (buffer.includes(0)) {
+      return {
+        path: resolved.relative, name, size: info.size, truncated: false, binary: true,
+        kind: "text", content: "", startLine: 1, eof: true,
+      };
+    }
+    const all = buffer.toString("utf8");
+    const lines = all.split("\n");
+    if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+    const total = Math.max(lines.length, 1);
+    const offset = options?.offset !== undefined && Number.isFinite(options.offset)
+      ? Math.max(1, Math.floor(options.offset))
+      : 1;
+    const limit = options?.limit !== undefined && Number.isFinite(options.limit)
+      ? Math.max(1, Math.floor(options.limit))
+      : undefined;
+    // A capped read must not pretend lines past the buffer were loaded.
+    const windowed = !truncated && (offset > 1 || limit !== undefined);
+    const start = windowed ? Math.min(total, offset - 1) : 0;
+    const end = windowed && limit !== undefined ? Math.min(total, start + limit) : total;
+    const content = lines.slice(start, end).join("\n");
+    return {
+      path: resolved.relative,
+      name,
+      size: info.size,
+      truncated,
+      binary: false,
+      kind: "text",
+      content,
+      startLine: start + 1,
+      eof: !truncated && end >= total,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
 /** Validate referenced paths are files inside the workspace. */
 export async function validateReferencedPaths(
   cwd: string,
@@ -295,27 +410,26 @@ export async function resolveWorkspaceWritePath(
     };
   }
 
-  const target = path.resolve(resolvedCwd, trimmed);
-  if (!isPathInsideCwd(target, resolvedCwd)) {
-    return {
-      ok: false,
-      error: `Path escapes workspace cwd: ${relativePath}`,
-    };
-  }
-
-  const relativePosix = toPosixRelative(resolvedCwd, target);
-  const segments = relativePosix.split("/").filter(Boolean);
-  if (
-    segments.some((segment) => segment === ".git" || segment === "node_modules")
-  ) {
-    return {
-      ok: false,
-      error: `Refusing to write under protected path: ${relativePosix}`,
-    };
-  }
-
   try {
     const realCwd = await realpath(resolvedCwd);
+    const target = path.isAbsolute(trimmed)
+      ? path.resolve(trimmed)
+      : path.resolve(realCwd, trimmed);
+    if (!isPathInsideCwd(target, realCwd)) {
+      return {
+        ok: false,
+        error: `Path escapes workspace cwd: ${relativePath}`,
+      };
+    }
+
+    const relativePosix = toPosixRelative(realCwd, target);
+    const segments = relativePosix.split("/").filter(Boolean);
+    if (segments.some((segment) => segment === ".git" || segment === "node_modules")) {
+      return {
+        ok: false,
+        error: `Refusing to write under protected path: ${relativePosix}`,
+      };
+    }
 
     try {
       const realTarget = await realpath(target);
@@ -400,7 +514,7 @@ export async function resolveWorkspaceWritePath(
             error: `Failed to resolve parent for ${relativePath}`,
           };
         }
-        if (!isPathInsideCwd(parent, resolvedCwd) && parent !== resolvedCwd) {
+        if (!isPathInsideCwd(parent, realCwd) && parent !== realCwd) {
           return {
             ok: false,
             error: `Path escapes workspace cwd: ${relativePath}`,

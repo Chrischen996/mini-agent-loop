@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import type { Tool, ToolResult } from "./types.ts";
+import type { Tool, ToolResult, ToolExecutionOptions } from "./types.ts";
 import { DEFAULT_SANDBOX_CONFIG, type SandboxConfig, type SandboxResult, type SandboxRunner } from "../sandbox/types.ts";
 import { terminateProcessTree } from "../process-tree.ts";
 import { describeShell, resolveShell } from "./shell.ts";
@@ -34,7 +34,7 @@ export function createBashTool(
       required: ["command"],
       additionalProperties: false,
     },
-    async execute(args, signal): Promise<ToolResult> {
+    async execute(args, signal, execution?: ToolExecutionOptions): Promise<ToolResult> {
       if (typeof args.command !== "string" || !args.command.trim()) {
         return { content: "command must be a non-empty string", isError: true };
       }
@@ -49,6 +49,8 @@ export function createBashTool(
       }
       const effectiveTimeoutMs = Math.min(timeoutSeconds * 1000, Number.MAX_SAFE_INTEGER);
 
+      const executionCwd = execution?.cwd ?? cwd;
+
       // Sandbox mode: use the runner directly (command-level exec only)
       if (sandbox && sandbox.runner.type !== "none") {
         try {
@@ -60,7 +62,7 @@ export function createBashTool(
           const result: SandboxResult = await sandbox.runner.execute({
             command: execShell.command,
             args: [...execShell.args, args.command],
-            cwd,
+            cwd: executionCwd,
             timeout: effectiveTimeoutMs,
             allowNetwork: sandboxConfig?.allowNetwork ?? false,
             allowWrite: true,
@@ -85,7 +87,7 @@ export function createBashTool(
       // Fallback: spawn directly (original behavior)
       return await new Promise((resolve, reject) => {
         const child = spawn(shell.command, [...shell.args, args.command], {
-          cwd,
+          cwd: executionCwd,
           stdio: ["ignore", "pipe", "pipe"],
           detached: process.platform !== "win32",
         });

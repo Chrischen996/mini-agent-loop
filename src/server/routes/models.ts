@@ -4,11 +4,19 @@
 
 import type { Express } from "express";
 import { getAvailableModels, searchModels } from "../../models.ts";
+import { ALL_THINKING_LEVELS, modelSupportsMappedLevel } from "../../pi-ai/thinking-levels.ts";
 
 export type ModelRoutesContext = {
   /** Model id advertised as the server default. */
   defaultModel: string;
 };
+
+function thinkingLevelsForModel(model: ReturnType<typeof getAvailableModels>[number]): string[] {
+  if (!model.reasoning) return [];
+  return ALL_THINKING_LEVELS.filter((level) =>
+    modelSupportsMappedLevel(model.reasoning, model.thinkingLevelMap, level),
+  );
+}
 
 export function registerModelRoutes(app: Express, context: ModelRoutesContext): void {
   app.get("/api/models", (request, response) => {
@@ -25,6 +33,7 @@ export function registerModelRoutes(app: Express, context: ModelRoutesContext): 
         contextWindow: model.contextWindow,
         maxTokens: model.maxTokens,
         reasoning: model.reasoning,
+        thinkingLevels: thinkingLevelsForModel(model),
       })),
       defaultModel: context.defaultModel,
     });

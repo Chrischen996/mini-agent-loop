@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Tool, ToolResult, ToolSource } from "./tools/types.ts";
+import type { Tool, ToolResult, ToolSource, ToolExecutionOptions } from "./tools/types.ts";
 
 export type PermissionDecision = "allow" | "deny";
 export type PermissionRisk = "safe" | "medium" | "high";
@@ -55,7 +55,7 @@ export type PermissionTurnContext = {
   readonly revision: number;
   readonly signal: AbortSignal;
   authorize(tool: Tool, args: Record<string, unknown>, signal?: AbortSignal): Promise<void>;
-  execute(tool: Tool, args: Record<string, unknown>, signal?: AbortSignal, beforeExecute?: () => void | Promise<void>): Promise<ToolResult>;
+  execute(tool: Tool, args: Record<string, unknown>, signal?: AbortSignal, beforeExecute?: () => void | Promise<void>, options?: ToolExecutionOptions): Promise<ToolResult>;
   assertCurrent(): void;
   close(): void;
 };
@@ -434,7 +434,7 @@ export class PermissionManager {
       revision,
       signal: merged.signal,
       authorize,
-      execute: async (tool, args, signal, beforeExecute) => {
+      execute: async (tool, args, signal, beforeExecute, options) => {
         await authorize(tool, args, signal);
         assertCurrent();
         await beforeExecute?.();
@@ -442,7 +442,7 @@ export class PermissionManager {
         const combined = mergeAbortSignals(merged.signal, signal);
         try {
           assertCurrent();
-          const result = await tool.execute(args, combined.signal);
+          const result = await tool.execute(args, combined.signal, options);
           // A tool may ignore AbortSignal and finish after a mode switch. Do
           // not let that stale result advance the old turn.
           assertCurrent();

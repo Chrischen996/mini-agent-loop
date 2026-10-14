@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { isAbortError } from "../llm/retry.ts";
 import { resolveWorkspaceWritePath } from "../workspace.ts";
-import type { Tool, ToolResult } from "./types.ts";
+import type { Tool, ToolResult, ToolExecutionOptions } from "./types.ts";
 
 export type WriteArgs = {
   path: string;
@@ -34,7 +34,7 @@ export function createWriteTool(cwd: string): Tool<WriteArgs> {
       required: ["path", "content"],
       additionalProperties: false,
     },
-    async execute(args: WriteArgs, signal?: AbortSignal): Promise<ToolResult> {
+    async execute(args: WriteArgs, signal?: AbortSignal, execution?: ToolExecutionOptions): Promise<ToolResult> {
       if (signal?.aborted) {
         const err = new Error("Aborted");
         err.name = "AbortError";
@@ -57,7 +57,8 @@ export function createWriteTool(cwd: string): Tool<WriteArgs> {
           };
         }
 
-        const resolved = await resolveWorkspaceWritePath(resolvedCwd, args.path);
+        const cwd = execution?.cwd ?? resolvedCwd;
+        const resolved = await resolveWorkspaceWritePath(cwd, args.path);
         if (!resolved.ok) {
           return { content: resolved.error, isError: true };
         }

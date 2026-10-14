@@ -63,6 +63,11 @@ describe("parseCliArgs", () => {
     assert.deepEqual(result.tools, ["read", "bash"]);
   });
 
+  it("accepts background task tools in selection flags", () => {
+    const result = parseCliArgs(["--tools", "bg_start,bg_wait", "run it"]);
+    assert.deepEqual(result.tools, ["bg_start", "bg_wait"]);
+  });
+
   it("parses --exclude-tools flag", () => {
     const result = parseCliArgs(["--exclude-tools", "bash", "go"]);
     assert.deepEqual(result.excludeTools, ["bash"]);

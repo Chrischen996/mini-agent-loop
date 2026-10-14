@@ -42,7 +42,9 @@ async function buildEntry(
   });
 }
 
-// One-shot CLI and the single Ink terminal client are the only executables.
+// Keep the existing CLI/TUI entries and add the Web server/launcher entries.
 await buildEntry("src/cli.ts", "cli.js", true);
 await buildEntry("src/tui/ink-main.tsx", "tui.js", false);
 await buildEntry("src/bg-tasks/runner.ts", "runner.js", false);
+await buildEntry("src/server.ts", "server.js", false);
+await buildEntry("src/web-launcher.ts", "web-launcher.js", false);

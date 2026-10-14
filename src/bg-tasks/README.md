@@ -23,10 +23,12 @@ overwritten once present.
 ## Integration
 
 `createBgTaskSuite(cwd)` in `src/tools/index.ts` returns `{ tools, manager,
-dispose }`. `cli.ts` and `tui/ink-main.tsx` wire it in behind the
+dispose }`. CLI, TUI, and the HTTP server wire it in behind the
 `MINI_AGENT_BG_TASKS` env flag (default on; set `0`/`false` to disable). The
-flag only controls registration — when tmux is missing the tools are
-gracefully omitted and a warning is printed.
+flag controls registration. CLI/TUI initialize the manager during startup;
+the HTTP server registers the tools synchronously and initializes the manager
+on the first background-task call. When tmux is missing, the call returns the
+tmux availability error instead of crashing the server.
 
 ## Tests
 

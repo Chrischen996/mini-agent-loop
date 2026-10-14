@@ -7,7 +7,8 @@
   "bin": {
     "mini-agent-loop": "dist/tui.js",
     "mini-agent-loop-tui": "dist/tui.js",
-    "mini-agent-loop-run": "dist/cli.js"
+    "mini-agent-loop-run": "dist/cli.js",
+    "mini-agent-loop-web": "dist/web-launcher.js"
   },
   "files": [
     "version-check.js",
@@ -30,13 +31,14 @@
   "scripts": {
     "start": "tsx src/cli.ts",
     "tui": "node --import tsx src/tui/ink-main.tsx",
+    "web:start": "tsx src/web-launcher.ts",
     "dev": "tsx watch src/server.ts",
     "dev:server": "tsx watch src/server.ts",
     "serve": "tsx src/server.ts",
     "build": "tsx build.ts",
     "generate-models": "tsx scripts/generate-models.ts",
     "generate-models:check": "tsx scripts/generate-models.ts --check",
-    "build:package": "tsx build.ts && node -e \"const fs=require('node:fs'); fs.chmodSync('dist/cli.js', 0o755); fs.chmodSync('dist/tui.js', 0o755)\"",
+    "build:package": "tsx build.ts && npm run web:build && node -e \"const fs=require('node:fs'); for (const file of ['dist/cli.js', 'dist/tui.js', 'dist/web-launcher.js']) fs.chmodSync(file, 0o755)\"",
     "prepack": "npm run build:package",
     "dev:inspect": "node --inspect=0.0.0.0:8888 --import tsx src/tui/ink-main.tsx",
     "tui:inspect": "tsx src/tui/ink-main.tsx --inspect=9229",

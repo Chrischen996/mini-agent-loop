@@ -75,7 +75,7 @@ export function useAgentStream(activeId: string | null) {
   }, [activeId, commitItems]);
 
   const send = useCallback(
-    async (prompt: string): Promise<void> => {
+    async (prompt: string, files: File[] = []): Promise<void> => {
       const sessionId = activeId;
       if (!sessionId || streaming) return;
       const controller = new AbortController();
@@ -89,7 +89,7 @@ export function useAgentStream(activeId: string | null) {
       setStreaming(true);
       setStreamError(null);
       try {
-        const response = await api.sendPrompt(sessionId, prompt, controller.signal);
+        const response = await api.sendPrompt(sessionId, prompt, files, controller.signal);
         if (!response.ok) {
           let message = `HTTP ${response.status}`;
           try {
