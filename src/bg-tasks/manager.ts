@@ -2,9 +2,18 @@ import { EventEmitter } from "node:events";
 import { existsSync, watch, type FSWatcher } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { BgTaskStore, type TaskMeta, type TaskPaths, type TaskResult } from "./store.js";
 import { BgTmuxBackend } from "./tmux.js";
+import { BgProcessBackend } from "./process.js";
+import type { BgBackendKind, BgTaskBackend } from "./backend.js";
+import { resolveWorkspacePath } from "../workspace.ts";
+
+export type BgBackendMode = "auto" | BgBackendKind;
+
+export function stableBgTaskInstanceId(projectCwd: string): string {
+  return `project_${createHash("sha256").update(projectCwd).digest("hex").slice(0, 20)}`;
+}
 
 export interface BgTaskSummary {
   taskId: string;
@@ -22,6 +31,8 @@ export interface BgTaskSummary {
   sessionName: string;
   socketName: string;
   logPath: string;
+  backend: BgBackendKind;
+  pid?: number;
   attachCommand?: string;
   reason?: string;
 }
@@ -76,7 +87,11 @@ function defaultRunnerPath(): string {
 
 export class BgTaskManager extends EventEmitter {
   readonly store: BgTaskStore;
-  readonly backend: BgTmuxBackend;
+  backend: BgTaskBackend;
+  private readonly tmuxBackend: BgTmuxBackend;
+  private readonly processBackend: BgProcessBackend;
+  private readonly runnerPath: string;
+  private readonly backendMode: BgBackendMode;
   private readonly watchers = new Map<string, FSWatcher>();
   private readonly timeoutTimers = new Map<string, NodeJS.Timeout>();
   private readonly seenCompletions = new Set<string>();
@@ -84,22 +99,29 @@ export class BgTaskManager extends EventEmitter {
   private reconciliationTimer?: NodeJS.Timeout;
   private cleanupHandler?: () => void;
   private disposed = false;
+  private initialized = false;
+  private initialization?: Promise<void>;
 
   constructor(
     readonly projectCwd: string,
     readonly instanceId: string,
     runnerPath?: string,
+    options: { backend?: BgBackendMode } = {},
   ) {
     super();
     this.store = new BgTaskStore(projectCwd, instanceId);
-    this.backend = new BgTmuxBackend(
+    this.runnerPath = runnerPath ?? defaultRunnerPath();
+    this.tmuxBackend = new BgTmuxBackend(
       `pi-bg-${instanceId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 56)}`,
-      runnerPath ?? defaultRunnerPath(),
+      this.runnerPath,
     );
+    this.processBackend = new BgProcessBackend(this.runnerPath);
+    const configuredBackend = options.backend ?? process.env.MINI_AGENT_BG_BACKEND;
+    this.backendMode = configuredBackend === "tmux" || configuredBackend === "process" ? configuredBackend : "auto";
+    this.backend = this.tmuxBackend;
 
     this.cleanupHandler = () => {
       this.dispose();
-      void this.backend.killServer();
     };
     process.once("exit", this.cleanupHandler);
     process.once("SIGINT", this.cleanupHandler);
@@ -107,6 +129,29 @@ export class BgTaskManager extends EventEmitter {
   }
 
   async initialize(): Promise<void> {
+    if (this.initialized) return;
+    this.initialization ??= this.initializeOnce();
+    try {
+      await this.initialization;
+      this.initialized = true;
+    } catch (error) {
+      this.initialization = undefined;
+      throw error;
+    }
+  }
+
+  private async initializeOnce(): Promise<void> {
+    if (this.backendMode === "process") {
+      this.backend = this.processBackend;
+    } else {
+      try {
+        await this.tmuxBackend.assertAvailable();
+        this.backend = this.tmuxBackend;
+      } catch (error) {
+        if (this.backendMode === "tmux") throw error;
+        this.backend = this.processBackend;
+      }
+    }
     await this.backend.assertAvailable();
     await this.store.initialize();
     for (const taskId of await this.store.listOwnTaskIds()) {
@@ -119,28 +164,42 @@ export class BgTaskManager extends EventEmitter {
   }
 
   async start(input: StartTaskInput): Promise<BgTaskSummary> {
+    await this.initialize();
     if (!input.command.trim()) throw new Error("command must not be empty");
+    const resolvedCwd = await resolveWorkspacePath(this.projectCwd, input.cwd ?? "");
+    if (!resolvedCwd.ok) throw new Error(resolvedCwd.error);
     const taskId = `bg_${randomUUID().replace(/-/g, "")}`;
+    const sessionName = `pi-${taskId}`;
     const meta: TaskMeta = {
       schemaVersion: 1,
       taskId,
       name: input.name?.trim() || input.command.trim().slice(0, 80),
       command: input.command,
-      cwd: input.cwd ?? this.projectCwd,
+      cwd: resolvedCwd.realTarget,
       shell: process.env.SHELL || "/bin/sh",
       status: "starting",
       createdAt: new Date().toISOString(),
       notifyOnCompletion: true,
+      backend: this.backend.kind,
+      sessionName,
+      socketName: this.backend.socketName,
+      instanceId: this.instanceId,
       ...(input.timeoutSeconds !== undefined ? { timeoutSeconds: input.timeoutSeconds } : {}),
     };
     const paths = await this.store.createTask(meta);
-    const sessionName = `pi-${taskId}`;
+    let runnerPid: number | undefined;
     try {
-      await this.backend.start(sessionName, meta.cwd, paths.dir);
+      const started = await this.backend.start(sessionName, meta.cwd, paths.dir, paths.log);
+      runnerPid = started.pid;
       await this.backend.pipePane(sessionName, paths.log);
-      await this.store.signalStart(paths);
       const startedAt = new Date().toISOString();
-      await this.store.updateMeta(paths, (current) => ({ ...current, status: "running", startedAt }));
+      await this.store.updateMeta(paths, (current) => ({
+        ...current,
+        status: "running",
+        startedAt,
+        ...(runnerPid !== undefined ? { pid: runnerPid } : {}),
+      }));
+      await this.store.signalStart(paths);
       this.watchTask(taskId);
       this.scheduleTimeout(taskId, startedAt, input.timeoutSeconds);
       const summary = await this.get(taskId);
@@ -148,7 +207,7 @@ export class BgTaskManager extends EventEmitter {
       this.emit("changed", summary);
       return summary;
     } catch (error) {
-      await this.backend.kill(sessionName).catch(() => undefined);
+      await this.backend.kill(sessionName, runnerPid, true, paths.dir).catch(() => undefined);
       await this.store.writeResult(paths, {
         schemaVersion: 1,
         taskId,
@@ -168,9 +227,12 @@ export class BgTaskManager extends EventEmitter {
     const meta = await this.store.readMeta(paths);
     if (!meta) return undefined;
     const result = await this.store.readResult(paths);
+    const taskBackend = this.backendForMeta(meta);
+    const sessionName = meta.sessionName ?? `pi-${taskId}`;
+    const pid = meta.pid;
     let status: string = result?.status ?? meta.status;
     if (!result) {
-      if (!(await this.backend.hasSession(`pi-${taskId}`))) {
+      if (!(await taskBackend.hasSession(sessionName, pid, paths.dir))) {
         const interrupted: TaskResult = {
           schemaVersion: 1,
           taskId,
@@ -179,7 +241,7 @@ export class BgTaskManager extends EventEmitter {
           signal: null,
           startedAt: meta.startedAt,
           endedAt: new Date().toISOString(),
-          reason: "tmux session disappeared without a result",
+          reason: `${meta.backend ?? "tmux"} task disappeared without a result`,
         };
         await this.store.writeResult(paths, interrupted);
         status = "interrupted";
@@ -200,11 +262,13 @@ export class BgTaskManager extends EventEmitter {
       durationMs: end ? Math.max(0, Date.parse(end) - Date.parse(start)) : Math.max(0, Date.now() - Date.parse(start)),
       exitCode: finalResult?.exitCode ?? null,
       signal: finalResult?.signal ?? null,
-      ownedByCurrentInstance: true,
-      sessionName: `pi-${taskId}`,
-      socketName: this.backend.socketName,
+      ownedByCurrentInstance: !meta.instanceId || meta.instanceId === this.instanceId,
+      sessionName,
+      socketName: meta.socketName ?? taskBackend.socketName,
       logPath: paths.log,
-      attachCommand: finalResult ? undefined : this.backend.attachCommand(`pi-${taskId}`),
+      backend: meta.backend ?? "tmux",
+      pid,
+      attachCommand: finalResult || taskBackend.kind !== "tmux" ? undefined : (taskBackend as BgTmuxBackend).attachCommand(sessionName),
       reason: finalResult?.reason,
     };
   }
@@ -252,8 +316,10 @@ export class BgTaskManager extends EventEmitter {
     if (!paths) throw new Error(`Task not found: ${taskId}`);
     const meta = await this.store.readMeta(paths);
     if (!meta) throw new Error(`Task metadata is missing: ${taskId}`);
-    if (!(await this.backend.hasSession(`pi-${taskId}`))) throw new Error(`Task is not running: ${taskId}`);
-    const raw = await this.backend.capturePane(`pi-${taskId}`, lines);
+    const taskBackend = this.backendForMeta(meta);
+    const sessionName = meta.sessionName ?? `pi-${taskId}`;
+    if (!(await taskBackend.hasSession(sessionName, meta.pid, paths.dir))) throw new Error(`Task is not running: ${taskId}`);
+    const raw = await taskBackend.capturePane(sessionName, lines, paths.log);
     return {
       taskId,
       text: raw,
@@ -268,8 +334,12 @@ export class BgTaskManager extends EventEmitter {
     if (!summary) throw new Error(`Task not found: ${taskId}`);
     if (isTerminalStatus(summary.status)) throw new Error(`Task is not running: ${taskId}`);
     if (input.text === undefined && !input.enter) throw new Error("Provide text or enter");
-    if (input.text !== undefined) await this.backend.sendLiteral(summary.sessionName, input.text);
-    if (input.enter) await this.backend.sendKey(summary.sessionName, "Enter");
+    const paths = await this.store.findTask(taskId);
+    const meta = paths ? await this.store.readMeta(paths) : undefined;
+    if (!meta) throw new Error(`Task metadata is missing: ${taskId}`);
+    const taskBackend = this.backendForMeta(meta);
+    if (input.text !== undefined) await taskBackend.sendLiteral(summary.sessionName, input.text);
+    if (input.enter) await taskBackend.sendKey(summary.sessionName, "Enter");
     return summary;
   }
 
@@ -279,16 +349,19 @@ export class BgTaskManager extends EventEmitter {
     const current = await this.get(taskId);
     if (!current) throw new Error(`Task not found: ${taskId}`);
     if (isTerminalStatus(current.status)) return current;
+    const meta = await this.store.readMeta(paths);
+    if (!meta) throw new Error(`Task metadata is missing: ${taskId}`);
+    const taskBackend = this.backendForMeta(meta);
     await this.store.writeCancellation(paths, "cancelled");
-    if (!force && (await this.backend.hasSession(current.sessionName))) {
-      await this.backend.sendKey(current.sessionName, "C-c").catch(() => undefined);
+    if (!force && taskBackend.kind === "tmux" && (await taskBackend.hasSession(current.sessionName, current.pid, paths.dir))) {
+      await taskBackend.sendKey(current.sessionName, "C-c").catch(() => undefined);
       const ended = await this.waitForResult(paths, 1500);
       if (ended) {
         await this.processCompletion(taskId);
         return (await this.get(taskId)) ?? current;
       }
     }
-    await this.backend.kill(current.sessionName).catch(() => undefined);
+    await taskBackend.kill(current.sessionName, current.pid, force, paths.dir).catch(() => undefined);
     await new Promise((r) => setTimeout(r, 50));
     const result = await this.store.readResult(paths);
     if (!result) {
@@ -297,7 +370,7 @@ export class BgTaskManager extends EventEmitter {
         taskId,
         status: "cancelled",
         exitCode: null,
-        signal: force ? "SIGKILL" : "SIGHUP",
+        signal: force ? "SIGKILL" : taskBackend.kind === "process" ? "SIGTERM" : "SIGHUP",
         startedAt: current.startedAt,
         endedAt: new Date().toISOString(),
         reason: "cancelled",
@@ -359,6 +432,7 @@ export class BgTaskManager extends EventEmitter {
     for (const timer of this.timeoutTimers.values()) clearTimeout(timer);
     this.watchers.clear();
     this.timeoutTimers.clear();
+    this.backend.dispose();
     this.removeAllListeners();
   }
 
@@ -420,7 +494,9 @@ export class BgTaskManager extends EventEmitter {
     await this.store.writeCancellation(paths, "timed_out");
     const current = await this.get(taskId);
     if (!current) return;
-    await this.backend.kill(current.sessionName).catch(() => undefined);
+    const meta = await this.store.readMeta(paths);
+    const taskBackend = meta ? this.backendForMeta(meta) : this.backend;
+    await taskBackend.kill(current.sessionName, current.pid, true, paths.dir).catch(() => undefined);
     await new Promise((r) => setTimeout(r, 50));
     const result = await this.store.readResult(paths);
     if (!result) {
@@ -445,6 +521,15 @@ export class BgTaskManager extends EventEmitter {
     if (meta?.timeoutSeconds !== undefined && meta.startedAt && !result) {
       this.scheduleTimeout(taskId, meta.startedAt, meta.timeoutSeconds);
     }
+  }
+
+  private backendForMeta(meta: TaskMeta): BgTaskBackend {
+    if (meta.backend === "process") return this.processBackend;
+    if (meta.backend === "tmux") {
+      if (!meta.socketName || meta.socketName === this.tmuxBackend.socketName) return this.tmuxBackend;
+      return new BgTmuxBackend(meta.socketName, this.runnerPath);
+    }
+    return this.backend;
   }
 
   private async waitForCompletionEvent(timeoutMs: number, signal?: AbortSignal): Promise<void> {

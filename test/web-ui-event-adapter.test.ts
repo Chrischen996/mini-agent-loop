@@ -132,6 +132,22 @@ describe("web ui event adapter (P3)", () => {
     if (assistant.kind === "assistant") assert.equal(assistant.streaming, false);
   });
 
+  it("keeps automatic continuation active and ends the total limit as a recoverable stop", () => {
+    const state = new ChatStreamState();
+    state.apply({ type: "user", content: "finish the task" });
+    state.apply({ type: "assistant_delta", text: "partial progress", kind: "answer" });
+    state.apply({ type: "auto_continue", attempt: 1, maxAutoContinues: 4 });
+    assert.equal(state.phase, "streaming");
+    state.apply({ type: "max_turns", maxTurns: 150, messageCount: 311 });
+    assert.equal(state.phase, "paused");
+    assert.equal(state.items.some((item) => item.kind === "assistant" && item.streaming), false);
+    const note = state.items.at(-1);
+    assert.ok(note?.kind === "note");
+    assert.equal(note.tone, "warn");
+    assert.match(note.text, /progress saved.*Continue to resume/);
+    assert.equal(state.items.some((item) => item.kind === "note" && item.tone === "error"), false);
+  });
+
   it("ignores unknown event types but surfaces plan events", () => {
     const state = new ChatStreamState();
     state.apply({ type: "user", content: "plan something" });
@@ -202,5 +218,27 @@ describe("web ui event adapter (P3 review fixes)", () => {
       ["first", "second"],
     );
     assert.equal(next.items.length, 4);
+  });
+});
+
+
+describe("Web policy pause details", () => {
+  it("shows safety stops with allocation limits and session totals", () => {
+    const state = new ChatStreamState();
+    state.apply({ type: "assistant_delta", kind: "answer", text: "working" });
+    state.apply({
+      type: "run_stopped", stopReason: "safety_cap_reached",
+      budgetUsage: { tokensUsed: 20, toolCallsUsed: 2, writeCallsUsed: 1, elapsedMs: 1500 },
+      cumulativeBudgetUsage: { tokensUsed: 50, toolCallsUsed: 5, writeCallsUsed: 2, elapsedMs: 3000 },
+      budgetPolicy: { tokenBudget: 100, toolCallBudget: 10, writeCallBudget: 5, deadlineMs: 300000 },
+    });
+    assert.equal(state.phase, "paused");
+    const notes = state.items.filter((item) => item.kind === "note");
+    assert.equal(notes.length, 1);
+    assert.match(notes[0]!.text, /emergency iteration cap/);
+    assert.match(notes[0]!.text, /20\/100 tokens, 2\/10 tool calls, 1\/5 writes, 1.5\/300.0 seconds/);
+    assert.match(notes[0]!.text, /Session total: 50 tokens, 5 tool calls, 2 writes, 3.0 seconds/);
+    assert.match(notes[0]!.text, /new budget/);
+    assert.equal(state.items[0]!.kind === "assistant" && state.items[0]!.streaming, false);
   });
 });

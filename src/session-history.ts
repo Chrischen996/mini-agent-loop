@@ -62,10 +62,23 @@ export function sanitizeResumableMessages(
       toolResults.every((toolResult) => expectedIds.has(toolResult.toolCallId));
 
     if (!complete) {
-      // Drop the interrupted assistant and its partial results. Later records
-      // are not trusted until a new user turn establishes a clean boundary.
+      // If tool results were incomplete (e.g. process crashed or was interrupted
+      // before result could be written), synthesize unknown results for missing tool calls
+      // so we do not discard already completed side-effects, while warning that status is unknown.
+      const repairedToolResults: ToolResultMessage[] = [...toolResults];
+      for (const call of calls) {
+        if (!foundIds.has(call.id)) {
+          repairedToolResults.push({
+            role: "tool",
+            toolCallId: call.id,
+            name: call.name,
+            content: `[未知结果 / 进程中断] 工具 ${call.name} 已派发执行，但在结果写入前进程中断或异常退出。请检查实际状态，请勿直接重放。`,
+            isError: true,
+          });
+        }
+      }
+      result.push(message, ...repairedToolResults);
       index = nextIndex - 1;
-      discardUntilUser = true;
       continue;
     }
 

@@ -99,7 +99,16 @@ catalog value → env var → default. See [Per-model timeouts](#per-model-timeo
 | `MINI_AGENT_MCP_CONFIG` | no | — |
 | `MINI_AGENT_PERMISSION_MODE` | no | `plan` (or `bypass`) |
 | `MINI_AGENT_SUBAGENT` | no | `1` in CLI/server, TUI always on |
-| `MINI_AGENT_BG_TASKS` | no | `1`; set `0`/`false` to remove tmux-backed `bg_*` tools |
+| `MINI_AGENT_BG_TASKS` | no | `1`; set `0`/`false` to disable `bg_*` tools |
+| `MINI_AGENT_BG_BACKEND` | no | `auto`; choose `auto`, `tmux`, or `process` |
+| `MINI_AGENT_WEB_TOKEN_BUDGET` | no | unlimited per allocation |
+| `MINI_AGENT_WEB_TOOL_CALL_BUDGET` | no | unlimited per allocation |
+| `MINI_AGENT_WEB_WRITE_CALL_BUDGET` | no | unlimited per allocation |
+| `MINI_AGENT_WEB_DEADLINE_MS` | no | unlimited execution time per allocation |
+| `MINI_AGENT_WEB_MAX_COMPACTIONS` | no | `8` |
+| `MINI_AGENT_WEB_SAME_ACTION_LIMIT` | no | `3` repetitions |
+| `MINI_AGENT_WEB_NO_PROGRESS_LIMIT` | no | `6` turns |
+| `MINI_AGENT_WEB_EMERGENCY_ITERATION_CAP` | no | `2000` (safety fallback) |
 | `MINI_AGENT_GLOBAL_TOKEN_BUDGET` | no | unlimited; shared by parent and nested subagents |
 | `MINI_AGENT_GLOBAL_CONCURRENCY_LIMIT` | no | unlimited; applies across overlapping batches |
 | `MINI_AGENT_AUTO_SUBAGENT` | no | enabled by default; set `0`/`false`/`off` to disable |
@@ -125,6 +134,45 @@ once. A timeout after partial answer text is preserved in conversation history
 and is not replayed automatically. Nested sub-agent timeouts return any
 recovered partial text to the parent as an error result, allowing the parent to
 choose whether to retry or simplify the task.
+
+### Web task execution policy and recovery
+
+Web tasks use `AgentRunPolicy` by default. Token and time budgets, tool and write
+call budgets, context compactions, and stalled-action detection determine when
+execution pauses. The default `emergencyIterationCap: 2000` is a final safety
+fallback, rather than the normal task budget. Token, time, tool and write budgets
+are unlimited until configured; compactions default to 8, repeated actions to 3
+repetitions, and turns without progress to 6.
+
+Set `AgentServerOptions.runPolicy` or `MINI_AGENT_WEB_*` environment variables
+to configure limits. Programmatic fields override environment values, which
+override defaults. Values must be positive safe integers; invalid settings fail
+initialization. Budgets are checked at safe turn boundaries, so an in-flight
+request or tool batch can exceed a limit before pausing.
+
+A policy pause saves complete partial history and usage, then emits one
+`run_stopped` event with `budget_exhausted`, `safety_cap_reached`,
+`context_exhausted`, or `stalled`. The Web UI displays the pause details and
+consumption. Refreshing or restarting preserves `runState`, including allocation
+usage and cumulative session usage.
+
+While a Web task runs, one Codex-inspired activity row shows the current work,
+elapsed time and a Stop control. Its title waits 600 ms, then sweeps a brightness
+highlight for one second every four seconds. Changing activity restarts the
+sweep while preserving the turn's elapsed time. The view follows reduced-motion
+preferences. Source attribution and the upstream Apache-2.0 license are included
+in `apps/web/THIRD_PARTY_NOTICES.md` and `apps/web/public/licenses/openai-codex/`.
+
+The Continue button allocates a new default budget from the saved checkpoint.
+`POST /api/sessions/:id/continue` also accepts new limits such as
+`{ "tokenBudget": 50000, "deadlineMs": 300000 }`, or
+`{ "budgetMode": "remaining" }` to reuse the saved allocation. Downtime is
+excluded from execution time. Exhausted remaining budgets pause immediately.
+
+Explicit `maxTurns` without `runPolicy` enables the legacy hard stop per block
+and bounded `maxAutoContinues` behavior. CLI, TUI and subagent limits retain
+their existing behavior. See [Web policy and API events](docs/web-run-policy.md)
+for configuration, counting rules, checkpoint fields and request examples.
 
 ### Automatic subagent preflight
 
@@ -327,6 +375,58 @@ MINI_AGENT_MODELS='[{"provider":"company","id":"company-model-v1","baseUrl":"htt
 `contextWindow`, and `api` (`"anthropic-messages"` keeps Claude on native
 Messages even when `baseUrl` is a private gateway).
 
+The Web UI can persist the same setup without editing environment variables.
+Open **Settings → Models → Custom model API**, choose **Add provider**, and
+enter the provider ID, base URL, API key, protocol, and one or more model IDs.
+**Fetch models** reads the provider's `/models` endpoint and fills the model
+list; models can also be entered manually. Supported protocols are OpenAI Chat
+Completions, OpenAI Responses, and Anthropic Messages. The configuration is
+stored in `MINI_AGENT_MODEL_CONFIG` (or `~/.mini-agent/models.json`) with
+owner-only permissions; API keys are never returned by the Web API.
+Use the service's API base URL, without `/chat/completions`, `/responses`, or
+`/messages`. OpenAI protocols preserve the configured prefix (include `/v1`
+when the service requires it). Anthropic accepts a base with or without a
+trailing `/v1`.
+
+For a custom reasoning model, check **Enable thinking** and choose the
+**Default thinking level**. Common settings are filled in automatically;
+DeepSeek URLs and model IDs use DeepSeek's thinking format. Change the current
+level in the conversation's **Effort** menu.
+
+**Advanced thinking settings** is optional. It preserves existing custom
+mappings and lets unusual endpoints restrict their accepted levels or rename
+an API value (for example, `max` → `ultra`). Chat Completions providers can
+override the **Thinking format** or disable **Send reasoning effort** for
+endpoints that accept only an on/off switch. Provider-wide overrides live under
+**Advanced API settings**. The request preview uses the same serializer as
+live Chat Completions requests.
+
+The corresponding fields inside a `customProviders` entry are:
+
+```json
+{
+  "compat": { "thinkingFormat": "deepseek", "supportsReasoningEffort": true },
+  "models": [{
+    "id": "my-reasoner",
+    "reasoningEfforts": { "off": null, "high": "high", "max": "ultra" },
+    "defaultThinkingLevel": "high"
+  }]
+}
+```
+
+This example assumes the gateway accepts DeepSeek-style thinking parameters
+and `high`/`ultra` efforts. An explicit efforts object exposes only its declared
+levels; omitted levels are unavailable. `off: null` uses the selected protocol's
+Off behavior (for DeepSeek, `thinking: {type: "disabled"}`); a string provides
+an explicit Off value for formats such as OpenAI or OpenRouter. Declare Off
+only when the endpoint supports it. `reasoningEfforts: false` disables the
+capability. Existing `reasoning: true/false` configurations remain supported.
+`compat` fields shown here apply to Chat Completions; Responses and Anthropic
+use their protocol adapters. Select **Effort** in the conversation's model menu
+to change the current session. Choices persist across restarts. Updated custom
+provider settings apply at the next operation, preserving a supported session
+level and falling back to the model default when the old level was removed.
+
 A persistent 中转站 for every Claude request can also be set with
 `MINI_AGENT_RELAY`. Omit `protocol` (or set `"openai-compatible"`) for the
 usual Chat Completions gateways; set `"protocol":"anthropic-messages"` only
@@ -477,10 +577,26 @@ the sidebar only adds a path reference; the agent still uses the `read` tool to
 load contents. Sessions are persisted under `AGENT_DATA_DIR` (workspace-scoped,
 with a 30-day default TTL) and are restored when the server restarts.
 
-When `tmux` is installed, the CLI, TUI, and Web server expose `bg_start`,
-`bg_status`, `bg_logs`, `bg_send`, `bg_wait`, and `bg_kill` for persistent
-background terminals. The Web server initializes this suite when the first
-`bg_*` call is made; set `MINI_AGENT_BG_TASKS=0` to disable it.
+The CLI, TUI, and Web server expose `bg_start`, `bg_status`, `bg_logs`,
+`bg_send`, `bg_wait`, and `bg_kill` for persistent background tasks. The
+default `auto` backend uses tmux when installed and otherwise runs a detached
+Node process. Process-backed tasks support logs, status, waiting, timeouts,
+and cancellation; interactive `bg_send` requires tmux. The Web server also
+provides workspace-scoped `/api/background-tasks` control routes and
+initializes the suite on the first background-task request. Set
+`MINI_AGENT_BG_TASKS=0` to disable it.
+
+The HTTP API accepts `workspaceId` or `sessionId` to select a workspace. Its
+routes are `GET/POST /api/background-tasks`,
+`GET /api/background-tasks/:taskId`,
+`GET /api/background-tasks/:taskId/logs?offset=0&limitBytes=16384`,
+`POST /api/background-tasks/wait` with `{ "taskIds": ["bg_..."] }`,
+`POST /api/background-tasks/:taskId/input` with `{ "text": "...", "enter": true }`,
+and `POST /api/background-tasks/:taskId/kill` with `{ "force": true }`.
+Start a task with `{ "sessionId": "<session-id>", "command": "npm test", "name": "tests", "cwd": "." }`;
+the response is `202` with the new task summary. Mutating routes require a
+session so the server can apply that session's permission mode. A task working
+directory is checked against its selected workspace before it is accepted.
 
 The core tool registry follows Pi Agent's seven-tool vocabulary:
 
@@ -751,7 +867,7 @@ Coverage includes:
 - Tool call id ↔ tool result pairing
 - Unknown tool → `isError` tool message (no crash)
 - Validation failure → `isError` tool message (no crash)
-- `maxTurns` hard stop
+- Web policy stops, budget persistence and Continue allocation; legacy `maxTurns` hard stop
 - `read` sandbox / missing file behavior
 - symlink escape rejection
 - vision/non-vision message preparation
@@ -790,9 +906,9 @@ mini-agent-loop/
 2. Tool failure is a **message** (`isError`), not a loop crash
 3. Every tool call gets a tool result before the next LLM call
 4. Loop stops when assistant has zero tool calls
-5. `maxTurns` hard-stops runaway loops
+5. Web defaults to `AgentRunPolicy`; explicit legacy `maxTurns` remains a hard stop
 
-When `maxTurns` is reached, the loop raises the typed `MaxTurnsExceededError`
+In legacy mode, when `maxTurns` is reached, the loop raises the typed `MaxTurnsExceededError`
 with the partial message history attached. The TUI preserves that history and
 shows a controlled-stop status, while the CLI reports the limit and returns the
 latest partial assistant output instead of treating the stop as an API failure.

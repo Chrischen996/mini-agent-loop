@@ -124,7 +124,7 @@ export function App() {
     }).catch((err) => setActionError(err instanceof Error ? err.message : String(err)));
     return () => { cancelled = true; };
   }, []);
-  const { items, phase, streaming, streamError, send, stop, currentPlan, resolvePermissionLocally } =
+  const { items, phase, streaming, activity, streamError, send, continueSession, stop, currentPlan, resolvePermissionLocally } =
     useAgentStream(activeId);
 
   const active = useMemo(
@@ -162,7 +162,7 @@ export function App() {
   // Refresh the session list when a stream ends so messageCount / lastActiveAt
   // in the sidebar stay current.
   useEffect(() => {
-    if (phase === "done" || phase === "error" || phase === "aborted") {
+    if (phase === "done" || phase === "error" || phase === "aborted" || phase === "stopped" || phase === "paused") {
       void refresh();
     }
   }, [phase, refresh]);
@@ -222,7 +222,7 @@ export function App() {
         </header>
         <div className="conversation-body">
           {blank && <div className="empty-hero"><FishLogo size={34} className="hero-mark" /><div className="empty-hero__title"><h2>How can I help?</h2></div></div>}
-          <ChatView items={items} phase={phase} sessionTitle={active ? active.title || active.preview || active.id.slice(0, 8) : null} sessionId={activeId} onPermissionResolve={handlePermissionResolve} />
+          <ChatView items={items} phase={phase} activity={streaming ? activity : null} onStop={stop} sessionTitle={active ? active.title || active.preview || active.id.slice(0, 8) : null} sessionId={activeId} onPermissionResolve={handlePermissionResolve} onContinue={() => void continueSession()} />
           {streamError || actionError ? <p role="alert" className="stream-error error">{streamError ?? actionError}</p> : null}
           <div className="composer-seat">
             {blank && <div className="hero-workspace-select" ref={workspaceChip}>

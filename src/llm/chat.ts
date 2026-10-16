@@ -2,6 +2,7 @@
  * LLM request execution: completeChat, streamChat, SSE parsing.
  * Orchestrates config, wire-format, vision, retry, and Hermes format modules.
  */
+import { applyCompletionsThinking } from "../pi-ai/completions-thinking.ts";
 import { supportsImageInput } from "../models.ts";
 import { getPiModels } from "../models.ts";
 import {
@@ -98,19 +99,14 @@ function reasoningOption(config: LlmConfig): ThinkingLevel | undefined {
 }
 
 function addReasoningOption(body: Record<string, unknown>, config: LlmConfig): void {
-  const effort = reasoningOption(config);
-  if (!effort) return;
-
-  // Some provider model definitions explicitly reject OpenAI's generic
-  // reasoning_effort field (notably xAI/Grok). Sending it through a custom
-  // OpenAI-compatible gateway can produce reasoning-only responses.
-  if (config.compat?.supportsReasoningEffort === false) return;
-
-  if (config.compat?.thinkingFormat === "openrouter") {
-    body.reasoning = { effort };
-    return;
-  }
-  body.reasoning_effort = effort;
+  applyCompletionsThinking(body, {
+    reasoning: config.reasoning,
+    thinkingLevelMap: config.thinkingLevelMap ?? config.piModel?.thinkingLevelMap,
+  }, { reasoningEffort: reasoningOption(config) }, {
+    thinkingFormat: "openai",
+    supportsReasoningEffort: true,
+    ...config.compat,
+  });
 }
 
 // ─── Pi-AI chat (internal) ───────────────────────────────────────────────────

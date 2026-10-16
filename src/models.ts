@@ -1,11 +1,13 @@
 
+import { ALL_THINKING_LEVELS } from "./pi-ai/thinking-levels.ts";
 import { builtinModels } from "./pi-ai/providers/all.ts";
-import type { Api, Model as PiModel } from "./pi-ai/types.ts";
+import type { Api, ThinkingLevelMap, ModelThinkingLevel, Model as PiModel } from "./pi-ai/types.ts";
 import type { ToolCallFormat } from "./hermes/types.ts";
 import { KIMI_K3_MODELS } from "./kimi-k3-models.ts";
 import { GPT6_ASTRA_MODELS } from "./openai-gpt6-astra.ts";
 import { TOKENROUTER_MODELS, tokenrouterProvider } from "./tokenrouter-models.ts";
 import { ORCAROUTER_MODELS, orcarouterProvider } from "./orcarouter-models.ts";
+import type { CustomProviderProfile } from "./profile-store.ts";
 
 export type ModelCapabilities = {
   input: Array<"text" | "image">;
@@ -32,6 +34,7 @@ export type ModelRef = {
    */
   toolCallFormat?: ToolCallFormat;
   thinkingLevelMap?: Record<string, string | null>;
+  defaultThinkingLevel?: ModelThinkingLevel;
   cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
   compat?: Record<string, unknown>;
   piModel?: PiModel<Api>;
@@ -55,6 +58,69 @@ export type ModelReferenceMatch = {
   ambiguous: true;
   matches: ModelRef[];
 };
+
+/** Convert persisted Web custom providers into runtime model catalog entries. */
+export function customProviderModels(
+  providers: Record<string, CustomProviderProfile> | undefined,
+): ModelRef[] {
+  if (!providers) return [];
+  const models: ModelRef[] = [];
+  for (const [provider, profile] of Object.entries(providers)) {
+    for (const definition of profile.models) {
+      const thinkingLevelMap: ThinkingLevelMap | undefined = definition.reasoningEfforts && typeof definition.reasoningEfforts === "object"
+        ? Object.fromEntries(ALL_THINKING_LEVELS.flatMap((level) => {
+            const value = definition.reasoningEfforts && definition.reasoningEfforts[level];
+            return value === null && level === "off" ? [] : [[level, value === undefined ? null : value]];
+          })) : undefined;
+      const compat = { ...profile.compat, ...definition.compat };
+      const input = definition.input?.length ? definition.input : ["text" as const];
+      const contextWindow = definition.contextWindow ?? 128_000;
+      const maxTokens = Math.min(definition.maxTokens ?? 16_384, Math.max(1, contextWindow - 1));
+      const anthropic = profile.protocol === "anthropic-messages";
+      const responses = profile.protocol === "openai-responses";
+      // OpenAI gateways use the configured request prefix. Anthropic's SDK
+      // appends /v1/messages itself, so accept the /v1 form used by discovery
+      // without adding that segment twice at request time.
+      const baseUrl = anthropic ? profile.baseUrl.replace(/\/v1$/i, "") : profile.baseUrl;
+      const piModel = anthropic || responses
+        ? {
+            id: definition.id,
+            name: definition.name ?? definition.id,
+            api: (anthropic ? "anthropic-messages" : "openai-responses") as "anthropic-messages" | "openai-responses",
+            provider: (anthropic ? "anthropic" : "openai") as "anthropic" | "openai",
+            baseUrl,
+            reasoning: definition.reasoning === true,
+            ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+            input: [...input],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow,
+            maxTokens,
+          } satisfies PiModel<"anthropic-messages"> | PiModel<"openai-responses">
+        : undefined;
+      models.push({
+        id: definition.id,
+        name: definition.name ?? definition.id,
+        provider,
+        api: anthropic ? "anthropic-messages" : responses ? "openai-responses" : "openai-completions",
+        protocol: anthropic || responses ? "pi" : "openai-compatible",
+        baseUrl,
+        apiKeyEnv: [],
+        capabilities: {
+          input: [...input],
+          tools: definition.tools !== false,
+        },
+        contextWindow,
+        maxTokens,
+        reasoning: definition.reasoning === true,
+        thinkingLevelMap,
+        defaultThinkingLevel: definition.defaultThinkingLevel,
+        compat,
+        ...(piModel ? { piModel } : {}),
+      });
+    }
+  }
+  return models;
+}
 
 export type ImagePolicy = "placeholder" | "fail" | "strip";
 

@@ -12,7 +12,7 @@ import { formatHelpNotice, parseSlashCommand, parseUnknownSlashCommand, SLASH_CO
 import { isExactSlashCommand } from "./autocomplete.ts";
 import { WebUiManager } from "./web-ui-manager.ts";
 import { executeWebUiCommand } from "./web-ui-command.ts";
-import { BgTaskManager } from "../bg-tasks/manager.js";
+import { BgTaskManager, stableBgTaskInstanceId } from "../bg-tasks/manager.js";
 import { parseInitCommand } from "./init-command.ts";
 import { initAgentMd } from "../init-agent-md.ts";
 import { buildInitAgentPrompt } from "../init-prompt.ts";
@@ -254,7 +254,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
       return null;
     }
     try {
-      const instanceId = `tui_${randomUUID().slice(0, 8)}`;
+      const instanceId = stableBgTaskInstanceId(cwd);
       bgManagerRef.current = new BgTaskManager(cwd, instanceId);
       return bgManagerRef.current;
     } catch {

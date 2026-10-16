@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { contentAsString } from "./content.ts";
 import {
   compactHistory,
@@ -86,6 +86,52 @@ export type NextTurnUpdate = {
   context?: ContextManagerOptions;
 };
 
+export type StopReason =
+  | "completed"
+  | "cancelled"
+  | "budget_exhausted"
+  | "safety_cap_reached"
+  | "context_exhausted"
+  | "stalled"
+  | "waiting_user"
+  | "failed";
+
+export type AgentBudgetUsage = {
+  tokensUsed: number;
+  toolCallsUsed: number;
+  writeCallsUsed: number;
+  elapsedMs: number;
+};
+
+export type AgentRunPolicy = {
+  deadlineMs?: number;
+  tokenBudget?: number;
+  toolCallBudget?: number;
+  writeCallBudget?: number;
+  maxCompactions?: number;
+  stallPolicy?: {
+    sameActionLimit?: number;
+    noProgressLimit?: number;
+  };
+  emergencyIterationCap?: number;
+};
+
+export class RunStoppedError extends Error {
+  readonly messages: AgentMessage[];
+  readonly stopReason: StopReason;
+  readonly details?: string;
+  readonly budgetUsage?: AgentBudgetUsage;
+
+  constructor(messages: AgentMessage[], stopReason: StopReason, details?: string, budgetUsage?: AgentBudgetUsage) {
+    super(details ?? `Run stopped: ${stopReason}`);
+    this.name = "RunStoppedError";
+    this.messages = messages;
+    this.stopReason = stopReason;
+    this.details = details;
+    this.budgetUsage = budgetUsage;
+  }
+}
+
 /** Raised when the loop reaches its configured safety limit with partial history. */
 export class MaxTurnsExceededError extends Error {
   readonly messages: AgentMessage[];
@@ -114,6 +160,28 @@ export type TurnContext = {
   assistantMessage: AssistantMessage;
   toolResults: ToolResultMessage[];
   messages: AgentMessage[];
+};
+
+export type CheckpointReason =
+  | "user_input"
+  | "before_tool"
+  | "tool_result"
+  | "context_compacted"
+  | "completed"
+  | "paused"
+  | "interrupted"
+  | "failed";
+
+export type CheckpointContext = {
+  reason: CheckpointReason;
+  messages: AgentMessage[];
+  turn?: number;
+  toolCall?: ToolCall;
+  toolResult?: ToolResult;
+  stopReason?: StopReason;
+  details?: string;
+  budgetUsage?: AgentBudgetUsage;
+  lastFingerprint?: string;
 };
 
 export type AgentLoopOptions = {
@@ -213,6 +281,14 @@ export type AgentLoopOptions = {
   sessionPhase?: import('./plan-act/types.js').SessionPhase;
   /** Callback for plan-related events. */
   onPlanEvent?: (event: import('./plan-act/types.js').PlanActEvent) => void;
+  /** Awaitable checkpoint callback for reliable step-by-step persistence. */
+  onCheckpoint?: (context: CheckpointContext) => Promise<void>;
+  /** When true, runs in explicit continuation mode without appending a duplicate prompt. */
+  isContinuation?: boolean;
+  /** Optional policy-driven execution rules (replaces fixed maxTurns). */
+  runPolicy?: AgentRunPolicy;
+  /** Usage already charged to this allocation when resuming its remaining budget. */
+  initialBudgetUsage?: AgentBudgetUsage;
 };
 
 export type AgentRuntimeRef = {
@@ -243,6 +319,16 @@ export type LoopEvent =
   | { type: "assistant"; message: AssistantMessage; usage?: StreamChatUsage }
   | { type: "error"; message: string }
   | { type: "max_turns"; maxTurns: number; messages: AgentMessage[] }
+  | {
+      type: "run_stopped";
+      stopReason: StopReason;
+      details?: string;
+      message?: string;
+      budgetUsage?: AgentBudgetUsage;
+      cumulativeBudgetUsage?: AgentBudgetUsage;
+      budgetPolicy?: AgentRunPolicy;
+      messages: AgentMessage[];
+    }
   | { type: "tool_start"; call: ToolCall }
   | { type: "tool_end"; call: ToolCall; result: ToolResult }
   | { type: "todo_updated"; todos: TodoItem[]; revision: number }
@@ -493,8 +579,6 @@ function compactForModel(
   llm: LlmConfig,
   tools: Tool[],
   context: ContextManagerOptions | undefined,
-  onEvent: ((event: LoopEvent) => void) | undefined,
-  reason: string,
   force = false,
 ): AgentMessage[] {
   const reserveTokens = Math.max(1, Math.min(context?.reserveTokens ?? llm.maxTokens, llm.contextWindow - 1));
@@ -509,10 +593,6 @@ function compactForModel(
     maxTokens: Math.max(1, budget - toolTokens),
     keepRecentMessages: force ? 2 : context?.keepRecentMessages,
   });
-  const afterTokens = estimateContextTokens(compacted, tools);
-  if (compacted !== messages) {
-    onEvent?.({ type: "context_compacted", beforeTokens, afterTokens, reason });
-  }
   return compacted;
 }
 
@@ -612,6 +692,19 @@ export async function runAgentTurn(
       ...options,
       signal: merged.signal,
     });
+  } catch (error) {
+    if (options.onCheckpoint && !(error instanceof MaxTurnsExceededError) && !(error instanceof RunStoppedError)) {
+      try {
+        const isAbort = isAbortError(error) || Boolean(merged.signal?.aborted);
+        await options.onCheckpoint({
+          reason: isAbort ? "interrupted" : "failed",
+          messages: options.runtimeRef?.history ? [...options.runtimeRef.history] : [...history],
+        });
+      } catch {
+        // preserve original error
+      }
+    }
+    throw error;
   } finally {
     merged.cleanup();
   }
@@ -622,10 +715,15 @@ async function runAgentTurnInternal(
   userText: string,
   options: AgentTurnOptions,
 ): Promise<AgentMessage[]> {
+  const envTurnsRaw = process.env.MINI_AGENT_MAX_TURNS;
+  const envTurns = envTurnsRaw !== undefined && envTurnsRaw !== "" ? Number(envTurnsRaw) : undefined;
+  const maxTurns = envTurns !== undefined
+    ? (envTurns === 0 ? undefined : (envTurns || 80))
+    : (options.maxTurns === 0 ? undefined : (options.maxTurns ?? 80));
+
   const {
     llm: configuredLlm,
     tools,
-    maxTurns = 30,
     globalTokenBudget,
     chat: completeChat,
     onEvent,
@@ -652,6 +750,9 @@ async function runAgentTurnInternal(
     skillRegistry = defaultSkillRegistry,
     sessionPhase,
     onPlanEvent,
+    onCheckpoint,
+    isContinuation = false,
+    runPolicy,
   } = options;
 
   const activeRuntimeRef = runtimeRef ?? (globalTokenBudget !== undefined ? {} : undefined);
@@ -829,17 +930,103 @@ async function runAgentTurnInternal(
       capabilities: currentLlm.capabilities,
     },
   };
-  const initialBatch = await applyPreprocessors(
-    [
-      {
-        role: "user",
-        content: userContent ?? effectiveUserText ?? "",
-      },
-    ],
-    finalPreprocessors,
-    preprocessContext,
-  );
-  const messages: AgentMessage[] = [...compactHistory(history, currentContext), ...initialBatch];
+  const triggerCheckpoint = async (
+    reason: CheckpointReason,
+    extra: { turn?: number; toolCall?: ToolCall; toolResult?: ToolResult; stopReason?: StopReason; details?: string } = {},
+  ): Promise<void> => {
+    if (!onCheckpoint) return;
+    await onCheckpoint({
+      reason,
+      messages: [...messages],
+      turn: extra.turn,
+      toolCall: extra.toolCall,
+      toolResult: extra.toolResult,
+      stopReason: extra.stopReason,
+      details: extra.details,
+      budgetUsage: budgetUsage(),
+      lastFingerprint: lastActionFingerprint || undefined,
+    });
+  };
+
+  const initialBatch = isContinuation
+    ? []
+    : await applyPreprocessors(
+        [
+          {
+            role: "user",
+            content: userContent ?? effectiveUserText ?? "",
+          },
+        ],
+        finalPreprocessors,
+        preprocessContext,
+      );
+  const compactedHistory = compactHistory(history, currentContext);
+  const messages: AgentMessage[] = [...(runPolicy ? history : compactedHistory), ...initialBatch];
+  let pendingHistoryCompaction = runPolicy && compactedHistory !== history
+    ? [...compactedHistory, ...initialBatch] : undefined;
+
+  // ── Stall & Action Policy Detector ───────────────────────────────────────
+  const sameActionLimit = runPolicy?.stallPolicy?.sameActionLimit ?? 3;
+  const noProgressLimit = runPolicy?.stallPolicy?.noProgressLimit ?? 6;
+  let sameActionCount = 0;
+  let lastActionFingerprint = "";
+  let consecutiveNoProgressCount = 0;
+  let compactionsCount = 0;
+  let toolCallsUsed = options.initialBudgetUsage?.toolCallsUsed ?? 0;
+  let writeCallsUsed = options.initialBudgetUsage?.writeCallsUsed ?? 0;
+  let tokensUsed = options.initialBudgetUsage?.tokensUsed ?? 0;
+  const startTime = Date.now() - (options.initialBudgetUsage?.elapsedMs ?? 0);
+  const maxEmergencyTurns = runPolicy?.emergencyIterationCap ?? (runPolicy ? 2000 : maxTurns);
+  const budgetUsage = (): AgentBudgetUsage => ({
+    tokensUsed,
+    toolCallsUsed,
+    writeCallsUsed,
+    elapsedMs: Date.now() - startTime,
+  });
+  const stopRun = async (stopReason: StopReason, details: string, turn: number): Promise<never> => {
+    await triggerCheckpoint("paused", { turn, stopReason, details });
+    const usage = budgetUsage();
+    onEvent?.({ type: "run_stopped", stopReason, details, message: details, budgetUsage: usage, messages });
+    throw new RunStoppedError(messages, stopReason, details, usage);
+  };
+
+  const applyCompaction = async (compacted: AgentMessage[], turn: number, tools: Tool[], reason: string): Promise<void> => {
+    if (runPolicy?.maxCompactions !== undefined && compactionsCount >= runPolicy.maxCompactions) {
+      await stopRun("context_exhausted", `Context compaction limit reached (${compactionsCount}/${runPolicy.maxCompactions}); progress was saved.`, turn - 1);
+    }
+    const beforeTokens = estimateContextTokens(messages, tools);
+    compactionsCount += 1;
+    messages.splice(0, messages.length, ...compacted);
+    await triggerCheckpoint("context_compacted", { turn: turn - 1 });
+    onEvent?.({ type: "context_compacted", beforeTokens, afterTokens: estimateContextTokens(messages, tools), reason });
+  };
+
+  const writeToolNames = new Set(["write", "edit", "delete", "mkdir", "copy", "move", "patch", "document_edit"]);
+  const emitToolStart = (call: ToolCall): void => {
+    toolCallsUsed += 1;
+    if (writeToolNames.has(call.name)) writeCallsUsed += 1;
+    onEvent?.({ type: "tool_start", call });
+  };
+
+  const checkPolicyBudgets = (turnNumber: number): StopReason | undefined => {
+    if (activeSignal?.aborted) return "cancelled";
+    if (runPolicy?.deadlineMs && Date.now() - startTime >= runPolicy.deadlineMs) {
+      return "budget_exhausted";
+    }
+    if (runPolicy?.tokenBudget && tokensUsed >= runPolicy.tokenBudget) {
+      return "budget_exhausted";
+    }
+    if (runPolicy?.toolCallBudget && toolCallsUsed >= runPolicy.toolCallBudget) {
+      return "budget_exhausted";
+    }
+    if (runPolicy?.writeCallBudget && writeCallsUsed >= runPolicy.writeCallBudget) {
+      return "budget_exhausted";
+    }
+    if (turnNumber > maxEmergencyTurns) {
+      return "safety_cap_reached";
+    }
+    return undefined;
+  };
 
   const syncRuntimeRef = (): void => {
     if (!activeRuntimeRef) return;
@@ -855,12 +1042,19 @@ async function runAgentTurnInternal(
   };
   syncRuntimeRef();
 
+  const emitAbortedWithCheckpoint = async (): Promise<void> => {
+    emitAborted(onEvent, messages, permissionTurn);
+    await triggerCheckpoint("interrupted");
+  };
   const emitAssistantEvent = (message: AssistantMessage, usage?: StreamChatUsage): void => {
     const budget = activeRuntimeRef?.globalBudgetState;
     let exceeded = false;
     if (budget && usage?.totalTokens) {
       budget.used += usage.totalTokens;
       exceeded = budget.used > budget.limit;
+    }
+    if (usage?.totalTokens) {
+      tokensUsed += usage.totalTokens;
     }
     onEvent?.({ type: "assistant", message, ...(usage ? { usage } : {}) });
     if (exceeded) throw new Error(`Global agent token budget exceeded (${budget?.limit}).`);
@@ -1021,6 +1215,7 @@ async function runAgentTurnInternal(
       }
       
       onEvent?.({ type: "done", messages });
+      await triggerCheckpoint("completed", { turn });
       return "done";
     }
 
@@ -1028,6 +1223,9 @@ async function runAgentTurnInternal(
     emptyAssistantResponses = 0;
     messages.push(assistant);
     emitAssistantEvent(assistant, usage);
+
+    // Checkpoint 2: received full tool calls, before executing tools
+    await triggerCheckpoint("before_tool", { turn, toolCall: calls[0] });
 
     let toolMessages: ToolResultMessage[];
     let wasAborted: boolean;
@@ -1039,7 +1237,7 @@ async function runAgentTurnInternal(
 
       // Emit all tool_start events up front
       for (const call of calls) {
-        onEvent?.({ type: "tool_start", call });
+        emitToolStart(call);
       }
 
       const settled = await Promise.allSettled(
@@ -1106,7 +1304,7 @@ async function runAgentTurnInternal(
           emitAborted(onEvent, messages, permissionTurn);
           return "aborted";
         }
-        onEvent?.({ type: "tool_start", call });
+        emitToolStart(call);
 
         let result: ToolResult;
 
@@ -1179,18 +1377,51 @@ async function runAgentTurnInternal(
       emitAborted(onEvent, messages, permissionTurn);
       return "aborted";
     }
+    let nextTurnToolResults = processedToolMessages;
     messages.push(...processedToolMessages.map((message) => ({
       ...message,
       content: truncateToolResult(message.content),
     })));
-    let nextTurnToolResults = processedToolMessages;
+
+    // Store a digest so persisted stall fingerprints do not expose tool arguments or output.
+    const currentFingerprint = createHash("sha256").update(calls
+      .map((c, i) => `${c.name}:${JSON.stringify(c.arguments)}:${String(processedToolMessages[i]?.content ?? "").slice(0, 80)}`)
+      .join("|")).digest("hex");
+
+    if (currentFingerprint && currentFingerprint === lastActionFingerprint) {
+      sameActionCount += 1;
+    } else {
+      sameActionCount = 0;
+      lastActionFingerprint = currentFingerprint;
+    }
+
+    // Detect progress (e.g. non-error outputs or state updates)
+    const hasProgress = processedToolMessages.some((msg) => !msg.isError);
+    if (!hasProgress) {
+      consecutiveNoProgressCount += 1;
+    } else {
+      consecutiveNoProgressCount = 0;
+    }
+
+    if (runPolicy && sameActionCount >= sameActionLimit) {
+      const details = `Repeated action detected: the same tool, arguments and result occurred ${sameActionCount + 1} times; the run is paused to avoid a loop.`;
+      return stopRun("stalled", details, turn);
+    }
+
+    if (runPolicy && consecutiveNoProgressCount >= noProgressLimit) {
+      const details = `No visible progress was made for ${consecutiveNoProgressCount} consecutive turns; the run is paused.`;
+      return stopRun("stalled", details, turn);
+    }
+
+    // Checkpoint 3: tool results entered history
+    await triggerCheckpoint("tool_result", { turn });
     if (autoValidate && processedToolMessages.some((message) =>
       !message.isError && ["write", "edit", "delete", "mkdir", "copy", "move", "patch", "document_edit"].includes(message.name))) {
       const validationCall: ToolCall = { id: `auto_validation_${turn}`, name: "validate_workspace", arguments: {} };
       const validationAssistant: AssistantMessage = { role: "assistant", content: "", toolCalls: [validationCall] };
       messages.push(validationAssistant);
       emitAssistantEvent(validationAssistant);
-      onEvent?.({ type: "tool_start", call: validationCall });
+      emitToolStart(validationCall);
       const report = await runValidation({ workspace: validationWorkspace, signal: activeSignal });
       const validationResult: ToolResult = { content: formatValidationReport(report), isError: !report.ok };
       const validationMessage: ToolResultMessage = {
@@ -1214,11 +1445,16 @@ async function runAgentTurnInternal(
     return "continue";
   }
 
-  for (let turn = 1; turn <= maxTurns; turn++) {
+  for (let turn = 1; maxEmergencyTurns == null || turn <= maxEmergencyTurns; turn++) {
     await pauseGate?.wait(activeSignal);
     if (activeSignal?.aborted) {
       emitAborted(onEvent, messages, permissionTurn);
       return messages;
+    }
+    const budgetExhaustedReason = checkPolicyBudgets(turn);
+    if (budgetExhaustedReason) {
+      const details = `Run budget exhausted (tokens=${tokensUsed}, tools=${toolCallsUsed}, writes=${writeCallsUsed}, elapsedMs=${Date.now() - startTime}); progress was saved.`;
+      return stopRun(budgetExhaustedReason, details, turn - 1);
     }
     if (activeRuntimeRef?.globalBudgetState && activeRuntimeRef.globalBudgetState.used >= activeRuntimeRef.globalBudgetState.limit) {
       throw new Error(`Global agent token budget exhausted (${activeRuntimeRef.globalBudgetState.limit}).`);
@@ -1243,6 +1479,11 @@ async function runAgentTurnInternal(
 
     const baseTools = resolveToolProvider(tools);
     const turnTools = [...baseTools, ...skillTools];
+    if (pendingHistoryCompaction) {
+      const compacted = pendingHistoryCompaction;
+      pendingHistoryCompaction = undefined;
+      await applyCompaction(compacted, turn, turnTools, "context threshold");
+    }
 
     // Optional deterministic preflight + coordinator activation. This happens
     // once before the first model request and is intentionally not passed into
@@ -1296,7 +1537,7 @@ async function runAgentTurnInternal(
           };
           messages.push(assistant);
           emitAssistantEvent(assistant);
-          onEvent?.({ type: "tool_start", call });
+          emitToolStart(call);
 
           let result: ToolResult;
           let wasAborted = false;
@@ -1380,10 +1621,13 @@ async function runAgentTurnInternal(
       }
     }
 
-    const preparedMessages = compactForModel(messages, currentLlm, turnTools, currentContext, onEvent, "token budget");
-    if (preparedMessages !== messages) {
-      messages.splice(0, messages.length, ...preparedMessages);
+    // Preflight delegation can consume a budget before the first model request.
+    const preflightStopReason = checkPolicyBudgets(turn);
+    if (preflightStopReason) {
+      return stopRun(preflightStopReason, "Run budget exhausted after preflight; progress was saved.", turn - 1);
     }
+    const preparedMessages = compactForModel(messages, currentLlm, turnTools, currentContext);
+    if (preparedMessages !== messages) await applyCompaction(preparedMessages, turn, turnTools, "token budget");
     let assistant: AssistantMessage;
     let lastUsage: StreamChatUsage | undefined;
     try {
@@ -1530,16 +1774,19 @@ async function runAgentTurnInternal(
           currentLlm,
           turnTools,
           currentContext,
-          onEvent,
-          "provider context overflow",
           true,
         );
         if (compacted === messages) {
+          if (runPolicy) return stopRun("context_exhausted", "Context window overflowed and could not be compacted further; progress was saved.", turn - 1);
           throw new Error("Context window overflowed and could not be compacted further");
         }
-        messages.splice(0, messages.length, ...compacted);
+        await applyCompaction(compacted, turn, turnTools, "provider context overflow");
         turn -= 1;
         continue;
+      }
+
+      if (runPolicy && isContextOverflowError(err)) {
+        return stopRun("context_exhausted", "Context window overflowed after compaction recovery; progress was saved.", turn - 1);
       }
 
       // Retry only request-level transient failures. Retrying after a tool
@@ -1599,8 +1846,15 @@ async function runAgentTurnInternal(
     if (action === "done" || action === "aborted") return messages;
   }
 
-  const stopError = new MaxTurnsExceededError(messages, maxTurns);
-  onEvent?.({ type: "max_turns", maxTurns, messages });
+  if (runPolicy) {
+    const details = `Emergency iteration cap reached (${maxEmergencyTurns} steps); progress was saved.`;
+    return stopRun("safety_cap_reached", details, maxEmergencyTurns);
+  }
+
+  const reportedMaxTurns = maxTurns ?? maxEmergencyTurns ?? 80;
+  const stopError = new MaxTurnsExceededError(messages, reportedMaxTurns);
+  onEvent?.({ type: "max_turns", maxTurns: reportedMaxTurns, messages });
+  await triggerCheckpoint("paused", { turn: reportedMaxTurns });
   throw stopError;
 }
 

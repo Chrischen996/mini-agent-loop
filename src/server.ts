@@ -19,13 +19,15 @@ import type { PersistedSession } from "./session-store.ts";
 import { SessionManager } from "./session-manager.ts";
 import { sanitizeResumableMessages } from "./session-history.ts";
 import { isAbortError, loadLlmConfigFromEnv, switchLlmModel, type ChatFn, type LlmConfig } from "./llm/index.ts";
-import { getAvailableModels, resolveModel, searchModels } from "./models.ts";
-import { getActiveProfile, loadProfileStore } from "./profile-store.ts";
+import { customProviderModels, getAvailableModels, resolveModel, searchModels, type ModelRef } from "./models.ts";
+import { getActiveProfile, loadProfileStore, loadProfileStoreSync, type CustomProviderProfile } from "./profile-store.ts";
 import {
   createAgentHistory,
   buildSystemPrompt,
-  runAgentTurn,
+  MaxTurnsExceededError,
+  RunStoppedError,
   type AgentLoopOptions,
+  type AgentRunPolicy,
   type AgentRuntimeRef,
   type LoopEvent,
 } from "./loop.ts";
@@ -34,19 +36,22 @@ import {
   loadVisionConfigFromEnv,
   type MessagePreprocessor,
 } from "./preprocessors/index.ts";
-import { createBgTaskTools, createTools, type SandboxConfig } from "./tools/index.ts";
+import { createBgTaskTools, type SandboxConfig } from "./tools/index.ts";
 import { createSandboxRunner } from "./sandbox/index.ts";
 import { createRepositoryStoreFromEnv, RepositoryStore } from "./codebase/repository-store.ts";
 import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";
 import type { CodebaseSemanticProvider } from "./codebase/deepwiki-provider.ts";
-import { createDocumentEditTool } from "./tools/document-edit.ts";
 import { createTodoTool, validateTodoSnapshot, type TodoItem } from "./tools/todo.ts";
+import {
+  createWebSessionToolProvider,
+  createWebWorkspaceToolProvider,
+} from "./server/web-tools.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "./tools/types.ts";
 import type { SandboxRunner } from "./sandbox/types.ts";
 import type { AgentMessage, ContentPart, ImageMimeType, MessageContent } from "./types.ts";
 import { createMcpApprovalGate, mcpAllowlistFromEnv, mcpAutoApproveFromEnv } from "./mcp/approval.ts";
 import { createMcpRuntimeFromEnv, mergeToolSets } from "./mcp/runtime.ts";
-import { BgTaskManager } from "./bg-tasks/manager.js";
+import { BgTaskManager, stableBgTaskInstanceId } from "./bg-tasks/manager.js";
 import type { McpServerStatus } from "./mcp/types.ts";
 import {
   createSubagentTool,
@@ -72,7 +77,8 @@ import {
   validateReferencedPaths,
 } from "./workspace.ts";
 import {
-  getThinkingLevelChoices,
+  getSelectableThinkingLevels,
+  restoreThinkingLevel,
   intensityToModelThinkingLevel,
   parseThinkingCommandMode,
   parseThinkingIntensityPrompt,
@@ -107,13 +113,23 @@ import { registerMemoryRoutes } from "./server/routes/memory.ts";
 import { registerJobRoutes } from "./server/routes/jobs.ts";
 import { registerGitRoutes } from "./server/routes/git.ts";
 import { registerModelRoutes } from "./server/routes/models.ts";
+import { registerModelProviderRoutes } from "./server/routes/model-providers.ts";
 import { registerSubagentProfileRoutes } from "./server/routes/subagent-profiles.ts";
 import { registerPlanActRoutes } from "./server/routes/plan-act.ts";
 import { registerPermissionRoutes } from "./server/routes/permissions.ts";
 import { registerSkillRoutes } from "./server/routes/skills.ts";
 import { registerFileRoutes } from "./server/routes/files.ts";
 import { registerPlanDocumentRoutes, planHttpError } from "./server/routes/plan-document.ts";
+import { registerBackgroundTaskRoutes } from "./server/routes/background-tasks.ts";
 import { WorkspaceRegistry } from "./workspaces.ts";
+import {
+  DEFAULT_MAX_AUTO_CONTINUES,
+  runServerAgentTurn,
+  type AutoContinueEvent,
+} from "./server/turn-runner.ts";
+
+import { resolveContinueRun, resolveWebRunPolicy, type ContinueBudgetMode } from "./server/run-policy.ts";
+export { loadDefaultWebRunPolicyFromEnv } from "./server/run-policy.ts";
 
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_IMAGES = 5;
@@ -180,17 +196,26 @@ type Session = {
   planHistory?: import('./plan-act/types.js').ExecutionPlan[];
   todos: TodoItem[];
   todoVersion: number;
+  runState?: import("./session-store.ts").WebRunState | null;
 };
 
 export type AgentServerOptions = {
   llm: LlmConfig;
   tools?: ToolProvider;
-  /** Register tmux-backed background task tools when using the default tools. */
+  /** Register persistent background task tools when using the default tools. */
   backgroundTasks?: boolean;
   preprocessors?: MessagePreprocessor[];
   chat?: ChatFn;
+  /** Explicit legacy mode: hard limit per block (with bounded automatic continuation). */
+  maxTurns?: number;
+  /** Additional blocks in legacy maxTurns mode. Default: 4. */
+  maxAutoContinues?: number;
+  /** Web policy overrides. Precedence: these fields, environment variables, defaults. */
+  runPolicy?: AgentRunPolicy;
   workspace?: string;
   dataDir?: string;
+  /** Optional persisted model/provider store path (defaults to MINI_AGENT_MODEL_CONFIG). */
+  modelConfigPath?: string;
   /**
    * Called after each inner turn (assistant response + tool results).
    * Return a {@link import("./loop.ts").NextTurnUpdate} to switch models or
@@ -309,6 +334,18 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
       return {
         type: "max_turns",
         maxTurns: event.maxTurns,
+        message: (event as { message?: string }).message,
+        messageCount: event.messages.length,
+      };
+    case "run_stopped":
+      return {
+        type: "run_stopped",
+        stopReason: event.stopReason,
+        details: event.details,
+        message: event.message ?? event.details ?? `Run stopped: ${event.stopReason}`,
+        budgetUsage: event.budgetUsage,
+        cumulativeBudgetUsage: event.cumulativeBudgetUsage,
+        budgetPolicy: event.budgetPolicy,
         messageCount: event.messages.length,
       };
     case "tool_start":
@@ -697,9 +734,29 @@ async function parseMessageRequest(
 }
 
 export function createAgentServer(options: AgentServerOptions): Express {
+  const effectiveRunPolicy = options.runPolicy
+    ? resolveWebRunPolicy(options.runPolicy) : undefined;
   const workspace = path.resolve(options.workspace ?? process.cwd());
   const dataRoot = path.resolve(options.dataDir ?? path.join(os.homedir(), ".mini-agent"));
   const workspaceRegistry = new WorkspaceRegistry(dataRoot, workspace);
+  let customProviders: Record<string, CustomProviderProfile> =
+    loadProfileStoreSync(options.modelConfigPath)?.customProviders ?? {};
+  const customModels = (): ModelRef[] => customProviderModels(customProviders);
+  const customProviderForModel = (reference: string): { model: ModelRef; apiKey: string } | undefined => {
+    const normalized = reference.trim().toLowerCase();
+    const model = customModels().find((candidate) =>
+      `${candidate.provider}/${candidate.id}`.toLowerCase() === normalized,
+    );
+    if (!model) return undefined;
+    const provider = customProviders[model.provider];
+    return provider ? { model, apiKey: provider.apiKey } : undefined;
+  };
+  const resolveSessionModel = (reference: string, current: LlmConfig): LlmConfig => {
+    const custom = customProviderForModel(reference);
+    return custom
+      ? switchLlmModel(current, custom.model, { apiKey: custom.apiKey }, options.relayRegistry)
+      : switchLlmModel(current, reference, {}, options.relayRegistry);
+  };
   const sessionPresentation = new SessionPresentationStore(dataRoot);
   const defaultWorkspace = () => workspaceRegistry.defaultWorkspace;
   const workspaceForSession = (session: Session): string =>
@@ -712,6 +769,16 @@ export function createAgentServer(options: AgentServerOptions): Express {
       ?? workspaceRegistry.findByPath(session.workspaceId ?? "")?.id
       ?? defaultWorkspace().id;
   const sessions = new Map<string, Session>();
+  const sessionLlmConfig = (session: Session): LlmConfig => {
+    const previous = session.llmOverride ?? options.llm;
+    if (!session.modelId || !customProviderForModel(session.modelId)) return previous;
+    const latest = resolveSessionModel(session.modelId, previous);
+    const updated = restoreThinkingLevel(latest, session.thinkingLevel ?? previous.thinkingLevel);
+    session.llmOverride = updated;
+    session.thinkingLevel = updated.thinkingLevel;
+    return updated;
+  };
+
   const sessionGate = new SessionExecutionGate();
   const isSessionBusy = (session: Session): boolean => session.busy || sessionGate.isBusy(session.id);
   const reserveSession = (session: Session, owner: string): SessionExecutionLease | undefined => {
@@ -887,13 +954,17 @@ export function createAgentServer(options: AgentServerOptions): Express {
   }>();
   const backgroundTasksEnabled = options.backgroundTasks
     ?? (process.env.MINI_AGENT_BG_TASKS !== "0" && process.env.MINI_AGENT_BG_TASKS !== "false");
-  const backgroundToolsForWorkspace = (root: string): Tool[] => {
-    if (!backgroundTasksEnabled) return [];
+  const backgroundTaskRuntimeForWorkspace = (root: string): {
+    manager: BgTaskManager;
+    tools: Tool[];
+    initialize: () => Promise<void>;
+  } | undefined => {
+    if (!backgroundTasksEnabled) return undefined;
     let runtime = bgTaskRuntimes.get(root);
     if (!runtime) {
       const manager = new BgTaskManager(
         root,
-        `server_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
+        stableBgTaskInstanceId(root),
       );
       let initialization: Promise<void> | undefined;
       const initialize = (): Promise<void> => {
@@ -910,28 +981,29 @@ export function createAgentServer(options: AgentServerOptions): Express {
       runtime = { manager, tools, initialize };
       bgTaskRuntimes.set(root, runtime);
     }
-    return runtime.tools;
+    return runtime;
+  };
+  const backgroundToolsForWorkspace = (root: string): Tool[] => {
+    return backgroundTaskRuntimeForWorkspace(root)?.tools ?? [];
   };
   const sharedToolProviders = new Map<string, ToolProvider>();
   const toolsForWorkspace = (root: string): ToolProvider => {
     if (options.tools) return options.tools;
     const existing = sharedToolProviders.get(root);
     if (existing) return existing;
-    const localTools = createTools(root, {
-      codebase: codebaseEnabled,
+    const sharedToolProvider = createWebWorkspaceToolProvider({
+      workspace: root,
+      codebaseEnabled,
       codebaseStore,
       codebaseProvider: options.codebaseProvider,
       sandbox: options.sandbox,
       sandboxRunner: options.sandboxRunner,
+      mcpTools: options.mcpTools,
+      mcpApproval: async (tool, args, signal) => {
+        await mcpApproval(tool, args, signal);
+      },
+      backgroundTaskTools: backgroundToolsForWorkspace(root),
     });
-    const gateMcp = (tool: Tool): Tool => {
-      if (tool.source?.kind !== "mcp" && tool.name !== "mcp_prompts" && tool.name !== "mcp_resource") return tool;
-      return { ...tool, execute: async (args, signal, execution) => { await mcpApproval(tool, args, signal); return tool.execute(args, signal, execution); } };
-    };
-    const sharedToolProvider = () => mergeToolSets(
-      [...localTools, ...backgroundToolsForWorkspace(root)],
-      resolveToolProvider(options.mcpTools ?? []),
-    ).map(gateMcp);
     sharedToolProviders.set(root, sharedToolProvider);
     return sharedToolProvider;
   };
@@ -991,6 +1063,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     messages: session.messages,
     todos: session.todos,
     todoVersion: session.todoVersion,
+    runState: session.runState,
     parentSessionId: session.parentSessionId,
     forkedFromMessage: session.forkedFromMessage,
     forkedFromMessageId: session.forkedFromMessageId,
@@ -1006,6 +1079,28 @@ export function createAgentServer(options: AgentServerOptions): Express {
       content,
     });
   };
+  const runSessionTurn = (
+    session: Session,
+    prompt: string,
+    loop: AgentLoopOptions,
+    onAutoContinue?: (event: AutoContinueEvent) => void,
+    turnOptions?: { runId?: string; isResume?: boolean; runPolicy?: AgentRunPolicy; budgetMode?: ContinueBudgetMode },
+  ): Promise<AgentMessage[]> => runServerAgentTurn(session.messages, prompt, {
+    loop: { ...loop, maxTurns: options.maxTurns },
+    maxAutoContinues: options.maxAutoContinues,
+    runPolicy: turnOptions?.runPolicy ?? effectiveRunPolicy,
+    previousRunState: session.runState,
+    budgetMode: turnOptions?.budgetMode,
+    runId: turnOptions?.runId,
+    isResume: turnOptions?.isResume,
+    startRunning: true,
+    persistCheckpoint: async (messages, runState) => {
+      session.messages = messages;
+      session.runState = runState;
+      await saveSession(session);
+    },
+    onAutoContinue,
+  });
   const updateSessionTodos = async (session: Session, snapshot: unknown): Promise<void> => {
     const todos = validateTodoSnapshot(snapshot);
     session.todos = todos;
@@ -1072,6 +1167,14 @@ export function createAgentServer(options: AgentServerOptions): Express {
         currentPlan: restoredPlan,
         todos: persisted.todos ?? [],
         todoVersion: persisted.todoVersion ?? 0,
+        runState: persisted.runState?.status === "running"
+          ? {
+              ...persisted.runState,
+              status: "interrupted",
+              reason: "server_restart",
+              savedAt: Date.now(),
+            }
+          : persisted.runState,
         parentSessionId: persisted.parentSessionId,
         forkedFromMessage: persisted.forkedFromMessage,
         forkedFromMessageId: persisted.forkedFromMessageId,
@@ -1081,12 +1184,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       let restoredLlm = options.llm;
       if (persisted.modelId) {
         try {
-          restoredLlm = switchLlmModel(
-            options.llm,
-            persisted.modelId,
-            {},
-            options.relayRegistry,
-          );
+          restoredLlm = resolveSessionModel(persisted.modelId, options.llm);
         } catch {
           // Model no longer available — fall back to server default
           session.modelId = undefined;
@@ -1094,9 +1192,10 @@ export function createAgentServer(options: AgentServerOptions): Express {
       }
       if (persisted.modelId || persisted.thinkingLevel) {
         session.llmOverride = persisted.thinkingLevel
-          ? withThinkingLevel(restoredLlm, persisted.thinkingLevel)
+          ? restoreThinkingLevel(restoredLlm, persisted.thinkingLevel)
           : restoredLlm;
       }
+      session.thinkingLevel = session.llmOverride?.thinkingLevel ?? restoredLlm.thinkingLevel;
       sessions.set(persisted.id, session);
       await documentStore.restoreSession(persisted.id);
     }));
@@ -1138,7 +1237,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       try {
         const memoryPrompt = await memoryStore.buildPrompt(context.job.task, { scope: "project", limit: 8 });
         const taskPrompt = memoryPrompt ? `${context.job.task}\n\n${memoryPrompt}` : context.job.task;
-        const sessionLlm = session.llmOverride ?? options.llm;
+        const sessionLlm = sessionLlmConfig(session);
         const baseTools: ToolProvider = addSessionTodoTool(session, () => resolveToolProvider(toolsForSession(session)));
         const subagentTools = createSessionSubagentToolSet({
           sessionId: session.id,
@@ -1212,8 +1311,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
         }
 
         await persistTurnStart(session, taskPrompt);
-        session.messages = await runAgentTurn(
-          session.messages,
+        session.messages = await runSessionTurn(
+          session,
           taskPrompt,
           createSessionLoopOptions({
             session,
@@ -1229,6 +1328,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
               void context.emit(event.type, undefined, { event });
             },
           }),
+          (event) => { void context.emit(event.type, undefined, { event }); },
         );
         context.job.messages = session.messages;
         await context.emit("session_snapshot", "background job updated session history", {
@@ -1273,6 +1373,30 @@ export function createAgentServer(options: AgentServerOptions): Express {
     registry: workspaceRegistry,
     getSession: (id) => sessions.get(id),
     getWorkspace: (id) => workspaceRegistry.get(id),
+  });
+  registerBackgroundTaskRoutes(app, {
+    workspace,
+    enabled: backgroundTasksEnabled,
+    getRuntime: (root) => backgroundTaskRuntimeForWorkspace(root),
+    getSession: (id) => sessions.get(id),
+    getWorkspace: (id) => workspaceRegistry.get(id),
+    authorize: async (request, toolName, args) => {
+      const sessionId = typeof request.body?.sessionId === "string"
+        ? request.body.sessionId
+        : typeof request.query.sessionId === "string"
+          ? request.query.sessionId
+          : undefined;
+      if (!sessionId) throw new Error(`${toolName} requires sessionId`);
+      const session = sessions.get(sessionId);
+      if (!session) throw new Error("Session not found");
+      const permissionTool: Tool = {
+        name: toolName,
+        description: "Background task HTTP operation",
+        parameters: { type: "object" },
+        execute: async () => ({ content: "" }),
+      };
+      await session.permissionManager.authorize(session.id, permissionTool, args, undefined, () => undefined);
+    },
   });
   registerMemoryRoutes(app, { memoryStore });
   registerJobRoutes(app, {
@@ -1339,7 +1463,15 @@ export function createAgentServer(options: AgentServerOptions): Express {
 
   // ── Model discovery & per-session switching ─────────────────────────────────
 
-  registerModelRoutes(app, { defaultModel: `${options.llm.provider}/${options.llm.model}` });
+  registerModelRoutes(app, {
+    defaultModel: `${options.llm.provider}/${options.llm.model}`,
+    customModels,
+  });
+  registerModelProviderRoutes(app, {
+    getProviders: () => customProviders,
+    onProvidersChanged: (providers) => { customProviders = providers; },
+    storePath: options.modelConfigPath,
+  });
 
   app.put("/api/sessions/:id/model", async (request, response) => {
     const session = sessions.get(request.params.id);
@@ -1358,13 +1490,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     try {
-      const previousLlm = session.llmOverride ?? options.llm;
-      const newLlm = switchLlmModel(
-        previousLlm,
-        modelId,
-        {},
-        options.relayRegistry,
-      );
+      const previousLlm = sessionLlmConfig(session);
+      const newLlm = resolveSessionModel(modelId, previousLlm);
       // Persist a provider-safe transcript at the switch boundary. This is
       // important for a later request/restart: the next model must not be
       // handed tool calls or images it cannot consume.
@@ -1376,7 +1503,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
       session.llmOverride = newLlm;
       session.thinkingLevel = newLlm.thinkingLevel;
       await saveSession(session);
-      const resolved = resolveModel(newLlm.model, newLlm.baseUrl);
+      const resolved = customProviderForModel(session.modelId)?.model
+        ?? resolveModel(newLlm.model, newLlm.baseUrl);
       response.json({
         model: newLlm.model,
         qualifiedId: session.modelId,
@@ -1407,8 +1535,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
       return;
     }
     try {
-      const currentLlm = session.llmOverride ?? options.llm;
-      const availableLevels = getThinkingLevelChoices(currentLlm);
+      const currentLlm = sessionLlmConfig(session);
+      const availableLevels = getSelectableThinkingLevels(currentLlm);
       if (!availableLevels.includes(level)) {
         response.status(400).json({ error: "thinkingLevel is not supported by the selected model" });
         return;
@@ -1448,24 +1576,27 @@ export function createAgentServer(options: AgentServerOptions): Express {
       .sort((a, b) =>
         (b.lastActiveAt ?? b.createdAt) - (a.lastActiveAt ?? a.createdAt),
       )
-      .map((session) => ({
-        id: session.id,
-        workspaceId: workspaceIdForSession(session),
-        workspaceName: workspaceRegistry.get(workspaceIdForSession(session))?.name ?? path.basename(workspace),
-        ...sessionPresentation.get(session.id),
-        permissionMode: session.permissionManager.getMode(),
-        createdAt: session.createdAt,
-        lastActiveAt: session.lastActiveAt ?? session.createdAt,
-        busy: isSessionBusy(session),
-        parentSessionId: session.parentSessionId ?? null,
-        forkedFromMessage: session.forkedFromMessage ?? null,
-        forkedFromMessageId: session.forkedFromMessageId ?? null,
-        messageCount: visibleMessageCount(session.messages),
-        preview: contentAsString(session.messages.find((message) => message.role === "user")?.content ?? "").slice(0, 80),
-        modelId: session.modelId,
-        thinkingLevel: session.thinkingLevel ?? (session.llmOverride ?? options.llm).thinkingLevel ?? "off",
-        thinkingMode: session.thinkingMode ?? loadThinkingModeFromEnv(),
-      }));
+      .map((session) => {
+        sessionLlmConfig(session);
+        return {
+          id: session.id,
+          workspaceId: workspaceIdForSession(session),
+          workspaceName: workspaceRegistry.get(workspaceIdForSession(session))?.name ?? path.basename(workspace),
+          ...sessionPresentation.get(session.id),
+          permissionMode: session.permissionManager.getMode(),
+          createdAt: session.createdAt,
+          lastActiveAt: session.lastActiveAt ?? session.createdAt,
+          busy: isSessionBusy(session),
+          parentSessionId: session.parentSessionId ?? null,
+          forkedFromMessage: session.forkedFromMessage ?? null,
+          forkedFromMessageId: session.forkedFromMessageId ?? null,
+          messageCount: visibleMessageCount(session.messages),
+          preview: contentAsString(session.messages.find((message) => message.role === "user")?.content ?? "").slice(0, 80),
+          modelId: session.modelId,
+          thinkingLevel: session.thinkingLevel ?? (session.llmOverride ?? options.llm).thinkingLevel ?? "off",
+          thinkingMode: session.thinkingMode ?? loadThinkingModeFromEnv(),
+        };
+      });
     response.json({ sessions: items });
   });
   registerSessionPresentationRoutes(app, { hasSession: (id) => sessions.has(id), store: sessionPresentation });
@@ -1695,15 +1826,15 @@ export function createAgentServer(options: AgentServerOptions): Express {
         abortController.signal,
       );
 
-      const sessionLlm = session.llmOverride ?? options.llm;
+      const sessionLlm = sessionLlmConfig(session);
       const parentRuntime: AgentRuntimeRef = {};
       const generatePrompt = prompt + PLAN_ONLY_SUFFIX;
       const sessionTools: ToolProvider = addSessionTodoTool(session, toolsForSession(session));
 
       try {
         await persistTurnStart(session, generatePrompt);
-        session.messages = await runAgentTurn(
-          session.messages,
+        session.messages = await runSessionTurn(
+          session,
           generatePrompt,
           createSessionLoopOptions({
             session,
@@ -1831,16 +1962,15 @@ export function createAgentServer(options: AgentServerOptions): Express {
 
     try {
       const operationScope = randomUUID();
-      const documentTool = createDocumentEditTool(
-        documentStore,
-        String(request.params.id),
+      const sessionLlm = sessionLlmConfig(session);
+      const baseToolProvider = createWebSessionToolProvider({
+        sessionId: session.id,
+        workspace: sessionWorkspace,
         operationScope,
-      ) as Tool;
-      const sessionLlm = session.llmOverride ?? options.llm;
-      const baseToolProvider = addSessionTodoTool(
-        session,
-        () => [...resolveToolProvider(toolsForSession(session)), documentTool],
-      );
+        documentStore,
+        updateTodos: (todos) => updateSessionTodos(session, todos),
+        baseTools: () => resolveToolProvider(toolsForSession(session)),
+      });
       const { tools: sessionTools } = createSessionSubagentToolSet({
         sessionId: session.id,
         parentLlm: sessionLlm,
@@ -1854,8 +1984,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
       });
 
       await persistTurnStart(session, executionUserText);
-      session.messages = await runAgentTurn(
-        session.messages,
+      session.messages = await runSessionTurn(
+        session,
         executionUserText,
         createSessionLoopOptions({
           session,
@@ -1883,6 +2013,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
             }
           },
         }),
+        (event) => send(event),
       );
 
       const lastAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
@@ -1930,7 +2061,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       }
       if (isAbortError(err)) {
         send({ type: "aborted", message: "已停止生成" });
-      } else {
+      } else if (!(err instanceof RunStoppedError) && !(err instanceof MaxTurnsExceededError)) {
         send({ type: "error", message, retryable: isRetryableError(message) });
       }
       await saveSession(session);
@@ -1963,8 +2094,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
       response.status(404).json({ error: "Session not found" });
       return;
     }
-    const effectiveLlm = session.llmOverride ?? options.llm;
-    const resolved = resolveModel(effectiveLlm.model, effectiveLlm.baseUrl);
+    const effectiveLlm = sessionLlmConfig(session);
+    const resolved = customProviderForModel(`${effectiveLlm.provider}/${effectiveLlm.model}`)?.model
+      ?? resolveModel(effectiveLlm.model, effectiveLlm.baseUrl);
     let planStatus: string | null = null;
     try {
       const plan = await loadPlanDocument(sessionPlanRoot(dataRoot, session.id));
@@ -1991,6 +2123,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       skillNames: resolveSessionSkillNames(session),
       todos: session.todos,
       todoVersion: session.todoVersion,
+      runState: session.runState ?? null,
       messages: session.messages
         .filter((message) => message.role !== "system")
         .map(safeMessage),
@@ -2098,18 +2231,14 @@ export function createAgentServer(options: AgentServerOptions): Express {
         ? [textPart(input.modelPrompt), ...attachments]
         : undefined;
       const parentRuntime: AgentRuntimeRef = {};
+      const turnStartHistory = session.messages;
 
       try {
         const operationScope = randomUUID();
-        const documentTool = createDocumentEditTool(
-          documentStore,
-          String(request.params.id),
-          operationScope,
-        ) as Tool;
         // Use the per-session model and thinking level, otherwise fall back to
         // the server default. A /think command is applied before the first
         // model request and is retained for subsequent messages in this session.
-      const sessionLlm = session.llmOverride ?? options.llm;
+        const sessionLlm = sessionLlmConfig(session);
         const effectiveLlm = input.thinkingLevel
           ? withThinkingLevel(sessionLlm, input.thinkingLevel)
           : sessionLlm;
@@ -2118,11 +2247,15 @@ export function createAgentServer(options: AgentServerOptions): Express {
           session.thinkingLevel = effectiveLlm.thinkingLevel;
         }
         if (input.thinkingMode) session.thinkingMode = input.thinkingMode;
-        // Build the tool set, optionally including the subagent tool
-        const baseToolProvider = addSessionTodoTool(
-          session,
-          () => [...resolveToolProvider(toolsForSession(session)), documentTool],
-        );
+        // Build the tool set, including Web-specific document and todo tools
+        const baseToolProvider = createWebSessionToolProvider({
+          sessionId: session.id,
+          workspace: workspaceForSession(session),
+          operationScope,
+          documentStore,
+          updateTodos: (todos) => updateSessionTodos(session, todos),
+          baseTools: () => resolveToolProvider(toolsForSession(session)),
+        });
         const { tools: sessionTools } = createSessionSubagentToolSet({
           sessionId: session.id,
           parentLlm: effectiveLlm,
@@ -2135,8 +2268,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
           onSubagentEvent: (subEvent) => send(safeEvent(subEvent)),
         });
         await persistTurnStart(session, userContent ?? input.modelPrompt);
-        session.messages = await runAgentTurn(
-          session.messages,
+        session.messages = await runSessionTurn(
+          session,
           input.modelPrompt,
           createSessionLoopOptions({
             session,
@@ -2162,20 +2295,156 @@ export function createAgentServer(options: AgentServerOptions): Express {
               }
             },
           }),
+          (event) => send(event),
         );
-        await saveSession(session);
       } catch (err) {
         const currentUserContent: ContentPart[] | string = userContent ?? input.modelPrompt;
-        if (session.messages.length === 0 || session.messages[session.messages.length - 1]?.role !== "user") {
+        // The runner already checkpoints partial history. Only add the prompt
+        // when setup failed before the runner could take ownership.
+        if (session.messages === turnStartHistory) {
           session.messages = [
             ...session.messages,
             { role: "user", content: currentUserContent },
           ];
         }
-        await saveSession(session);
+        if (!(err instanceof RunStoppedError) && !(err instanceof MaxTurnsExceededError)) await saveSession(session);
         if (isAbortError(err)) {
           send({ type: "aborted", message: "已停止生成" });
-        } else {
+        } else if (!(err instanceof RunStoppedError) && !(err instanceof MaxTurnsExceededError)) {
+          const message = err instanceof Error ? err.message : String(err);
+          send({ type: "error", message, retryable: isRetryableError(message) });
+        }
+      } finally {
+        permissionTurn.close();
+        request.off("aborted", onClientAbort);
+        response.off("close", onResponseClose);
+        try {
+          if (!response.writableEnded) response.end();
+        } finally {
+          releaseSession(session, lease);
+        }
+      }
+    },
+  );
+
+  app.post(
+    "/api/sessions/:id/continue",
+    async (request: Request, response: Response): Promise<void> => {
+      const sessionId = String(request.params.id);
+      const session = sessions.get(sessionId);
+      if (!session) {
+        response.status(404).json({ error: "Session not found" });
+        return;
+      }
+      let continuation: ReturnType<typeof resolveContinueRun>;
+      try {
+        continuation = resolveContinueRun(request.body, effectiveRunPolicy, session.runState);
+      } catch (error) {
+        response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+        return;
+      }
+      const lease = reserveSession(session, "message:continue");
+      if (!lease) {
+        response.status(409).json({ error: "Session is busy" });
+        return;
+      }
+
+      response.status(200);
+      response.set({
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+      });
+      response.flushHeaders();
+      const abortController = new AbortController();
+      const onClientAbort = () => {
+        if (!abortController.signal.aborted) abortController.abort();
+      };
+      const onResponseClose = () => {
+        if (!response.writableFinished) onClientAbort();
+      };
+      request.on("aborted", onClientAbort);
+      response.on("close", onResponseClose);
+      const send = (payload: Record<string, unknown>): void => {
+        if (!response.writableEnded) {
+          response.write(`${JSON.stringify(payload)}\n`);
+        }
+      };
+      const permissionTurn = session.permissionManager.beginTurn(
+        session.id,
+        (request) => send(safeEvent({ type: "permission_required", request })),
+        abortController.signal,
+      );
+
+      // Resuming from latest checkpoint: sanitize history to guarantee tool-call and tool-result pairing
+      session.messages = sanitizeResumableMessages(session.messages);
+
+      const parentRuntime: AgentRuntimeRef = {};
+      const operationScope = randomUUID();
+      const documentTool = createDocumentEditTool(
+        documentStore,
+        sessionId,
+        operationScope,
+      ) as Tool;
+      const sessionLlm = sessionLlmConfig(session);
+      const baseToolProvider = addSessionTodoTool(
+        session,
+        () => [...resolveToolProvider(toolsForSession(session)), documentTool],
+      );
+      const { tools: sessionTools } = createSessionSubagentToolSet({
+        sessionId: session.id,
+        parentLlm: sessionLlm,
+        parentTools: baseToolProvider,
+        signal: abortController.signal,
+        permissionTurn,
+        parentRuntime,
+        runtimeContext: runtimeContextForSession(session.id, { taskId: operationScope }),
+        thinkingMode: session.thinkingMode,
+        onSubagentEvent: (subEvent) => send(safeEvent(subEvent)),
+      });
+
+      send({
+        type: "auto_continue",
+        attempt: 1,
+        maxAutoContinues: options.maxAutoContinues ?? DEFAULT_MAX_AUTO_CONTINUES,
+        messageCount: session.messages.length,
+      });
+
+      try {
+        session.messages = await runSessionTurn(
+          session,
+          "",
+          createSessionLoopOptions({
+            session,
+            llm: sessionLlm,
+            tools: sessionTools,
+            signal: abortController.signal,
+            permissionTurn,
+            thinkingMode: session.thinkingMode,
+            persistModelUpdates: true,
+            runtimeRef: parentRuntime,
+            runtimeContext: runtimeContextForSession(session.id, { taskId: operationScope }),
+            onEvent: (event) => {
+              if (event.type === "thinking_policy") {
+                session.thinkingLevel = event.level;
+                session.llmOverride = withThinkingLevel(session.llmOverride ?? sessionLlm, event.level);
+              }
+              send(safeEvent(event));
+              if (event.type === "tool_end" && event.result.files) {
+                for (const file of event.result.files) {
+                  send({ type: "file_ready", ...file, downloadUrl: `/api/sessions/${request.params.id}/files/${file.id}` });
+                }
+              }
+            },
+          }),
+          (event) => send(event),
+          { isResume: true, ...continuation },
+        );
+      } catch (err) {
+        if (!(err instanceof RunStoppedError) && !(err instanceof MaxTurnsExceededError)) await saveSession(session);
+        if (isAbortError(err)) {
+          send({ type: "aborted", message: "已停止生成" });
+        } else if (!(err instanceof RunStoppedError) && !(err instanceof MaxTurnsExceededError)) {
           const message = err instanceof Error ? err.message : String(err);
           send({ type: "error", message, retryable: isRetryableError(message) });
         }
@@ -2224,6 +2493,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
   });
   app.use(
     (err: unknown, _request: Request, response: Response, _next: NextFunction) => {
+      if (response.headersSent) return;
       const message = err instanceof Error ? err.message : String(err);
       const status = err instanceof multer.MulterError ? 400 : 500;
       response.status(status).json({ error: message });

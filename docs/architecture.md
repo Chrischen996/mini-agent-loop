@@ -46,8 +46,30 @@ Loop invariants:
 2. A tool failure is a *message* (`isError`), not a loop crash.
 3. Every tool call receives a tool result before the next LLM call.
 4. The loop stops when the assistant emits zero tool calls.
-5. `maxTurns` hard-stops runaway loops with a typed `MaxTurnsExceededError`
-   carrying the partial history.
+5. `AgentRunPolicy` pauses Web runs with a typed `RunStoppedError` carrying
+   partial history, the stop reason and usage. Explicit legacy `maxTurns` remains
+   a hard stop with `MaxTurnsExceededError`.
+
+## Web policy and checkpoints
+
+`src/server/run-policy.ts` resolves defaults, environment variables and
+`AgentServerOptions.runPolicy`, and validates Continue budget requests.
+`src/server/turn-runner.ts` drives policy execution and serializes checkpoints.
+The core checks token, time, tool, write and compaction budgets plus stalled
+actions. The emergency iteration cap is the final safety fallback. Explicit
+`maxTurns` selects the legacy bounded-block path when no policy is supplied.
+
+Policy pauses checkpoint their actual reason before emitting a single
+`run_stopped` event. They bypass the error checkpoint handler, so ordinary
+budget exhaustion never produces a transient `failed/model_error` state.
+Successful completion is also held until persistence succeeds.
+
+`WebRunState` persists allocation usage, cumulative session usage, selected
+policy, checkpoint revision and a digest of the latest action. Continue defaults
+to a new allocation; remaining mode restores the saved policy and charged usage,
+excluding downtime. Frontend pause rendering uses the same formatter for live
+NDJSON events and reloaded sessions. See [Web policy and API events](web-run-policy.md)
+for request validation, stop reasons and counter semantics.
 
 ## Directory map
 
@@ -98,7 +120,7 @@ can be read and changed in isolation.
 
 Still owned by `src/server.ts`: `/api/config`, session CRUD (list, create, fork,
 rewind, tree, delete), per-session model switching, and the streaming
-`POST /api/sessions/:id/messages` turn endpoint, which is tightly coupled to
+`POST /api/sessions/:id/messages` and `/api/sessions/:id/continue` endpoints, which is tightly coupled to
 session mutation and abort handling.
 
 ## Generated artifacts

@@ -136,7 +136,7 @@ export function ModelSelector({
   const selectedModel = models.find((model) => model.qualifiedId === currentQualifiedId) ?? null;
   const modelLabel = selectedModel?.name ?? currentQualifiedId ?? "Choose model";
   const thinkingLevels = selectedModel?.thinkingLevels ?? [];
-  const currentEffort = thinkingLevel ?? (thinkingLevels.includes("medium") ? "medium" : thinkingLevels[0] ?? null);
+  const currentEffort = thinkingLevel && thinkingLevels.includes(thinkingLevel) ? thinkingLevel : selectedModel?.defaultThinkingLevel ?? (thinkingLevels.includes("medium") ? "medium" : thinkingLevels.find((level) => level !== "off") ?? thinkingLevels[0] ?? null);
   const showSearch = forceSearch || models.length > 4;
 
   const groups = useMemo(() => {

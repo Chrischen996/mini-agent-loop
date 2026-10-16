@@ -3,6 +3,7 @@
 import type { LlmConfig } from "./llm/config.ts";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
 import {
+  ALL_THINKING_LEVELS,
   clampToAvailableLevels,
   modelSupportsMappedLevel,
   THINKING_EFFORT_LEVELS,
@@ -93,12 +94,12 @@ export function normalizeThinkingLevelForModel(
  * the model catalog, so retrying them with a local "off" value is a no-op.
  */
 export function supportsThinkingOff(
-  config: Pick<LlmConfig, "reasoning" | "provider" | "baseUrl" | "compat" | "piModel">,
+  config: Pick<LlmConfig, "reasoning" | "provider" | "baseUrl" | "compat" | "piModel" | "thinkingLevelMap">,
 ): boolean {
   if (!config.reasoning) return true;
   const explicit = config.compat?.supportsThinkingOff;
   if (typeof explicit === "boolean") return explicit;
-  if (config.piModel?.thinkingLevelMap?.off === null) return false;
+  if ((config.thinkingLevelMap ?? config.piModel?.thinkingLevelMap)?.off === null) return false;
   if (config.provider.toLowerCase() === "xai" || /api\.x\.ai/i.test(config.baseUrl)) return false;
   return true;
 }
@@ -112,24 +113,38 @@ export type ThinkingLlmConfig = LlmConfig & { thinkingLevel: ModelThinkingLevel 
 export const THINKING_LEVEL_ORDER: readonly ModelThinkingLevel[] = THINKING_EFFORT_LEVELS;
 
 function modelSupportsLevel(
-  config: Pick<LlmConfig, "reasoning" | "piModel">,
+  config: Pick<LlmConfig, "reasoning" | "piModel" | "thinkingLevelMap">,
   level: ModelThinkingLevel,
 ): boolean {
-  return modelSupportsMappedLevel(config.reasoning, config.piModel?.thinkingLevelMap, level);
+  return modelSupportsMappedLevel(config.reasoning, (config.thinkingLevelMap ?? config.piModel?.thinkingLevelMap), level);
 }
 
 /** Return the effort levels that can be selected for the active model. */
 export function getThinkingLevelChoices(
-  config: Pick<LlmConfig, "reasoning" | "piModel">,
+  config: Pick<LlmConfig, "reasoning" | "piModel" | "thinkingLevelMap">,
 ): ModelThinkingLevel[] {
   if (!config.reasoning) return ["off"];
   const mapped = THINKING_LEVEL_ORDER.filter((level) => modelSupportsLevel(config, level));
   return mapped.length > 0 ? [...mapped] : ["medium"];
 }
 
+/** Levels accepted by explicit selectors, including supported Off. */
+export function getSelectableThinkingLevels(
+  config: Pick<LlmConfig, "reasoning" | "piModel" | "thinkingLevelMap"> & Partial<Pick<LlmConfig, "provider" | "baseUrl" | "compat">>,
+): ModelThinkingLevel[] {
+  if (!config.reasoning) return ["off"];
+  return ALL_THINKING_LEVELS.filter((level) => modelSupportsLevel(config, level) && (level !== "off" || supportsThinkingOff({ ...config, provider: config.provider ?? "", baseUrl: config.baseUrl ?? "" })));
+}
+
+/** Revalidate a restored or reconfigured session against current capabilities. */
+export function restoreThinkingLevel(base: LlmConfig, level: ModelThinkingLevel | undefined): ThinkingLlmConfig {
+  const choices = getSelectableThinkingLevels(base);
+  return withThinkingLevel(base, level && choices.includes(level) ? level : clampThinkingLevelForModel(base, base.defaultThinkingLevel ?? "medium"));
+}
+
 /** Move one effort step without changing provider or model. */
 export function cycleThinkingLevel(
-  config: Pick<LlmConfig, "reasoning" | "piModel" | "thinkingLevel">,
+  config: Pick<LlmConfig, "reasoning" | "piModel" | "thinkingLevelMap" | "thinkingLevel">,
   direction: "increase" | "decrease",
   options: { wrap?: boolean } = {},
 ): ModelThinkingLevel {
@@ -149,7 +164,7 @@ export function cycleThinkingLevel(
 
 /** Clamp a requested level to the closest effort supported by the active model. */
 export function clampThinkingLevelForModel(
-  config: Pick<LlmConfig, "reasoning" | "piModel">,
+  config: Pick<LlmConfig, "reasoning" | "piModel" | "thinkingLevelMap">,
   requested: ModelThinkingLevel,
 ): ModelThinkingLevel {
   if (!config.reasoning || requested === "off") return "off";

@@ -2,11 +2,13 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import type { BackendStartResult, BgTaskBackend } from "./backend.js";
 import { shellQuote } from "./utils.js";
 
 const execFileAsync = promisify(execFile);
 
-export class BgTmuxBackend {
+export class BgTmuxBackend implements BgTaskBackend {
+  readonly kind = "tmux" as const;
   constructor(readonly socketName: string, private readonly runnerPath: string) {}
 
   async assertAvailable(): Promise<void> {
@@ -20,7 +22,7 @@ export class BgTmuxBackend {
     }
   }
 
-  async start(sessionName: string, cwd: string, taskDir: string): Promise<void> {
+  async start(sessionName: string, cwd: string, taskDir: string, _logPath: string): Promise<BackendStartResult> {
     // Source checkouts run through tsx, while packaged builds contain a plain
     // JavaScript runner. Keep both entry points usable without changing the
     // persisted task format.
@@ -38,6 +40,7 @@ export class BgTmuxBackend {
       cwd,
       runnerCommand,
     ]);
+    return {};
   }
 
   async pipePane(sessionName: string, logPath: string): Promise<void> {
@@ -45,7 +48,7 @@ export class BgTmuxBackend {
     await this.run(["pipe-pane", "-t", sessionName, "-o", pipeCommand]);
   }
 
-  async hasSession(sessionName: string): Promise<boolean> {
+  async hasSession(sessionName: string, _pid?: number, _taskDir?: string): Promise<boolean> {
     try {
       await this.run(["has-session", "-t", sessionName]);
       return true;
@@ -62,24 +65,22 @@ export class BgTmuxBackend {
     await this.run(["send-keys", "-t", sessionName, key]);
   }
 
-  async capturePane(sessionName: string, lines = 200): Promise<string> {
+  async capturePane(sessionName: string, lines = 200, _logPath?: string): Promise<string> {
     const safeLines = Math.max(1, Math.min(500, Math.floor(lines)));
     const { stdout } = await this.run(["capture-pane", "-p", "-t", sessionName, "-S", `-${safeLines}`]);
     return stdout;
   }
 
-  async kill(sessionName: string): Promise<void> {
+  async kill(sessionName: string, _pid?: number, _force?: boolean, _taskDir?: string): Promise<void> {
     if (await this.hasSession(sessionName)) {
       await this.run(["kill-session", "-t", sessionName]).catch(() => undefined);
     }
   }
 
-  async killServer(): Promise<void> {
-    try {
-      await this.run(["kill-server"]).catch(() => undefined);
-    } catch {
-      // ignore
-    }
+  dispose(): void {
+    // Tasks intentionally outlive the manager and server process. The tmux
+    // socket is isolated per manager instance, so no server-wide cleanup is
+    // needed here.
   }
 
   attachCommand(sessionName: string): string {

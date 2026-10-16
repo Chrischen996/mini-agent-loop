@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { access, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import request from "supertest";
@@ -70,24 +70,38 @@ describe("agent server", () => {
       const defaultDirectoryBrowser = await request(app).get("/api/workspaces/directories");
       assert.equal(defaultDirectoryBrowser.status, 200);
       assert.equal(
-        (defaultDirectoryBrowser.body as { path: string }).path,
-        await realpath(firstRoot),
+        (defaultDirectoryBrowser.body as { path: string; home: string }).path,
+        await realpath(homedir()),
       );
+      assert.equal((defaultDirectoryBrowser.body as { home: string }).home, homedir());
 
       const relativeDirectoryBrowser = await request(app)
         .get("/api/workspaces/directories?path=.");
-      assert.equal(relativeDirectoryBrowser.status, 200);
-      assert.equal(
-        (relativeDirectoryBrowser.body as { path: string }).path,
-        await realpath(firstRoot),
+      assert.equal(relativeDirectoryBrowser.status, 400);
+      assert.match(
+        (relativeDirectoryBrowser.body as { error: string }).error,
+        /fully qualified/,
       );
+
+      await mkdir(path.join(dataDir, ".hidden-project"));
 
       const directoryBrowser = await request(app).get(`/api/workspaces/directories?path=${encodeURIComponent(dataDir)}`);
       assert.equal(directoryBrowser.status, 200);
-      const browsed = directoryBrowser.body as { directories: Array<{ name: string }>; path: string };
+      const browsed = directoryBrowser.body as { directories: Array<{ name: string; hidden?: boolean }>; path: string };
       assert.equal(browsed.path, await realpath(dataDir));
-      assert.ok(browsed.directories.some((item) => item.name === "project-one"));
+      assert.ok(browsed.directories.some((item) => item.name === "project-one" && item.hidden !== true));
       assert.ok(browsed.directories.some((item) => item.name === "project-two"));
+      assert.ok(browsed.directories.some((item) => item.name === ".hidden-project" && item.hidden === true));
+      assert.equal((directoryBrowser.body as { truncated: boolean }).truncated, false);
+      assert.ok(Array.isArray((directoryBrowser.body as { crumbs: unknown }).crumbs));
+
+      const created = await request(app).post("/api/workspaces/directories").send({ path: dataDir, name: "created-folder" });
+      assert.equal(created.status, 201);
+      assert.equal((created.body as { path: string }).path, path.join(await realpath(dataDir), "created-folder"));
+      const duplicate = await request(app).post("/api/workspaces/directories").send({ path: dataDir, name: "created-folder" });
+      assert.equal(duplicate.status, 409);
+      const badName = await request(app).post("/api/workspaces/directories").send({ path: dataDir, name: "../escape" });
+      assert.equal(badName.status, 400);
 
       const added = await request(app).post("/api/workspaces").send({ path: secondRoot });
       assert.equal(added.status, 201);

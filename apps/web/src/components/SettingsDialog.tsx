@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icon.tsx";
 import { api } from "../lib/api.ts";
 import { ModelSelector } from "./ModelSelector.tsx";
+import { CustomModelProviderManager } from "./CustomModelProviderManager.tsx";
 
 type PermissionMode = "plan" | "bypass";
 
@@ -87,7 +88,10 @@ export function SettingsDialog({ open, onClose, theme, onThemeChange, sessionId,
           {error && <p className="error" role="alert">{error}</p>}
         </section>
         </>}
-        {section === "models" && <section className="settings-section settings-models"><h4>Current session model</h4><ModelSelector sessionId={sessionId} currentModel={model} currentThinkingLevel={thinkingLevel} disabled={savingPermission} onModelChange={onModelChange} /></section>}
+        {section === "models" && <>
+          <section className="settings-section settings-models"><h4>Current session model</h4><ModelSelector sessionId={sessionId} currentModel={model} currentThinkingLevel={thinkingLevel} disabled={savingPermission} onModelChange={onModelChange} /></section>
+          <CustomModelProviderManager onModelChange={onModelChange} />
+        </>}
         {section === "skills" && <section className="settings-section settings-skills"><h4>Session skills</h4>{!sessionId ? <p className="muted">Create a session to manage skills.</p> : skills ? skills.available.map((skill) => <label className="settings-skill" key={skill.name}><input type="checkbox" checked={skills.active.includes(skill.name)} disabled={Boolean(savingSkill)} onChange={async (event) => { const enabled = event.target.checked; setSavingSkill(skill.name); setError(null); try { const updated = await api.updateSessionSkills(sessionId, enabled ? { add: [skill.name] } : { remove: [skill.name] }); setSkills(updated); } catch (err) { setError(err instanceof Error ? err.message : String(err)); } finally { setSavingSkill(null); } }} /><span><strong>{skill.name}</strong><small>{skill.description}</small></span></label>) : <p className="muted">Loading…</p>}</section>}
         {section === "about" && <section className="settings-section settings-about"><h4>Mini Agent Loop</h4><p>Web workspace</p></section>}
         {error && section !== "general" && <p className="error" role="alert">{error}</p>}

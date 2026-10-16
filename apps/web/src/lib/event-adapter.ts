@@ -1,4 +1,6 @@
 import type { HistoryMessage, PlanSummary, WireEvent } from "../types/api.ts";
+import { runStopText } from "./run-state.ts";
+import type { LoadingActivity } from "./loading.ts";
 
 /**
  * Frontend view model for the chat area (doc 1.md §7.2-7.3).
@@ -22,9 +24,9 @@ export type ChatItem =
       startLine?: number;
     }
   | { id: string; kind: "permission"; requestId: string; tool: string; risk: string; status: "pending" | "resolved" }
-  | { id: string; kind: "note"; tone: "info" | "warn" | "error"; text: string };
+  | { id: string; kind: "note"; tone: "info" | "warn" | "error"; text: string; action?: "continue" };
 
-export type StreamPhase = "idle" | "streaming" | "done" | "error" | "aborted";
+export type StreamPhase = "idle" | "streaming" | "done" | "error" | "aborted" | "stopped" | "paused";
 
 let nextId = 0;
 function uid(): string {
@@ -150,6 +152,8 @@ export function historyToItems(messages: HistoryMessage[]): ChatItem[] {
 export class ChatStreamState {
   items: ChatItem[] = [];
   phase: StreamPhase = "idle";
+  activity: LoadingActivity | null = null;
+  private activeTools = new Map<string, string>();
   /** Latest plan summary from a `plan_updated` event; null when no plan exists. */
   currentPlan: PlanSummary | null = null;
 
@@ -158,11 +162,31 @@ export class ChatStreamState {
     this.items = historyToItems(messages);
     this.phase = "idle";
     this.currentPlan = null;
+    this.activity = null;
+    this.activeTools.clear();
+  }
+
+  beginTurn(now = Date.now()): void {
+    this.phase = "streaming";
+    this.activity = { label: "Working", startedAt: now, labelStartedAt: now };
+    this.activeTools.clear();
+  }
+
+  private updateActivity(label: string): void {
+    const now = Date.now();
+    if (!this.activity) this.beginTurn(now);
+    if (this.activity!.label !== label) this.activity = { ...this.activity!, label, labelStartedAt: now };
+  }
+
+  private refreshToolActivity(): void {
+    const running = [...this.activeTools.values()].at(-1);
+    this.updateActivity(running ? `Running ${running}` : "Working");
   }
 
   apply(event: WireEvent): void {
     switch (event.type) {
       case "user": {
+        if (!this.activity) this.beginTurn();
         const text = extractText(event.content);
         const attachments = [...(Array.isArray(event.images) ? event.images : []), ...(Array.isArray(event.documents) ? event.documents : [])].filter((name): name is string => typeof name === "string");
         if (text || attachments.length) this.items.push({ id: uid(), kind: "user", text, attachments });
@@ -170,6 +194,7 @@ export class ChatStreamState {
         break;
       }
       case "assistant_delta": {
+        this.updateActivity(event.kind === "reasoning" ? "Thinking" : "Responding");
         const item = this.ensureAssistant();
         if (event.kind === "reasoning") item.reasoning += String(event.text ?? "");
         else item.text += String(event.text ?? "");
@@ -177,6 +202,7 @@ export class ChatStreamState {
         break;
       }
       case "assistant_deltas": {
+        this.updateActivity(event.answer ? "Responding" : "Thinking");
         const item = this.ensureAssistant();
         if (typeof event.reasoning === "string") item.reasoning += event.reasoning;
         if (typeof event.answer === "string") item.text += event.answer;
@@ -184,6 +210,7 @@ export class ChatStreamState {
         break;
       }
       case "assistant": {
+        this.updateActivity("Working");
         // A full assistant message boundary. If no deltas streamed (non-streaming
         // or empty-delta response), fall back to the event content so the reply
         // still renders. Deltas already set item.text, so only fill when empty.
@@ -196,8 +223,11 @@ export class ChatStreamState {
         }
         this.closeAssistant();
         break;
-      }      case "tool_start": {
+      }
+      case "tool_start": {
         const toolCallId = String(event.id ?? "");
+        if (!this.activity) this.beginTurn();
+        this.activeTools.set(toolCallId, String(event.name ?? "tool"));
         const existing = this.items.find(
           (item): item is Extract<ChatItem, { kind: "tool" }> =>
             item.kind === "tool" && item.toolCallId === toolCallId,
@@ -219,10 +249,12 @@ export class ChatStreamState {
             ...meta,
           });
         }
+        this.refreshToolActivity();
         break;
       }
       case "tool_end": {
         const toolCallId = String(event.id ?? "");
+        this.activeTools.delete(toolCallId);
         const item = this.items.find(
           (candidate): candidate is Extract<ChatItem, { kind: "tool" }> =>
             candidate.kind === "tool" && candidate.toolCallId === toolCallId,
@@ -234,9 +266,11 @@ export class ChatStreamState {
           if (!item.path && meta.path) item.path = meta.path;
           if (!item.startLine && meta.startLine) item.startLine = meta.startLine;
         }
+        this.refreshToolActivity();
         break;
       }
       case "permission_required": {
+        this.updateActivity("Waiting for permission");
         const requestId = String(event.requestId ?? "");
         const existing = this.items.find(
           (candidate): candidate is Extract<ChatItem, { kind: "permission" }> =>
@@ -257,20 +291,24 @@ export class ChatStreamState {
         break;
       }
       case "error":
+        this.activity = null;
         this.closeAssistant();
         this.phase = "error";
         this.items.push({ id: uid(), kind: "note", tone: "error", text: String(event.message ?? "Unknown error") });
         break;
       case "aborted":
+        this.activity = null;
         this.closeAssistant();
         this.phase = "aborted";
         this.items.push({ id: uid(), kind: "note", tone: "info", text: String(event.message ?? "Generation stopped") });
         break;
       case "done":
+        this.activity = null;
         this.closeAssistant();
         this.phase = "done";
         break;
       case "context_compacted":
+        this.updateActivity("Working");
         this.items.push({
           id: uid(),
           kind: "note",
@@ -279,14 +317,46 @@ export class ChatStreamState {
         });
         break;
       case "max_turns":
+        this.activity = null;
+        this.closeAssistant();
+        this.phase = "paused";
         this.items.push({
           id: uid(),
           kind: "note",
           tone: "warn",
-          text: `Reached max turns (${String(event.maxTurns)}); ${String(event.messageCount)} messages kept`,
+          text: (event as { message?: string }).message ?? `Auto-continue limit reached (${String(event.maxTurns)} model turns); progress saved. Use Continue to resume.`,
+          action: "continue",
         });
         break;
+      case "run_stopped": {
+        this.activity = null;
+        this.closeAssistant();
+        this.phase = "paused";
+        this.items.push({
+          id: uid(),
+          kind: "note",
+          tone: "warn",
+          text: runStopText({ ...event, reason: event.stopReason }),
+          action: "continue",
+        });
+        break;
+      }
+      case "auto_continue":
+        this.updateActivity("Continuing");
+        this.closeAssistant();
+        this.phase = "streaming";
+        this.items.push({
+          id: uid(),
+          kind: "note",
+          tone: "info",
+          text: (event as { message?: string }).message ?? "Turn limit reached, continuing...",
+        });
+        break;
+      case "request_retry":
+        this.updateActivity("Reconnecting");
+        break;
       case "retry_attempt":
+        this.updateActivity("Reconnecting");
         this.items.push({
           id: uid(),
           kind: "note",
@@ -303,6 +373,7 @@ export class ChatStreamState {
         });
         break;
       case "attempt_reset":
+        this.updateActivity("Reconnecting");
         this.items.push({
           id: uid(),
           kind: "note",

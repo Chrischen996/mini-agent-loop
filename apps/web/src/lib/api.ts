@@ -1,6 +1,10 @@
+import type { ContinueRunRequest } from "../types/api.ts";
 import type {
   CreateSessionResponse,
   ModelOption,
+  ModelProviderDiscoveryResponse,
+  ModelProviderInput,
+  ModelProviderListResponse,
   ModelSelectionResponse,
   ModelsListResponse,
   PlanSummary,
@@ -58,8 +62,18 @@ export const api = {
   addWorkspace: (path: string): Promise<{ workspace: WorkspaceRecord }> =>
     requestJson("/api/workspaces", { method: "POST", headers: json, body: JSON.stringify({ path }) }),
 
-  browseWorkspaceDirectories: (path?: string): Promise<{ path: string; parent: string | null; directories: Array<{ name: string; path: string }> }> =>
+  browseWorkspaceDirectories: (path?: string): Promise<{
+    path: string;
+    parent: string | null;
+    home: string;
+    crumbs: Array<{ name: string; path: string }>;
+    directories: Array<{ name: string; path: string; hidden?: boolean }>;
+    truncated?: boolean;
+  }> =>
     requestJson(`/api/workspaces/directories${path ? `?path=${encodeURIComponent(path)}` : ""}`),
+
+  createWorkspaceDirectory: (path: string, name: string): Promise<{ path: string }> =>
+    requestJson("/api/workspaces/directories", { method: "POST", headers: json, body: JSON.stringify({ path, name }) }),
 
   getSession: (id: string): Promise<SessionDetail> =>
     requestJson<SessionDetail>(`/api/sessions/${encodeURIComponent(id)}`),
@@ -145,6 +159,15 @@ export const api = {
     return fetch(`/api/sessions/${encodeURIComponent(id)}/messages`, { method: "POST", body, signal });
   },
 
+  /** Continue from a checkpoint; omitted budgets allocate the configured default budget. */
+  continueSession: (id: string, signal?: AbortSignal, budget: ContinueRunRequest = {}): Promise<Response> =>
+    fetch(`/api/sessions/${encodeURIComponent(id)}/continue`, {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify(budget),
+      signal,
+    }),
+
   // ── Workspace (P4) ───────────────────────────────────────────────────────
 
   listWorkspace: (relativePath = "", sessionId?: string, workspaceId?: string): Promise<WorkspaceListResponse> =>
@@ -170,6 +193,44 @@ export const api = {
 
   listModels: (): Promise<ModelsListResponse> =>
     requestJson<ModelsListResponse>("/api/models"),
+
+  listModelProviders: (): Promise<ModelProviderListResponse> =>
+    requestJson<ModelProviderListResponse>("/api/model-providers"),
+
+  createModelProvider: (input: ModelProviderInput): Promise<ModelProviderListResponse["providers"][number]> =>
+    requestJson<ModelProviderListResponse["providers"][number]>("/api/model-providers", {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify(input),
+    }),
+
+  updateModelProvider: (provider: string, input: ModelProviderInput): Promise<ModelProviderListResponse["providers"][number]> =>
+    requestJson<ModelProviderListResponse["providers"][number]>(`/api/model-providers/${encodeURIComponent(provider)}`, {
+      method: "PUT",
+      headers: json,
+      body: JSON.stringify(input),
+    }),
+
+  deleteModelProvider: async (provider: string): Promise<void> => {
+    const response = await fetch(`/api/model-providers/${encodeURIComponent(provider)}`, { method: "DELETE" });
+    if (!response.ok && response.status !== 204) {
+      let message = `HTTP ${response.status}`;
+      try {
+        const body = (await response.json()) as { error?: unknown };
+        if (body && typeof body.error === "string") message = body.error;
+      } catch {
+        // non-JSON body
+      }
+      throw new Error(message);
+    }
+  },
+
+  discoverModelProvider: (input: Pick<ModelProviderInput, "baseUrl" | "protocol"> & { provider?: string; apiKey?: string }): Promise<ModelProviderDiscoveryResponse> =>
+    requestJson<ModelProviderDiscoveryResponse>("/api/model-providers/discover", {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify(input),
+    }),
 
   // ── Plan (P4) ────────────────────────────────────────────────────────────
 

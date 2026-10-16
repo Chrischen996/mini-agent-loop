@@ -1,6 +1,7 @@
 import { existsSync, linkSync, unlinkSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, open, readFile, readdir, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { BgBackendKind } from "./backend.js";
 
 export interface TaskMeta {
   schemaVersion: 1;
@@ -15,6 +16,12 @@ export interface TaskMeta {
   timeoutSeconds?: number;
   notifyOnCompletion: boolean;
   notifiedAt?: string;
+  /** Backend and process identity are persisted so another manager can recover the task. */
+  backend?: BgBackendKind;
+  pid?: number;
+  sessionName?: string;
+  socketName?: string;
+  instanceId?: string;
 }
 
 export interface TaskResult {
@@ -42,6 +49,7 @@ export class BgTaskStore {
   readonly instanceRoot: string;
 
   constructor(projectCwd: string, instanceId: string) {
+    if (!/^[A-Za-z0-9_-]+$/.test(instanceId)) throw new Error("Invalid background task instance id");
     this.root = join(projectCwd, ".bg-tasks", "instances");
     this.instanceRoot = join(this.root, instanceId);
   }
@@ -52,6 +60,7 @@ export class BgTaskStore {
   }
 
   paths(taskId: string): TaskPaths {
+    if (!/^bg_[A-Za-z0-9_-]{1,128}$/.test(taskId)) throw new Error("Invalid background task id");
     const dir = join(this.instanceRoot, taskId);
     return {
       dir,
@@ -127,7 +136,7 @@ export class BgTaskStore {
   }
 
   async listOwnTaskIds(): Promise<string[]> {
-    return listDirectories(this.instanceRoot);
+    return (await listDirectories(this.instanceRoot)).filter((taskId) => /^bg_[A-Za-z0-9_-]{1,128}$/.test(taskId));
   }
 
   async removeTask(taskId: string): Promise<void> {

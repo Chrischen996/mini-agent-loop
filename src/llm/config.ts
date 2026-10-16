@@ -1,6 +1,7 @@
 /**
  * LLM configuration: types, env/profile loading, model switching.
  */
+import { modelSupportsMappedLevel } from "../pi-ai/thinking-levels.ts";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import {
@@ -46,6 +47,8 @@ export type LlmConfig = {
   streamIdleTimeoutMs?: number;
   piModel?: ModelRef["piModel"];
   reasoning: boolean;
+  thinkingLevelMap?: ModelRef["thinkingLevelMap"];
+  defaultThinkingLevel?: ModelThinkingLevel;
   /** Provider compatibility flags used by the fallback OpenAI-compatible path. */
   compat?: Record<string, unknown>;
   /** Provider-neutral thinking level for the current model. Optional for legacy callers. */
@@ -327,10 +330,12 @@ export function loadLlmConfigFromEnv(): LlmConfig {
       streamIdleTimeoutMs: activeProfile.streamIdleTimeoutMs ?? resolved.streamIdleTimeoutMs,
       piModel: resolved.piModel,
       reasoning: resolved.reasoning,
+      thinkingLevelMap: resolved.thinkingLevelMap,
+      defaultThinkingLevel: resolved.defaultThinkingLevel,
       compat: resolved.compat,
       thinkingLevel: normalizeThinkingLevelForModel(
         resolved.reasoning,
-        activeProfile.thinkingLevel ?? getDefaultThinkingLevel(),
+        activeProfile.thinkingLevel ?? resolved.defaultThinkingLevel ?? getDefaultThinkingLevel(),
       ),
       imagePolicy,
       toolCallFormat: resolved.toolCallFormat ?? "openai",
@@ -398,10 +403,12 @@ export function loadLlmConfigFromEnv(): LlmConfig {
     streamIdleTimeoutMs: resolved.streamIdleTimeoutMs,
     piModel: resolved.piModel,
     reasoning: resolved.reasoning,
+    thinkingLevelMap: resolved.thinkingLevelMap,
+    defaultThinkingLevel: resolved.defaultThinkingLevel,
     compat: resolved.compat,
     thinkingLevel: normalizeThinkingLevelForModel(
       resolved.reasoning,
-      getDefaultThinkingLevel(),
+      resolved.defaultThinkingLevel ?? getDefaultThinkingLevel(),
     ),
     imagePolicy,
     toolCallFormat: resolved.toolCallFormat ?? "openai",
@@ -428,6 +435,7 @@ export function makeLlmConfig(
     firstResponseTimeoutMs?: number;
     streamIdleTimeoutMs?: number;
     reasoning?: boolean;
+    thinkingLevelMap?: ModelRef["thinkingLevelMap"];
     thinkingLevel?: ModelThinkingLevel;
     imagePolicy?: ImagePolicy;
     sessionId?: string;
@@ -453,10 +461,12 @@ export function makeLlmConfig(
     streamIdleTimeoutMs: partial.streamIdleTimeoutMs ?? resolved.streamIdleTimeoutMs,
     piModel: resolved.piModel,
     reasoning: partial.reasoning ?? resolved.reasoning,
+    thinkingLevelMap: partial.thinkingLevelMap ?? resolved.thinkingLevelMap,
+    defaultThinkingLevel: resolved.defaultThinkingLevel,
     compat: partial.compat ?? resolved.compat,
     thinkingLevel: normalizeThinkingLevelForModel(
       partial.reasoning ?? resolved.reasoning,
-      partial.thinkingLevel ?? getDefaultThinkingLevel(),
+      partial.thinkingLevel ?? resolved.defaultThinkingLevel ?? getDefaultThinkingLevel(),
     ),
     imagePolicy: partial.imagePolicy ?? "placeholder",
     toolCallFormat: resolved.toolCallFormat ?? "openai",
@@ -514,12 +524,14 @@ export function switchLlmModel(
     maxTokens: resolveOutputTokenLimit(resolved.maxTokens, resolved.contextWindow),
     piModel: resolved.piModel,
     reasoning: resolved.reasoning,
+    thinkingLevelMap: resolved.thinkingLevelMap,
+    defaultThinkingLevel: resolved.defaultThinkingLevel,
     compat: resolved.compat,
     thinkingLevel: normalizeThinkingLevelForModel(
       resolved.reasoning,
-      config.reasoning
-        ? config.thinkingLevel ?? getDefaultThinkingLevel()
-        : getDefaultThinkingLevel(),
+      config.reasoning && config.thinkingLevel && (!resolved.thinkingLevelMap || modelSupportsMappedLevel(resolved.reasoning, resolved.thinkingLevelMap, config.thinkingLevel))
+        ? config.thinkingLevel
+        : resolved.defaultThinkingLevel ?? getDefaultThinkingLevel(),
     ),
     toolCallFormat: resolved.toolCallFormat ?? "openai",
     // Inherit sessionId and cacheRetention from current config or env

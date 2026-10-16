@@ -30,7 +30,7 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { ModelThinkingLevel } from "./pi-ai/types.ts";
+import type { OpenAICompletionsCompat, ModelThinkingLevel } from "./pi-ai/types.ts";
 import { ALL_THINKING_LEVELS, THINKING_EFFORT_LEVELS } from "./pi-ai/thinking-levels.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -49,6 +49,34 @@ export type ModelProfile = {
   streamIdleTimeoutMs?: number;
 };
 
+export type CustomProviderProtocol = "openai-completions" | "openai-responses" | "anthropic-messages";
+
+export type ReasoningEfforts = false | Partial<Record<ModelThinkingLevel, string | null>>;
+export type CustomThinkingCompat = Pick<OpenAICompletionsCompat, "thinkingFormat" | "supportsReasoningEffort">;
+
+export type CustomProviderModel = {
+  id: string;
+  name?: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  input?: Array<"text" | "image">;
+  tools?: boolean;
+  reasoning?: boolean;
+  reasoningEfforts?: ReasoningEfforts;
+  defaultThinkingLevel?: ModelThinkingLevel;
+  compat?: CustomThinkingCompat;
+};
+
+/** A user-defined gateway persisted with the profile store. */
+export type CustomProviderProfile = {
+  displayName?: string;
+  baseUrl: string;
+  protocol: CustomProviderProtocol;
+  apiKey: string;
+  compat?: CustomThinkingCompat;
+  models: CustomProviderModel[];
+};
+
 export type ModelProfileStore = {
   version: 1;
   activeProfile: string | null;
@@ -63,6 +91,8 @@ export type ModelProfileStore = {
    * @example { researcher: "agnes-ai-agnes-2-0-flash", coder: "anthropic-claude-opus-4-6" }
    */
   subagentRoles?: Record<string, string>;
+  /** Custom gateways configured from the Web settings page. */
+  customProviders?: Record<string, CustomProviderProfile>;
 };
 
 // ─── Defaults & Path Resolution ───────────────────────────────────────────────
@@ -132,6 +162,138 @@ function validateProfile(name: string, raw: unknown): ModelProfile {
   };
 }
 
+const CUSTOM_PROVIDER_ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+
+function positiveInteger(value: unknown, fallback: number, maximum = 2_000_000_000): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return fallback;
+  return Math.min(Math.floor(value), maximum);
+}
+
+function validateThinkingCompat(raw: unknown, protocol: unknown): CustomThinkingCompat | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ProfileStoreValidationError("compat must be an object");
+  const value = raw as Record<string, unknown>;
+  if (Object.keys(value).length && protocol !== "openai-completions") throw new ProfileStoreValidationError("Thinking compat fields require openai-completions");
+  const formats = ["openai", "deepseek", "openrouter", "qwen", "qwen-chat-template", "zai", "together", "string-thinking", "ant-ling"];
+  for (const key of Object.keys(value)) if (key !== "thinkingFormat" && key !== "supportsReasoningEffort") throw new ProfileStoreValidationError(`Unsupported compat field: ${key}`);
+  if (value.thinkingFormat !== undefined && !formats.includes(String(value.thinkingFormat))) throw new ProfileStoreValidationError("Unsupported thinkingFormat");
+  if (value.supportsReasoningEffort !== undefined && typeof value.supportsReasoningEffort !== "boolean") throw new ProfileStoreValidationError("supportsReasoningEffort must be boolean");
+  return { ...value } as CustomThinkingCompat;
+}
+
+function validateReasoningEfforts(raw: unknown): ReasoningEfforts | undefined {
+  if (raw === undefined || raw === false) return raw;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ProfileStoreValidationError("reasoningEfforts must be false or a non-empty object");
+  const result: Exclude<ReasoningEfforts, false> = {};
+  for (const [level, wire] of Object.entries(raw)) {
+    if (!ALL_THINKING_LEVELS.includes(level as ModelThinkingLevel)) throw new ProfileStoreValidationError(`Invalid thinking level: ${level}`);
+    if (wire !== null && (typeof wire !== "string" || !wire.trim())) throw new ProfileStoreValidationError(`reasoningEfforts.${level} must be a non-empty string`);
+    if (wire === null && level !== "off") throw new ProfileStoreValidationError(`Only reasoningEfforts.off may be null`);
+    result[level as ModelThinkingLevel] = typeof wire === "string" ? wire.trim() : null;
+  }
+  if (!Object.keys(result).some((level) => level !== "off")) throw new ProfileStoreValidationError("reasoningEfforts must offer a thinking level");
+  return result;
+}
+
+function validateCustomProviderModel(provider: string, raw: unknown, protocol: unknown): CustomProviderModel {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ProfileStoreValidationError(`Custom provider "${provider}" model must be an object`);
+  }
+  const value = raw as Record<string, unknown>;
+  if (typeof value.id !== "string" || !value.id.trim()) {
+    throw new ProfileStoreValidationError(`Custom provider "${provider}" model.id must be a non-empty string`);
+  }
+  const reasoningEfforts = validateReasoningEfforts(value.reasoningEfforts);
+  const reasoning = reasoningEfforts === undefined ? value.reasoning === true : reasoningEfforts !== false;
+  const compat = validateThinkingCompat(value.compat, protocol);
+  const defaultThinkingLevel = value.defaultThinkingLevel as ModelThinkingLevel | undefined;
+  if (defaultThinkingLevel !== undefined && (!ALL_THINKING_LEVELS.includes(defaultThinkingLevel) ||
+    (!reasoning && defaultThinkingLevel !== "off") ||
+    (reasoningEfforts && !Object.hasOwn(reasoningEfforts, defaultThinkingLevel)) ||
+    (reasoning && reasoningEfforts === undefined && ["xhigh", "max", "ultra"].includes(defaultThinkingLevel)))) {
+    throw new ProfileStoreValidationError("defaultThinkingLevel must be supported by the model");
+  }
+  const id = value.id.trim();
+  const name = typeof value.name === "string" && value.name.trim() ? value.name.trim() : undefined;
+  const contextWindow = positiveInteger(value.contextWindow, 128_000);
+  const maxTokens = Math.min(positiveInteger(value.maxTokens, 16_384), Math.max(1, contextWindow - 1));
+  const input = Array.isArray(value.input)
+    ? value.input.filter((item): item is "text" | "image" => item === "text" || item === "image")
+    : ["text" as const];
+  const uniqueInput = [...new Set(input.length > 0 ? input : ["text" as const])];
+  return {
+    id,
+    ...(name ? { name } : {}),
+    contextWindow,
+    maxTokens,
+    input: uniqueInput,
+    tools: value.tools !== false,
+    reasoning,
+    ...(reasoningEfforts !== undefined ? { reasoningEfforts } : {}),
+    ...(defaultThinkingLevel !== undefined ? { defaultThinkingLevel } : {}),
+    ...(compat ? { compat } : {}),
+  };
+}
+
+export function validateCustomProvider(
+  providerName: string,
+  raw: unknown,
+): CustomProviderProfile {
+  const provider = providerName.trim().toLowerCase();
+  if (!CUSTOM_PROVIDER_ID.test(provider)) {
+    throw new ProfileStoreValidationError(
+      `Custom provider id must match ${CUSTOM_PROVIDER_ID.source}`,
+    );
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ProfileStoreValidationError(`Custom provider "${provider}" must be an object`);
+  }
+  const value = raw as Record<string, unknown>;
+  if (typeof value.baseUrl !== "string" || !value.baseUrl.trim()) {
+    throw new ProfileStoreValidationError(`Custom provider "${provider}".baseUrl must be a non-empty string`);
+  }
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(value.baseUrl.trim());
+  } catch {
+    throw new ProfileStoreValidationError(`Custom provider "${provider}".baseUrl must be a valid http(s) URL`);
+  }
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    throw new ProfileStoreValidationError(`Custom provider "${provider}".baseUrl must use http or https`);
+  }
+  if (typeof value.apiKey !== "string" || !value.apiKey.trim()) {
+    throw new ProfileStoreValidationError(`Custom provider "${provider}".apiKey must be a non-empty string`);
+  }
+  if (value.protocol !== "openai-completions" && value.protocol !== "openai-responses" && value.protocol !== "anthropic-messages") {
+    throw new ProfileStoreValidationError(
+      `Custom provider "${provider}".protocol must be openai-completions, openai-responses, or anthropic-messages`,
+    );
+  }
+  if (!Array.isArray(value.models) || value.models.length === 0) {
+    throw new ProfileStoreValidationError(`Custom provider "${provider}".models must contain at least one model`);
+  }
+  const models = value.models.map((model) => validateCustomProviderModel(provider, model, value.protocol));
+  const ids = new Set<string>();
+  for (const model of models) {
+    const key = model.id.toLowerCase();
+    if (ids.has(key)) {
+      throw new ProfileStoreValidationError(`Custom provider "${provider}" contains duplicate model "${model.id}"`);
+    }
+    ids.add(key);
+  }
+  const displayName = typeof value.displayName === "string" && value.displayName.trim()
+    ? value.displayName.trim()
+    : undefined;
+  return {
+    ...(displayName ? { displayName } : {}),
+    baseUrl: normalizeUrl(parsedUrl.toString()),
+    protocol: value.protocol,
+    ...(value.compat !== undefined ? { compat: validateThinkingCompat(value.compat, value.protocol) } : {}),
+    apiKey: value.apiKey,
+    models,
+  };
+}
+
 function validateStore(raw: unknown): ModelProfileStore {
   if (!raw || typeof raw !== "object") {
     throw new ProfileStoreValidationError("Store root must be an object");
@@ -168,11 +330,23 @@ function validateStore(raw: unknown): ModelProfileStore {
     }
   }
 
+  let customProviders: Record<string, CustomProviderProfile> | undefined;
+  if (obj.customProviders !== undefined) {
+    if (typeof obj.customProviders !== "object" || Array.isArray(obj.customProviders)) {
+      throw new ProfileStoreValidationError("customProviders must be an object");
+    }
+    customProviders = {};
+    for (const [provider, value] of Object.entries(obj.customProviders as Record<string, unknown>)) {
+      customProviders[provider] = validateCustomProvider(provider, value);
+    }
+  }
+
   return {
     version: 1,
     activeProfile: typeof obj.activeProfile === "string" ? obj.activeProfile : null,
     profiles,
     ...(subagentRoles ? { subagentRoles } : {}),
+    ...(customProviders ? { customProviders } : {}),
   };
 }
 
@@ -332,6 +506,34 @@ export function listProfiles(
   }));
 }
 
+export function upsertCustomProvider(
+  store: ModelProfileStore,
+  provider: string,
+  profile: CustomProviderProfile,
+): ModelProfileStore {
+  const normalizedProvider = provider.trim().toLowerCase();
+  const validated = validateCustomProvider(normalizedProvider, profile);
+  return {
+    ...store,
+    customProviders: {
+      ...(store.customProviders ?? {}),
+      [normalizedProvider]: validated,
+    },
+  };
+}
+
+export function deleteCustomProvider(store: ModelProfileStore, provider: string): ModelProfileStore {
+  const normalizedProvider = provider.trim().toLowerCase();
+  if (!(normalizedProvider in (store.customProviders ?? {}))) {
+    throw new Error(`Custom provider "${normalizedProvider}" does not exist`);
+  }
+  const { [normalizedProvider]: _removed, ...remaining } = store.customProviders ?? {};
+  return {
+    ...store,
+    ...(Object.keys(remaining).length > 0 ? { customProviders: remaining } : { customProviders: undefined }),
+  };
+}
+
 // ─── Convenience: load + operate + save ──────────────────────────────────────
 
 /** Load, upsert a profile, and persist. Returns the updated store. */
@@ -365,6 +567,29 @@ export async function removeProfile(
 ): Promise<ModelProfileStore> {
   const store = await loadProfileStore(storePath);
   const updated = deleteProfile(store, name);
+  await saveProfileStore(updated, storePath);
+  return updated;
+}
+
+/** Load, upsert a custom provider, and persist it. */
+export async function saveCustomProvider(
+  provider: string,
+  profile: CustomProviderProfile,
+  storePath = resolveProfileStorePath(),
+): Promise<ModelProfileStore> {
+  const store = await loadProfileStore(storePath);
+  const updated = upsertCustomProvider(store, provider, profile);
+  await saveProfileStore(updated, storePath);
+  return updated;
+}
+
+/** Load, delete a custom provider, and persist it. */
+export async function removeCustomProvider(
+  provider: string,
+  storePath = resolveProfileStorePath(),
+): Promise<ModelProfileStore> {
+  const store = await loadProfileStore(storePath);
+  const updated = deleteCustomProvider(store, provider);
   await saveProfileStore(updated, storePath);
   return updated;
 }

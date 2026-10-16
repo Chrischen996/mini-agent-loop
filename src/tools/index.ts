@@ -12,7 +12,7 @@ import { createValidationTool } from "./validation.ts";
 import { createTodoWriteTool } from "./todo-write.ts";
 import { createSandboxRunner, DEFAULT_SANDBOX_CONFIG, type SandboxConfig, type SandboxRunner } from "../sandbox/index.ts";
 import { createBgTaskTools } from "../bg-tasks/tools.js";
-import { BgTaskManager } from "../bg-tasks/manager.js";
+import { BgTaskManager, stableBgTaskInstanceId } from "../bg-tasks/manager.js";
 
 export type { JsonSchema, Tool, ToolCapabilities, ToolResult } from "./types.ts";
 export type { ReadArgs } from "./read.ts";
@@ -195,10 +195,10 @@ export async function createToolsWithSandbox(
  */
 export async function createBgTaskSuite(
   cwd: string,
-  options: { instanceId?: string } = {},
+  options: { instanceId?: string; backend?: "auto" | "tmux" | "process" } = {},
 ): Promise<{ tools: Tool[]; manager: BgTaskManager; dispose: () => void }> {
-  const instanceId = options.instanceId ?? `run_${new Date().toISOString().replace(/[-:.]/g, "")}_p${process.pid}`;
-  const manager = new BgTaskManager(cwd, instanceId);
+  const instanceId = options.instanceId ?? stableBgTaskInstanceId(cwd);
+  const manager = new BgTaskManager(cwd, instanceId, undefined, { backend: options.backend });
   await manager.initialize();
   const tools = createBgTaskTools(manager);
   return { tools, manager, dispose: () => manager.dispose() };

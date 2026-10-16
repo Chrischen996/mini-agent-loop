@@ -6,7 +6,7 @@ export function createBgTaskTools(manager: BgTaskManager): Tool[] {
     {
       name: "bg_start",
       description:
-        "Start a shell command in a persistent tmux-backed background terminal and return immediately with its task ID.",
+        "Start a shell command in a persistent background task and return immediately with its task ID. Uses tmux when available and a detached process fallback otherwise.",
       displayName: "Background Task",
       parameters: {
         type: "object",
@@ -96,7 +96,7 @@ export function createBgTaskTools(manager: BgTaskManager): Tool[] {
     },
     {
       name: "bg_send",
-      description: "Send literal text or Enter to a running background task via tmux.",
+      description: "Send literal text or Enter to a running tmux-backed background task. Process-backed tasks do not support interactive input.",
       displayName: "Task Input",
       parameters: {
         type: "object",
@@ -151,7 +151,7 @@ export function createBgTaskTools(manager: BgTaskManager): Tool[] {
     },
     {
       name: "bg_kill",
-      description: "Gracefully cancel a running background task, or force-close its tmux session.",
+      description: "Gracefully cancel a running background task, or force-stop its tmux session/process group.",
       displayName: "Stop Task",
       parameters: {
         type: "object",

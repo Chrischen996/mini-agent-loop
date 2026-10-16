@@ -14,6 +14,8 @@
     "version-check.js",
     "dist",
     "README.md",
+    "apps/web/THIRD_PARTY_NOTICES.md",
+    "apps/web/public/licenses/openai-codex",
     "skills"
   ],
   "repository": {

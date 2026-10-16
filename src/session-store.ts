@@ -10,6 +10,45 @@ import type { ModelThinkingLevel } from "./pi-ai/types.ts";
 import type { ThinkingMode } from "./thinking-policy.ts";
 import type { SessionPhase, ExecutionPlan } from "./plan-act/types.ts";
 import type { TodoItem } from "./tools/todo.ts";
+import type { AgentRunPolicy } from "./loop.ts";
+
+export type WebRunStatus = "running" | "completed" | "paused" | "interrupted" | "failed";
+export type WebRunReason =
+  | "step_limit"
+  | "budget_exhausted"
+  | "safety_cap_reached"
+  | "context_exhausted"
+  | "stalled"
+  | "waiting_user"
+  | "user_stop"
+  | "disconnected"
+  | "server_restart"
+  | "model_error"
+  | "persistence_error";
+
+export type WebRunBudgetUsage = {
+  tokensUsed?: number;
+  toolCallsUsed?: number;
+  writeCallsUsed?: number;
+  elapsedMs?: number;
+};
+
+export type WebRunState = {
+  runId: string;
+  status: WebRunStatus;
+  reason?: WebRunReason;
+  details?: string;
+  stepsUsed: number;
+  maxSteps: number;
+  budgetUsage?: WebRunBudgetUsage;
+  /** Usage across all allocations in this session, including the current allocation. */
+  cumulativeBudgetUsage?: WebRunBudgetUsage;
+  budgetPolicy?: AgentRunPolicy;
+  budgetMode?: "new" | "remaining";
+  lastFingerprint?: string;
+  checkpointRevision: number;
+  savedAt?: number;
+};
 
 type SessionCreatedEvent = {
   type: "session_created";
@@ -47,6 +86,7 @@ type SessionSnapshotEvent = {
   messages: AgentMessage[];
   todos?: TodoItem[];
   todoVersion?: number;
+  runState?: WebRunState | null;
   parentSessionId?: string;
   forkedFromMessage?: number;
   forkedFromMessageId?: string;
@@ -80,6 +120,7 @@ export type PersistedSession = {
   messages: AgentMessage[];
   todos?: TodoItem[];
   todoVersion?: number;
+  runState?: WebRunState | null;
   parentSessionId?: string;
   forkedFromMessage?: number;
   forkedFromMessageId?: string;
@@ -467,6 +508,7 @@ export class SessionStore {
       messages: session.messages,
       todos: session.todos,
       todoVersion: session.todoVersion,
+      runState: session.runState ?? null,
       parentSessionId: session.parentSessionId,
       forkedFromMessage: session.forkedFromMessage,
       forkedFromMessageId: session.forkedFromMessageId,
@@ -597,6 +639,7 @@ export class SessionStore {
             messages: parsed.messages,
             todos: parsed.todos ?? current?.todos ?? [],
             todoVersion: parsed.todoVersion ?? current?.todoVersion ?? 0,
+            runState: parsed.runState === null ? undefined : (parsed.runState ?? current?.runState),
             parentSessionId: parsed.parentSessionId ?? current?.parentSessionId,
             forkedFromMessage: parsed.forkedFromMessage ?? current?.forkedFromMessage,
             forkedFromMessageId: parsed.forkedFromMessageId ?? current?.forkedFromMessageId,

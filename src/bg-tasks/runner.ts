@@ -31,7 +31,7 @@ function finalize(exitCode: number | null, signal: string | null, reason?: strin
 process.on("SIGTERM", () => { finalize(null, "SIGTERM", "runner terminated"); process.exit(128); });
 process.on("SIGINT", () => { /* allow Ctrl+C to reach child */ });
 
-(async () => {
+void (async () => {
   await waitGate(gatePath, 10000);
   const startedAt = new Date().toISOString();
   meta.startedAt = startedAt;
@@ -40,4 +40,7 @@ process.on("SIGINT", () => { /* allow Ctrl+C to reach child */ });
 
   child.once("error", (e) => { finalize(null, null, e.message); process.exitCode = 1; });
   child.once("close", (code, sig) => { finalize(code, sig); process.exitCode = code ?? (sig ? 128 : 1); });
-})();
+})().catch((error) => {
+  finalize(null, null, error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});

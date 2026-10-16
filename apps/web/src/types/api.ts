@@ -51,6 +51,57 @@ export type HistoryMessage = {
   isError?: boolean;
 };
 
+export type WebRunStatus = "running" | "completed" | "paused" | "interrupted" | "failed";
+export type WebRunReason =
+  | "step_limit"
+  | "budget_exhausted"
+  | "safety_cap_reached"
+  | "context_exhausted"
+  | "stalled"
+  | "waiting_user"
+  | "user_stop"
+  | "disconnected"
+  | "server_restart"
+  | "model_error"
+  | "persistence_error";
+
+export type WebRunBudgetUsage = {
+  tokensUsed?: number;
+  toolCallsUsed?: number;
+  writeCallsUsed?: number;
+  elapsedMs?: number;
+};
+
+export type WebRunPolicy = {
+  tokenBudget?: number;
+  toolCallBudget?: number;
+  writeCallBudget?: number;
+  deadlineMs?: number;
+  maxCompactions?: number;
+  emergencyIterationCap?: number;
+  stallPolicy?: { sameActionLimit?: number; noProgressLimit?: number };
+};
+
+export type ContinueRunRequest = Pick<WebRunPolicy, "tokenBudget" | "toolCallBudget" | "writeCallBudget" | "deadlineMs"> & {
+  budgetMode?: "new" | "remaining";
+};
+
+export type WebRunState = {
+  runId: string;
+  status: WebRunStatus;
+  reason?: WebRunReason;
+  details?: string;
+  stepsUsed: number;
+  maxSteps: number;
+  budgetUsage?: WebRunBudgetUsage;
+  cumulativeBudgetUsage?: WebRunBudgetUsage;
+  budgetPolicy?: WebRunPolicy;
+  budgetMode?: "new" | "remaining";
+  lastFingerprint?: string;
+  checkpointRevision: number;
+  savedAt?: number;
+};
+
 export type SessionDetail = {
   id: string;
   busy: boolean;
@@ -61,6 +112,7 @@ export type SessionDetail = {
   permissionMode: string;
   planStatus: string | null;
   thinkingLevel: string;
+  runState?: WebRunState | null;
   messages: HistoryMessage[];
 };
 
@@ -113,11 +165,61 @@ export type ModelOption = {
   maxTokens: number;
   reasoning: boolean;
   thinkingLevels: string[];
+  defaultThinkingLevel?: ThinkingLevel;
 };
 
 export type ModelsListResponse = {
   models: ModelOption[];
   defaultModel: string;
+};
+
+export type ModelProviderProtocol = "openai-completions" | "openai-responses" | "anthropic-messages";
+
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+export type ThinkingCompat = {
+  thinkingFormat?: "openai" | "deepseek" | "openrouter" | "qwen" | "qwen-chat-template" | "zai" | "together" | "string-thinking" | "ant-ling";
+  supportsReasoningEffort?: boolean;
+};
+export type CustomModelDefinition = {
+  id: string;
+  name?: string;
+  contextWindow?: number;
+  maxTokens?: number;
+  input?: string[];
+  tools?: boolean;
+  reasoning?: boolean;
+  reasoningEfforts?: false | Partial<Record<ThinkingLevel, string | null>>;
+  defaultThinkingLevel?: ThinkingLevel;
+  compat?: ThinkingCompat;
+};
+
+export type ModelProviderSummary = {
+  provider: string;
+  displayName?: string;
+  baseUrl: string;
+  protocol: ModelProviderProtocol;
+  keyConfigured: boolean;
+  compat?: ThinkingCompat;
+  models: CustomModelDefinition[];
+};
+
+export type ModelProviderInput = {
+  provider: string;
+  displayName?: string;
+  baseUrl: string;
+  protocol: ModelProviderProtocol;
+  apiKey?: string;
+  compat?: ThinkingCompat;
+  models: CustomModelDefinition[];
+};
+
+export type ModelProviderListResponse = {
+  providers: ModelProviderSummary[];
+};
+
+export type ModelProviderDiscoveryResponse = {
+  compat?: ThinkingCompat;
+  models: CustomModelDefinition[];
 };
 
 export type ModelSelectionResponse = {
@@ -130,6 +232,7 @@ export type ModelSelectionResponse = {
 export type ThinkingLevelResponse = {
   thinkingLevel: string;
   thinkingLevels: string[];
+  defaultThinkingLevel?: ThinkingLevel;
 };
 
 // ── Plan-Act events (P4) ──────────────────────────────────────────────────────

@@ -4,23 +4,60 @@
 
 import type { Express } from "express";
 import { createReadStream } from "node:fs";
-import { readdir, realpath, stat } from "node:fs/promises";
+import { mkdir, readdir, realpath, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { listWorkspaceDirectory, readWorkspaceFile, resolveWorkspacePath } from "../../workspace.ts";
 import type { WorkspaceRegistry, WorkspaceRecord } from "../../workspaces.ts";
 import { errorMessage } from "./types.ts";
 
-function resolveDirectoryRequest(value: string | undefined, workspace: string): string {
+/** One directory level in the add-workspace picker. Hidden rows count toward the bound. */
+export const DIRECTORY_BROWSER_MAX_ENTRIES = 1000;
+
+export type DirectoryBrowserEntry = {
+  name: string;
+  path: string;
+  hidden: boolean;
+};
+
+export type DirectoryCrumb = { name: string; path: string };
+
+/**
+ * A picker path must name one fixed location. Relative paths are refused so a
+ * wire value cannot be rebased onto the host process working directory.
+ */
+export function isFullyQualifiedDirectory(value: string): boolean {
+  if (!value || value !== value.trim()) return false;
+  if (process.platform === "win32") {
+    return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+  }
+  return path.isAbsolute(value);
+}
+
+export function directoryBreadcrumbs(current: string): DirectoryCrumb[] {
+  const root = path.parse(current).root;
+  const crumbs: DirectoryCrumb[] = [{ name: root, path: root }];
+  if (current === root) return crumbs;
+  const relative = path.relative(root, current);
+  let cursor = root;
+  for (const part of relative.split(path.sep).filter(Boolean)) {
+    cursor = path.join(cursor, part);
+    crumbs.push({ name: part, path: cursor });
+  }
+  return crumbs;
+}
+
+function resolveDirectoryRequest(value: string | undefined): string | { error: string } {
   const requested = value?.trim();
-  if (!requested) return workspace;
+  if (!requested) return os.homedir();
   if (requested === "~") return os.homedir();
-  if (requested.startsWith("~/") || requested.startsWith(`~${path.sep}`)) {
+  if (requested.startsWith("~/") || requested.startsWith("~\\")) {
     return path.join(os.homedir(), requested.slice(2));
   }
-  return path.isAbsolute(requested)
-    ? requested
-    : path.resolve(workspace, requested);
+  if (!isFullyQualifiedDirectory(requested)) {
+    return { error: "Directory path must be fully qualified" };
+  }
+  return requested;
 }
 
 export type WorkspaceRoutesContext = {
@@ -80,11 +117,42 @@ export function registerWorkspaceRoutes(app: Express, context: WorkspaceRoutesCo
     }
   });
 
+  app.post("/api/workspaces/directories", async (request, response) => {
+    const parent = resolveDirectoryRequest(typeof request.body?.path === "string" ? request.body.path : undefined);
+    if (typeof parent !== "string") {
+      response.status(400).json({ error: parent.error });
+      return;
+    }
+    const name = typeof request.body?.name === "string" ? request.body.name.trim() : "";
+    if (!name || name === "." || name === ".." || name.includes("/") || name.includes("\\")) {
+      response.status(400).json({ error: "Folder name must be a single path segment" });
+      return;
+    }
+    try {
+      const current = await realpath(path.resolve(parent));
+      if (!(await stat(current)).isDirectory()) {
+        response.status(400).json({ error: "Path must be a directory" });
+        return;
+      }
+      const child = path.join(current, name);
+      await mkdir(child);
+      response.status(201).json({ path: await realpath(child) });
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "";
+      response.status(code === "EEXIST" ? 409 : 400).json({
+        error: code === "EEXIST" ? "Folder already exists" : errorMessage(error),
+      });
+    }
+  });
+
   app.get("/api/workspaces/directories", async (request, response) => {
     const requested = resolveDirectoryRequest(
       typeof request.query.path === "string" ? request.query.path : undefined,
-      context.workspace,
     );
+    if (typeof requested !== "string") {
+      response.status(400).json({ error: requested.error });
+      return;
+    }
     try {
       const current = await realpath(path.resolve(requested));
       if (!(await stat(current)).isDirectory()) {
@@ -92,13 +160,39 @@ export function registerWorkspaceRoutes(app: Express, context: WorkspaceRoutesCo
         return;
       }
       const entries = await readdir(current, { withFileTypes: true });
-      const directories = entries
-        .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
-        .map((entry) => ({ name: entry.name, path: path.join(current, entry.name) }))
-        .sort((a, b) => a.name.localeCompare(b.name))
-        .slice(0, 500);
+      const directories: DirectoryBrowserEntry[] = [];
+      for (const entry of entries) {
+        if (entry.isDirectory()) {
+          directories.push({
+            name: entry.name,
+            path: path.join(current, entry.name),
+            hidden: entry.name.startsWith("."),
+          });
+          continue;
+        }
+        if (!entry.isSymbolicLink()) continue;
+        const child = path.join(current, entry.name);
+        try {
+          const target = await realpath(child);
+          if ((await stat(target)).isDirectory()) {
+            directories.push({ name: entry.name, path: target, hidden: entry.name.startsWith(".") });
+          }
+        } catch {
+          // Skip broken or cyclic directory links.
+        }
+      }
+      directories.sort((a, b) => a.name.localeCompare(b.name));
+      const truncated = directories.length > DIRECTORY_BROWSER_MAX_ENTRIES;
       const parent = path.dirname(current);
-      response.json({ path: current, parent: parent === current ? null : parent, directories });
+      const home = os.homedir();
+      response.json({
+        path: current,
+        parent: parent === current ? null : parent,
+        home,
+        crumbs: directoryBreadcrumbs(current),
+        directories: truncated ? directories.slice(0, DIRECTORY_BROWSER_MAX_ENTRIES) : directories,
+        truncated,
+      });
     } catch (error) {
       response.status(400).json({ error: errorMessage(error) });
     }

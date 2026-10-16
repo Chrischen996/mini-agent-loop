@@ -35,7 +35,7 @@ export const researcherProfile: SubagentProfile = {
     "codebase_read",
     "codebase_explain",
   ],
-  maxTurns: 12,
+  maxTurns: 20,
   readOnly: true,
 };
 
@@ -64,7 +64,7 @@ export const coderProfile: SubagentProfile = {
     "find",
     "ls",
   ],
-  maxTurns: 15,
+  maxTurns: 25,
 };
 
 // ─── Reviewer ────────────────────────────────────────────────────────────────
@@ -93,7 +93,7 @@ export const reviewerProfile: SubagentProfile = {
     "codebase_read",
     "codebase_explain",
   ],
-  maxTurns: 10,
+  maxTurns: 15,
   readOnly: true,
 };
 

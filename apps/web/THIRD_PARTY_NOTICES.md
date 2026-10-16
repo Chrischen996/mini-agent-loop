@@ -18,3 +18,11 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+The loading animation in `src/lib/loading.ts` adapts OpenAI Codex's
+`summary_shimmer.rs`, `motion.rs`, and `status_indicator_widget.rs` at commit
+`6ae8b8aa7c608730d4315d59c5c081897ae02780` from
+https://github.com/openai/codex, Copyright 2025 OpenAI, under Apache-2.0.
+It was translated to TypeScript and adapted for the React Web view. The upstream
+license and notice are included in `public/licenses/openai-codex/` and served
+under `/licenses/openai-codex/` in the Web build.

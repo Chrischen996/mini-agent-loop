@@ -2,11 +2,37 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api } from "../lib/api.ts";
 import type { ChatItem, StreamPhase } from "../lib/event-adapter.ts";
 import { Icon } from "./Icon.tsx";
+import { LoadingIndicator } from "./LoadingIndicator.tsx";
+import type { LoadingActivity } from "../lib/loading.ts";
 
-function renderNote(item: Extract<ChatItem, { kind: "note" }>): JSX.Element {
+function renderNote(
+  item: Extract<ChatItem, { kind: "note" }>,
+  onContinue?: () => void,
+): JSX.Element {
   return (
     <div key={item.id} className={`note note--${item.tone}`}>
-      {item.text}
+      <span style={{ whiteSpace: "pre-line" }}>{item.text}</span>
+      {item.action === "continue" && onContinue && (
+        <button
+          type="button"
+          className="note__action-btn"
+          style={{
+            marginLeft: "12px",
+            padding: "2px 10px",
+            background: "var(--color-primary, #0969da)",
+            color: "#fff",
+            border: "none",
+            borderRadius: "4px",
+            cursor: "pointer",
+            fontWeight: 500,
+            fontSize: "12px",
+          }}
+          title="使用默认策略分配新预算并从检查点继续"
+          onClick={onContinue}
+        >
+          继续执行（新预算）
+        </button>
+      )}
     </div>
   );
 }
@@ -228,7 +254,11 @@ function PermissionCard({ item, sessionId, onResolved }: { item: Extract<ChatIte
 
 function renderItem(
   item: ChatItem,
-  opts: { sessionId: string; onResolved: (requestId: string) => void },
+  opts: {
+    sessionId: string;
+    onResolved: (requestId: string) => void;
+    onContinue?: () => void;
+  },
 ): JSX.Element {
   switch (item.kind) {
     case "user":
@@ -258,7 +288,7 @@ function renderItem(
     case "permission":
       return <PermissionCard key={item.id} item={item} {...opts} />;
     case "note":
-      return renderNote(item);
+      return renderNote(item, opts.onContinue);
   }
 }
 
@@ -268,17 +298,23 @@ export function ChatView({
   sessionTitle,
   sessionId,
   onPermissionResolve,
+  onContinue,
+  activity,
+  onStop,
 }: {
   items: ChatItem[];
   phase: StreamPhase;
   sessionTitle: string | null;
   sessionId: string | null;
   onPermissionResolve: (requestId: string) => void;
+  onContinue?: () => void;
+  activity?: LoadingActivity | null;
+  onStop?: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followTailRef = useRef(true);
   const [showToBottom, setShowToBottom] = useState(false);
-  const opts = { sessionId: sessionId ?? "", onResolved: onPermissionResolve };
+  const opts = { sessionId: sessionId ?? "", onResolved: onPermissionResolve, onContinue };
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -321,6 +357,7 @@ export function ChatView({
         <div className="chat" ref={scrollRef} onScroll={handleScroll}>
           <div className="chat__column">
             {items.length > 0 ? items.map((item) => renderItem(item, opts)) : null}
+            {activity && <LoadingIndicator key={activity.startedAt} activity={activity} onStop={onStop} />}
           </div>
         </div>
         {showToBottom && <button type="button" className="chat__to-bottom" aria-label="Jump to latest message" title="Jump to latest message" onClick={scrollToBottom}><Icon name="chevronDown" width={16} height={16} /></button>}
