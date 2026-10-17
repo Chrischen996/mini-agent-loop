@@ -1,6 +1,7 @@
 import type { HistoryMessage, PlanSummary, WireEvent } from "../types/api.ts";
 import { runStopText } from "./run-state.ts";
 import type { LoadingActivity } from "./loading.ts";
+import { captureToolArgs, type ToolArgs } from "./tool-card.ts";
 
 /**
  * Frontend view model for the chat area (doc 1.md §7.2-7.3).
@@ -18,10 +19,14 @@ export type ChatItem =
       name: string;
       status: "running" | "ok" | "error";
       preview: string;
-      /** Workspace path for read-family rows. Presentation only. */
+      /** Workspace path for file rows. Presentation only. */
       path?: string;
       /** 1-based line the read call started from. Presentation only. */
       startLine?: number;
+      /** Slim tool arguments for the row summary and expanded card. */
+      args?: ToolArgs;
+      /** Decoded input length used for write/edit size labels. */
+      inputBytes?: number;
     }
   | { id: string; kind: "permission"; requestId: string; tool: string; risk: string; status: "pending" | "resolved" }
   | { id: string; kind: "note"; tone: "info" | "warn" | "error"; text: string; action?: "continue" };
@@ -81,14 +86,31 @@ function attachmentNames(content: unknown): string[] {
 }
 
 
-function readCallMeta(name: string, args: unknown): { path?: string; startLine?: number } {
-  if (name.trim().toLowerCase() !== "read" || !args || typeof args !== "object") return {};
-  const record = args as Record<string, unknown>;
-  const path = typeof record.path === "string" && record.path.trim() ? record.path : undefined;
-  const offset = typeof record.offset === "number" && Number.isFinite(record.offset)
+function toolPresentation(name: string, args: unknown): Pick<Extract<ChatItem, { kind: "tool" }>, "path" | "startLine" | "args" | "inputBytes"> {
+  const captured = captureToolArgs(args);
+  const record = captured.args;
+  const isRead = name.trim().toLowerCase() === "read";
+  const path = typeof record?.path === "string" && record.path.trim()
+    ? record.path
+    : typeof record?.file_path === "string" && record.file_path.trim()
+      ? record.file_path
+      : undefined;
+  const offset = isRead && typeof record?.offset === "number" && Number.isFinite(record.offset)
     ? Math.max(1, Math.floor(record.offset))
     : undefined;
-  return { path, startLine: offset ?? (path ? 1 : undefined) };
+  return {
+    ...captured,
+    ...(path ? { path } : {}),
+    ...(isRead && path ? { startLine: offset ?? 1 } : {}),
+  };
+}
+
+function applyPresentation(item: Extract<ChatItem, { kind: "tool" }>, name: string, args: unknown): void {
+  const presentation = toolPresentation(name, args);
+  if (presentation.path) item.path = presentation.path;
+  if (presentation.startLine) item.startLine = presentation.startLine;
+  if (presentation.args) item.args = presentation.args;
+  if (presentation.inputBytes !== undefined) item.inputBytes = presentation.inputBytes;
 }
 
 /** Convert persisted session history (GET /api/sessions/:id) into view items. */
@@ -112,7 +134,6 @@ export function historyToItems(messages: HistoryMessage[]): ChatItem[] {
       }
       for (const call of message.toolCalls ?? []) {
         // Refined later when the matching tool result message arrives.
-        const meta = readCallMeta(call.name, call.arguments);
         items.push({
           id: `t-${call.id}`,
           kind: "tool",
@@ -120,7 +141,7 @@ export function historyToItems(messages: HistoryMessage[]): ChatItem[] {
           name: call.name,
           status: "ok",
           preview: "",
-          ...meta,
+          ...toolPresentation(call.name, call.arguments),
         });
       }
     } else {
@@ -234,11 +255,8 @@ export class ChatStreamState {
         );
         if (existing) {
           existing.status = "running";
-          const meta = readCallMeta(String(event.name ?? existing.name), event.arguments);
-          if (meta.path) existing.path = meta.path;
-          if (meta.startLine) existing.startLine = meta.startLine;
+          applyPresentation(existing, String(event.name ?? existing.name), event.arguments);
         } else {
-          const meta = readCallMeta(String(event.name ?? "tool"), event.arguments);
           this.items.push({
             id: `t-${toolCallId}`,
             kind: "tool",
@@ -246,7 +264,7 @@ export class ChatStreamState {
             name: String(event.name ?? "tool"),
             status: "running",
             preview: "",
-            ...meta,
+            ...toolPresentation(String(event.name ?? "tool"), event.arguments),
           });
         }
         this.refreshToolActivity();
@@ -259,12 +277,10 @@ export class ChatStreamState {
           (candidate): candidate is Extract<ChatItem, { kind: "tool" }> =>
             candidate.kind === "tool" && candidate.toolCallId === toolCallId,
         );
-        const meta = readCallMeta(String(event.name ?? item?.name ?? ""), event.arguments);
         if (item) {
           item.status = event.isError ? "error" : "ok";
           item.preview = String(event.preview ?? "").slice(0, 500);
-          if (!item.path && meta.path) item.path = meta.path;
-          if (!item.startLine && meta.startLine) item.startLine = meta.startLine;
+          applyPresentation(item, String(event.name ?? item.name), event.arguments);
         }
         this.refreshToolActivity();
         break;

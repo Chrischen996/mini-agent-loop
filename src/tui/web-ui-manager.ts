@@ -20,6 +20,25 @@ const STOP_GRACE_MS = 5_000;
 const BUILD_TIMEOUT_MS = 120_000;
 
 /**
+ * `spawn("npm")` cannot see the Windows `npm.cmd` shim (ENOENT). Node 24 also
+ * rejects `spawn("npm.cmd")` with EINVAL unless a shell is involved. Route the
+ * fixed build command through `cmd.exe` instead of enabling `shell: true`.
+ */
+export function npmInvocation(args: string[], platform = process.platform): { command: string; args: string[] } {
+  if (platform === "win32") {
+    return { command: "cmd.exe", args: ["/d", "/s", "/c", ["npm", ...args].join(" ")] };
+  }
+  return { command: "npm", args };
+}
+
+/** Prefer the local Vite binary. `npm run web:build` shells out to `vite`, which is missing when the .bin shim was not linked. */
+export function webBuildInvocation(packageRoot: string, execPath = process.execPath): { command: string; args: string[] } {
+  const viteBin = path.join(packageRoot, "node_modules", "vite", "bin", "vite.js");
+  if (existsSync(viteBin)) return { command: execPath, args: [viteBin, "build"] };
+  return npmInvocation(["run", "web:build"]);
+}
+
+/**
  * Lifecycle manager for the local Web workbench (doc 1.md §5).
  *
  * - Spawns the shared Web launcher (`dist/web-launcher.js` in a package build,
@@ -77,7 +96,8 @@ export class WebUiManager {
         : path.resolve(packageRoot, "dist", "web");
       let notice: string | undefined;
       if (!existsSync(webDist)) {
-        const build = await this.runCommand("npm", ["run", "web:build"], packageRoot, BUILD_TIMEOUT_MS);
+        const buildCommand = webBuildInvocation(packageRoot);
+        const build = await this.runCommand(buildCommand.command, buildCommand.args, packageRoot, BUILD_TIMEOUT_MS);
         if (!build.ok) {
           this.state = "failed";
           this.lastError = build.output.slice(-500);
@@ -98,7 +118,10 @@ export class WebUiManager {
         cwd: packageRoot,
         env: { ...process.env, PORT: String(this.port) },
         stdio: ["ignore", "pipe", "pipe"],
-        detached: true, // own process group so stop() can terminate the whole tree
+        windowsHide: true,
+        // A detached console on Windows delivers CTRL_C_EVENT (exit 0xC000013A)
+        // and the server dies before it listens. Unix still needs a process group.
+        detached: process.platform !== "win32",
       });
       this.startedAt = Date.now();
       let stderrTail = "";
@@ -162,6 +185,19 @@ export class WebUiManager {
         proc.kill(signal);
         return;
       }
+      if (process.platform === "win32") {
+        // Negative pids are not process groups on Windows. taskkill /t stops
+        // the launcher and the server it spawned.
+        const args = ["/pid", String(pid), "/t"];
+        if (signal === "SIGKILL") args.push("/f");
+        spawn("taskkill", args, {
+          windowsHide: true,
+          stdio: "ignore",
+        }).on("error", () => {
+          try { proc.kill(signal); } catch { /* already gone */ }
+        });
+        return;
+      }
       try {
         process.kill(-pid, signal); // whole group (npm -> tsx -> node)
       } catch {
@@ -216,9 +252,18 @@ export class WebUiManager {
   }
 
   private openBrowser(): void {
-    const command =
-      process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
     try {
+      if (process.platform === "win32") {
+        // `start` is a cmd builtin. The empty title keeps the URL from being
+        // parsed as the window title.
+        spawn("cmd.exe", ["/d", "/s", "/c", "start", "", this.url], {
+          detached: true,
+          windowsHide: true,
+          stdio: "ignore",
+        }).unref();
+        return;
+      }
+      const command = process.platform === "darwin" ? "open" : "xdg-open";
       exec(`${command} ${this.url}`);
     } catch {
       // Auto-open failure is non-fatal (doc §3.1 constraint 4); the URL is

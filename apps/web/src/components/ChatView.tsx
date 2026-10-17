@@ -3,6 +3,7 @@ import { api } from "../lib/api.ts";
 import type { ChatItem, StreamPhase } from "../lib/event-adapter.ts";
 import { Icon } from "./Icon.tsx";
 import { LoadingIndicator } from "./LoadingIndicator.tsx";
+import { ToolCallCard } from "./ToolCallCard.tsx";
 import type { LoadingActivity } from "../lib/loading.ts";
 
 function renderNote(
@@ -13,24 +14,8 @@ function renderNote(
     <div key={item.id} className={`note note--${item.tone}`}>
       <span style={{ whiteSpace: "pre-line" }}>{item.text}</span>
       {item.action === "continue" && onContinue && (
-        <button
-          type="button"
-          className="note__action-btn"
-          style={{
-            marginLeft: "12px",
-            padding: "2px 10px",
-            background: "var(--color-primary, #0969da)",
-            color: "#fff",
-            border: "none",
-            borderRadius: "4px",
-            cursor: "pointer",
-            fontWeight: 500,
-            fontSize: "12px",
-          }}
-          title="使用默认策略分配新预算并从检查点继续"
-          onClick={onContinue}
-        >
-          继续执行（新预算）
+        <button type="button" className="note__action" title="Allocate a new budget and resume from the checkpoint" onClick={onContinue}>
+          Continue
         </button>
       )}
     </div>
@@ -144,68 +129,6 @@ function AssistantMarkdown({ text }: { text: string }): JSX.Element {
   return <div className="markdown">{blocks.length ? blocks : <span>{text}</span>}</div>;
 }
 
-function toolTitle(name: string): string {
-  const labels: Record<string, string> = {
-    read: "Read",
-    bash: "Bash",
-    write: "Write",
-    edit: "Edit",
-    grep: "Grep",
-    search: "Search",
-  };
-  return labels[name.trim().toLowerCase()] ?? name;
-}
-
-function splitReadNotice(preview: string): { body: string; notice?: string } {
-  const match = preview.match(/\n\n\[notice: ([\s\S]+)\]\s*$/);
-  if (!match || match.index === undefined) return { body: preview };
-  return { body: preview.slice(0, match.index), notice: match[1] };
-}
-
-function numberedPreview(preview: string, startLine = 1): string {
-  const { body, notice } = splitReadNotice(preview.replace(/\r\n?/g, "\n"));
-  const lines = body.split("\n");
-  const width = String(startLine + Math.max(lines.length - 1, 0)).length;
-  const numbered = lines
-    .map((line, index) => `${String(startLine + index).padStart(width, " ")}  ${line}`)
-    .join("\n");
-  return notice ? `${numbered}\n\n${notice}` : numbered;
-}
-
-function renderTool(item: Extract<ChatItem, { kind: "tool" }>): JSX.Element {
-  const isRead = item.name.trim().toLowerCase() === "read";
-  const summary = isRead ? item.path : undefined;
-  const body = item.preview
-    ? isRead
-      ? numberedPreview(item.preview, item.startLine ?? 1)
-      : item.preview
-    : "";
-  return (
-    <div key={item.id} className={`tool tool--${item.status}${isRead ? " tool--read" : ""}`}>
-      <div className="tool__head">
-        <span className="tool__name">{isRead ? "Read" : toolTitle(item.name)}</span>
-        {summary ? (
-          <>
-            <span className="tool__sep" aria-hidden="true" />
-            <span className="tool__summary" title={summary}>{summary}</span>
-          </>
-        ) : null}
-        <span className="tool__status">{item.status}</span>
-      </div>
-      {body ? (
-        isRead ? (
-          <details className="tool__details">
-            <summary>File</summary>
-            <pre className="tool__preview tool__preview--lines">{body}</pre>
-          </details>
-        ) : (
-          <pre className="tool__preview">{body}</pre>
-        )
-      ) : null}
-    </div>
-  );
-}
-
 function PermissionCard({ item, sessionId, onResolved }: { item: Extract<ChatItem, { kind: "permission" }>; sessionId: string; onResolved: (requestId: string) => void }): JSX.Element {
   const [resolving, setResolving] = useState(false);
   const handleDecision = async (decision: "allow" | "deny"): Promise<void> => {
@@ -284,7 +207,7 @@ function renderItem(
         </div>
       );
     case "tool":
-      return renderTool(item);
+      return <ToolCallCard key={item.id} item={item} />;
     case "permission":
       return <PermissionCard key={item.id} item={item} {...opts} />;
     case "note":

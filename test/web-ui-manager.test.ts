@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { describe, it } from "node:test";
-import { WebUiManager, resolveWebLauncherCommand } from "../src/tui/web-ui-manager.ts";
+import { WebUiManager, npmInvocation, resolveWebLauncherCommand, webBuildInvocation } from "../src/tui/web-ui-manager.ts";
 
 /**
  * State-machine tests that do NOT spawn processes (doc §11.1). The real
@@ -32,10 +33,28 @@ describe("web ui manager state machine (P1 review fix)", () => {
     assert.equal(st.url, undefined);
   });
 
+  it("launches npm through cmd.exe on Windows", () => {
+    assert.deepEqual(npmInvocation(["run", "web:build"], "win32"), {
+      command: "cmd.exe",
+      args: ["/d", "/s", "/c", "npm run web:build"],
+    });
+    assert.deepEqual(npmInvocation(["--version"], "linux"), {
+      command: "npm",
+      args: ["--version"],
+    });
+  });
+
+  it("builds the web UI with the local Vite binary when it is installed", () => {
+    const command = webBuildInvocation(process.cwd(), "node");
+    assert.equal(command.command, "node");
+    assert.equal(command.args[1], "build");
+    assert.match(command.args[0] ?? "", /vite\.js$/);
+  });
+
   it("resolves the source Web launcher for the source TUI entry", () => {
     const command = resolveWebLauncherCommand(new URL("../src/tui/web-ui-manager.ts", import.meta.url).href);
     assert.equal(command.command, process.execPath);
     assert.deepEqual(command.args.slice(0, 2), ["--import", "tsx"]);
-    assert.match(command.args[2] ?? "", /src\/web-launcher\.ts$/);
+    assert.equal(command.args[2], path.resolve("src/web-launcher.ts"));
   });
 });
