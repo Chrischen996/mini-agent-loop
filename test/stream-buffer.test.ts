@@ -56,4 +56,19 @@ describe("TurnEventBuffer", () => {
     assert.deepEqual(events.map((event) => event.type), ["assistant_delta", "done"]);
     assert.equal((events[0] as Extract<LoopEvent, { type: "assistant_delta" }>).text, "fresh");
   });
+
+  for (const stop of [
+    { type: "max_turns", maxTurns: 1, messages: [] },
+    { type: "run_stopped", stopReason: "stalled", messages: [] },
+  ] satisfies LoopEvent[]) {
+    it(`closes ${stop.type} runs and ignores late provider events`, () => {
+      const events: LoopEvent[] = [];
+      const buffer = new TurnEventBuffer((event) => events.push(event));
+      const run = buffer.start();
+      buffer.handle(run, stop);
+      assert.equal(buffer.isActive(run), false);
+      assert.equal(buffer.handle(run, { type: "assistant_delta", kind: "answer", text: "late" }), false);
+      assert.deepEqual(events, [stop]);
+    });
+  }
 });

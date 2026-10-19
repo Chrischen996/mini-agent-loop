@@ -36,13 +36,12 @@ import { useAutocomplete } from "./hooks/useAutocomplete.ts";
 import { tuiReducer, createInitialState } from "./state.ts";
 import {
   createAgentHistory,
-  MaxTurnsExceededError,
-  runAgentTurn,
   restoreAgentHistory,
   getDefaultSystemPrompt,
   type AgentRuntimeRef,
   type LoopEvent,
 } from "../loop.ts";
+import { runTuiAgentTurn, tuiContinuationPrompt } from "./agent-turn.ts";
 import { loadInstructionBundle } from "../agents-md.ts";
 import { LlmTimeoutError } from "../llm/retry.ts";
 import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
@@ -131,6 +130,7 @@ import {
 } from "../skills/index.ts";
 
 import { Overlays } from "./components/Overlays.tsx";
+import { BgTaskLivePanel } from "./components/BgTaskLivePanel.tsx";
 import { PermissionPanel } from "./components/PermissionPanel.tsx";
 import { PlanApprovalBar } from "./components/PlanApprovalBar.tsx";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
@@ -263,6 +263,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
     }
   }, [cwd]);
   const [bgTaskCount, setBgTaskCount] = useState(0);
+  const [bgPanelOpen, setBgPanelOpen] = useState(false);
   const refreshBgTaskCount = useCallback(async () => {
     const manager = getBgManager();
     if (!manager) return;
@@ -1187,7 +1188,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
       // If the turn is aborted mid-pipeline, the pipeline tool receives the
       // same signal via the broker and cancels in-flight subagent dispatches.
       try {
-        historyRef.current = await runAgentTurn(historyRef.current, task, {
+        const pipelineResult = await runTuiAgentTurn(historyRef.current, task, {
           llm: { ...effectiveLlm, sessionId: conversationId },
           tools: () => [
             ...resolveToolProvider(agentToolsRef.current),
@@ -1205,7 +1206,12 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
           skillNames: skillNamesRef.current,
           skillRegistry: defaultSkillRegistry,
           onEvent: (event: LoopEvent) => { streamBuffer.handle(runId, event); },
+          onCheckpoint: async ({ messages }) => {
+            historyRef.current = messages;
+            await persistSession(messages);
+          },
         });
+        historyRef.current = pipelineResult.history;
         streamBuffer.finish(runId);
       } catch (err) {
         streamBuffer.finish(runId);
@@ -1247,6 +1253,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
       return;
     }
     if (trimmed === "/bg-tasks") {
+      setBgPanelOpen(true);
       const manager = getBgManager();
       if (!manager) {
         dispatch({
@@ -1594,13 +1601,25 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
       return;
     }
 
+    const isContinuation = !planTurnOverride && /^\/continue$/i.test(trimmed);
+    if (!planTurnOverride && /^\/continue(?:\s|$)/i.test(trimmed)) {
+      try {
+        if (!isContinuation) throw new Error("Usage: /continue");
+        if (pendingImagesRef.current.length > 0) throw new Error("Submit attached images with a new prompt before continuing.");
+        tuiContinuationPrompt(historyRef.current);
+      } catch (error) {
+        setInput("");
+        dispatch({ type: "ADD_NOTICE", title: "Continue", text: error instanceof Error ? error.message : String(error) });
+        return;
+      }
+    }
     const pendingImgs = planTurnOverride ? [] : [...pendingImagesRef.current];
     if (!planTurnOverride && !trimmed && pendingImgs.length === 0) {
       setInput("");
       return;
     }
-    const prompt = planTurnOverride?.prompt ?? (trimmed || DEFAULT_IMAGE_PROMPT);
-    const parsedThinking = planTurnOverride
+    const prompt = isContinuation ? tuiContinuationPrompt(historyRef.current) : planTurnOverride?.prompt ?? (trimmed || DEFAULT_IMAGE_PROMPT);
+    const parsedThinking = planTurnOverride || isContinuation
       ? { intensity: undefined as undefined }
       : parseThinkingIntensityPrompt(prompt);
     let turnLlm = parsedThinking.intensity
@@ -1631,7 +1650,8 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
       abortRef.current.signal,
     );
     permissionTurnRef.current = permissionTurn;
-    dispatch({
+    if (isContinuation) dispatch({ type: "CONTINUE_TURN" });
+    else dispatch({
       type: "USER_MESSAGE",
       text: planTurnOverride ? planTurnOverride.displayText : prompt,
       ...(planTurnOverride?.displayText !== undefined ? { displayText: planTurnOverride.displayText } : {}),
@@ -1640,9 +1660,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
 
     const streamBuffer = streamBufferRef.current!;
     const runId = streamBuffer.start();
-    const MAX_AUTO_CONTINUES = 5;
-    let autoContinueCount = 0;
-    let currentUserText = planTurnOverride
+    const currentUserText = planTurnOverride
       ? prompt
       : prompt.replace(/@\S+/g, "").replace(/\s{2,}/g, " ").trim();
     const thinkingMode = planTurnOverride
@@ -1652,8 +1670,10 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
         : parseThinkingCommandMode(prompt) ?? thinkingPolicyRef.current;
     let turnSucceeded = false;
     let turnErrorMessage: string | undefined;
+    let turnAborted = false;
 
     const onLoopEvent = (event: LoopEvent) => {
+      if (event.type === "aborted") turnAborted = true;
       if (event.type === "thinking_policy") {
         // Keep adaptive escalation local to this turn. The selected level in
         // llmRef is user-owned and is what session persistence must restore.
@@ -1677,11 +1697,11 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
     };
 
     try {
-      await persistSession([
+      await persistSession(isContinuation ? historyRef.current : [
         ...historyRef.current,
         { role: "user", content: currentUserText },
       ]);
-      let currentUserContent = planTurnOverride
+      let currentUserContent = planTurnOverride || isContinuation
         ? prompt
         : await resolveAtRefsRef(prompt, permissionTurn);
       if (imageParts.length > 0) {
@@ -1692,78 +1712,47 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
       }
 
 
-      // Auto-continue loop: re-invoke runAgentTurn when maxTurns is exceeded.
-      while (true) {
-        try {
-          historyRef.current = await runAgentTurn(historyRef.current, currentUserText, {
-            llm: { ...turnLlm, sessionId: conversationId },
-            tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools(turnLlm)],
-            autoSubagent,
-            preprocessors: visionPreprocessors,
-            userContent: currentUserContent,
-            permissionTurn,
-            runtimeContext: {
-              sessionId: conversationId,
-              workspaceId: cwd,
-            } satisfies RuntimeExecutionContext,
-            globalTokenBudget,
-            autoValidate: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_VALIDATE),
-            validationWorkspace: cwd,
-            autoCheckpoint: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_CHECKPOINT),
-            thinkingMode,
-            runtimeRef: subagentRuntimeRef.current,
-            skillNames: skillNamesRef.current,
-            skillRegistry: defaultSkillRegistry,
-            onEvent: onLoopEvent,
-          });
+      try {
+        const result = await runTuiAgentTurn(historyRef.current, currentUserText, {
+          llm: { ...turnLlm, sessionId: conversationId },
+          tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools(turnLlm)],
+          autoSubagent,
+          preprocessors: visionPreprocessors,
+          userContent: currentUserContent,
+          isContinuation,
+          permissionTurn,
+          runtimeContext: {
+            sessionId: conversationId,
+            workspaceId: cwd,
+          } satisfies RuntimeExecutionContext,
+          globalTokenBudget,
+          autoValidate: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_VALIDATE),
+          validationWorkspace: cwd,
+          autoCheckpoint: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_CHECKPOINT),
+          thinkingMode,
+          runtimeRef: subagentRuntimeRef.current,
+          skillNames: skillNamesRef.current,
+          skillRegistry: defaultSkillRegistry,
+          onEvent: onLoopEvent,
+          onCheckpoint: async ({ messages }) => {
+            historyRef.current = messages;
+            await persistSession(messages);
+          },
+        });
+        historyRef.current = result.history;
+        streamBuffer.finish(runId);
+        turnSucceeded = !result.stop && !turnAborted;
+        turnErrorMessage = result.stop?.details;
+      } catch (err) {
+        if (err instanceof LlmTimeoutError && err.messages) {
+          // Timeout with partial content: save the partial history so the next
+          // turn starts from the known state instead of losing the streamed output.
+          historyRef.current = err.messages;
           streamBuffer.finish(runId);
-          turnSucceeded = true;
-          break;
-        } catch (err) {
-          if (err instanceof MaxTurnsExceededError) {
-            historyRef.current = err.messages;
-            autoContinueCount++;
-            if (autoContinueCount >= MAX_AUTO_CONTINUES || permissionTurn.signal.aborted) {
-              streamBuffer.finish(runId);
-              turnErrorMessage = permissionTurn.signal.aborted
-                ? "aborted"
-                : `Auto-continue limit reached (${MAX_AUTO_CONTINUES} turns)`;
-              if (permissionTurn.signal.aborted) {
-                const reason = permissionTurn.signal.reason;
-                dispatch({
-                  type: "LOOP_EVENT",
-                  event: reason instanceof PermissionModeChangedError
-                    ? {
-                        type: "aborted",
-                        messages: historyRef.current,
-                        reason: "permission_mode_changed",
-                        previousMode: reason.previousMode,
-                        permissionMode: reason.mode,
-                      }
-                    : { type: "aborted", messages: historyRef.current },
-                });
-              } else {
-                dispatch({ type: "LOOP_EVENT", event: { type: "error", message: turnErrorMessage } });
-              }
-              break;
-            }
-            currentUserText = "Continue the remaining work.";
-            currentUserContent = currentUserText;
-            dispatch({ type: "AUTO_CONTINUE", count: autoContinueCount, max: MAX_AUTO_CONTINUES });
-            continue;
-          }
-          if (err instanceof LlmTimeoutError && err.messages) {
-            // Timeout with partial content: save the partial history so the next
-            // turn starts from the known state instead of losing the streamed output.
-            historyRef.current = err.messages;
-            streamBuffer.finish(runId);
-            turnErrorMessage = formatLlmTimeoutMessage(err);
-            dispatch({ type: "LOOP_EVENT", event: { type: "error", message: turnErrorMessage } });
-            break;
-          }
-          throw err;
+          turnErrorMessage = formatLlmTimeoutMessage(err);
+          dispatch({ type: "LOOP_EVENT", event: { type: "error", message: turnErrorMessage } });
+        } else throw err;
         }
-      }
     } catch (err) {
       streamBuffer.finish(runId);
       turnErrorMessage = err instanceof Error ? err.message : String(err);
@@ -2172,6 +2161,13 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
           cacheReadTokens={state.cacheReadTokens}
           promptTokens={state.contextTokens}
         />
+        {bgPanelOpen && (
+          <BgTaskLivePanel
+            manager={getBgManager() ?? { initialize: async () => {}, list: async () => [], logs: async () => ({ taskId: "", text: "", offset: 0, nextOffset: 0, endOfLog: true }) }}
+            width={Math.min(80, Math.max(60, (termWidth ?? 100) - 4))}
+            onClose={() => setBgPanelOpen(false)}
+          />
+        )}
       </Box>
     </Box>
   );

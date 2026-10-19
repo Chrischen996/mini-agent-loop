@@ -37,6 +37,7 @@ import {
   type MessagePreprocessor,
 } from "./preprocessors/index.ts";
 import { createBgTaskTools, type SandboxConfig } from "./tools/index.ts";
+import { createDocumentEditTool } from "./tools/document-edit.ts";
 import { createSandboxRunner } from "./sandbox/index.ts";
 import { createRepositoryStoreFromEnv, RepositoryStore } from "./codebase/repository-store.ts";
 import { createCodebaseRuntimeFromEnv } from "./codebase/runtime.ts";

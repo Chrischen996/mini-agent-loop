@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { existsSync, watch, type FSWatcher } from "node:fs";
-import { open, stat } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { BgTaskStore, type TaskMeta, type TaskPaths, type TaskResult } from "./store.js";
@@ -35,6 +35,7 @@ export interface BgTaskSummary {
   pid?: number;
   attachCommand?: string;
   reason?: string;
+  tags?: string[];
 }
 
 export interface LogChunk {
@@ -45,16 +46,48 @@ export interface LogChunk {
   endOfLog: boolean;
 }
 
+export interface LogSearchOptions {
+  search?: string;
+  context?: number;
+  level?: "debug" | "info" | "warn" | "error";
+  reverse?: boolean;
+}
+
+export interface LogSearchResult {
+  taskId: string;
+  matches: string[];
+  matchCount: number;
+  truncated: boolean;
+}
+
 export interface StartTaskInput {
-  command: string;
+  command?: string;
+  template?: string;
   cwd?: string;
   name?: string;
   timeoutSeconds?: number;
+  depends_on?: string[];
+  strategy?: "all" | "any";
+  tags?: string[];
+  priority?: "high" | "normal" | "low";
+  maxConcurrent?: number;
+  cpuLimit?: number;
+  memoryLimit?: string;
+}
+
+export interface SnapshotInput {
+  taskId: string;
+  include?: string[];
+}
+
+export interface ReplayInput {
+  snapshot: string;
 }
 
 export interface SendTaskInput {
   text?: string;
   enter?: boolean;
+  key?: "ctrl_c" | "ctrl_d" | "ctrl_z" | "up" | "down" | "left" | "right";
 }
 
 export interface WaitResult {
@@ -78,6 +111,19 @@ function completeUtf8PrefixLength(buffer: Buffer): number {
   return buffer.length - lead < expected ? lead : buffer.length;
 }
 
+function keyToTmuxKey(key: SendTaskInput["key"]): string {
+  switch (key) {
+    case "ctrl_c": return "C-c";
+    case "ctrl_d": return "C-d";
+    case "ctrl_z": return "C-z";
+    case "up": return "Up";
+    case "down": return "Down";
+    case "left": return "Left";
+    case "right": return "Right";
+    default: throw new Error(`Unsupported send key: ${String(key)}`);
+  }
+}
+
 function defaultRunnerPath(): string {
   const javascriptRunner = fileURLToPath(new URL("./runner.js", import.meta.url));
   if (existsSync(javascriptRunner)) return javascriptRunner;
@@ -98,6 +144,7 @@ export class BgTaskManager extends EventEmitter {
   private readonly activeWaiters = new Map<string, number>();
   private reconciliationTimer?: NodeJS.Timeout;
   private cleanupHandler?: () => void;
+  private healthCheckTimer?: NodeJS.Timeout;
   private disposed = false;
   private initialized = false;
   private initialization?: Promise<void>;
@@ -154,6 +201,7 @@ export class BgTaskManager extends EventEmitter {
     }
     await this.backend.assertAvailable();
     await this.store.initialize();
+    await this.recoverOrphanedTasks();
     for (const taskId of await this.store.listOwnTaskIds()) {
       this.watchTask(taskId);
       await this.restoreTimeout(taskId);
@@ -161,11 +209,33 @@ export class BgTaskManager extends EventEmitter {
     await this.reconcile();
     this.reconciliationTimer = setInterval(() => void this.reconcile(), 1000);
     this.reconciliationTimer.unref();
+    this.healthCheckTimer = setInterval(async () => {
+      for (const taskId of await this.store.listOwnTaskIds()) {
+        const paths = await this.store.findTask(taskId);
+        if (!paths) continue;
+        const meta = await this.store.readMeta(paths);
+        if (meta?.status === "running" && meta.pid) {
+          const alive = await this.isProcessAlive(meta.pid);
+          if (!alive) await this.handleCrash(taskId);
+        }
+      }
+    }, 5000);
+    this.healthCheckTimer.unref();
   }
 
   async start(input: StartTaskInput): Promise<BgTaskSummary> {
     await this.initialize();
-    if (!input.command.trim()) throw new Error("command must not be empty");
+    if (input.depends_on && input.depends_on.length > 0) {
+      await this.wait(input.depends_on, input.strategy ?? "all");
+    }
+    const template = input.template ? await (async () => {
+      const templates = await this.readTemplates();
+      const t = templates[input.template!];
+      if (!t) throw new Error(`Template not found: ${input.template}`);
+      return t;
+    })() : undefined;
+    const command = input.command ?? template?.command ?? "";
+    if (!command.trim()) throw new Error("command or template must be provided");
     const resolvedCwd = await resolveWorkspacePath(this.projectCwd, input.cwd ?? "");
     if (!resolvedCwd.ok) throw new Error(resolvedCwd.error);
     const taskId = `bg_${randomUUID().replace(/-/g, "")}`;
@@ -173,8 +243,8 @@ export class BgTaskManager extends EventEmitter {
     const meta: TaskMeta = {
       schemaVersion: 1,
       taskId,
-      name: input.name?.trim() || input.command.trim().slice(0, 80),
-      command: input.command,
+      name: input.name?.trim() || template?.name || command.trim().slice(0, 80),
+      command,
       cwd: resolvedCwd.realTarget,
       shell: process.env.SHELL || "/bin/sh",
       status: "starting",
@@ -185,6 +255,7 @@ export class BgTaskManager extends EventEmitter {
       socketName: this.backend.socketName,
       instanceId: this.instanceId,
       ...(input.timeoutSeconds !== undefined ? { timeoutSeconds: input.timeoutSeconds } : {}),
+      tags: Array.isArray(input.tags) ? input.tags : undefined,
     };
     const paths = await this.store.createTask(meta);
     let runnerPid: number | undefined;
@@ -219,6 +290,106 @@ export class BgTaskManager extends EventEmitter {
       });
       throw error;
     }
+  }
+
+  private async recoverOrphanedTasks() {
+    const ids = await this.store.listOwnTaskIds();
+    for (const taskId of ids) {
+      const paths = await this.store.findTask(taskId);
+      if (!paths) continue;
+      const meta = await this.store.readMeta(paths);
+      if (meta?.status === "running" && meta.instanceId !== this.instanceId) {
+        if (meta.restartable && (meta.currentRetry ?? 0) < (meta.maxRetries ?? 3)) {
+          await this.start({ command: meta.command, name: meta.name, cwd: meta.cwd });
+        }
+      }
+    }
+  }
+
+  private async handleCrash(taskId: string) {
+    const paths = await this.store.findTask(taskId);
+    if (!paths) return;
+    await this.store.updateMeta(paths, (meta) => ({
+      ...meta,
+      status: "crashed",
+      lastCrashReason: `pid ${meta.pid} dead`,
+    }));
+    const meta = await this.store.readMeta(paths);
+    if (meta?.restartable && (meta.currentRetry ?? 0) < (meta.maxRetries ?? 3)) {
+      await this.store.updateMeta(paths, (m) => ({ ...m, currentRetry: (m.currentRetry ?? 0) + 1 }));
+      await this.start({ command: meta.command, name: meta.name, cwd: meta.cwd });
+    }
+  }
+
+  private async isProcessAlive(pid?: number): Promise<boolean> {
+    if (!pid) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async snapshot(input: SnapshotInput): Promise<{ snapshotPath: string }> {
+    const task = await this.get(input.taskId);
+    if (!task) throw new Error(`Task not found: ${input.taskId}`);
+    const snapshotsDir = this.store.instanceRoot;
+    const snapshotPath = `${snapshotsDir}/snapshots/${task.taskId}_${Date.now()}.json`;
+    const snapshot = {
+      taskId: task.taskId,
+      command: task.command,
+      cwd: task.cwd,
+      exitCode: task.exitCode,
+      status: task.status,
+      tags: task.tags,
+      timestamp: new Date().toISOString(),
+    };
+    await mkdir(snapshotsDir, { recursive: true });
+    await writeFile(snapshotPath, JSON.stringify(snapshot, null, 2));
+    return { snapshotPath };
+  }
+
+  async replay(input: ReplayInput): Promise<BgTaskSummary> {
+    const raw = await readFile(input.snapshot, "utf8");
+    const snapshot = JSON.parse(raw);
+    return this.start({ command: snapshot.command, name: snapshot.name, cwd: snapshot.cwd, tags: snapshot.tags });
+  }
+
+  async expandTemplate(template: string): Promise<string> {
+    const templates = await this.readTemplates();
+    const t = templates[template];
+    if (!t) throw new Error(`Template not found: ${template}`);
+    return t.command;
+  }
+
+  async readTemplates(): Promise<Record<string, { command: string; name?: string; cwd?: string; timeout?: number; tags?: string[] }>> {
+    const templatesPath = `${this.store.instanceRoot}/../templates.json`;
+    try {
+      const raw = await readFile(templatesPath, "utf8");
+      return JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+
+  async searchLogs(taskId: string, options: LogSearchOptions = {}): Promise<LogSearchResult> {
+    const paths = await this.store.findTask(taskId);
+    if (!paths) throw new Error(`Task not found: ${taskId}`);
+    const content = await readFile(paths.log, "utf8");
+    const lines = content.split("\n");
+    const { search, context = 0, level, reverse } = options;
+    const matches: string[] = [];
+    const targetLevel = level === "debug" ? /debug/i : level === "info" ? /info/i : level === "warn" ? /warn/i : level === "error" ? /error/i : null;
+    for (let i = 0; i < lines.length; i++) {
+      if (search && !lines[i].toLowerCase().includes(search.toLowerCase())) continue;
+      if (targetLevel && !targetLevel.test(lines[i])) continue;
+      const start = Math.max(0, i - context);
+      const end = Math.min(lines.length, i + context + 1);
+      matches.push(lines.slice(start, end).join("\n"));
+    }
+    if (reverse) matches.reverse();
+    return { taskId, matches, matchCount: matches.length, truncated: false };
   }
 
   async get(taskId: string): Promise<BgTaskSummary | undefined> {
@@ -270,6 +441,7 @@ export class BgTaskManager extends EventEmitter {
       pid,
       attachCommand: finalResult || taskBackend.kind !== "tmux" ? undefined : (taskBackend as BgTmuxBackend).attachCommand(sessionName),
       reason: finalResult?.reason,
+      tags: meta.tags,
     };
   }
 
@@ -333,13 +505,20 @@ export class BgTaskManager extends EventEmitter {
     const summary = await this.get(taskId);
     if (!summary) throw new Error(`Task not found: ${taskId}`);
     if (isTerminalStatus(summary.status)) throw new Error(`Task is not running: ${taskId}`);
-    if (input.text === undefined && !input.enter) throw new Error("Provide text or enter");
+    if (input.text === undefined && !input.enter && input.key === undefined) throw new Error("Provide text, enter, or key");
     const paths = await this.store.findTask(taskId);
     const meta = paths ? await this.store.readMeta(paths) : undefined;
     if (!meta) throw new Error(`Task metadata is missing: ${taskId}`);
     const taskBackend = this.backendForMeta(meta);
+    if (taskBackend.kind === "process" && (input.text !== undefined || input.enter || input.key !== undefined)) {
+      throw new Error(
+        "Interactive input (bg_send) requires a tmux-backed task. " +
+        "Restart the task with MINI_AGENT_BG_BACKEND=tmux, or use process backend only for non-interactive tasks."
+      );
+    }
     if (input.text !== undefined) await taskBackend.sendLiteral(summary.sessionName, input.text);
     if (input.enter) await taskBackend.sendKey(summary.sessionName, "Enter");
+    if (input.key) await taskBackend.sendKey(summary.sessionName, keyToTmuxKey(input.key));
     return summary;
   }
 

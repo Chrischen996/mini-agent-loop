@@ -109,6 +109,14 @@ catalog value → env var → default. See [Per-model timeouts](#per-model-timeo
 | `MINI_AGENT_WEB_SAME_ACTION_LIMIT` | no | `3` repetitions |
 | `MINI_AGENT_WEB_NO_PROGRESS_LIMIT` | no | `6` turns |
 | `MINI_AGENT_WEB_EMERGENCY_ITERATION_CAP` | no | `2000` (safety fallback) |
+| `MINI_AGENT_TUI_TOKEN_BUDGET` | no | unlimited per TUI run |
+| `MINI_AGENT_TUI_TOOL_CALL_BUDGET` | no | unlimited per TUI run |
+| `MINI_AGENT_TUI_WRITE_CALL_BUDGET` | no | unlimited per TUI run |
+| `MINI_AGENT_TUI_DEADLINE_MS` | no | unlimited execution time per TUI run |
+| `MINI_AGENT_TUI_MAX_COMPACTIONS` | no | `8` |
+| `MINI_AGENT_TUI_SAME_ACTION_LIMIT` | no | `3` repetitions |
+| `MINI_AGENT_TUI_NO_PROGRESS_LIMIT` | no | `6` turns |
+| `MINI_AGENT_TUI_EMERGENCY_ITERATION_CAP` | no | `2000` (safety fallback) |
 | `MINI_AGENT_GLOBAL_TOKEN_BUDGET` | no | unlimited; shared by parent and nested subagents |
 | `MINI_AGENT_GLOBAL_CONCURRENCY_LIMIT` | no | unlimited; applies across overlapping batches |
 | `MINI_AGENT_AUTO_SUBAGENT` | no | enabled by default; set `0`/`false`/`off` to disable |
@@ -170,8 +178,7 @@ The Continue button allocates a new default budget from the saved checkpoint.
 excluded from execution time. Exhausted remaining budgets pause immediately.
 
 Explicit `maxTurns` without `runPolicy` enables the legacy hard stop per block
-and bounded `maxAutoContinues` behavior. CLI, TUI and subagent limits retain
-their existing behavior. See [Web policy and API events](docs/web-run-policy.md)
+and bounded `maxAutoContinues` behavior. See [Web policy and API events](docs/web-run-policy.md)
 for configuration, counting rules, checkpoint fields and request examples.
 
 ### Automatic subagent preflight
@@ -799,6 +806,13 @@ overrides. Sessions are persisted under the shared `AGENT_DATA_DIR` root and
 restore history, tool results, Todo/Plan state, permission mode, and model
 settings on the next start. The Ink interface follows the Claude Code-style
 conversation layout.
+TUI runs use `AgentRunPolicy` by default. Token, time, tool and write budgets,
+context compaction, repeated-action detection, and no-progress detection can
+pause a run while preserving its partial history. The task summary reports the
+pause reason and usage; `/continue` resumes the saved task with a fresh policy
+allocation without adding a synthetic user message. Set the `MINI_AGENT_TUI_*`
+variables to configure the defaults. `MINI_AGENT_MAX_TURNS` or an explicit
+`maxTurns` opts a caller into the legacy hard-stop path for compatibility.
 TUI supports plan workflow slash commands: `/plan`, `/plan-show`, `/plan-approve`,
 `/plan-reject`, `/plan-run`, `/plan-retry`, `/plan-history`, `/plan-archive`.
 Terminal input follows the Claude Code-style priority order: `Tab`/`↑↓` first

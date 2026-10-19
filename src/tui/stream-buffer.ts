@@ -46,9 +46,8 @@ export class TurnEventBuffer {
     if (!this.isActive(runId)) return false;
     this.emit(event);
 
-    // max_turns is a continuation boundary, not a terminal event. The TUI
-    // remains busy while App starts the next inner run.
-    if (event.type === "done" || event.type === "aborted" || event.type === "error") {
+    if (event.type === "done" || event.type === "aborted" || event.type === "error"
+      || event.type === "max_turns" || event.type === "run_stopped") {
       this.finish(runId);
     }
     return true;

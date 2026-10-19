@@ -44,3 +44,44 @@ There is no configured lint script. Tests do not require an API key; live CLI/TU
 - TUI notices and status strings are English at the source. `noticeTitle`/`noticeText`/`statusLabel` only translate legacy Chinese strings recovered from persisted sessions; never add new user-facing Chinese text, and never let a translation fallback blank a message body.
 - Tool calls render as compact Claude-style rows (`✓ Name(args)` plus a nested `⎿` result gutter) in the Ink client — no full-width boxes. Live work shows exactly one spinner row; fold transient tips into it rather than stacking another.
 - Run focused tests for touched modules, then `npm test`, `npm run typecheck`, and `npm run build` when changes affect runtime or packaging.
+
+## Background task strategy
+
+When you encounter long-running commands (builds, tests, package installs, watch processes, servers), **automatically use `bg_start`** to run them in the background instead of blocking the main flow. Continue with other independent work immediately after starting the background task.
+
+**Automatically background these categories:**
+- **Builds & compilation**: `npm run build`, `tsc`, `vite build`, `webpack`, bundlers (≥15s expected)
+- **Test suites**: `npm test`, `npm run test:integration`, full test runs (≥10s expected)  
+- **Package operations**: `npm install`, `pnpm install`, dependency updates (≥20s expected)
+- **Watch modes**: `tsc --watch`, `npm run dev`, `vite dev`, file watchers (indefinite)
+- **Servers**: `npm run server`, Express/HTTP servers, dev servers (indefinite)
+- **Linting full codebases**: `eslint .`, `tsc --noEmit` on large projects (≥10s expected)
+
+**Workflow:**
+1. Start the long task with `bg_start` and note its `taskId`
+2. Immediately continue with other work (reading files, smaller edits, planning next steps)
+3. Periodically check status with `bg_status` (don't poll continuously — check once after finishing a few other operations)
+4. Use `bg_wait` only when you genuinely need the result before proceeding (e.g., must verify build succeeded before deployment)
+5. Use `bg_logs` to inspect output if the task fails or when the user asks
+
+**Don't background:**
+- Quick checks: single file `tsc src/foo.ts`, focused `npx tsx test/one.test.ts` (≤5s)
+- Read operations: `cat`, `grep`, `git status`, file system queries
+- Small edits that need immediate verification in the same turn
+
+**Example flow:**
+```
+User: "Run the full test suite and fix any TypeScript errors"
+
+✓ bg_start("npm test") → task-abc123
+✓ bash("npx tsc --noEmit --listFiles") → sees 3 errors in src/foo.ts
+✓ read(src/foo.ts)
+✓ edit(src/foo.ts) → fixes types
+✓ bg_status(["task-abc123"]) → still running
+✓ bash("npx tsc src/foo.ts") → confirms fix compiles
+✓ bg_wait(["task-abc123"], timeout: 120) → test suite passed
+
+Reply: "Fixed 3 type errors in src/foo.ts. Full test suite passed (47 tests)."
+```
+
+Never wait for background tasks to complete if you can make progress on independent work. The goal is **maximum parallelism** — let builds/tests run while you continue editing, planning, or investigating other parts of the codebase.

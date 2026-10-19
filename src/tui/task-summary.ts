@@ -4,7 +4,7 @@ import { terminalStringWidth } from "./terminal-width.ts";
 import { todoText } from "./todo-format.ts";
 import type { RenderLine } from "./render-lines.ts";
 
-export type TaskSummaryStatus = "running" | "completed" | "failed" | "cancelled";
+export type TaskSummaryStatus = "running" | "completed" | "failed" | "cancelled" | "paused";
 
 export type TaskSummaryInput = {
   title: string;

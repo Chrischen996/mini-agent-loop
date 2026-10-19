@@ -194,7 +194,7 @@ export type AgentLoopOptions = {
    */
   autoSubagent?: AutoSubagentOptions;
   systemPrompt?: string;
-  /** Hard stop for runaway loops. Default: 30 */
+  /** Legacy hard stop for runaway loops. Default: 80; 0 disables it. */
   maxTurns?: number;
   /** Optional total token budget shared by this loop and nested subagents. */
   globalTokenBudget?: number;
@@ -717,9 +717,10 @@ async function runAgentTurnInternal(
 ): Promise<AgentMessage[]> {
   const envTurnsRaw = process.env.MINI_AGENT_MAX_TURNS;
   const envTurns = envTurnsRaw !== undefined && envTurnsRaw !== "" ? Number(envTurnsRaw) : undefined;
-  const maxTurns = envTurns !== undefined
-    ? (envTurns === 0 ? undefined : (envTurns || 80))
-    : (options.maxTurns === 0 ? undefined : (options.maxTurns ?? 80));
+  // A caller-supplied limit is authoritative; the environment is the default
+  // for entrypoints that do not pass an explicit compatibility limit.
+  const configuredMaxTurns = options.maxTurns ?? envTurns ?? 80;
+  const maxTurns = configuredMaxTurns === 0 ? undefined : configuredMaxTurns;
 
   const {
     llm: configuredLlm,
@@ -1022,7 +1023,7 @@ async function runAgentTurnInternal(
     if (runPolicy?.writeCallBudget && writeCallsUsed >= runPolicy.writeCallBudget) {
       return "budget_exhausted";
     }
-    if (turnNumber > maxEmergencyTurns) {
+    if (maxEmergencyTurns !== undefined && turnNumber > maxEmergencyTurns) {
       return "safety_cap_reached";
     }
     return undefined;

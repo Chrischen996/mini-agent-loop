@@ -34,7 +34,7 @@ describe("Web UI Tools vs CLI Tools separation", () => {
         name: "mcp_custom_tool",
         description: "Test MCP tool",
         parameters: { type: "object" },
-        source: { kind: "mcp", serverId: "test-server" },
+        source: { kind: "mcp", serverId: "test-server", toolName: "mcp_custom_tool" },
         execute: async () => ({ content: "mcp-result" }),
       };
 

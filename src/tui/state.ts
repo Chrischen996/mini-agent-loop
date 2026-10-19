@@ -24,7 +24,7 @@ export type ToolState = "running" | "done" | "error";
 /** Global thinking display mode for extended reasoning (DeepSeek / Claude). */
 export type ThinkingDisplayMode = "hidden" | "summary" | "full";
 
-export type TaskSummaryStatus = "running" | "completed" | "failed" | "cancelled";
+export type TaskSummaryStatus = "running" | "completed" | "failed" | "cancelled" | "paused";
 
 export const THINKING_MODE_ORDER: ThinkingDisplayMode[] = ["hidden", "summary", "full"];
 
@@ -177,6 +177,7 @@ export type TuiAction =
   | { type: "LOOP_EVENT"; event: LoopEvent }
   | { type: "PLAN_ACT_EVENT"; event: PlanActEvent }
   | { type: "AUTO_CONTINUE"; count: number; max: number }
+  | { type: "CONTINUE_TURN" }
   | { type: "MODEL_CHANGED"; modelName: string }
   | { type: "SET_STATUS"; status: string }
   | { type: "SET_TODOS"; todos: TodoItem[] }
@@ -689,6 +690,25 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         taskDurationMs: taskDuration(state.taskStartedAt),
       };
 
+    case "CONTINUE_TURN":
+      return {
+        ...state,
+        busy: true,
+        taskStatus: "running",
+        taskStartedAt: Date.now(),
+        taskDurationMs: undefined,
+        turnStartedAt: Date.now(),
+        streamingText: "",
+        streamingReasoning: "",
+        streamingTextParts: [],
+        streamingReasoningParts: [],
+        lastStreamAt: undefined,
+        pendingPermission: undefined,
+        spinnerMessage: undefined,
+        status: "Continuing…",
+        scrollOffset: 0,
+      };
+
     case "AUTO_CONTINUE":
       return {
         ...state,
@@ -919,15 +939,37 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               : `Request failed, retrying (${event.attempt}/${event.maxRetries})…`,
           };
 
-        case "max_turns":
+        case "run_stopped":
+        case "max_turns": {
+          const details = event.type === "max_turns"
+            ? `Turn limit reached (${event.maxTurns}).`
+            : event.details ?? event.message ?? `Run stopped: ${event.stopReason}.`;
+          const usage = event.type === "run_stopped" ? event.budgetUsage : undefined;
+          const consumption = usage
+            ? `\nUsed: ${usage.tokensUsed} tokens · ${usage.toolCallsUsed} tool calls · ${usage.writeCallsUsed} writes · ${Math.ceil(usage.elapsedMs / 1000)}s.`
+            : "";
+          const newMessages: ChatMessage[] = [...state.messages, {
+            kind: "notice", title: "Run paused",
+            text: `${details}${consumption}\nUse /continue to resume with a new run budget, or submit new instructions.`,
+          }];
           return {
             ...state,
+            messages: newMessages,
+            busy: false,
+            taskStatus: "paused",
+            taskDurationMs: taskDuration(state.taskStartedAt),
             streamingText: "",
             streamingReasoning: "",
             streamingTextParts: [],
             streamingReasoningParts: [],
-            status: `Turn limit reached (${event.maxTurns}), continuing…`,
+            turnStartedAt: undefined,
+            lastStreamAt: undefined,
+            pendingPermission: undefined,
+            spinnerMessage: undefined,
+            status: "Paused · /continue to resume",
+            scrollOffset: preserveScrollOnAppend(state.scrollOffset, estimateNewMessageRows(state.messages, newMessages)),
           };
+        }
 
         case "context_compacted": {
           const compaction = {

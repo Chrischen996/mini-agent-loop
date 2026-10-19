@@ -1,6 +1,6 @@
 // tui-core — renderer-agnostic TurnRunner for headless consumers.
 //
-// Composes auto-continue, timeout, permission, and persistence around the
+// Composes policy pauses, timeout, permission, and persistence around the
 // shared runAgentTurn core. The store owns presentation state while this
 // runner owns AgentMessage history; LOOP_EVENT dispatch connects the two.
 // The shipped Ink TUI invokes the same core directly for its UI-specific
@@ -8,12 +8,11 @@
 
 import type { LlmConfig, ChatFn } from "../../llm/index.ts";
 import {
-  MaxTurnsExceededError,
-  runAgentTurn,
   createAgentHistory,
   type AgentRuntimeRef,
   type LoopEvent,
 } from "../../loop.ts";
+import { runTuiAgentTurn, tuiContinuationPrompt, type TuiTurnStop } from "../agent-turn.ts";
 import { LlmTimeoutError } from "../../llm/retry.ts";
 import {
   PermissionModeChangedError,
@@ -41,6 +40,7 @@ export type TerminalTurnResult = {
   succeeded: boolean;
   history: AgentMessage[];
   errorMessage?: string;
+  stop?: TuiTurnStop;
 };
 
 export type TurnRunnerOptions = {
@@ -69,7 +69,11 @@ export type TurnRunnerOptions = {
   skillRegistry?: SkillRegistry;
   sessionId?: string;
   chat?: ChatFn;
-  /** Cap on auto-continues. Default 5, matching both entrypoints. */
+  runPolicy?: import("../../loop.ts").AgentRunPolicy;
+  /** Explicit legacy hard stop; reaching it pauses until the user continues. */
+  maxTurns?: number;
+  onCheckpoint?: import("../../loop.ts").AgentTurnOptions["onCheckpoint"];
+  /** @deprecated Runs now pause at limits; kept for source compatibility. */
   maxContinues?: number;
 
   onLlmChange?: (llm: LlmConfig) => void;
@@ -262,8 +266,24 @@ export class TurnRunner {
     if (!text) return { succeeded: false, history: this.history };
     const state = this.options.store.getState();
     if (state.busy) return { succeeded: false, history: this.history };
+    const isContinuation = /^\/continue$/i.test(text);
+    let currentPrompt = prompt;
+    if (/^\/continue(?:\s|$)/i.test(text)) {
+      try {
+        if (!isContinuation) throw new Error("Usage: /continue");
+        if (submitOptions.images?.length || submitOptions.userContent !== undefined) {
+          throw new Error("Submit attachments with a new prompt before continuing.");
+        }
+        currentPrompt = tuiContinuationPrompt(this.history);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        this.dispatch({ type: "ADD_NOTICE", title: "Continue", text: errorMessage });
+        return { succeeded: false, history: this.history, errorMessage };
+      }
+    }
 
-    this.dispatch({
+    if (isContinuation) this.dispatch({ type: "CONTINUE_TURN" });
+    else this.dispatch({
       type: "USER_MESSAGE",
       text: prompt,
       ...(submitOptions.displayText !== undefined ? { displayText: submitOptions.displayText } : {}),
@@ -279,10 +299,9 @@ export class TurnRunner {
     );
     this.options.onPermissionTurnChange?.(permissionTurn);
     const runId = this.streamBuffer.start();
-    let currentPrompt = prompt;
     let turnLlm = this.activeLlm;
     let userContent = submitOptions.userContent;
-    let continueCount = 0;
+    let stop: TuiTurnStop | undefined;
     let succeeded = false;
     let errorMessage: string | undefined;
     let aborted = false;
@@ -290,12 +309,12 @@ export class TurnRunner {
     try {
       await this.options.onTurnStarted?.({
         prompt,
-        history: [
+        history: isContinuation ? this.history : [
           ...this.history,
           { role: "user", content: submitOptions.userContent ?? prompt },
         ],
       });
-      if (userContent === undefined) {
+      if (userContent === undefined && !isContinuation) {
         userContent = await resolveAtRefs(text, permissionTurn, this.options.tools);
       }
       if (submitOptions.images?.length) {
@@ -305,20 +324,21 @@ export class TurnRunner {
         const textParts =
           typeof userContent === "string"
             ? [{ type: "text" as const, text: userContent }]
-            : userContent;
+            : userContent ?? [];
         userContent = [...textParts, ...imageParts];
       }
 
-      const maxContinues = this.options.maxContinues ?? 5;
-      while (true) {
         try {
-          this.history = await runAgentTurn(this.history, currentPrompt, {
+          const result = await runTuiAgentTurn(this.history, currentPrompt, {
             llm: { ...turnLlm, ...(this.activeSessionId ? { sessionId: this.activeSessionId } : {}) },
             tools: this.options.tools,
             chat: this.options.chat,
             autoSubagent: this.options.autoSubagent,
             preprocessors: this.options.preprocessors,
             userContent,
+            isContinuation,
+            runPolicy: this.options.runPolicy,
+            maxTurns: this.options.maxTurns,
             permissionTurn,
             runtimeRef: this.options.runtimeRef,
             runtimeContext: this.options.runtimeContext,
@@ -329,6 +349,10 @@ export class TurnRunner {
             autoCheckpoint: this.options.autoCheckpoint ?? false,
             skillNames: this.options.skillNames,
             skillRegistry: this.options.skillRegistry,
+            onCheckpoint: async (checkpoint) => {
+              this.history = checkpoint.messages;
+              await this.options.onCheckpoint?.(checkpoint);
+            },
             onEvent: (event) => {
               if (event.type === "aborted") aborted = true;
               if (event.type === "thinking_policy") {
@@ -339,43 +363,22 @@ export class TurnRunner {
               this.streamBuffer.handle(runId, event);
             },
           });
-          succeeded = !aborted;
-          break;
+          this.history = result.history;
+          stop = result.stop;
+          succeeded = !stop && !aborted;
         } catch (error) {
-          if (error instanceof MaxTurnsExceededError) {
-            this.history = error.messages;
-            continueCount += 1;
-            if (continueCount >= maxContinues || abortController.signal.aborted) {
-              if (abortController.signal.aborted) {
-                this.streamBuffer.handle(runId, this.abortEvent(this.history, abortController.signal.reason));
-                aborted = true;
-              } else {
-                errorMessage = `Auto-continue limit reached (${maxContinues} turns)`;
-                this.streamBuffer.handle(runId, { type: "error", message: errorMessage });
-              }
-              break;
-            }
-            currentPrompt = "Continue the remaining work.";
-            userContent = currentPrompt;
-            this.dispatch({ type: "AUTO_CONTINUE", count: continueCount, max: maxContinues });
-            continue;
-          }
           if (error instanceof LlmTimeoutError && error.messages) {
             this.history = error.messages;
             errorMessage = formatLlmTimeoutMessage(error);
             this.streamBuffer.handle(runId, { type: "error", message: errorMessage });
-            break;
-          }
-          if (error instanceof PermissionModeChangedError || abortController.signal.aborted) {
+          } else if (error instanceof PermissionModeChangedError || abortController.signal.aborted) {
             aborted = true;
             this.streamBuffer.handle(runId, this.abortEvent(this.history, abortController.signal.reason));
-            break;
+          } else {
+            errorMessage = error instanceof Error ? error.message : String(error);
+            this.streamBuffer.handle(runId, { type: "error", message: errorMessage });
           }
-          errorMessage = error instanceof Error ? error.message : String(error);
-          this.streamBuffer.handle(runId, { type: "error", message: errorMessage });
-          break;
         }
-      }
     } finally {
       this.streamBuffer.finish(runId);
       permissionTurn.close();
@@ -386,6 +389,7 @@ export class TurnRunner {
         succeeded,
         history: this.history,
         ...(errorMessage ? { errorMessage } : {}),
+        ...(stop ? { stop } : {}),
       };
       try {
         await this.options.onTurnFinished?.(result);

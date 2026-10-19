@@ -58,6 +58,11 @@ Loop invariants:
 The core checks token, time, tool, write and compaction budgets plus stalled
 actions. The emergency iteration cap is the final safety fallback. Explicit
 `maxTurns` selects the legacy bounded-block path when no policy is supplied.
+The Ink TUI resolves a policy by default using `MINI_AGENT_TUI_*` limits and
+pauses at policy boundaries. `/continue` starts a new allocation from the saved
+history without appending a synthetic user message. Setting
+`MINI_AGENT_MAX_TURNS` (or passing `maxTurns`) opts TUI callers into the legacy
+hard-stop path for compatibility.
 
 Policy pauses checkpoint their actual reason before emitting a single
 `run_stopped` event. They bypass the error checkpoint handler, so ordinary

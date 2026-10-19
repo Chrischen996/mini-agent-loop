@@ -10,10 +10,15 @@ export interface TaskMeta {
   command: string;
   cwd: string;
   shell: string;
-  status: "starting" | "running";
+  status: "starting" | "running" | "crashed" | "restarting";
   createdAt: string;
   startedAt?: string;
   timeoutSeconds?: number;
+  restartable?: boolean;
+  maxRetries?: number;
+  currentRetry?: number;
+  lastCrashReason?: string;
+  tags?: string[];
   notifyOnCompletion: boolean;
   notifiedAt?: string;
   /** Backend and process identity are persisted so another manager can recover the task. */

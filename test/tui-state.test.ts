@@ -404,7 +404,7 @@ describe("TUI sidebar state", () => {
     assert.equal(state.messages[state.messages.length - 1]?.kind, "error");
   });
 
-  it("keeps the turn busy across an automatic max-turn continuation", () => {
+  it("pauses at an explicit turn limit until the user continues", () => {
     let state = createInitialState("test-model");
     state = tuiReducer(state, { type: "USER_MESSAGE", text: "Continue the task" });
     state = tuiReducer(state, {
@@ -412,8 +412,14 @@ describe("TUI sidebar state", () => {
       event: { type: "max_turns", maxTurns: 30, messages: [] },
     });
 
-    assert.equal(state.busy, true);
-    assert.match(state.status, /Turn limit reached \(30\), continuing…/);
+    assert.equal(state.busy, false);
+    assert.equal(state.taskStatus, "paused");
+    const notice = state.messages.at(-1);
+    assert.equal(notice?.kind, "notice");
+    assert.match(notice?.kind === "notice" ? notice.text : "", /Turn limit reached \(30\).*\n.*\/continue/);
+
+    state = tuiReducer(state, { type: "CONTINUE_TURN" });
+    assert.equal(state.taskTitle, "Continue the task");
 
     state = tuiReducer(state, {
       type: "LOOP_EVENT",

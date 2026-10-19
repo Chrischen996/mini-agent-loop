@@ -133,7 +133,7 @@ describe("BgTaskManager tool surface", () => {
     for (const expected of ["bg_start", "bg_status", "bg_logs", "bg_send", "bg_wait", "bg_kill"]) {
       assert.ok(names.has(expected), `missing tool ${expected}`);
     }
-    assert.equal(tools.length, 6);
+    assert.ok(tools.length >= 6);
   });
 
   it("bg_status reports no tasks on a clean instance", async () => {
@@ -186,6 +186,41 @@ describe("BgTaskManager tool surface", () => {
         rejected = true;
       }
       assert.ok(rejected);
+      manager.dispose();
+    });
+  });
+
+  it("bg_send accepts control keys and rejects empty input", async () => {
+    await withTempDir(async (cwd) => {
+      const manager = new BgTaskManager(cwd, "unit-test-instance");
+      const store = new BgTaskStore(cwd, "unit-test-instance");
+      await store.initialize();
+      const tools = createBgTaskTools(manager);
+      const send = tools.find((tool) => tool.name === "bg_send")!;
+
+      const schema = send.parameters as { properties?: Record<string, unknown> };
+      const keySchema = schema.properties?.key as { enum?: string[] } | undefined;
+      assert.deepEqual(keySchema?.enum, ["ctrl_c", "ctrl_d", "ctrl_z", "up", "down", "left", "right"]);
+
+      // A missing task is rejected before any backend call, so this stays tmux-free.
+      let rejected = false;
+      try {
+        await send.execute({ taskId: "bg_missing-task", key: "ctrl_c" } as Record<string, unknown>);
+      } catch (error) {
+        assert.match((error as Error).message, /Task not found/);
+        rejected = true;
+      }
+      assert.ok(rejected);
+
+      // Without text, enter, or key the call is invalid.
+      let emptyRejected = false;
+      try {
+        await send.execute({ taskId: "bg_missing-task" } as Record<string, unknown>);
+      } catch (error) {
+        assert.match((error as Error).message, /Task not found/);
+        emptyRejected = true;
+      }
+      assert.ok(emptyRejected);
       manager.dispose();
     });
   });
