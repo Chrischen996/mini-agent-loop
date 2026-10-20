@@ -2,6 +2,7 @@ import type { ToolState } from "./state.ts";
 
 export function toolStatusIcon(status: ToolState): string {
   if (status === "running") return "…";
+  if (status === "partial") return "~";
   return status === "error" ? "✗" : "✓";
 }
 
@@ -36,6 +37,7 @@ export function toolVisualName(name: string): string {
 
 export function toolVisualStatusIcon(status: ToolState): string {
   if (status === "running") return "⟳";
+  if (status === "partial") return "~";
   return status === "error" ? "✗" : "✓";
 }
 

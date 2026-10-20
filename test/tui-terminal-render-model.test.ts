@@ -12,6 +12,52 @@ import { buildWelcomePanelRows } from "../src/tui/welcome-panel.ts";
 import type { TerminalAutocompleteState } from "../src/tui/terminal-autocomplete-controller.ts";
 
 describe("standalone terminal render model", () => {
+  it("maps partial subagent completion to a visible partial status", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_start",
+        id: "sub-1",
+        task: "inspect files",
+        depth: 1,
+        runtime: {
+          model: "test-model",
+          provider: "test",
+          baseUrl: "http://localhost",
+          thinkingMode: "fixed",
+          modelSwitchSucceeded: true,
+        },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_end",
+        id: "sub-1",
+        result: "Partial findings",
+        success: false,
+        partial: true,
+        depth: 1,
+        turns: 2,
+        totalTokens: 10,
+        runtime: {
+          model: "test-model",
+          provider: "test",
+          baseUrl: "http://localhost",
+          thinkingMode: "fixed",
+          modelSwitchSucceeded: true,
+        },
+        autoDelegationInherited: false,
+      },
+    });
+
+    const message = state.messages.find((item) => item.kind === "subagent_call");
+    assert.equal(message?.kind, "subagent_call");
+    if (message?.kind === "subagent_call") assert.equal(message.status, "partial");
+    assert.equal(state.status, "Subagent partial result");
+  });
+
   it("keeps the Claude-style input container Ink-only", () => {
     const lines = buildTerminalRenderLines(createInitialState("test-model"), { width: 80, input: "draft" });
 

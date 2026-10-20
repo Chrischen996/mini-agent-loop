@@ -359,8 +359,10 @@ export type SubagentEvent =
       /** Unique id for this subagent invocation. */
       id: string;
       result: string;
-      /** Whether the subagent finished normally. */
+      /** Whether the subagent finished normally (no truncation or fallback). */
       success: boolean;
+      /** Present when the subagent returned a usable but incomplete result. */
+      partial?: boolean;
       depth: number;
       turns: number;
       /** Cumulative token usage across all turns (0 when unavailable). */

@@ -90,6 +90,27 @@ function createToolThenAnswerChat(
   };
 }
 
+/**
+ * Create a faux chat that keeps calling a tool forever.
+ * Used to exercise maxTurns limits.
+ */
+function createInfiniteToolLoopChat(
+  toolName: string,
+  toolArgs: Record<string, unknown>,
+): ChatFn {
+  let callCount = 0;
+  return async (): Promise<AssistantMessage> => {
+    callCount += 1;
+    return {
+      role: "assistant",
+      content: "",
+      toolCalls: [
+        { id: `loop_call_${callCount}`, name: toolName, arguments: toolArgs },
+      ],
+    };
+  };
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 // Wrapped in a single parent `describe` to ensure serial execution on Node 18,
 // which runs top-level describe blocks concurrently by default.
@@ -482,11 +503,13 @@ describe("createSubagentTool", () => {
         };
       };
 
+      const events: SubagentEvent[] = [];
       const tool = createSubagentTool({
         parentLlm: dummyLlm,
         parentTools: [createEchoTool()],
         profiles,
         chat: infiniteChat,
+        onSubagentEvent: (event) => events.push(event),
       });
 
       // researcher profile has maxTurns=12, but we override with 2
@@ -497,10 +520,39 @@ describe("createSubagentTool", () => {
       });
       assert.notEqual(result.isError, true);
       assert.ok(toolCalls <= 3, `Expected ≤3 chat calls with maxTurns=2, got ${toolCalls}`);
+      assert.equal((result as any).partial, true);
       assert.ok(
         contentAsString(result.content).startsWith("[Partial: maxTurns=2]"),
         `expected partial prefix, got: ${contentAsString(result.content).slice(0, 80)}`,
       );
+      const end = events.find((e) => e.type === "subagent_end");
+      assert.ok(end && end.type === "subagent_end");
+      if (end?.type === "subagent_end") {
+        assert.equal(end.success, false, "partial result should not be success");
+        assert.equal(end.partial, true, "subagent_end should mark result as partial");
+      }
+    });
+
+    it("maxTurns without recoverable progress is an error", async () => {
+      const events: SubagentEvent[] = [];
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        chat: async (): Promise<AssistantMessage> => ({
+          role: "assistant",
+          content: "",
+        }),
+        onSubagentEvent: (event) => events.push(event),
+      });
+
+      const result = await tool.execute({ task: "empty", maxTurns: 1 });
+      assert.equal(result.isError, true);
+      const end = events.find((e) => e.type === "subagent_end");
+      assert.ok(end && end.type === "subagent_end");
+      if (end?.type === "subagent_end") {
+        assert.equal(end.success, false);
+        assert.equal(end.partial, true, "no recoverable progress with maxTurns should still be partial");
+      }
     });
 
     it("unknown profile falls back to default config", async () => {

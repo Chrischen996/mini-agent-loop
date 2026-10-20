@@ -18,6 +18,7 @@ describe("Claude-style status presentation", () => {
     assert.equal(statusLabel("子代理 (depth 1)...", true), "Delegating…");
     assert.equal(statusLabel("子代理完成"), "Done");
     assert.equal(statusLabel("子代理失败"), "Failed");
+    assert.equal(statusLabel("Subagent partial result"), "Partial result");
   });
 
   it("maps the English subagent and orchestration statuses the same way", () => {

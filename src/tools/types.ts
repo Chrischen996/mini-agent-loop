@@ -7,6 +7,8 @@ export type ToolResult = {
   /** Text and/or image parts (string still allowed). */
   content: MessageContent;
   isError?: boolean;
+  /** Present when the tool completed but the result is incomplete or truncated. */
+  partial?: boolean;
   files?: FileArtifact[];
   /** Structured session-state update consumed by the agent loop. */
   todoUpdate?: TodoItem[];

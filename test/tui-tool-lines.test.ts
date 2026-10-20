@@ -8,6 +8,7 @@ describe("TUI tool render model", () => {
     assert.equal(toolDisplayName(""), "tool");
     assert.equal(toolStatusIcon("running"), "…");
     assert.equal(toolStatusIcon("done"), "✓");
+    assert.equal(toolStatusIcon("partial"), "~");
     assert.equal(toolStatusIcon("error"), "✗");
   });
 

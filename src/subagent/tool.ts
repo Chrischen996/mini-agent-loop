@@ -923,7 +923,7 @@ ${args.sharedContext}
       const partial = extracted.partial || hitMaxTurns;
       // Partial progress is still useful to the parent; only hard-fail when
       // we truly recovered nothing.
-      success = extracted.text.length > 0;
+      success = extracted.text.length > 0 && !partial;
 
       const { tokenBreakdown, estimatedCost } = getBreakdownAndCost();
       onSubagentEvent?.({
@@ -931,6 +931,7 @@ ${args.sharedContext}
         id: invocationId,
         result: extracted.text,
         success,
+        partial: partial || undefined,
         depth,
         turns,
         totalTokens: accumulatedTokens,
@@ -938,7 +939,7 @@ ${args.sharedContext}
         estimatedCost,
         runtime: runtimeInfo,
         errors: errors.length > 0 ? errors : undefined,
-        autoDelegationInherited: false, // auto-delegation is intentionally isolated per subagent
+        autoDelegationInherited: false,
       });
 
       if (!extracted.text) {
@@ -950,17 +951,13 @@ ${args.sharedContext}
         };
       }
 
-      // Return only the extracted text. Execution metadata (turns, tokens,
-      // errors) is available in subagent_end events for observability.
-      // Partial/maxTurns hints are prepended only when the parent needs to
-      // know the result is incomplete.
       const prefix = hitMaxTurns
         ? `[Partial: maxTurns=${maxTurns}] `
         : extracted.partial
           ? "[Partial] "
           : "";
 
-      return { content: prefix + extracted.text };
+      return { content: prefix + extracted.text, partial: partial || undefined };
     },
   };
 }

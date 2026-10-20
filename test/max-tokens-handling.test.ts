@@ -2,6 +2,13 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { tuiReducer, createInitialState } from "../src/tui/state.js";
 
+function errorText(state: ReturnType<typeof createInitialState>): string {
+  const message = state.messages[0];
+  assert.equal(message?.kind, "error");
+  if (message?.kind !== "error") throw new Error("Expected an error message");
+  return message.text;
+}
+
 describe("max-tokens handling", () => {
   it("shows helpful tip when max_tokens is reached", () => {
     const initial = createInitialState("test-model");
@@ -15,9 +22,8 @@ describe("max-tokens handling", () => {
     assert.equal(next.status, "Output truncated");
     assert.equal(next.taskStatus, "failed");
     assert.equal(next.messages.length, 1);
-    assert.equal(next.messages[0].kind, "error");
-    assert.ok(next.messages[0].text.includes("💡 Tip: Use /continue"));
-    assert.ok(next.messages[0].text.includes("higher max_tokens"));
+    assert.ok(errorText(next).includes("💡 Tip: Use /continue"));
+    assert.ok(errorText(next).includes("higher max_tokens"));
   });
 
   it("detects OutputTruncatedError by name pattern", () => {
@@ -30,7 +36,7 @@ describe("max-tokens handling", () => {
       },
     });
     assert.equal(next.status, "Output truncated");
-    assert.ok(next.messages[0].text.includes("/continue"));
+    assert.ok(errorText(next).includes("/continue"));
   });
 
   it("handles normal errors without special tip", () => {
@@ -40,8 +46,8 @@ describe("max-tokens handling", () => {
       event: { type: "error", message: "Network timeout" },
     });
     assert.equal(next.status, "Request failed");
-    assert.equal(next.messages[0].text, "Network timeout");
-    assert.ok(!next.messages[0].text.includes("/continue"));
+    assert.equal(errorText(next), "Network timeout");
+    assert.ok(!errorText(next).includes("/continue"));
   });
 
   it("preserves original message when adding tip", () => {
@@ -51,6 +57,6 @@ describe("max-tokens handling", () => {
       type: "LOOP_EVENT",
       event: { type: "error", message: originalMessage },
     });
-    assert.ok(next.messages[0].text.includes(originalMessage));
+    assert.ok(errorText(next).includes(originalMessage));
   });
 });

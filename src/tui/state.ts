@@ -19,7 +19,7 @@ export type { SessionPhase } from "../plan-act/types.ts";
 
 export type MessageRole = "user" | "assistant" | "tool";
 
-export type ToolState = "running" | "done" | "error";
+export type ToolState = "running" | "done" | "partial" | "error";
 
 /** Global thinking display mode for extended reasoning (DeepSeek / Claude). */
 export type ThinkingDisplayMode = "hidden" | "summary" | "full";
@@ -1105,7 +1105,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             if (card.id !== event.call.id) return card;
             return {
               ...card,
-              status: event.result.isError ? "error" : "done",
+              status: event.result.isError ? "error" : (event.result.partial ? "partial" : "done"),
               preview: result || undefined,
               durationMs: card.startedAt ? Math.max(0, now - card.startedAt) : undefined,
             } satisfies ToolCardState;
@@ -1355,7 +1355,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           const now = Date.now();
           const next = updateSubagentMessage(state, evt.id, (message) => ({
             ...message,
-            status: evt.success ? "done" as const : "error" as const,
+            status: evt.success ? "done" as const : (evt.partial ? "partial" as const : "error" as const),
             result: evt.result,
             turns: evt.turns,
             totalTokens: evt.totalTokens || undefined,
@@ -1363,7 +1363,10 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             estimatedCost: evt.estimatedCost,
             durationMs: now - message.startedAt,
           }));
-          return next === state ? state : { ...next, status: evt.success ? "Subagent done" : "Subagent failed" };
+          return next === state ? state : {
+            ...next,
+            status: evt.success ? "Subagent done" : (evt.partial ? "Subagent partial result" : "Subagent failed"),
+          };
         }
         default:
           return state;
