@@ -42,6 +42,8 @@ import {
   type LoopEvent,
 } from "../loop.ts";
 import { runTuiAgentTurn, tuiContinuationPrompt } from "./agent-turn.ts";
+import { loadAutoContinueConfig, shouldAutoContinue } from "./auto-continue-config.ts";
+import { executeAutoContinue, isTruncatedTurn } from "./auto-continue-orchestrator.ts";
 import { loadInstructionBundle } from "../agents-md.ts";
 import { LlmTimeoutError } from "../llm/retry.ts";
 import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
@@ -232,6 +234,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
   const startupSession = useMemo(() => getStartupSessionRequest(), []);
   const vision = loadVisionConfigFromEnv();
   const autoSubagent = useMemo(() => loadAutoSubagentOptionsFromEnv(), []);
+  const autoContinueConfig = useMemo(() => loadAutoContinueConfig(), []);
   const globalTokenBudget = useMemo(() => loadGlobalTokenBudgetFromEnv(), []);
   const globalConcurrencyLimit = useMemo(() => loadGlobalConcurrencyLimitFromEnv(), []);
   const [skillNames, setSkillNames] = useState<string[]>(() => loadSkillNamesFromEnv());
@@ -1743,6 +1746,56 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
         streamBuffer.finish(runId);
         turnSucceeded = !result.stop && !turnAborted;
         turnErrorMessage = result.stop?.details;
+
+        // Auto-continue on max_tokens truncation
+        if (autoContinueConfig.enabled && isTruncatedTurn(result) && !turnAborted) {
+          const continueResult = await executeAutoContinue(
+            historyRef.current,
+            async (history, prompt, options) => {
+              return await runTuiAgentTurn(history, prompt, options);
+            },
+            {
+              llm: { ...turnLlm, sessionId: conversationId },
+              tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools(turnLlm)],
+              autoSubagent,
+              preprocessors: visionPreprocessors,
+              permissionTurn,
+              runtimeContext: {
+                sessionId: conversationId,
+                workspaceId: cwd,
+              } satisfies RuntimeExecutionContext,
+              globalTokenBudget,
+              autoValidate: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_VALIDATE),
+              validationWorkspace: cwd,
+              autoCheckpoint: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_CHECKPOINT),
+              thinkingMode,
+              runtimeRef: subagentRuntimeRef.current,
+              skillNames: skillNamesRef.current,
+              skillRegistry: defaultSkillRegistry,
+              onEvent: onLoopEvent,
+              onCheckpoint: async ({ messages }) => {
+                historyRef.current = messages;
+                await persistSession(messages);
+              },
+            },
+            {
+              config: autoContinueConfig,
+              attemptCount: stateRef.current.autoContinueCount,
+              onProgress: (count, max) => {
+                dispatch({ type: "AUTO_CONTINUE", count, max });
+              },
+            },
+          );
+          historyRef.current = continueResult.history;
+          if (continueResult.truncated) {
+            // Still truncated after max attempts
+            turnErrorMessage = `Output truncated after ${autoContinueConfig.maxAttempts} auto-continue attempts. Use /continue to resume manually.`;
+          } else {
+            // Successfully completed
+            turnSucceeded = true;
+            turnErrorMessage = undefined;
+          }
+        }
       } catch (err) {
         if (err instanceof LlmTimeoutError && err.messages) {
           // Timeout with partial content: save the partial history so the next

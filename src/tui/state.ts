@@ -159,6 +159,8 @@ export type TuiState = {
   scrollOffset: number;
   /** Maximum scroll offset allowed by the viewport height and content size. */
   maxScrollOffset?: number;
+  /** Auto-continue state for max_tokens truncation handling */
+  autoContinueCount: number;
 };
 
 export type TuiAction =
@@ -324,10 +326,11 @@ export function createInitialState(modelName: string): TuiState {
     todoPlan: undefined,
     todoItems: undefined,
     todoRevision: 0,
-    // Match Claude Code: keep the task list compact during normal work;
+    // Match Claude Code: keep the task list compact during work;
     // users can expand it with Ctrl+T or /tasks expanded.
     todoViewMode: "compact",
     spinnerMessage: undefined,
+    autoContinueCount: 0,
   };
 }
 
@@ -588,6 +591,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         streamingReasoningParts: [],
         turnStartedAt: Date.now(),
         lastStreamAt: undefined,
+        autoContinueCount: 0,
         // New user turns always re-pin the feed to the latest content.
         scrollOffset: 0,
       };
@@ -705,6 +709,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         lastStreamAt: undefined,
         pendingPermission: undefined,
         spinnerMessage: undefined,
+        autoContinueCount: 0,
         status: "Continuing…",
         scrollOffset: 0,
       };
@@ -718,6 +723,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         streamingTextParts: [],
         streamingReasoningParts: [],
         lastStreamAt: undefined,
+        autoContinueCount: action.count,
         status: `Continuing… (${action.count}/${action.max})`,
       };
 
