@@ -53,7 +53,7 @@ describe("auto-continue-orchestrator", () => {
       const onProgress = mock.fn();
 
       const result = await executeAutoContinue(
-        [],
+        [{ role: "user", content: "Generate code" }] as AgentMessage[],
         mockRunFn,
         { llm: {} as any, tools: () => [] },
         {
@@ -89,7 +89,7 @@ describe("auto-continue-orchestrator", () => {
       });
 
       const result = await executeAutoContinue(
-        [],
+        [{ role: "user", content: "Generate code" }] as AgentMessage[],
         mockRunFn,
         { llm: {} as any, tools: () => [] },
         {
@@ -101,7 +101,7 @@ describe("auto-continue-orchestrator", () => {
 
       assert.equal(mockRunFn.mock.calls.length, 2);
       assert.equal(result.truncated, false);
-      assert.equal(result.history.length, 2);
+      assert.equal(result.history.length, 3);
     });
 
     it("should respect delayMs between attempts", async () => {
@@ -115,7 +115,7 @@ describe("auto-continue-orchestrator", () => {
 
       const start = Date.now();
       await executeAutoContinue(
-        [],
+        [{ role: "user", content: "Generate code" }] as AgentMessage[],
         mockRunFn,
         { llm: {} as any, tools: () => [] },
         {
@@ -142,7 +142,7 @@ describe("auto-continue-orchestrator", () => {
       const onProgress = mock.fn();
 
       await executeAutoContinue(
-        [],
+        [{ role: "user", content: "Generate code" }] as AgentMessage[],
         mockRunFn,
         { llm: {} as any, tools: () => [] },
         {
@@ -172,7 +172,7 @@ describe("auto-continue-orchestrator", () => {
       });
 
       const result = await executeAutoContinue(
-        [],
+        [{ role: "user", content: "Generate code" }] as AgentMessage[],
         mockRunFn,
         { llm: {} as any, tools: () => [] },
         {

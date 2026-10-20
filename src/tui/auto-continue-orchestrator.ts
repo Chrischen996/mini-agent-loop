@@ -20,16 +20,24 @@ export type AutoContinueContext = {
 /**
  * Check if the turn result indicates a truncation that should trigger auto-continue.
  */
+/**
+ * Check if the turn result indicates a truncation that should trigger auto-continue.
+ */
 export function isTruncatedTurn(result: TuiAgentTurnResult, error?: Error): boolean {
   if (error) {
-    return shouldAutoContinue(error, { enabled: true, maxAttempts: 0, delayMs: 0 }, 0);
+    const errorName = error.name ?? "";
+    const errorMessage = error.message ?? String(error);
+    return (
+      errorName === "OutputTruncatedError" ||
+      /max_tokens|output reached|OutputTruncatedError|finish_reason.*length/i.test(errorMessage)
+    );
   }
-  
+
   // Check if stop reason indicates truncation
   if (result.stop?.reason === "step_limit") return false;
-  
+
   const details = result.stop?.details ?? "";
-  return /max_tokens|output reached|OutputTruncatedError/i.test(details);
+  return /max_tokens|output reached|OutputTruncatedError|finish_reason/i.test(details);
 }
 
 /**
@@ -49,7 +57,7 @@ export async function executeAutoContinue(
 
   while (true) {
     attemptCount++;
-    
+
     // Check if we've reached the limit
     if (maxAttempts > 0 && attemptCount > maxAttempts) {
       return { history, truncated: true };
@@ -70,7 +78,12 @@ export async function executeAutoContinue(
       isContinuation: true,
     });
 
+    // Preserve user message in history for continuation tracking
+    const userMessage = history.find((m) => m.role === "user");
     history = result.history;
+    if (userMessage && !history.some((m) => m.role === "user")) {
+      history = [userMessage, ...history];
+    }
 
     // Check if this turn was also truncated
     if (!isTruncatedTurn(result)) {

@@ -100,11 +100,19 @@ export type ModelSwitchOverrides = {
 export const DEFAULT_OUTPUT_TOKEN_CAP = 32_768;
 const DEFAULT_OUTPUT_CONTEXT_RATIO = 0.25;
 
+export function outputTokenCapFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number(env.MINI_AGENT_OUTPUT_TOKEN_CAP);
+  return Number.isSafeInteger(configured) && configured > 0
+    ? configured
+    : DEFAULT_OUTPUT_TOKEN_CAP;
+}
+
 /** Resolve the per-request output limit without changing the model catalog capability. */
 export function resolveOutputTokenLimit(
   modelMaxTokens: number,
   contextWindow: number,
   requestedMaxTokens?: number,
+  outputTokenCap = outputTokenCapFromEnv(),
 ): number {
   const safeContextWindow = Number.isFinite(contextWindow)
     ? Math.max(2, Math.floor(contextWindow))
@@ -112,8 +120,11 @@ export function resolveOutputTokenLimit(
   const safeModelMax = Number.isFinite(modelMaxTokens)
     ? Math.max(1, Math.floor(modelMaxTokens))
     : 1;
+  const safeOutputCap = Number.isSafeInteger(outputTokenCap) && outputTokenCap > 0
+    ? outputTokenCap
+    : DEFAULT_OUTPUT_TOKEN_CAP;
   const requested = requestedMaxTokens === undefined
-    ? Math.min(DEFAULT_OUTPUT_TOKEN_CAP, Math.max(1, Math.floor(safeContextWindow * DEFAULT_OUTPUT_CONTEXT_RATIO)))
+    ? Math.min(safeOutputCap, Math.max(1, Math.floor(safeContextWindow * DEFAULT_OUTPUT_CONTEXT_RATIO)))
     : Number.isFinite(requestedMaxTokens)
       ? Math.max(1, Math.floor(requestedMaxTokens))
       : 1;

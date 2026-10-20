@@ -12,6 +12,7 @@ export {
   loadDotEnvFile,
   loadLlmConfigFromEnv,
   makeLlmConfig,
+  outputTokenCapFromEnv,
   resolveOutputTokenLimit,
   requestTimeout,
   firstResponseTimeout,

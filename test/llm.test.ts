@@ -5,6 +5,7 @@ import {
   completeChat,
   createRequestSignal,
   makeLlmConfig,
+  outputTokenCapFromEnv,
   resolveOutputTokenLimit,
   switchLlmModel,
   timeoutLimitForPhase,
@@ -46,6 +47,16 @@ describe("completeChat wire protocol", () => {
     assert.equal(resolveOutputTokenLimit(100_000, 16_000, 6_000), 6_000);
     assert.equal(resolveOutputTokenLimit(100_000, 16_000, 99_000), 15_999);
     assert.equal(resolveOutputTokenLimit(100_000, 16_000, Number.NaN), 1);
+    assert.equal(resolveOutputTokenLimit(100_000, 200_000, undefined, 8_000), 8_000);
+    assert.equal(resolveOutputTokenLimit(4_000, 200_000, undefined, 8_000), 4_000);
+  });
+
+  it("loads a validated output token cap from the environment", () => {
+    assert.equal(outputTokenCapFromEnv({ MINI_AGENT_OUTPUT_TOKEN_CAP: "12000" }), 12_000);
+    assert.equal(outputTokenCapFromEnv({ MINI_AGENT_OUTPUT_TOKEN_CAP: "0" }), 32_768);
+    assert.equal(outputTokenCapFromEnv({ MINI_AGENT_OUTPUT_TOKEN_CAP: "-2" }), 32_768);
+    assert.equal(outputTokenCapFromEnv({ MINI_AGENT_OUTPUT_TOKEN_CAP: "12.5" }), 32_768);
+    assert.equal(outputTokenCapFromEnv({}), 32_768);
   });
 
   it("passes the configured thinking level to an OpenAI-compatible reasoning model", async () => {
