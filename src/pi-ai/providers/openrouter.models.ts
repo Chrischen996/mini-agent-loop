@@ -3253,7 +3253,7 @@ export const OPENROUTER_MODELS = {
 			cacheWrite: 0,
 		},
 		contextWindow: 200000,
-		maxTokens: 4096,
+		maxTokens: 16384,
 	} satisfies Model<"openai-completions">,
 	"openrouter/fusion": {
 		id: "openrouter/fusion",

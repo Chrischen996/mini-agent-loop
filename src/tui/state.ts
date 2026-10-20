@@ -891,7 +891,11 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         }
 
         case "error": {
-          const newMessages: ChatMessage[] = [...state.messages, { kind: "error", text: event.message }];
+          const isTruncated = /max_tokens|output reached|OutputTruncatedError/i.test(event.message);
+          const errorText = isTruncated
+            ? `${event.message}\n\n💡 Tip: Use /continue to resume the response, or switch to a model with higher max_tokens.`
+            : event.message;
+          const newMessages: ChatMessage[] = [...state.messages, { kind: "error", text: errorText }];
           return {
             ...state,
             busy: false,
@@ -903,7 +907,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
-            status: "Request failed",
+            status: isTruncated ? "Output truncated" : "Request failed",
             taskStatus: "failed",
             taskDurationMs: taskDuration(state.taskStartedAt),
             scrollOffset: preserveScrollOnAppend(
