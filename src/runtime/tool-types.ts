@@ -3,13 +3,15 @@ import type { Tool, ToolCapabilities } from "../tools/types.ts";
 const READ_TOOLS = new Set([
   "read", "grep", "find", "ls", "list", "search", "git_status", "git_diff",
   "codebase_open", "codebase_search", "codebase_read", "codebase_explain",
-  "bg_status", "bg_logs", "bg_wait",
+  "bg_status", "bg_logs", "bg_wait", "bg_status_by_tag", "bg_search_logs",
 ]);
 const WRITE_TOOLS = new Set([
   "write", "edit", "patch", "mkdir", "copy", "move", "delete", "document_edit",
   "git_checkpoint", "git_undo", "git_branch_isolate",
-  "bg_send",
+  "bg_send", "bg_snapshot",
 ]);
+/** Background-task controls that signal or relaunch a task process. */
+const BG_PROCESS_TOOLS = new Set(["bg_kill", "bg_kill_by_tag", "bg_replay"]);
 const WEB_TOOLS = new Set(["web_search", "fetch_content", "get_search_content", "source_check"]);
 const DESTRUCTIVE_TOOLS = new Set(["delete", "move", "git_undo"]);
 
@@ -50,8 +52,10 @@ export function resolveToolCapabilities(
     Object.assign(inferred, commandCapabilities(typeof args.command === "string" ? args.command : ""));
   }
   if (tool.name === "validate_workspace") inferred.executeProcess = true;
-  if (tool.name === "bg_kill") {
+  if (BG_PROCESS_TOOLS.has(tool.name)) {
     inferred.executeProcess = true;
+    // Signalling or relaunching a task process is never plan-mode safe.
+    inferred.requiresApproval = true;
   }
   if (tool.name === "bg_send") {
     inferred.executeProcess = true;

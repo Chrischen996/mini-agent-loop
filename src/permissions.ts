@@ -102,6 +102,14 @@ const WRITE_TOOLS = new Set([
   "git_undo",
   "git_branch_isolate",
   "bg_send",
+  "bg_snapshot",
+]);
+
+/** Background-task controls that signal or relaunch a task process. */
+const BG_PROCESS_TOOLS = new Set([
+  "bg_kill",
+  "bg_kill_by_tag",
+  "bg_replay",
 ]);
 
 const DANGEROUS_COMMANDS = new Set([
@@ -319,12 +327,16 @@ export function getRiskLevel(
   if (mode === "plan") {
     if (tool.name === "validate_workspace") return "high";
     if (tool.name === "bash" || tool.name === "bg_start") {
+      // A template-only bg_start hides its command until the manager expands it.
       const command = typeof args.command === "string" ? args.command : "";
+      if (!command.trim()) return "high";
       return isDangerousBashCommand(command) ? "high" : "safe";
     }
-    if (tool.name === "bg_kill" || tool.name === "bg_wait" || tool.name === "bg_status" || tool.name === "bg_logs") {
+    if (tool.name === "bg_kill" || tool.name === "bg_wait" || tool.name === "bg_status" || tool.name === "bg_logs"
+      || tool.name === "bg_status_by_tag" || tool.name === "bg_search_logs") {
       return "safe";
     }
+    if (BG_PROCESS_TOOLS.has(tool.name)) return "high";
     if (WRITE_TOOLS.has(tool.name)) return "high";
     if (tool.source?.kind === "mcp") return "high";
     return "safe";
@@ -529,9 +541,13 @@ export class PermissionManager {
       // MCP is always remote/untrusted, even when its advertised name is a
       // local-looking tool such as `read` or `bash`.
     } else if (tool.name === "bash" || tool.name === "bg_start") {
+      // A background task keeps the same shell-execution authority as `bash`,
+      // so it must not be a way to launder a command past the analyzer. A
+      // template-only bg_start hides its command until the manager expands it,
+      // so it stays high risk in plan mode.
       const command = typeof args.command === "string" ? args.command : "";
-      if (!isDangerousBashCommand(command)) return;
-    } else if (!WRITE_TOOLS.has(tool.name) && tool.name !== "validate_workspace") {
+      if (command.trim() && !isDangerousBashCommand(command)) return;
+    } else if (!WRITE_TOOLS.has(tool.name) && !BG_PROCESS_TOOLS.has(tool.name) && tool.name !== "validate_workspace") {
       return;
     }
 
