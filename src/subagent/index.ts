@@ -32,6 +32,7 @@
  */
 
 export { createSubagentTool, createSubagentBatchTool, allocateBatchTokenBudgets } from "./tool.ts";
+export { readAsyncBatch, resumeAsyncBatches, submitAsyncBatch, validateAsyncDag, waitAsyncBatch } from "./async-batch.ts";
 
 export {
   buildCoordinatorPromptFragment,

@@ -229,6 +229,8 @@ export type SubagentArgs = {
 export type SubagentBatchTask = {
   /** Unique label for this task within the batch. */
   label: string;
+  /** Labels that must complete successfully before this task starts. */
+  dependsOn?: string[];
   /** The task / prompt for this subagent. */
   task: string;
   /** Profile name to use. */
@@ -257,8 +259,13 @@ export type SubagentBatchTask = {
  * Arguments for the `subagent_batch` tool — runs multiple subagents in parallel.
  */
 export type SubagentBatchArgs = {
-  /** Array of tasks to run in parallel. */
-  tasks: SubagentBatchTask[];
+  /** Use async actions to submit and inspect a process-local DAG job. */
+  mode?: "sync" | "async";
+  action?: "submit" | "status" | "result" | "wait";
+  jobId?: string;
+  waitTimeoutMs?: number;
+  /** Array of tasks to run in parallel or as a dependency graph. */
+  tasks?: SubagentBatchTask[];
   /**
    * Maximum concurrent subagents. When undefined or 0, all tasks run
    * concurrently (original behavior). When set, batches are processed

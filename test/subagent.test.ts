@@ -1797,6 +1797,47 @@ describe("createSubagentTool", () => {
   // ── Batch tool concurrency ────────────────────────────────────────────────
 
   describe("batch concurrency", () => {
+    it("runs async DAG tasks after dependencies and exposes status/results", async () => {
+      const { readAsyncBatch } = await import("../src/subagent/async-batch.ts");
+      const order: string[] = [];
+      const tool = createSubagentBatchTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        chat: async (_config, messages) => {
+          const prompt = contentAsString(messages.find((message) => message.role === "user")?.content ?? "");
+          order.push(prompt);
+          return { role: "assistant", content: prompt.includes("first") ? "first result" : "second result" };
+        },
+      });
+      const submitted = await tool.execute({
+        mode: "async",
+        tasks: [
+          { label: "first", task: "first task" },
+          { label: "second", task: "second task", dependsOn: ["first"] },
+        ],
+      });
+      const jobId = JSON.parse(String(submitted.content)).jobId as string;
+      const final = await tool.execute({ mode: "async", action: "wait", jobId, waitTimeoutMs: 5000 });
+      assert.deepEqual(order, ["first task", "second task"]);
+      assert.match(String(final.content), /"status": "completed"/);
+      const result = await tool.execute({ mode: "async", action: "result", jobId });
+      assert.match(String(result.content), /first result/);
+      assert.match(await readAsyncBatch(jobId), /second/);
+    });
+
+    it("rejects cyclic async DAGs", async () => {
+      const tool = createSubagentBatchTool({ parentLlm: dummyLlm, parentTools: [], chat: createImmediateChat("unused") });
+      const result = await tool.execute({
+        mode: "async",
+        tasks: [
+          { label: "a", task: "a", dependsOn: ["b"] },
+          { label: "b", task: "b", dependsOn: ["a"] },
+        ],
+      });
+      assert.equal(result.isError, true);
+      assert.match(String(result.content), /cycle/);
+    });
+
     it("runs all tasks when maxConcurrency is 0 (unlimited)", async () => {
       const batchTool = createSubagentBatchTool({
         parentLlm: dummyLlm,

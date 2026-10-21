@@ -42,6 +42,7 @@ import type {
   SubagentToolOptions,
 } from "./types.ts";
 import { calculateSubagentCost } from "./cost.ts";
+import { readAsyncBatch, resumeAsyncBatches, submitAsyncBatch, waitAsyncBatch } from "./async-batch.ts";
 import type { PermissionTurnContext } from "../permissions.ts";
 import type { ThinkingMode } from "../thinking-policy.ts";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "../types.ts";
@@ -1051,6 +1052,8 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
       "Run multiple sub-agents in parallel. Each task spawns an independent sub-agent that executes concurrently.",
       "Use this when you have multiple independent sub-tasks that can be done simultaneously.",
       "Results are collected and returned together once all sub-agents complete.",
+      "Use mode=async to submit a process-local DAG job and return a jobId; then call with action=status, result, or wait and jobId.",
+      "Tasks may include dependsOn labels; dependent tasks receive successful dependency results as context.",
       "Optionally control concurrency with `maxConcurrency` to avoid overwhelming rate limits.",
     ].join(" "),
     annotations: {
@@ -1063,12 +1066,17 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
     parameters: {
       type: "object",
       properties: {
+        mode: { type: "string", enum: ["sync", "async"], description: "Use async to submit a process-local DAG job and return immediately." },
+        action: { type: "string", enum: ["submit", "status", "result", "wait"], description: "Async job action. Defaults to submit in async mode." },
+        jobId: { type: "string", description: "Existing async job identifier for status/result/wait." },
+        waitTimeoutMs: { type: "integer", minimum: 0, description: "Maximum time to wait for completion; defaults to 30000ms." },
         tasks: {
           type: "array",
           items: {
             type: "object",
             properties: {
               label: { type: "string", description: "Unique label for this task." },
+              dependsOn: { type: "array", items: { type: "string" }, description: "Task labels that must succeed before this task starts." },
               task: { type: "string", description: "Task prompt for the sub-agent." },
               ...(profileEnum
                 ? { profile: { type: "string", enum: profileEnum, description: "Profile to use." } }
@@ -1137,11 +1145,48 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
           additionalProperties: false,
         },
       },
-      required: ["tasks"],
+      required: [],
       additionalProperties: false,
     },
 
     execute: async (args: SubagentBatchArgs, execSignal?: AbortSignal): Promise<import("../tools/types.ts").ToolResult> => {
+      const executeAsyncTask = (task: SubagentBatchTask, dependencyContext: string) => singleTool.execute({
+        task: task.task,
+        profile: task.profile,
+        model: task.model,
+        maxTurns: task.maxTurns,
+        sharedContext: [task.sharedContext, dependencyContext].filter(Boolean).join("\\n\\n"),
+        thinkingMode: task.thinkingMode,
+        maxThinkingEscalations: task.maxThinkingEscalations,
+        contextPolicy: task.contextPolicy,
+        skillNames: task.skillNames,
+        inheritContextHistory: task.inheritContextHistory,
+        tokenBudget: task.tokenBudget,
+      }, execSignal);
+      if (args.mode === "async" || args.action) {
+        try {
+          const action = args.action ?? "submit";
+          if (action !== "submit") {
+            if (!args.jobId) return { content: "jobId is required for async job actions.", isError: true };
+            if (action === "wait") {
+              await resumeAsyncBatches(executeAsyncTask);
+              return { content: await waitAsyncBatch(args.jobId, args.waitTimeoutMs) };
+            }
+            if (action === "status" || action === "result") await resumeAsyncBatches(executeAsyncTask);
+            return { content: await readAsyncBatch(args.jobId, action === "result") };
+          }
+          if (!args.tasks?.length) return { content: "tasks are required to submit an async job.", isError: true };
+          const allocated = allocateBatchTokenBudgets(args.tasks, args.budgetAllocation, undefined);
+          const jobId = await submitAsyncBatch(args.tasks, async (task, dependencyContext) => {
+            const index = args.tasks!.indexOf(task);
+            const tokenBudget = allocated[index] === undefined ? task.tokenBudget : task.tokenBudget === undefined ? allocated[index] : Math.min(task.tokenBudget, allocated[index]!);
+            return singleTool.execute({ ...task, tokenBudget, sharedContext: [task.sharedContext, dependencyContext].filter(Boolean).join("\\n\\n") }, execSignal);
+          }, args.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY_BATCH);
+          return { content: JSON.stringify({ jobId, status: "running" }) };
+        } catch (error) {
+          return { content: error instanceof Error ? error.message : String(error), isError: true };
+        }
+      }
       if (!args.tasks || args.tasks.length === 0) {
         return { content: "No tasks provided for batch execution.", isError: true };
       }
