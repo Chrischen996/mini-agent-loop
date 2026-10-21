@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import { BgTaskManager } from "../src/bg-tasks/manager.js";
 import { BgTaskStore, type TaskMeta, type TaskResult } from "../src/bg-tasks/store.js";
 import { createBgTaskTools } from "../src/bg-tasks/tools.js";
+import { parseCliArgs } from "../src/cli.ts";
 
 /**
  * These tests exercise the persistence layer and tool surface without requiring
@@ -126,14 +127,27 @@ describe("BgTaskStore persistence", () => {
 });
 
 describe("BgTaskManager tool surface", () => {
-  it("exposes all six background task tools", () => {
+  it("exposes the full background task tool surface", () => {
     const manager = new BgTaskManager(process.cwd(), "unit-test-instance");
     const tools = createBgTaskTools(manager);
     const names = new Set(tools.map((tool) => tool.name));
-    for (const expected of ["bg_start", "bg_status", "bg_logs", "bg_send", "bg_wait", "bg_kill"]) {
+    for (const expected of [
+      "bg_start", "bg_status", "bg_logs", "bg_send", "bg_wait", "bg_kill",
+      "bg_snapshot", "bg_replay", "bg_search_logs", "bg_kill_by_tag", "bg_status_by_tag",
+    ]) {
       assert.ok(names.has(expected), `missing tool ${expected}`);
     }
-    assert.ok(tools.length >= 6);
+    assert.equal(names.size, 11);
+  });
+
+  it("keeps every bg tool name in the shared ToolName allowlist", async () => {
+    const manager = new BgTaskManager(process.cwd(), "unit-test-instance");
+    const names = createBgTaskTools(manager).map((tool) => tool.name);
+    // The CLI rejects any --tools value outside its allowlist, so every
+    // registered bg tool must be selectable there.
+    for (const name of names) {
+      assert.doesNotThrow(() => parseCliArgs(["--tools", name, "go"]), `${name} is not selectable via --tools`);
+    }
   });
 
   it("bg_status reports no tasks on a clean instance", async () => {

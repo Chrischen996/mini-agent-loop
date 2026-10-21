@@ -279,11 +279,15 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
       // Count is decorative; never fail the command on a read error.
     }
   }, [getBgManager]);
+  // Poll while the badge is visible. The agent can start tasks without the
+  // user ever running /bg-tasks, so the first count comes from the tool-event
+  // listener below rather than from the slash command.
   useEffect(() => {
-    if (bgTaskCount === 0) return;
+    const manager = getBgManager();
+    if (!manager || bgTaskCount === 0) return;
     const timer = setInterval(() => void refreshBgTaskCount(), 1000);
     return () => clearInterval(timer);
-  }, [bgTaskCount, refreshBgTaskCount]);
+  }, [bgTaskCount, getBgManager, refreshBgTaskCount]);
 
   // Create the subagent tool — dispatches SubagentEvents to the TUI reducer.
   // Memoized so the factory survives re-renders instead of rebuilding every
@@ -1695,6 +1699,10 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
             ? `Orchestration: ${event.profile} (exploration ${event.directExplorationUsed}/${event.maxDirectExploration})`
             : "Orchestration disabled",
         });
+      } else if (event.type === "tool_start" && event.call.name.startsWith("bg_")) {
+        // A bg_* call from the agent starts the badge without requiring the
+        // user to run /bg-tasks first.
+        void refreshBgTaskCount();
       }
       streamBuffer.handle(runId, event);
     };
@@ -2135,7 +2143,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
               onPasteImage={handlePasteImageRef}
               onTab={handleTabAt}
               pasteEnabled={!state.pendingPermission && todoEditorState === null}
-              focus={!state.pendingPermission && todoEditorState === null && update === null && upgradeResult === null}
+              focus={!state.pendingPermission && todoEditorState === null && update === null && upgradeResult === null && !bgPanelOpen}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               inputHistory={promptInputHistoryRef.current}
               disableArrowNavigation={Boolean(acMode)}
@@ -2215,11 +2223,16 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
           promptTokens={state.contextTokens}
         />
         {bgPanelOpen && (
-          <BgTaskLivePanel
-            manager={getBgManager() ?? { initialize: async () => {}, list: async () => [], logs: async () => ({ taskId: "", text: "", offset: 0, nextOffset: 0, endOfLog: true }) }}
-            width={Math.min(80, Math.max(60, (termWidth ?? 100) - 4))}
-            onClose={() => setBgPanelOpen(false)}
-          />
+          <>
+            <BgTaskLivePanel
+              manager={getBgManager() ?? { initialize: async () => {}, list: async () => [], logs: async () => ({ taskId: "", text: "", offset: 0, nextOffset: 0, endOfLog: true }) }}
+              width={Math.min(80, Math.max(60, (termWidth ?? 100) - 4))}
+              onClose={() => setBgPanelOpen(false)}
+            />
+            <Box paddingX={1}>
+              <Text dimColor>Esc closes the panel and restores the prompt.</Text>
+            </Box>
+          </>
         )}
       </Box>
     </Box>

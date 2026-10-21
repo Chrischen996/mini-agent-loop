@@ -5,6 +5,7 @@ import { ModelSelector } from "./components/ModelSelector";
 import { PlanPanel } from "./components/PlanPanel";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { ToolActivityPanel } from "./components/ToolActivityPanel";
+import BackgroundTasksPanel from "./components/BackgroundTasksPanel";
 import { WorkspacePanel } from "./components/WorkspacePanel";
 import { useAgentStream } from "./hooks/useAgentStream";
 import { useSessions } from "./hooks/useSessions";
@@ -51,7 +52,7 @@ export function App() {
   const [sidebarChoice, setSidebarChoice] = useState<boolean | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(280);
   const [dockWidth, setDockWidth] = useState<number | null>(null);
-  const [dock, setDock] = useState<"files" | "activity" | "plan" | null>(null);
+  const [dock, setDock] = useState<"files" | "activity" | "plan" | "tasks" | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
@@ -104,7 +105,7 @@ export function App() {
     if (side === "left") setSidebarWidth(Math.min(420, Math.max(264, start + delta)));
     else setDockWidth(Math.min(viewport * 0.7, Math.max(300, start - delta)));
   };
-  const openDock = (panel: "files" | "activity" | "plan") => { setDock(panel); setFullscreen(false); };
+  const openDock = (panel: "files" | "activity" | "plan" | "tasks") => { setDock(panel); setFullscreen(false); };
   const {
     sessions,
     activeId,
@@ -218,6 +219,7 @@ export function App() {
           <div className="workbench__title">{!blank && <h1>{active?.title || active?.preview || (active?.messageCount === 0 ? "New session" : `Session ${activeId?.slice(0, 8)}`)}</h1>}</div>
           <nav className="header-actions" aria-label="Workspace panels">
             <button type="button" className={`icon-button${dock ? " icon-button--active" : ""}`} aria-label={dock ? "Close workspace panel" : "Open workspace panel"} title={dock ? "Close workspace panel" : "Open workspace panel"} aria-pressed={Boolean(dock)} onClick={() => dock ? setDock(null) : openDock("files")}><Icon name="sidebar" /></button>
+            <button type="button" className={`icon-button${dock === "tasks" ? " icon-button--active" : ""}`} aria-label="Background tasks" title="Background tasks" aria-pressed={dock === "tasks"} onClick={() => dock === "tasks" ? setDock(null) : openDock("tasks")}><Icon name="terminal" /></button>
           </nav>
         </header>
         <div className="conversation-body">
@@ -247,15 +249,16 @@ export function App() {
             onPointerDown={(event) => resizePanel(event, "right")} onPointerMove={(event) => dragPanel(event, "right")}
             onKeyDown={(event) => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); setDockWidth(Math.min(viewport * 0.7, Math.max(300, (dockWidth ?? viewport * 0.45) + (event.key === "ArrowLeft" ? 16 : -16)))); } }} />}
           <div className="workspace-tabs" role="tablist" aria-label="Workspace views">
-            {(["files", "activity", "plan"] as const).map((panel) => <button type="button" key={panel} role="tab" id={`dock-tab-${panel}`} aria-controls={`dock-panel-${panel}`} aria-selected={dock === panel} tabIndex={dock === panel ? 0 : -1} className={`dock__tab${dock === panel ? " dock__tab--on" : ""}`} onClick={() => setDock(panel)} onKeyDown={(event) => {
-              const panels = ["files", "activity", "plan"] as const;
-              if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); const next = panels[(panels.indexOf(panel) + (event.key === "ArrowRight" ? 1 : 2)) % 3]; setDock(next); document.getElementById(`dock-tab-${next}`)?.focus(); }
-            }}>{panel === "files" ? "Files" : panel === "activity" ? "Activity" : "Plan"}</button>)}
+            {(["files", "activity", "plan", "tasks"] as const).map((panel) => <button type="button" key={panel} role="tab" id={`dock-tab-${panel}`} aria-controls={`dock-panel-${panel}`} aria-selected={dock === panel} tabIndex={dock === panel ? 0 : -1} className={`dock__tab${dock === panel ? " dock__tab--on" : ""}`} onClick={() => setDock(panel)} onKeyDown={(event) => {
+              const panels = ["files", "activity", "plan", "tasks"] as const;
+              if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); const next = panels[(panels.indexOf(panel) + (event.key === "ArrowRight" ? 1 : panels.length - 1)) % panels.length]; setDock(next); document.getElementById(`dock-tab-${next}`)?.focus(); }
+            }}>{panel === "files" ? "Files" : panel === "activity" ? "Activity" : panel === "plan" ? "Plan" : "Tasks"}</button>)}
             <div className="workspace-tabs__actions"><button type="button" className="icon-button" aria-label={fullscreen ? "Exit fullscreen" : "Expand panel"} aria-pressed={fullscreen} onClick={() => setFullscreen(!fullscreen)}><Icon name="expand" /></button><button type="button" className="icon-button" aria-label="Close panel" onClick={() => { setDock(null); setFullscreen(false); }}><Icon name="close" /></button></div>
           </div>
           <div id="dock-panel-files" role="tabpanel" aria-labelledby="dock-tab-files" className="workspace-pane" hidden={dock !== "files"}><WorkspacePanel key={`${activeId ?? "none"}:${selectedWorkspaceId}`} rootPath="" {...filesScope} embedded /></div>
           <div id="dock-panel-activity" role="tabpanel" aria-labelledby="dock-tab-activity" className="workspace-pane workspace-pane--scroll" hidden={dock !== "activity"}><ToolActivityPanel items={items} /></div>
           <div id="dock-panel-plan" role="tabpanel" aria-labelledby="dock-tab-plan" className="workspace-pane workspace-pane--scroll" hidden={dock !== "plan"}><PlanPanel plan={currentPlan} /></div>
+          <div id="dock-panel-tasks" role="tabpanel" aria-labelledby="dock-tab-tasks" className="workspace-pane workspace-pane--scroll" hidden={dock !== "tasks"}><BackgroundTasksPanel {...filesScope} active={dock === "tasks"} /></div>
         </>}
       </aside>
       <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} theme={theme} onThemeChange={setTheme} sessionId={activeId} permissionMode={active?.permissionMode ?? "plan"} model={active?.modelId ?? null} thinkingLevel={active?.thinkingLevel ?? null} onModelChange={() => void refresh()} onPermissionChange={async (mode) => { if (!activeId) return; await api.setPermissionMode(activeId, mode); await refresh(); }} />

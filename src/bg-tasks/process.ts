@@ -80,12 +80,19 @@ export class BgProcessBackend implements BgTaskBackend {
     if (!pid) return false;
     try {
       process.kill(pid, 0);
-      if (process.platform === "win32") return true;
-      if (!taskDir) return true;
+    } catch {
+      return false;
+    }
+    if (process.platform === "win32") return true;
+    if (!taskDir) return true;
+    try {
       const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "command="], { timeout: 2000 });
       return stdout.includes(taskDir);
     } catch {
-      return false;
+      // `ps` may be unavailable or blocked (minimal images, restricted
+      // sandboxes). A failed probe is not evidence that the task exited, so
+      // fall back to the signal-0 result instead of reporting it as gone.
+      return true;
     }
   }
 

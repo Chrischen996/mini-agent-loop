@@ -44,6 +44,7 @@ export {
 export type ToolName =
   | "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls"
   | "bg_start" | "bg_status" | "bg_logs" | "bg_send" | "bg_wait" | "bg_kill"
+  | "bg_snapshot" | "bg_replay" | "bg_search_logs" | "bg_kill_by_tag" | "bg_status_by_tag"
   | "codebase_open" | "codebase_search" | "codebase_read" | "codebase_explain"
   | "web_search" | "fetch_content" | "get_search_content" | "source_check"
   | "subagent" | "git_status" | "git_diff" | "git_checkpoint" | "git_undo" | "git_branch_isolate"

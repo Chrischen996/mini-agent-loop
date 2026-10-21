@@ -14,69 +14,91 @@ export type BgTaskLivePanelProps = {
   onClose?: () => void;
 };
 
+/** Tail limit for the in-panel log buffer; older bytes scroll out of view. */
+const MAX_LOG_BUFFER_CHARS = 32 * 1024;
+
+type TaskState = Pick<BgTaskSummary, "taskId" | "status" | "exitCode" | "durationMs" | "name">;
+const taskStates = new Map<string, TaskState>();
+
+function compareTaskStates(previous: TaskState[] | undefined, current: BgTaskSummary[]): boolean {
+  if (!previous || previous.length !== current.length) return true;
+  const map = new Map(previous.map((task) => [task.taskId, task]));
+  return current.some((task) => {
+    const prev = map.get(task.taskId);
+    return !prev || prev.status !== task.status || prev.exitCode !== task.exitCode || prev.name !== task.name;
+  });
+}
+
 export function BgTaskLivePanel({ manager, width = 80, maxLogLines = 8, onClose }: BgTaskLivePanelProps): React.ReactElement {
   const [tasks, setTasks] = useState<BgTaskSummary[]>([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [logText, setLogText] = useState<string>("");
   const [refreshKey, setRefreshKey] = useState(0);
   const [refreshError, setRefreshError] = useState<string | null>(null);
-  const lastTaskStates = useRef<Map<string, string>>(new Map());
 
   const selectedIndexRef = useRef(selectedIndex);
   useEffect(() => {
     selectedIndexRef.current = selectedIndex;
   }, [selectedIndex]);
 
-  const [logOffset, setLogOffset] = useState(0);
+  // Log cursors belong to one task. Tracking them per selected task keeps the
+  // inline tail from splicing another task's output into the panel.
+  const selectedTaskIdRef = useRef<string | undefined>(undefined);
+  const logOffsetRef = useRef(0);
+  const tasksRef = useRef<BgTaskSummary[]>([]);
+  tasksRef.current = tasks;
 
   const refresh = useCallback(async () => {
     try {
       await manager.initialize();
       const list = await manager.list();
+      if (!compareTaskStates(tasksRef.current.length ? list.map((t) => ({ taskId: t.taskId, status: t.status, exitCode: t.exitCode, durationMs: t.durationMs, name: t.name })) : undefined, list)) {
+        return;
+      }
       setTasks(list);
       setRefreshError(null);
 
-      // 增量刷新：仅处理状态变化的任务
-      const changedIds = new Set<string>();
-      for (const t of list) {
-        const prevStatus = lastTaskStates.current.get(t.taskId);
-        if (prevStatus !== t.status) {
-          changedIds.add(t.taskId);
-        }
-        lastTaskStates.current.set(t.taskId, t.status);
-      }
-      // 清理已删除任务的状态
-      for (const [id] of lastTaskStates.current) {
-        if (!list.find(t => t.taskId === id)) {
-          lastTaskStates.current.delete(id);
-        }
+      if (list.length === 0) {
+        selectedTaskIdRef.current = undefined;
+        logOffsetRef.current = 0;
+        setLogText("");
+        return;
       }
 
-      if (list.length > 0) {
-        const idx = Math.min(selectedIndexRef.current, list.length - 1);
-        setSelectedIndex(idx);
-        const selectedTask = list[idx];
-        // 仅在选中任务变化时刷新日志
-        if (changedIds.has(selectedTask.taskId) || !logText) {
-          const chunk = await manager.logs(selectedTask.taskId, logOffset, 4 * 1024);
-          setLogText(chunk.text);
-          setLogOffset(chunk.nextOffset);
-        }
-      } else {
+      const idx = Math.min(selectedIndexRef.current, list.length - 1);
+      setSelectedIndex(idx);
+      const selectedTask = list[idx];
+      if (selectedTask.taskId !== selectedTaskIdRef.current) {
+        selectedTaskIdRef.current = selectedTask.taskId;
+        logOffsetRef.current = 0;
         setLogText("");
+      }
+
+      const chunk = await manager.logs(selectedTask.taskId, logOffsetRef.current, 4 * 1024);
+      logOffsetRef.current = chunk.nextOffset;
+      if (chunk.text) {
+        setLogText((previous) => (previous + chunk.text).slice(-MAX_LOG_BUFFER_CHARS));
       }
     } catch (error) {
       setRefreshError(error instanceof Error ? error.message : String(error));
     }
-  }, [manager, logText]);
+  }, [manager]);
 
   useEffect(() => {
-    void refresh();
-    // 自适应刷新间隔：运行中 1s，空闲 5s
-    const getInterval = () => tasks.some(t => t.status === "running") ? 1000 : 5000;
-    const timer = setInterval(() => void refresh(), getInterval());
-    return () => clearInterval(timer);
-  }, [refresh, refreshKey, tasks]);
+    let cancelled = false;
+    let timer: NodeJS.Timeout | undefined;
+    const tick = async () => {
+      await refresh();
+      if (cancelled) return;
+      const active = tasksRef.current.some((t) => t.status === "running" || t.status === "starting");
+      timer = setTimeout(() => void tick(), active ? 1000 : 5000);
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [refresh, refreshKey]);
 
   useInput((input, key) => {
     if (key.escape && onClose) {
@@ -88,11 +110,17 @@ export function BgTaskLivePanel({ manager, width = 80, maxLogLines = 8, onClose 
       return;
     }
     if (key.downArrow) {
-      setSelectedIndex((i) => Math.min(i + 1, Math.max(0, tasks.length - 1)));
+      const next = Math.min(selectedIndexRef.current + 1, Math.max(0, tasks.length - 1));
+      selectedIndexRef.current = next;
+      setSelectedIndex(next);
+      void refresh();
       return;
     }
     if (key.upArrow) {
-      setSelectedIndex((i) => Math.max(i - 1, 0));
+      const next = Math.max(selectedIndexRef.current - 1, 0);
+      selectedIndexRef.current = next;
+      setSelectedIndex(next);
+      void refresh();
       return;
     }
   });
