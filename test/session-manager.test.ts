@@ -50,23 +50,32 @@ describe("SessionManager", () => {
         { role: "assistant" as const, content: "recovered" },
       ];
 
+      const sanitized = sanitizeResumableMessages(messages);
+      // The interrupted block is repaired rather than dropped: `call-one`
+      // already ran, so its result is kept and the missing `call-two` gets a
+      // synthetic unknown result to satisfy the provider contract. The orphan
+      // result and the empty assistant message are dropped.
       assert.deepEqual(
-        sanitizeResumableMessages(messages).map((message) => [message.role, message.content]),
+        sanitized.map((message) => [message.role, message.content]),
         [
           ["system", "system"],
           ["user", "first"],
+          ["assistant", ""],
+          ["tool", "partial"],
+          ["tool", sanitized[4]?.content ?? ""],
           ["user", "second"],
           ["assistant", "recovered"],
         ],
       );
+      assert.match(String(sanitized[4]?.content ?? ""), /unknown result/i);
+      assert.equal(sanitized[4]?.role === "tool" ? sanitized[4].isError : undefined, true);
+
       await manager.save({ id: "sanitize-session", messages });
       const restored = await manager.load("sanitize-session");
-      assert.deepEqual(restored?.messages.map((message) => [message.role, message.content]), [
-        ["system", "system"],
-        ["user", "first"],
-        ["user", "second"],
-        ["assistant", "recovered"],
-      ]);
+      assert.deepEqual(
+        restored?.messages.map((message) => [message.role, message.content]),
+        sanitized.map((message) => [message.role, message.content]),
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

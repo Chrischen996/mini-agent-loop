@@ -124,7 +124,11 @@ export async function runServerAgentTurn(
   if (isResume || startRunning) await saveState(currentHistory, "running");
 
   for (let attempt = 0; attempt <= maxAutoContinues; attempt++) {
-    const isContinuation = (attempt > 0 || isResume) && !currentPrompt;
+    // A resumed run continues the transcript that a previous run already
+    // delivered, so its prompt must not be appended a second time. The
+    // auto-continue nudge assigns `currentPrompt`, and that message is
+    // meant to reach the model, so later attempts keep appending it.
+    const isContinuation = attempt > 0 ? !currentPrompt : isResume;
     let blockTurnCount = 0;
     let terminalEvent: Extract<LoopEvent, { type: "done" | "aborted" }> | undefined;
     let messages: AgentMessage[];

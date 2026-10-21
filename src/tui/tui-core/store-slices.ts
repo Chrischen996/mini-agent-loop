@@ -92,6 +92,7 @@ export type RuntimeSlice = Pick<
   | "turnStartedAt"
   | "lastStreamAt"
   | "busy"
+  | "autoContinueCount"
   | "modelName"
   | "usedTokens"
   | "contextTokens"
@@ -146,7 +147,8 @@ const SLICE_KEYS: Array<[
   ["runtime", [
     "streamingText", "streamingReasoning", "streamingTextParts",
     "streamingReasoningParts", "turnStartedAt", "lastStreamAt", "busy",
-    "modelName", "usedTokens", "contextTokens", "cacheReadTokens", "spinnerMessage",
+    "autoContinueCount", "modelName", "usedTokens", "contextTokens",
+    "cacheReadTokens", "spinnerMessage",
   ]],
   ["view", ["expandedThinking", "focusedMessageIndex", "scrollOffset", "maxScrollOffset", "pendingImages"]],
   ["notices", ["status", "thinkingMode"]],
