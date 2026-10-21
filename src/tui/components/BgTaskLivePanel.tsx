@@ -52,9 +52,6 @@ export function BgTaskLivePanel({ manager, width = 80, maxLogLines = 8, onClose 
     try {
       await manager.initialize();
       const list = await manager.list();
-      if (!compareTaskStates(tasksRef.current.length ? list.map((t) => ({ taskId: t.taskId, status: t.status, exitCode: t.exitCode, durationMs: t.durationMs, name: t.name })) : undefined, list)) {
-        return;
-      }
       setTasks(list);
       setRefreshError(null);
 
@@ -68,7 +65,8 @@ export function BgTaskLivePanel({ manager, width = 80, maxLogLines = 8, onClose 
       const idx = Math.min(selectedIndexRef.current, list.length - 1);
       setSelectedIndex(idx);
       const selectedTask = list[idx];
-      if (selectedTask.taskId !== selectedTaskIdRef.current) {
+      const taskChanged = selectedTask.taskId !== selectedTaskIdRef.current;
+      if (taskChanged) {
         selectedTaskIdRef.current = selectedTask.taskId;
         logOffsetRef.current = 0;
         setLogText("");
@@ -78,6 +76,13 @@ export function BgTaskLivePanel({ manager, width = 80, maxLogLines = 8, onClose 
       logOffsetRef.current = chunk.nextOffset;
       if (chunk.text) {
         setLogText((previous) => (previous + chunk.text).slice(-MAX_LOG_BUFFER_CHARS));
+      } else if (taskChanged) {
+        // The new task has not produced log output yet; keep the panel clear
+        // instead of showing the previously selected task's tail.
+        setLogText("");
+      } else if (chunk.endOfLog) {
+        // The log has reached the tail and nothing new was appended.
+        setLogText("");
       }
     } catch (error) {
       setRefreshError(error instanceof Error ? error.message : String(error));

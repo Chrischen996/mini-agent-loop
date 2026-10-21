@@ -585,12 +585,14 @@ load contents. Sessions are persisted under `AGENT_DATA_DIR` (workspace-scoped,
 with a 30-day default TTL) and are restored when the server restarts.
 
 The CLI, TUI, and Web server expose `bg_start`, `bg_status`, `bg_logs`,
-`bg_send`, `bg_wait`, and `bg_kill` for persistent background tasks. The
-default `auto` backend uses tmux when installed and otherwise runs a detached
-Node process. Process-backed tasks support logs, status, waiting, timeouts,
-and cancellation; interactive `bg_send` requires tmux. The Web server also
-provides workspace-scoped `/api/background-tasks` control routes and
-initializes the suite on the first background-task request. Set
+`bg_send`, `bg_wait`, `bg_kill`, `bg_snapshot`, `bg_replay`,
+`bg_search_logs`, `bg_kill_by_tag`, and `bg_status_by_tag` for
+persistent background tasks. The default `auto` backend uses tmux when
+installed and otherwise runs a detached Node process. Process-backed
+tasks support logs, status, waiting, timeouts, and cancellation;
+interactive `bg_send` requires tmux. The Web server also provides
+workspace-scoped `/api/background-tasks` control routes and initializes
+the suite on the first background-task request. Set
 `MINI_AGENT_BG_TASKS=0` to disable it.
 
 The HTTP API accepts `workspaceId` or `sessionId` to select a workspace. Its

@@ -51,6 +51,8 @@ export interface LogSearchOptions {
   context?: number;
   level?: "debug" | "info" | "warn" | "error";
   reverse?: boolean;
+  /** Maximum number of matches returned before `truncated` becomes true. */
+  maxMatches?: number;
 }
 
 export interface LogSearchResult {
@@ -59,6 +61,8 @@ export interface LogSearchResult {
   matchCount: number;
   truncated: boolean;
 }
+
+const MAX_SEARCH_MATCHES = 200;
 
 export interface StartTaskInput {
   command?: string;
@@ -378,18 +382,28 @@ export class BgTaskManager extends EventEmitter {
     if (!paths) throw new Error(`Task not found: ${taskId}`);
     const content = await readFile(paths.log, "utf8");
     const lines = content.split("\n");
-    const { search, context = 0, level, reverse } = options;
+    const { search, context = 0, level, reverse, maxMatches } = options;
+    const max = Math.max(1, Math.min(
+      Number.isSafeInteger(maxMatches) ? Number(maxMatches) : MAX_SEARCH_MATCHES,
+      MAX_SEARCH_MATCHES,
+    ));
     const matches: string[] = [];
+    let matchCount = 0;
+    let truncated = false;
     const targetLevel = level === "debug" ? /debug/i : level === "info" ? /info/i : level === "warn" ? /warn/i : level === "error" ? /error/i : null;
     for (let i = 0; i < lines.length; i++) {
       if (search && !lines[i].toLowerCase().includes(search.toLowerCase())) continue;
       if (targetLevel && !targetLevel.test(lines[i])) continue;
-      const start = Math.max(0, i - context);
-      const end = Math.min(lines.length, i + context + 1);
-      matches.push(lines.slice(start, end).join("\n"));
+      matchCount += 1;
+      if (matchCount <= max) {
+        const start = Math.max(0, i - context);
+        const end = Math.min(lines.length, i + context + 1);
+        matches.push(lines.slice(start, end).join("\n"));
+      }
     }
+    truncated = matchCount > max;
     if (reverse) matches.reverse();
-    return { taskId, matches, matchCount: matches.length, truncated: false };
+    return { taskId, matches, matchCount: matchCount, truncated };
   }
 
   async get(taskId: string): Promise<BgTaskSummary | undefined> {

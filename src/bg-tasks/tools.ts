@@ -223,7 +223,7 @@ export function createBgTaskTools(manager: BgTaskManager): Tool[] {
     },
     {
       name: "bg_search_logs",
-      description: "Search a task log by keyword or log level, with optional context lines and reverse ordering.",
+      description: "Search a task log by keyword or log level, with optional context lines and reverse ordering. Results are capped at 200 matches.",
       displayName: "Search Logs",
       parameters: {
         type: "object",
@@ -233,6 +233,7 @@ export function createBgTaskTools(manager: BgTaskManager): Tool[] {
           context: { type: "integer", minimum: 0, maximum: 50 },
           level: { type: "string", enum: ["debug", "info", "warn", "error"] },
           reverse: { type: "boolean" },
+          maxMatches: { type: "integer", minimum: 1, maximum: 200, description: "Maximum number of matches to return (default 200)." },
         },
         required: ["taskId"],
         additionalProperties: false,
@@ -244,8 +245,10 @@ export function createBgTaskTools(manager: BgTaskManager): Tool[] {
           context: args.context !== undefined ? Number(args.context) : undefined,
           level: args.level !== undefined ? String(args.level) as "debug" | "info" | "warn" | "error" : undefined,
           reverse: args.reverse === true,
+          maxMatches: args.maxMatches !== undefined ? Number(args.maxMatches) : undefined,
         });
-        return { content: result.matchCount > 0 ? `${result.matchCount} match(es):\n${result.matches.join("\n---\n")}` : "No matches." };
+        const truncation = result.truncated ? ` (showing first ${result.matches.length} of ${result.matchCount})` : "";
+        return { content: result.matchCount > 0 ? `${result.matchCount} match(es)${truncation}:\n${result.matches.join("\n---\n")}` : "No matches." };
       },
     },
     {

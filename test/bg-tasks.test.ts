@@ -150,6 +150,40 @@ describe("BgTaskManager tool surface", () => {
     }
   });
 
+  it("caps bg_search_logs results and reports truncation", async () => {
+    await withTempDir(async (cwd) => {
+      const manager = new BgTaskManager(cwd, "search-test", undefined, { backend: "process" });
+      await manager.initialize();
+      const store = new BgTaskStore(cwd, "search-test");
+      await store.initialize();
+      const taskId = "bg_search";
+      const paths = await store.createTask({
+        schemaVersion: 1,
+        taskId,
+        name: "search-test",
+        command: "cat",
+        cwd,
+        shell: "/bin/sh",
+        status: "running",
+        createdAt: new Date(0).toISOString(),
+        notifyOnCompletion: false,
+      });
+      const { writeFile } = await import("node:fs/promises");
+      const lines = Array.from({ length: 500 }, (_, i) => `line-${i} INFO`);
+      await writeFile(paths.log, lines.join("\n") + "\n", "utf8");
+
+      const defaultResult = await manager.searchLogs(taskId, { search: "INFO" });
+      assert.equal(defaultResult.truncated, true);
+      assert.equal(defaultResult.matches.length, 200);
+      assert.equal(defaultResult.matchCount, 500);
+
+      const customResult = await manager.searchLogs(taskId, { search: "line-1 ", maxMatches: 1 });
+      assert.equal(customResult.truncated, false);
+      assert.equal(customResult.matches.length, 1);
+      manager.dispose();
+    });
+  });
+
   it("bg_status reports no tasks on a clean instance", async () => {
     await withTempDir(async (cwd) => {
       const manager = new BgTaskManager(cwd, "unit-test-instance");

@@ -70,9 +70,9 @@ describe("bg-tasks TUI surface", () => {
     it("shows the selected task's log without splicing in another task's output", async () => {
       const { manager } = fakeManager(
         [summary("bg_aaaa1111", "build"), summary("bg_bbbb2222", "lint")],
-        { bg_aaaa1111: "alpha-output", bg_bbbb2222: "beta-output" },
+        { bg_aaaa1111: "alpha-output\n", bg_bbbb2222: "beta-output\n" },
       );
-      const view = render(React.createElement(BgTaskLivePanel, { manager, width: 70 }));
+      const view = render(React.createElement(BgTaskLivePanel, { manager, width: 70 }), { columns: 100, rows: 40 });
       try {
         await waitForRender();
         const first = view.lastFrame() ?? "";
@@ -92,9 +92,9 @@ describe("bg-tasks TUI surface", () => {
     it("targets the newly selected task when reading logs", async () => {
       const { manager, calls } = fakeManager(
         [summary("bg_aaaa1111", "build"), summary("bg_bbbb2222", "lint")],
-        { bg_aaaa1111: "alpha", bg_bbbb2222: "beta" },
+        { bg_aaaa1111: "alpha\n", bg_bbbb2222: "beta\n" },
       );
-      const view = render(React.createElement(BgTaskLivePanel, { manager, width: 70 }));
+      const view = render(React.createElement(BgTaskLivePanel, { manager, width: 70 }), { columns: 100, rows: 40 });
       try {
         await waitForRender();
         view.stdin.write("\x1b[B");

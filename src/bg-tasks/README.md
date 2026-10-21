@@ -16,7 +16,8 @@ src/bg-tasks/
 ├── process.ts    — detached process fallback with PID and log redirection
 ├── runner.ts     — pane-side executor: waits for start gate, runs $SHELL -lc, writes result.json
 ├── manager.ts    — BgTaskManager: state machine, waits, timeouts, reconciliation
-├── tools.ts      — six tool definitions (bg_start/bg_status/bg_logs/bg_send/bg_wait/bg_kill)
+├── tools.ts      — 11 tool definitions (bg_start/bg_status/bg_logs/bg_send/bg_wait/bg_kill,
+│                   plus bg_snapshot/bg_replay/bg_search_logs/bg_kill_by_tag/bg_status_by_tag)
 └── utils.ts      — shellQuote helper
 ```
 
@@ -66,20 +67,29 @@ npx tsx --test test/bg-tasks.test.ts test/bg-tasks.integration.test.ts
 in `src/tui/App.tsx`): opens the **live panel** (B) —
 `src/tui/components/BgTaskLivePanel.tsx` — a persistent floating panel with
 arrow-key task selection, an inline log tail for the selected task, `r` to
-force a refresh, `Esc` to close, and a 1.5s auto-refresh while it is open.
-It also keeps the original one-shot `ADD_NOTICE` snapshot before the panel
-opens. The panel lazily creates a `BgTaskManager` on first use, so TUI startup
-never blocks on a missing tmux. When the flag is off (`MINI_AGENT_BG_TASKS=0`)
-or the manager cannot be created, the card says so instead of crashing.
+force a refresh, `Esc` to close, and an adaptive auto-refresh (1s while a task
+is running, 5s otherwise) while it is open. The panel resets its log offset
+when the selection changes so it never splices another task's tail into the
+view. It also keeps the original one-shot `ADD_NOTICE` snapshot before the
+panel opens. The panel lazily creates a `BgTaskManager` on first use, so TUI
+startup never blocks on a missing tmux. When the flag is off
+(`MINI_AGENT_BG_TASKS=0`) or the manager cannot be created, the card says so
+instead of crashing. While the panel is open, the prompt input is disabled;
+`Esc` closes the panel and restores it.
 
 While any task is running, the status bar shows `N bg tasks` (1s polling in
-`App.tsx`, appended by `StatusBar` after the regular segments). `bg_*` tool
-calls also render as regular Claude-Code-style rows via the `BgStart` /
-`BgStatus` / `BgLogs` / `BgSend` / `BgWait` / `BgKill` labels added in
+`App.tsx`, appended by `StatusBar` after the regular segments). The count
+light up when the agent itself runs a `bg_*` tool (via a `tool_start` event),
+so the badge no longer requires a manual `/bg-tasks` first. `bg_*` tool
+calls render as Claude-Code-style rows via the labels in
 `src/tui/tool-lines.ts`.
 
 `bg_send` accepts literal text, `enter: true`, or a `key` from the allow-list
 `ctrl_c | ctrl_d | ctrl_z | up | down | left | right` (tmux-backed tasks only).
+
+`bg_search_logs` caps its result at 200 matches (or `maxMatches` when given)
+and reports `truncated` when the log contains more; the tool output shows the
+capped count when truncation occurs.
 
 ## Known gaps (next steps)
 
@@ -98,9 +108,9 @@ and the matched windows.
 ### Task scheduling (`bg_start`)
 
 `bg_start` accepts optional scheduling hints — `priority`
-(`high` / `normal` / `low`), `maxConcurrent`, `cpuLimit`, and `memoryLimit`.
-These are persisted on the task meta and exposed through the tool schema;
-the backend applies them where the platform supports them.
+(`high` / `normal` / `low`). The `maxConcurrent`, `cpuLimit`, and
+`memoryLimit` fields exist on `StartTaskInput` but are not currently
+enforced by the backends; they are informational.
 
 ### Task snapshots & replay (`bg_snapshot` / `bg_replay`)
 

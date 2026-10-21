@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { runChildProcess } from "./child-process.ts";
 
 export type ClipboardWriteResult = {
   ok: boolean;
@@ -16,24 +15,45 @@ export type ClipboardIo = {
 
 const CLIPBOARD_TIMEOUT_MS = 5_000;
 
-// xterm-compatible terminals cap each OSC 52 command parameter at 76 bytes;
-// the base64 payload itself must fit in a single command.
-const MAX_OSC52_BASE64_BYTES = 76;
-
 function encodeOsc52(text: string): string {
   return `\x1b]52;c;${Buffer.from(text, "utf8").toString("base64")}\x07`;
 }
 
-type NativeCandidate = {
-  method: Exclude<ClipboardWriteResult["method"], "osc52" | "none">;
-  command: string;
-  args: string[];
-};
+async function runClipboardCommand(command: string, args: string[], input: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ["pipe", "ignore", "pipe"],
+      windowsHide: true,
+    });
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timeout = setTimeout(() => {
+      child.kill();
+      finish(new Error(`${command} timed out`));
+    }, CLIPBOARD_TIMEOUT_MS);
+
+    child.once("error", (error) => finish(error));
+    child.once("close", (code) => {
+      if (code === 0) finish();
+      else finish(new Error(`${command} exited with code ${code ?? "unknown"}`));
+    });
+    child.stdin?.once("error", () => {
+      /* The child may exit before stdin finishes flushing. */
+    });
+    child.stdin?.end(input);
+  });
+}
 
 function nativeCandidates(
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
-): NativeCandidate[] {
+): Array<{ method: Exclude<ClipboardWriteResult["method"], "osc52" | "none">; command: string; args: string[] }> {
   if (platform === "darwin") {
     return [{ method: "pbcopy", command: "pbcopy", args: [] }];
   }
@@ -42,67 +62,44 @@ function nativeCandidates(
   }
   const wayland = Boolean(env.WAYLAND_DISPLAY);
   const x11 = Boolean(env.DISPLAY);
-  const linux: NativeCandidate[] = [];
+  const linux: Array<{ method: "wl-copy" | "xclip"; command: string; args: string[] }> = [];
   if (wayland || !x11) linux.push({ method: "wl-copy", command: "wl-copy", args: [] });
   if (x11 || !wayland) linux.push({ method: "xclip", command: "xclip", args: ["-selection", "clipboard"] });
   return linux;
-}
-
-// Fire-and-forget native clipboard fallback: try each backend in order and
-// stop at the first success. Runs after an OSC 52 write so the clipboard is
-// still filled when the terminal ignores or disables OSC 52 (e.g. Windows
-// Terminal blocks OSC 52 writes by default).
-async function runNativeSafetyNet(
-  candidates: NativeCandidate[],
-  text: string,
-  run: (command: string, args: string[], input: string) => Promise<void>,
-): Promise<void> {
-  for (const candidate of candidates) {
-    try {
-      await run(candidate.command, candidate.args, text);
-      return;
-    } catch {
-      /* Try the next backend. */
-    }
-  }
 }
 
 export async function writeClipboardText(
   text: string,
   io: ClipboardIo = {},
 ): Promise<ClipboardWriteResult> {
-  if (!text) return { ok: false, method: "none", error: "Nothing to copy" };
+  if (!text) return { ok: false, method: "none", error: "没有可复制的内容" };
 
   const platform = io.platform ?? process.platform;
   const env = io.env ?? process.env;
-  const run = io.run ?? ((command: string, args: string[], input: string) => runChildProcess(command, args, {
-    input,
-    timeoutMs: CLIPBOARD_TIMEOUT_MS,
-    stdio: ["pipe", "ignore", "pipe"],
-  }));
+  const run = io.run ?? runClipboardCommand;
   const writeStdout = io.writeStdout ?? ((data: string) => process.stdout.write(data));
-  const candidates = nativeCandidates(platform, env);
 
-  // ── Path 1: OSC 52 (preferred, ~0ms, handled by the terminal itself) ─────
-  // Emit a single OSC 52 command whose base64 payload fits within the
-  // terminal's per-command limit. Always fire-and-forget the native clipboard
-  // tool as a safety net so the clipboard is still filled when the terminal
-  // has OSC 52 writes disabled or ignored them.
-  const base64 = Buffer.from(text, "utf8").toString("base64");
-  if (base64.length <= MAX_OSC52_BASE64_BYTES) {
-    try {
-      writeStdout(`\x1b]52;c;${base64}\x07`);
-      void runNativeSafetyNet(candidates, text, run).catch(() => {});
-      return { ok: true, method: "osc52" };
-    } catch {
-      // Writing the OSC 52 sequence failed; fall through to native tools.
+  // ── 第一路径：OSC 52（首选，~0ms，终端原生支持）──────────────────────────
+  // 生成 OSC 52 序列并输出，让终端自行处理复制
+  try {
+    const osc52 = encodeOsc52(text);
+    writeStdout(osc52);
+    // OSC 52 成功后，fire-and-forget 原生工具作为安全网
+    // 这样即使终端不支持 OSC 52，原生工具仍能写入剪贴板
+    if (platform !== "win32") {
+      const candidates = nativeCandidates(platform, env);
+      for (const candidate of candidates) {
+        run(candidate.command, candidate.args, text).catch(() => {}); // fire-and-forget
+        break; // 只试第一个可用的
+      }
     }
+    return { ok: true, method: "osc52" };
+  } catch (error) {
+    // OSC 52 失败，回退到原生工具
   }
-  // For larger payloads the base64 no longer fits a single command; use the
-  // native tools below.
 
-  // ── Path 2: native clipboard tools (safety net) ───────────────────────────
-  for (const candidate of candidates) {
+  // ── 第二路径：原生工具（安全网）────────────────────────────────────────────
+  for (const candidate of nativeCandidates(platform, env)) {
     try {
       await run(candidate.command, candidate.args, text);
       return { ok: true, method: candidate.method };
@@ -114,47 +111,8 @@ export async function writeClipboardText(
   return {
     ok: false,
     method: "none",
-    error: "Every clipboard method failed",
+    error: "所有复制方式均失败",
   };
-}
-
-export async function readClipboardText(
-  io: ClipboardIo = {},
-): Promise<{ ok: boolean; text?: string; error?: string; method?: string }> {
-  const platform = io.platform ?? process.platform;
-  const env = io.env ?? process.env;
-
-  const candidates: { method: string; command: string; args: string[] }[] = [];
-  if (platform === "win32") {
-    candidates.push({ method: "powershell", command: "powershell", args: ["-NoProfile", "-Command", "Get-Clipboard"] });
-  } else if (platform === "darwin") {
-    candidates.push({ method: "pbpaste", command: "pbpaste", args: [] });
-  } else {
-    const wayland = Boolean(env.WAYLAND_DISPLAY);
-    const x11 = Boolean(env.DISPLAY);
-    if (wayland || !x11) candidates.push({ method: "wl-paste", command: "wl-paste", args: [] });
-    if (x11 || !wayland) candidates.push({ method: "xclip", command: "xclip", args: ["-selection", "clipboard", "-o"] });
-  }
-
-  for (const c of candidates) {
-    try {
-      const text = await new Promise<string>((resolve, reject) => {
-        const child = spawn(c.command, c.args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-        let stdout = "";
-        child.stdout?.on("data", (d) => { stdout += d.toString(); });
-        child.stderr?.resume();
-        child.once("error", (e) => reject(e));
-        child.once("close", (code) => {
-          if (code === 0) resolve(stdout);
-          else reject(new Error(`${c.command} exited ${code}`));
-        });
-      });
-      return { ok: true, text, method: c.method };
-    } catch {
-      /* try next */
-    }
-  }
-  return { ok: false, error: "Every clipboard read method failed" };
 }
 
 export function osc52Payload(text: string): string {

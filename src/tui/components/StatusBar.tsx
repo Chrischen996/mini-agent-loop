@@ -1,71 +1,66 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { PermissionMode } from "../state.ts";
+import { TUI_COLORS as C } from "../theme.ts";
+import { formatContextWindow } from "./FileAutocomplete.tsx";
+import { thinkingLevelToDisplay } from "../../think-intensity.ts";
 import type { ModelThinkingLevel } from "../../pi-ai/types.ts";
-import { buildStatusSegments } from "../status-line.ts";
 
 type StatusBarProps = {
   modelName: string;
-  cwd?: string;
-  width?: number;
   tokenEstimate: number;
   contextWindow: number;
   busy: boolean;
   status?: string;
   queuedCount?: number;
-  mcpStatus?: string;
   /** Live background task counter, rendered as `N bg tasks` when non-zero. */
   bgTaskCount?: number;
+  /** Compact MCP connection summary, for example `MCP 2 ready`. */
+  mcpStatus?: string;
   permissionMode: PermissionMode;
   thinkingLevel: ModelThinkingLevel;
   cacheReadTokens?: number;
   promptTokens?: number;  // Total prompt tokens for accurate cache percentage
 };
 
-/**
- * Stable metadata chrome.
- *
- * Segment order, separators, truncation, and colors come from the
- * `status-line` module. This component maps those segments onto Ink text nodes.
- */
-export const StatusBar = React.memo(function StatusBar({ modelName, cwd, width = 80, tokenEstimate, contextWindow, busy, status = "Ready", queuedCount = 0, mcpStatus, bgTaskCount, permissionMode, thinkingLevel, cacheReadTokens, promptTokens }: StatusBarProps): React.ReactElement {
-  const bgTaskLabel = bgTaskCount && bgTaskCount > 0
-    ? `${bgTaskCount} bg task${bgTaskCount === 1 ? "" : "s"}`
-    : undefined;
-
-  const segments = buildStatusSegments({
-    modelName,
-    cwd,
-    permissionMode,
-    thinkingLevel,
-    contextTokens: tokenEstimate,
-    contextWindow,
-    busy,
-    status,
-    queuedCount,
-    mcpStatus,
-    cacheReadTokens,
-    promptTokens,
-    width,
-  });
-
-  if (bgTaskLabel) {
-    segments.push({ role: "status", text: bgTaskLabel, color: "#555555", dim: true });
-  }
+export function StatusBar({ modelName, tokenEstimate, contextWindow, busy, status = "就绪", queuedCount = 0, bgTaskCount, mcpStatus, permissionMode, thinkingLevel, cacheReadTokens, promptTokens }: StatusBarProps): React.ReactElement {
+  const modeLabel = permissionMode === "plan" ? "计划" : "绕过";
 
   return (
-    <Box paddingX={1} flexWrap="nowrap" minWidth={0} overflow="hidden">
-      {segments.map((segment, index) => (
-        <Text
-          key={`${segment.role}-${index}`}
-          color={segment.color}
-          dimColor={segment.dim}
-          bold={segment.bold}
-          wrap="truncate-end"
-        >
-          {segment.text}
-        </Text>
-      ))}
+    <Box
+      borderStyle="single"
+      borderColor={C.border}
+      paddingX={1}
+      flexDirection="column"
+    >
+      <Box gap={2}>
+        <Text color={busy ? C.running : C.success}>{busy ? "⟳ 运行中" : "● 就绪"}</Text>
+        {(busy || status !== "就绪") && (
+          <Text color={busy ? C.running : C.success} wrap="truncate-end">{status}</Text>
+        )}
+        {queuedCount > 0 && <Text color={C.running}>队列: {queuedCount}</Text>}
+        {bgTaskCount !== undefined && bgTaskCount > 0 && (
+          <Text color={C.running}>{bgTaskCount} bg task{bgTaskCount === 1 ? "" : "s"}</Text>
+        )}
+        {mcpStatus && <Text color={C.muted} wrap="truncate-end">{mcpStatus}</Text>}
+        <Text color={C.info} wrap="truncate-end">{modelName}</Text>
+        <Text color={C.thinking} wrap="truncate-end">思考: {thinkingLevelToDisplay(thinkingLevel)}</Text>
+        <Text dimColor>{tokenEstimate} / {formatContextWindow(contextWindow)}</Text>
+        <Text color={C.thinking} wrap="truncate-end">{modeLabel}</Text>
+        {cacheReadTokens !== undefined && cacheReadTokens > 0 && promptTokens !== undefined && promptTokens > 0 && (
+          <Text color={C.info} wrap="truncate-end">
+            CACHE:{Math.round(cacheReadTokens / promptTokens * 100)}% ({cacheReadTokens})
+          </Text>
+        )}
+        {cacheReadTokens !== undefined && cacheReadTokens > 0 && promptTokens === undefined && (
+          <Text color={C.info} wrap="truncate-end">
+            CACHE:{cacheReadTokens}
+          </Text>
+        )}
+      </Box>
+      <Box gap={2}>
+        <Text dimColor wrap="truncate-end">[PgUp/PgDn] 滚动  [Ctrl+Y/Ctrl+Shift+C] 复制  [Ctrl+V] 粘贴图片  [Ctrl+R] 思考  [Shift+Tab] 模式  [/copy] 原文  [Ctrl+C] 退出</Text>
+      </Box>
     </Box>
   );
-});
+}
