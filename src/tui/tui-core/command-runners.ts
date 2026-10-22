@@ -56,7 +56,7 @@ export const runTodo: (ctx: CommandContext, args: ParsedCommandArgs) => Promise<
     if (result.ok) {
       ctx.store.dispatch({ type: "SET_TODOS", todos: result.todos });
       // The headless context carries persistence through an optional hook.
-      (ctx as unknown as { persistTodoState?: (t: import("../../todo.ts").TodoItem[]) => void }).persistTodoState?.(result.todos);
+      ctx.persistTodoState?.(result.todos);
     } else {
       ctx.store.dispatch({ type: "ADD_NOTICE", title: "Todo", text: result.error });
     }
@@ -195,3 +195,114 @@ export const runResume: (ctx: CommandContext, args: ParsedCommandArgs) => Promis
 export function parseArgs(parsed: SlashCommand, text: string): ParsedCommandArgs {
   return argsFor(parsed, text);
 }
+
+// ─── /todos run --parallel helpers ──────────────────────────────────────────
+
+import {
+  parseTodosRunArgs,
+  buildRunnerDag,
+  formatDryRun,
+  runTodoPlan,
+  mergeOutcomesIntoTodos,
+  formatOutcome,
+  summarizeOutcomes,
+  type ParsedTodosRunArgs,
+  type RunnerPlan,
+} from "../../todos/index.ts";
+import type { BgTaskManager } from "../../bg-tasks/manager.js";
+import type { SubagentToolsFactoryDeps } from "../subagent-tools-factory.ts";
+import type { SubagentTaskCommand, BgTaskCommand } from "../../todos/execute.ts";
+
+export type TodosRunExecutors = {
+  subagent: (plan: SubagentTaskCommand, signal?: AbortSignal) => Promise<{ ok: boolean; summary?: string; error?: string }>;
+  startBgTask: (plan: BgTaskCommand) => Promise<string>;
+  pollBgTask: (taskId: string, signal?: AbortSignal) => Promise<{ ok: boolean; done: boolean; summary?: string; error?: string }>;
+};
+
+export function todosRunExecutors(options: {
+  getBgManager: () => BgTaskManager | null;
+  subagentFactory: SubagentToolsFactoryDeps & { getTools: (deps: SubagentToolsFactoryDeps) => import("../../tools/types.ts").Tool[] };
+  getSubagentTools?: () => import("../../tools/types.ts").Tool[];
+}): TodosRunExecutors {
+  const manager = options.getBgManager();
+  const startBgTask = async (plan: BgTaskCommand) => {
+    if (!manager) throw new Error("Background tasks are not available in this session");
+    const started = await manager.start({
+      command: plan.command,
+      ...(plan.timeoutSeconds ? { timeoutSeconds: plan.timeoutSeconds } : {}),
+      ...(plan.tags ? { tags: plan.tags } : {}),
+    });
+    return started.taskId;
+  };
+  const pollBgTask = async (taskId: string, signal?: AbortSignal) => {
+    if (!manager) return { ok: false, done: true, error: "Background tasks are not available" };
+    const result = await manager.wait([taskId], "all", signal ? 30 : 300);
+    const summary = await manager.get(taskId);
+    if (!summary) return { ok: false, done: true, error: "Background task not found" };
+    const ok = summary.status === "completed" && (summary.exitCode ?? 0) === 0;
+    return {
+      ok,
+      done: true,
+      summary: summary.status,
+      error: ok ? undefined : summary.reason ?? `background task ended with status ${summary.status}`,
+    };
+  };
+  const subagent = async (plan: SubagentTaskCommand, signal?: AbortSignal) => {
+    const tools = options.getSubagentTools?.() ?? [];
+    const subagentTool = tools.find((t) => t.name === "subagent");
+    if (!subagentTool) throw new Error("subagent tool is not available");
+    const result = await subagentTool.execute({
+      task: plan.task,
+      profile: plan.profile ?? "coder",
+      ...(plan.model ? { model: plan.model } : {}),
+    } as never, signal);
+    const content = typeof result === "string" ? result : JSON.stringify(result);
+    return { ok: true, summary: content.slice(0, 500) };
+  };
+  return { subagent, startBgTask, pollBgTask };
+}
+
+export const runTodos: (ctx: import("./commands.ts").TodosRunCommandContext, args: import("./commands.ts").ParsedCommandArgs) => Promise<boolean> =
+  async (ctx, args) => {
+    if (args.cmd !== "todos-run") return false;
+    const parsed = (args as { args?: ParsedTodosRunArgs }).args as ParsedTodosRunArgs;
+    const todos = ctx.store.getState().todoItems ?? [];
+    const plan = buildRunnerDag(todos, parsed);
+    if (plan.errors.length > 0) {
+      ctx.store.dispatch({ type: "ADD_NOTICE", title: "Todo runner", text: plan.errors.join("\n") });
+      return true;
+    }
+    if (parsed.dryRun) {
+      ctx.store.dispatch({
+        type: "ADD_NOTICE",
+        title: "Todo runner dry-run",
+        text: formatDryRun(plan),
+      });
+      return true;
+    }
+    const executors = ctx.todosRunExecutors;
+    if (!executors) {
+      ctx.store.dispatch({
+        type: "ADD_NOTICE",
+        title: "Todo runner",
+        text: "No executors registered; re-run the command in a TUI session with subagent and background task support.",
+      });
+      return true;
+    }
+    const outcomes = await runTodoPlan(plan, {
+      subagent: executors.subagent,
+      startBgTask: executors.startBgTask,
+      pollBgTask: executors.pollBgTask,
+      maxConcurrency: parsed.maxConcurrency ?? 2,
+      onEvent: () => undefined,
+    });
+    const merged = mergeOutcomesIntoTodos(todos, outcomes);
+    ctx.store.dispatch({ type: "SET_TODO_ITEMS", todos: merged.todos, revision: merged.revision });
+    ctx.persistTodoState?.(merged.todos);
+    ctx.store.dispatch({
+      type: "ADD_NOTICE",
+      title: "Todo runner",
+      text: summarizeOutcomes(plan, outcomes),
+    });
+    return true;
+  };

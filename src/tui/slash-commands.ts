@@ -1,4 +1,5 @@
 import { parseLegacyTodoCommand, TODO_COMMAND_USAGE, type LegacyTodoCommand } from "./todo-commands.ts";
+import { parseTodosRunArgs, type ParsedTodosRunArgs } from "../todos/index.ts";
 
 export type SlashCommand =
   | { cmd: "read"; path: string }
@@ -9,7 +10,13 @@ export type SlashCommand =
   | { cmd: "todo"; todo: LegacyTodoCommand }
   | { cmd: "resume"; raw: string }
   | { cmd: "web-ui"; raw: string }
+  | { cmd: "todos-run"; args: ParsedTodosRunArgs }
   | null;
+
+export function parseTodosRunCommand(input: string): ParsedTodosRunArgs | undefined {
+  const args = parseTodosRunArgs(input);
+  return args?.parallel ? args : undefined;
+}
 
 export type CommandDef = {
   name: string;       // e.g. "read"
@@ -86,7 +93,15 @@ export function parseSlashCommand(input: string): SlashCommand {
   switch (cmd) {
     case "todo": {
       const todo = parseLegacyTodoCommand(s);
-      return todo ? { cmd: "todo", todo } : null;
+      if (todo) return { cmd: "todo", todo };
+      const runArgs = parseTodosRunCommand(s);
+      if (runArgs) return { cmd: "todos-run", args: runArgs };
+      return null;
+    }
+    case "tasks": {
+      const runArgs = parseTodosRunCommand(s);
+      if (runArgs) return { cmd: "todos-run", args: runArgs };
+      return null;
     }
     case "read": { const path = parts.slice(1).join(" "); return path ? { cmd: "read", path } : null; }
     case "bash": case "sh": { const command = parts.slice(1).join(" "); return command ? { cmd: "bash", command } : null; }

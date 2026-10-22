@@ -107,6 +107,7 @@ import {
   parsePlanTurnOverride,
 } from "./plan-commands.ts";
 import { loadPlanDocument } from "../plan/index.ts";
+import { runTodos, todosRunExecutors, type TodosRunExecutors } from "./tui-core/command-runners.ts";
 import {
   applySkillCommand,
   defaultSkillRegistry,
@@ -212,10 +213,57 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
     });
   }, [llm, vision]);
 
+  // Executors for `/tasks run --parallel` (subagent + background tasks).
+  const todosExecutorsRef = useRef<TodosRunExecutors | null>(null);
+  const getTodosRunExecutors = useCallback((): TodosRunExecutors => {
+    if (todosExecutorsRef.current) return todosExecutorsRef.current;
+    todosExecutorsRef.current = todosRunExecutors({
+      getBgManager,
+      subagentFactory: subagentFactory as unknown as
+        import("./subagent-tools-factory.ts").SubagentToolsFactoryDeps & {
+          getTools: (deps: import("./subagent-tools-factory.ts").SubagentToolsFactoryDeps) => Tool[];
+        },
+      getSubagentTools: () =>
+        getSubagentTools(llmRef.current).filter((t) => t.name === "subagent"),
+    });
+    return todosExecutorsRef.current;
+  }, [getBgManager, getSubagentTools, subagentFactory]);
+
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
   // Generate a stable conversation session ID on startup
   const [conversationId, setConversationId] = useState(() => process.env.MINI_AGENT_SESSION_ID ?? randomUUID());
-  
+
+  // ── /tasks run /todos run --parallel runner ───────────────────────────────
+  const runTodosCommand = useCallback(
+    async (input: string, parsed: import("./slash-commands.ts").SlashCommand) => {
+      if (!parsed || parsed.cmd !== "todos-run") return;
+      setInputRef.current("");
+      dispatch({ type: "USER_MESSAGE", text: input });
+      await runTodos(
+        {
+          store: {
+            getState: () => stateRef.current,
+            dispatch: (action: import("./state.ts").TuiAction) =>
+              dispatchRef.current(action),
+            subscribe: () => () => undefined,
+          },
+          sessionRef: { current: conversationIdRef.current },
+          permissionManager: getPermissionManagerRef.current(),
+          cwd,
+          allTools: agentToolsRef.current,
+          recordSubmission: (text) => void text,
+          clearInput: () => setInputRef.current(""),
+          abortSignal: abortControllerRef.current.signal,
+          persistTodoState: (todos) => void todos,
+          todosRunExecutors: getTodosRunExecutors(),
+        },
+        { cmd: "todos-run", args: parsed.args },
+      );
+      dispatchRef.current({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
+    },
+    [cwd, agentToolsRef, getTodosRunExecutors],
+  );
+
   const pendingImagesRef = useRef<ImageAttachment[]>([]);
   pendingImagesRef.current = state.pendingImages;
   const promptQueueRef = useRef<string[]>([]);
@@ -224,8 +272,6 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
   // Bump to remount the text input so ink-text-input resets cursorOffset to value.length
   // after programmatic completions (Tab @file / slash commands).
   const [inputEpoch, setInputEpoch] = useState(0);
-  const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "plan"));
-  const abortRef = useRef<AbortController>(new AbortController());
   const permissionManagerRef = useRef<PermissionManager | null>(null);
   const permissionTurnRef = useRef<PermissionTurnContext | null>(null);
   const planCaptureRef = useRef<{ prompt: string } | null>(null);
@@ -247,9 +293,25 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
 
   const permissionSessionId = "tui_session";
 
+  // Refs so runTodosCommand (declared above) stays stable.
+  const stateRef = useRef(state);
+  const dispatchRef = useRef(dispatch);
+  const conversationIdRef = useRef(conversationId);
+  const setInputRef = useRef(setInput);
+  const getPermissionManagerRef = useRef(() => permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("plan")));
+  const abortControllerRef = useRef<AbortController>(new AbortController());
+  /** Alias for `abortControllerRef` (keeps the long-standing `abortRef` name). */
+  const abortRef = abortControllerRef;
+  const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "plan"));
   const getPermissionManager = useCallback(() => {
     return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("plan"));
   }, []);
+
+  // Re-sync refs each render.
+  stateRef.current = state;
+  dispatchRef.current = dispatch;
+  conversationIdRef.current = conversationId;
+  setInputRef.current = setInput;
 
   const addPendingImageRef = useCallback((image: ImageAttachment): boolean => {
     return addPendingImage(image, { pendingImages: pendingImagesRef.current, pendingImagesRef, dispatch, cwd });
@@ -727,6 +789,10 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
     // Slash commands → direct tool
     const slashCmd = parseSlashCommand(trimmed);
     if (slashCmd) {
+      if (slashCmd.cmd === "todos-run") {
+        void runTodosCommand(trimmed, slashCmd);
+        return;
+      }
       setInput("");
       dispatch({ type: "USER_MESSAGE", text: trimmed });
       switch (slashCmd.cmd) {

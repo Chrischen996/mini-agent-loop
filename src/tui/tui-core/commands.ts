@@ -27,6 +27,11 @@ export type CommandContext = {
   persistTodoState?: (todos: import("../../todo.ts").TodoItem[]) => void | Promise<void>;
 };
 
+export type TodosRunCommandContext = CommandContext & {
+  /** Executors wiring the runner to subagents + background tasks. */
+  todosRunExecutors?: import("./command-runners.ts").TodosRunExecutors;
+};
+
 export type ParsedCommandArgs =
   | { cmd: "read"; path: string }
   | { cmd: "bash"; command: string }
@@ -34,6 +39,7 @@ export type ParsedCommandArgs =
   | { cmd: "find"; pattern: string; path: string }
   | { cmd: "grep"; pattern: string; path: string }
   | { cmd: "todo"; todo: LegacyTodoCommand }
+  | { cmd: "todos-run"; args: import("../../todos/index.ts").ParsedTodosRunArgs }
   | { cmd: string; raw: string };
 
 export type CommandDef = {
