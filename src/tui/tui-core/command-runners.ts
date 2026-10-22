@@ -211,7 +211,7 @@ import {
 } from "../../todos/index.ts";
 import type { BgTaskManager } from "../../bg-tasks/manager.js";
 import type { SubagentToolsFactoryDeps } from "../subagent-tools-factory.ts";
-import type { SubagentTaskCommand, BgTaskCommand } from "../../todos/execute.ts";
+import { parseSubagentReceipt, type SubagentTaskCommand, type BgTaskCommand } from "../../todos/execute.ts";
 
 export type TodosRunExecutors = {
   subagent: (plan: SubagentTaskCommand, signal?: AbortSignal) => Promise<{ ok: boolean; summary?: string; error?: string }>;
@@ -256,8 +256,14 @@ export function todosRunExecutors(options: {
       profile: plan.profile ?? "coder",
       ...(plan.model ? { model: plan.model } : {}),
     } as never, signal);
-    const content = typeof result === "string" ? result : JSON.stringify(result);
-    return { ok: true, summary: content.slice(0, 500) };
+    const content = typeof result.content === "string"
+      ? result.content
+      : result.content.map((part) => part.type === "text" || part.type === "vision_analysis" ? part.text : "").join("\n");
+    const receipt = parseSubagentReceipt(content);
+    return {
+      ...receipt,
+      summary: receipt.summary ?? content.slice(0, 500),
+    };
   };
   return { subagent, startBgTask, pollBgTask };
 }
@@ -266,7 +272,9 @@ export const runTodos: (ctx: import("./commands.ts").TodosRunCommandContext, arg
   async (ctx, args) => {
     if (args.cmd !== "todos-run") return false;
     const parsed = (args as { args?: ParsedTodosRunArgs }).args as ParsedTodosRunArgs;
-    const todos = ctx.store.getState().todoItems ?? [];
+    const todos = ctx.todoRunConfirmed && ctx.todoRunSnapshot
+      ? ctx.todoRunSnapshot.map((todo) => ({ ...todo }))
+      : ctx.store.getState().todoItems ?? [];
     const plan = buildRunnerDag(todos, parsed);
     if (plan.errors.length > 0) {
       ctx.store.dispatch({ type: "ADD_NOTICE", title: "Todo runner", text: plan.errors.join("\n") });
@@ -277,6 +285,25 @@ export const runTodos: (ctx: import("./commands.ts").TodosRunCommandContext, arg
         type: "ADD_NOTICE",
         title: "Todo runner dry-run",
         text: formatDryRun(plan),
+      });
+      return true;
+    }
+    // Always stage a plan first. --yes is deliberately not a bypass for this
+    // interactive UI; the user must review the exact plan and confirm in TUI.
+    if (!ctx.todoRunConfirmed) {
+      ctx.onConfirmTodoRun?.({ plan, parsed, todos: todos.map((todo) => ({ ...todo })) });
+      ctx.store.dispatch({
+        type: "ADD_NOTICE",
+        title: "Todo runner",
+        text: "Review the run plan below. Press A/Enter to execute, or Esc/D to cancel.",
+      });
+      return true;
+    }
+    if (parsed.worktree) {
+      ctx.store.dispatch({
+        type: "ADD_NOTICE",
+        title: "Todo runner",
+        text: "--worktree is not available in this runtime yet; execution was blocked to avoid silently using the shared checkout.",
       });
       return true;
     }

@@ -29,6 +29,8 @@ export interface RunnerTask {
   dependsOn: string[];
   model?: string;
   files?: string[];
+  /** Optional isolated working directory assigned by the execution layer. */
+  cwd?: string;
   status: RunnerTaskStatus;
   error?: string;
   bgTaskId?: string;
@@ -52,7 +54,9 @@ export interface ParsedTodosRunArgs {
   model?: Record<string, string>;
   files?: Record<string, string[]>;
   maxConcurrency?: number;
-  /** Skip the plan-confirmation step; required for actual execution. */
+  /** Accepted by the parser for non-TUI callers; TUI still requires A/Enter confirmation. */
   confirm: boolean;
+  /** Worktree isolation is opt-in; shared checkout remains the default. */
+  worktree?: boolean;
   raw: string;
 }

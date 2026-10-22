@@ -395,7 +395,7 @@ describe("runTodoPlan (integration with mocked executors)", () => {
   });
 
   it("runs bg tasks through startBgTask/pollBgTask", async () => {
-    const todos = [todo("test", "run pnpm test")];
+    const todos = [todo("test", "run tests cmd: npm test")];
     const args = baseArgs();
     const dag = buildRunnerDag(todos, args);
     assert.equal(dag.tasks[0]?.runner, "bg");
@@ -536,8 +536,9 @@ describe("planRunnerTask / subagentPromptFor / defaultBgCommand", () => {
     }
   });
 
-  it("plans a bg task with default command", () => {
-    const plan = planRunnerTask(installTask);
+  it("requires an explicit bg command", () => {
+    assert.throws(() => planRunnerTask(installTask), /explicit command/);
+    const plan = planRunnerTask({ ...installTask, content: "install deps cmd: npm install" });
     assert.equal(plan.kind, "bg");
     if (plan.kind === "bg") {
       assert.equal(plan.command, "npm install");
@@ -552,6 +553,7 @@ describe("planRunnerTask / subagentPromptFor / defaultBgCommand", () => {
       runner: "bg",
     };
     assert.equal(defaultBgCommand(testTask), "npm test");
+    assert.equal(defaultBgCommand({ ...testTask, content: "run cmd: pnpm test" }), "pnpm test");
   });
 
   it("subagentPromptFor includes dep and file constraints", () => {

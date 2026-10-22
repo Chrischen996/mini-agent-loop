@@ -1,6 +1,6 @@
 import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from "react";
 import { randomUUID } from "node:crypto";
-import { Box, Text, useApp, useStdout } from "ink";
+import { Box, Text, useApp, useStdout, useInput } from "ink";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
@@ -87,6 +87,7 @@ import { formatMcpStatus } from "../mcp/status.ts";
 import type { McpServerStatus } from "../mcp/types.ts";
 import { BgTaskManager, stableBgTaskInstanceId } from "../bg-tasks/manager.js";
 import { BgTaskLivePanel } from "./components/BgTaskLivePanel.tsx";
+import { TodoRunPanel } from "./components/TodoRunPanel.tsx";
 import { useKeyboardHandler } from "./hooks/useKeyboardHandler.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
@@ -173,6 +174,8 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
   }, [cwd]);
   const [bgTaskCount, setBgTaskCount] = useState(0);
   const [bgPanelOpen, setBgPanelOpen] = useState(false);
+  const [pendingTodoRunPlan, setPendingTodoRunPlan] = useState<import("./state.ts").PendingTodoRunPlan | undefined>(undefined);
+  const confirmedTodoRunRef = useRef<import("./state.ts").PendingTodoRunPlan | undefined>(undefined);
   const refreshBgTaskCount = useCallback(async () => {
     const manager = getBgManager();
     if (!manager) return;
@@ -235,8 +238,13 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
 
   // ── /tasks run /todos run --parallel runner ───────────────────────────────
   const runTodosCommand = useCallback(
-    async (input: string, parsed: import("./slash-commands.ts").SlashCommand) => {
+    async (
+      input: string,
+      parsed: import("./slash-commands.ts").SlashCommand,
+      confirmed = false,
+    ) => {
       if (!parsed || parsed.cmd !== "todos-run") return;
+      const approvedPlan = confirmed ? confirmedTodoRunRef.current : undefined;
       setInputRef.current("");
       dispatch({ type: "USER_MESSAGE", text: input });
       await runTodos(
@@ -256,9 +264,19 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
           abortSignal: abortControllerRef.current.signal,
           persistTodoState: (todos) => void todos,
           todosRunExecutors: getTodosRunExecutors(),
+          onConfirmTodoRun: (pending) => {
+            confirmedTodoRunRef.current = pending;
+            setPendingTodoRunPlan(pending);
+          },
+          todoRunConfirmed: confirmed,
+          todoRunSnapshot: approvedPlan?.todos,
         },
-        { cmd: "todos-run", args: parsed.args },
+        {
+          cmd: "todos-run",
+          args: approvedPlan?.parsed ?? parsed.args,
+        },
       );
+      confirmedTodoRunRef.current = undefined;
       dispatchRef.current({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
     },
     [cwd, agentToolsRef, getTodosRunExecutors],
@@ -461,7 +479,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
   );
   // Approval chrome: the permission card / plan approval bar render between
   // the feed and the input row; reserve their rows in every height budget.
-  const permissionRows = state.pendingPermission ? 4 : 0;
+  const permissionRows = (state.pendingPermission ? 4 : 0) + (pendingTodoRunPlan ? 5 : 0);
   const planApprovalRows = state.phase === "review" && state.currentPlan ? 3 : 0;
   const pickerLayout = getPickerLayout({
     termRows: stdout?.rows,
@@ -503,6 +521,24 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
         : (result.error ?? "无法写入系统剪贴板"),
     });
   }, [input, state.focusedMessageIndex, state.messages, state.streamingReasoning, state.streamingText]);
+
+  // ── Todo run plan confirmation ────────────────────────────────────────────
+  useInput((input, key) => {
+    const pending = pendingTodoRunPlan;
+    if (!pending) return;
+    if (input.toLowerCase() === "a" || key.return) {
+      setPendingTodoRunPlan(undefined);
+      void runTodosCommand(pending.parsed.raw, {
+        cmd: "todos-run",
+        args: { ...pending.parsed, dryRun: false, confirm: true },
+      });
+      return;
+    }
+    if (key.escape || input.toLowerCase() === "d") {
+      setPendingTodoRunPlan(undefined);
+      dispatch({ type: "ADD_NOTICE", title: "Todo runner", text: "Run cancelled." });
+    }
+  }, { isActive: Boolean(pendingTodoRunPlan) });
 
   // ── keyboard handler ─────────────────────────────────────────────────────
 
@@ -1122,6 +1158,9 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
         {state.phase === "review" && state.currentPlan && (
           <PlanApprovalBar plan={state.currentPlan} />
         )}
+        {pendingTodoRunPlan && (
+          <TodoRunPanel plan={pendingTodoRunPlan} width={termWidth} />
+        )}
 
         {state.pendingImages.length > 0 && (
           <Box paddingX={1} gap={1}>
@@ -1146,8 +1185,8 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
               onChange={setInputSafe}
               onPasteImage={handlePasteImageRef}
               onTab={handleTabAt}
-              pasteEnabled={!state.pendingPermission}
-              focus={!state.pendingPermission && !bgPanelOpen}
+              pasteEnabled={!state.pendingPermission && !pendingTodoRunPlan}
+              focus={!state.pendingPermission && !pendingTodoRunPlan && !bgPanelOpen}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {
                 if (shouldAcceptAutocompleteOnEnter(acMode)) {

@@ -2,6 +2,8 @@ import type { RunnerPlan, RunnerTask } from "./types.ts";
 import type { BgExecutor, BgCommandDetector, BgPoller, SubagentExecutor } from "./execute.ts";
 import { planRunnerTask } from "./execute.ts";
 import { lockFor } from "./classify.ts";
+import { isolateForTask } from "./isolate.ts";
+import type { GitWorkflow } from "../git/workflow.ts";
 
 export interface RunnerOutcome {
   taskId: string;
@@ -20,8 +22,12 @@ export interface RunTodoPlanOptions {
   startBgTask: BgExecutor;
   /** Poll a background task; resolves when it reaches a terminal state. */
   pollBgTask: BgPoller;
-  /** Optional detector that overrides the default bg command per task. */
+  /** Optional detector that overrides the explicit Todo command per task. */
   bgCommandDetector?: BgCommandDetector;
+  /** Git workflow used when an individual task opts into a worktree. */
+  gitWorkflow?: GitWorkflow;
+  /** Whether this plan requested per-task worktree isolation. */
+  useWorktree?: boolean;
   /** Abort the whole run. */
   signal?: AbortSignal;
   /** Progress callback fired on every task transition. */
@@ -148,7 +154,16 @@ export async function runTodoPlan(plan: RunnerPlan, options: RunTodoPlanOptions)
 }
 
 async function executeTask(task: RunnerTask, options: RunTodoPlanOptions): Promise<RunnerOutcome> {
-  const spec = planRunnerTask(task, options.bgCommandDetector);
+  let spec: ReturnType<typeof planRunnerTask>;
+  try {
+    spec = planRunnerTask(task, options.bgCommandDetector);
+  } catch (error) {
+    return {
+      taskId: task.todoId,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
   task.status = "running";
   task.startedAt = new Date().toISOString();
   options.onEvent?.({ taskId: task.todoId, status: "running" });

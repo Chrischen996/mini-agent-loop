@@ -8,7 +8,8 @@ import type { ParsedTodosRunArgs } from "./types.ts";
  *   --dry-run        render the plan without dispatch
  *   --resume         resume an interrupted run
  *   --retry          retry failed/blocked tasks
- *   --yes            skip the confirmation step (required for actual execution)
+ *   --yes            mark explicit intent; TUI still requires A/Enter confirmation
+ *   --worktree      run code/doc tasks in isolated clean-git worktrees
  *   --only a,b,c     restrict to the listed labels or todo ids
  *   --deps label=a,b add explicit dependencies for a label
  *   --model label=m  override the subagent model for a label
@@ -21,7 +22,7 @@ export function parseTodosRunArgs(raw: string): ParsedTodosRunArgs | null {
   const tokens = trimmed.slice(1).split(/\s+/);
   const args: ParsedTodosRunArgs = {
     parallel: false,
-    dryRun: true, // default to dry-run; use --yes to actually execute
+    dryRun: true,
     raw,
     only: [],
     deps: {},
@@ -42,6 +43,9 @@ export function parseTodosRunArgs(raw: string): ParsedTodosRunArgs | null {
         break;
       case "--yes":
         args.confirm = true;
+        break;
+      case "--worktree":
+        args.worktree = true;
         break;
       case "--resume":
         args.resume = true;
