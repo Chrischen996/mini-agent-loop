@@ -514,10 +514,13 @@ export function switchLlmModel(
   relayRegistry?: RelayRegistry,
 ): LlmConfig {
   const requestedBaseUrl = overrides.baseUrl?.trim().replace(/\/$/, "");
+  const requestedApiKey = overrides.apiKey?.trim();
+  const explicitBaseUrl = requestedBaseUrl || overrides.protocol ? requestedBaseUrl : undefined;
+
   const resolved = typeof model === "string"
-    ? resolveModel(model, requestedBaseUrl, overrides.protocol)
-    : requestedBaseUrl || overrides.protocol
-      ? resolveModel(modelReference(model.provider, model.id), requestedBaseUrl, overrides.protocol)
+    ? resolveModel(model, explicitBaseUrl, overrides.protocol)
+    : explicitBaseUrl || overrides.protocol
+      ? resolveModel(modelReference(model.provider, model.id), explicitBaseUrl, overrides.protocol)
       : model;
   const apiKey = resolved.apiKeyEnv
     .map((name) => process.env[name])
@@ -530,10 +533,15 @@ export function switchLlmModel(
   // An inline key (persisted custom provider) takes precedence over both: the
   // provider owns its secret, so inheriting an unrelated key would send the
   // request to the wrong endpoint.
-  const effectiveApiKey = overrides.apiKey?.trim()
+  const sameBaseUrlKeyFallback =
+    resolved.baseUrl === config.baseUrl &&
+    (explicitBaseUrl === undefined || explicitBaseUrl === resolved.baseUrl)
+      ? config.apiKey
+      : undefined;
+  const effectiveApiKey = requestedApiKey
     || resolved.apiKey
     || apiKey
-    || (resolved.baseUrl === config.baseUrl ? config.apiKey : undefined);
+    || sameBaseUrlKeyFallback;
 
   if (!effectiveApiKey && !resolved.piModel) {
     throw new Error(
@@ -549,7 +557,7 @@ export function switchLlmModel(
     // Clear any inherited getApiKey — the new model may need a different resolver
     getApiKey: undefined,
     provider: resolved.provider,
-    baseUrl: resolved.baseUrl,
+    baseUrl: explicitBaseUrl || resolved.baseUrl,
     model: resolved.id,
     capabilities: resolved.capabilities,
     contextWindow: resolved.contextWindow,

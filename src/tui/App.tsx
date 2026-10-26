@@ -132,6 +132,12 @@ type AppProps = {
 };
 const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
 
+function useLazyRef<T>(factory: () => T): React.MutableRefObject<T> {
+  const ref = useRef<T | undefined>(undefined);
+  if (ref.current === undefined) ref.current = factory();
+  return ref as React.MutableRefObject<T>;
+}
+
 export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -142,15 +148,15 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const llmRef = useRef(llm);
   llmRef.current = llm;
-  const vision = loadVisionConfigFromEnv();
+  const vision = useMemo(() => loadVisionConfigFromEnv(), []);
   const autoSubagent = useMemo(() => loadAutoSubagentOptionsFromEnv(), []);
   const globalTokenBudget = useMemo(() => loadGlobalTokenBudgetFromEnv(), []);
   const globalConcurrencyLimit = useMemo(() => loadGlobalConcurrencyLimitFromEnv(), []);
   const [skillNames, setSkillNames] = useState<string[]>(() => loadSkillNamesFromEnv());
   const skillNamesRef = useRef(skillNames);
   skillNamesRef.current = skillNames;
-  const allToolsRef = useRef<ToolProvider>(allTools ?? createAllTools(cwd));
-  const agentToolsRef = useRef<ToolProvider>(agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
+  const allToolsRef = useLazyRef(() => allTools ?? createAllTools(cwd));
+  const agentToolsRef = useLazyRef(() => agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
 
   // Lazy background-task manager for the /bg-tasks slash command. Created on
   // first use so TUI startup is not blocked when tmux is unavailable.
@@ -199,7 +205,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
   }, [bgTaskCount, getBgManager, refreshBgTaskCount]);
 
   // Create the subagent tool — dispatches SubagentEvents to the TUI reducer
-  const subagentFactory = new SubagentToolsFactory();
+  const subagentFactory = useLazyRef(() => new SubagentToolsFactory()).current;
   const subagentRuntimeRef = useRef<AgentRuntimeRef>({});
   const getSubagentTools = useCallback((parentLlm = llm): Tool[] => {
     return subagentFactory.getTools({
@@ -1095,6 +1101,9 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
     width: termWidth,
     maxMessages: 200,
   });
+  const handleScrollContext = useCallback((direction: "up" | "down") => {
+    dispatch({ type: "SCROLL_BY", delta: direction === "up" ? 3 : -3 });
+  }, [dispatch]);
   const previousViewportHeightRef = useRef(viewportContentHeight);
   useLayoutEffect(() => {
     const previous = previousViewportHeightRef.current;
@@ -1102,7 +1111,14 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
     if (state.scrollOffset > 0 && viewportContentHeight > previous) {
       dispatch({ type: "SCROLL_BY", delta: viewportContentHeight - previous });
     }
-  }, [viewportContentHeight, state.scrollOffset]);
+  }, [dispatch, viewportContentHeight, state.scrollOffset]);
+
+  useLayoutEffect(() => {
+    dispatch({
+      type: "SET_MAX_SCROLL_OFFSET",
+      offset: Math.max(0, viewportContentHeight - Math.max(1, Math.max(3, feedHeight) - 1)),
+    });
+  }, [dispatch, viewportContentHeight, feedHeight]);
 
   return (
     <Box flexDirection="column" width={termWidth} height={termHeight} overflow="hidden">
@@ -1185,6 +1201,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
               onChange={setInputSafe}
               onPasteImage={handlePasteImageRef}
               onTab={handleTabAt}
+              onScrollContext={handleScrollContext}
               pasteEnabled={!state.pendingPermission && !pendingTodoRunPlan}
               focus={!state.pendingPermission && !pendingTodoRunPlan && !bgPanelOpen}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}

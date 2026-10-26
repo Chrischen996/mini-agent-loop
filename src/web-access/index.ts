@@ -4,6 +4,14 @@ import { imagePart, textPart } from "../content.ts";
 import { resolveWorkspacePath } from "../workspace.ts";
 import type { ContentPart, ImageMimeType } from "../types.ts";
 import type { Tool, ToolResult, ToolExecutionOptions } from "../tools/types.ts";
+import {
+  searchWithFallback,
+  setBuiltinSearchProvider,
+} from "./search-providers.ts";
+import type {
+  SearchOptions as ProviderSearchOptions,
+  SearchResponse as ProviderSearchResponse,
+} from "./search-providers.ts";
 
 const MAX_RESULT_CHARS = 30_000;
 const MAX_SEARCH_QUERIES = 8;
@@ -34,6 +42,25 @@ type SearchResponse = {
   provider?: string;
   inlineContent?: ExtractedContent[];
 };
+
+function toProviderSearchResponse(response: SearchResponse): ProviderSearchResponse {
+  return {
+    answer: response.answer,
+    results: response.results,
+    ...(response.provider ? { provider: response.provider } : {}),
+    ...(response.inlineContent
+      ? {
+          inlineContent: response.inlineContent.map((content) => ({
+            url: content.url,
+            ...(content.title ? { title: content.title } : {}),
+            ...(content.content ? { content: content.content } : {}),
+            ...(content.status !== undefined ? { status: content.status } : {}),
+            ...(content.error ? { error: content.error } : {}),
+          })),
+        }
+      : {}),
+  };
+}
 
 type StoredQuery = {
   query: string;
@@ -462,11 +489,9 @@ function createModuleAccessors(options: WebAccessToolOptions): WebAccessModuleAc
 import { loadSearchConfigSync } from "../search-config/index.ts";
 
 export {
-  searchWithFallback,
   createDuckDuckGoProvider,
   createMcpSearchProvider,
   createBuiltinProvider,
-  setBuiltinSearchProvider,
   clearSearchProviderCache,
   type SearchProviderName,
   type SearchProviderConfig,
@@ -493,10 +518,10 @@ export function createWebAccessTools(cwd: string, options: WebAccessToolOptions 
         const numResults = optionalNumber(args.numResults, "numResults", 1, 20);
         const recencyFilter = optionalRecency(args.recencyFilter);
         const domainFilter = args.domainFilter === undefined ? undefined : stringList(args.domainFilter, "domainFilter", 50);
-        const provider = providerSelection(args.provider);
+        const searchConfig = loadSearchConfig();
+        const provider = providerSelection(args.provider) ?? searchConfig.provider;
         const includeContent = args.includeContent === true;
         // Persisted search config (e.g. Tavily key from ~/.mini-agent/search.json).
-        const searchConfig = loadSearchConfig();
         const needsKey = provider === "tavily" || provider === "brave" || provider === "exa";
         const envVar = provider === "tavily"
           ? "TAVILY_API_KEY"
@@ -507,19 +532,29 @@ export function createWebAccessTools(cwd: string, options: WebAccessToolOptions 
         const restoreEnv = needsKey && searchConfig.apiKey
           ? installTemporaryEnv(envVar, searchConfig.apiKey)
           : undefined;
-        const search = await modules.search();
+        // Set the built-in provider so the three-layer registry can fall back to it.
+        setBuiltinSearchProvider(async (q, opts: ProviderSearchOptions) => {
+          const mod = await modules.search();
+          return toProviderSearchResponse(await mod(q, {
+            ...(opts.numResults !== undefined ? { numResults: opts.numResults } : {}),
+            ...(opts.recencyFilter ? { recencyFilter: opts.recencyFilter } : {}),
+            ...(opts.domainFilter ? { domainFilter: opts.domainFilter } : {}),
+            ...(opts.signal ? { signal: opts.signal } : {}),
+          }));
+        });
         const queryResults: StoredQuery[] = [];
         const inlineContent: ExtractedContent[] = [];
         try {
         for (const query of queryValues) {
           throwIfAborted(signal);
           try {
-            const response = await search(query, {
+            const response = await searchWithFallback(query, {
               ...(numResults !== undefined ? { numResults } : {}),
               ...(recencyFilter ? { recencyFilter } : {}),
               ...(domainFilter ? { domainFilter } : {}),
-              ...(provider !== undefined ? { provider } : {}),
-              includeContent,
+              ...(typeof provider === "string"
+                ? { provider: provider as import("./search-providers.ts").SearchProviderName }
+                : {}),
               signal,
             });
             queryResults.push({
@@ -529,7 +564,13 @@ export function createWebAccessTools(cwd: string, options: WebAccessToolOptions 
               error: null,
               provider: response.provider,
             });
-            inlineContent.push(...(response.inlineContent ?? []));
+            inlineContent.push(...(response.inlineContent ?? []).map((content) => ({
+              url: content.url,
+              title: content.title ?? "",
+              content: content.content ?? "",
+              error: content.error ?? null,
+              ...(content.status !== undefined ? { status: content.status } : {}),
+            })));
           } catch (error) {
             if (isAbortError(error)) throw error;
             queryResults.push({ query, answer: "", results: [], error: errorMessage(error) });

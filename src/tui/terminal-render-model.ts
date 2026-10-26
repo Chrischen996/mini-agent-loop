@@ -1,5 +1,5 @@
 import { resolveTranscriptMessage, type ChatMessage, type TuiState } from "./state.ts";
-import { markdownRowText, markdownRuleText, parseMarkdownLines, stripInlineMarkdown } from "./markdown-lines.ts";
+import { parseMarkdownLines, stripInlineMarkdown } from "./markdown-lines.ts";
 import { toMessageRenderModel } from "./render-model.ts";
 import type { RenderLine } from "./render-lines.ts";
 import { thinkingRenderLines } from "./thinking-lines.ts";
@@ -8,12 +8,10 @@ import { todoPanelRenderLines } from "./todo-lines.ts";
 import { taskSummaryRenderLines, taskSummaryViewMode } from "./task-summary.ts";
 import { toolResultPrefix, toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
-import { autocompleteRenderLines, permissionPanelRenderLines, planApprovalRenderLines, todoEditorRenderLines } from "./terminal-overlay-lines.ts";
+import { autocompleteRenderLines, panelBottomLine, panelContentLine, panelTopLine, permissionPanelRenderLines, planApprovalRenderLines, todoEditorRenderLines } from "./terminal-overlay-lines.ts";
+import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
 import { pickerChromeRows } from "./picker-window.ts";
 import { promptPlaceholder } from "./input-utils.ts";
-import { TUI_COLORS as C } from "./theme.ts";
-import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
-import type { TodoEditorState } from "./todo-editor.ts";
 import { noticeText, noticeTitle, toolArgumentSummary } from "./claude-style.ts";
 import { buildStatusSegments } from "./status-line.ts";
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
@@ -22,6 +20,8 @@ import { activityPresentation, formatActivity, loadingGlyph, loadingMarkerBright
 import { TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "./brand.ts";
 import { welcomePanelRenderLines, type WelcomePanelData } from "./welcome-panel.ts";
 import { compactStreamingText, stripLeadingBlankLines } from "./text-utils.ts";
+import type { TodoEditorState } from "./todo-editor.ts";
+import { TUI_COLORS as C } from "./theme.ts";
 
 export type TerminalRenderOptions = {
   maxMessages?: number;
@@ -71,8 +71,8 @@ export type TerminalRenderOptions = {
 };
 
 /**
- * Project the complete chat frame into presentation data for headless consumers
- * and tests. This does not mutate TuiState; the Ink UI renders React directly.
+ * Build the complete chat frame as presentation data only. This is the
+ * boundary used by the standalone ANSI entrypoint; it never mutates TuiState.
  */
 export function buildTerminalRenderLines(
   state: TuiState,
@@ -88,11 +88,9 @@ export function buildTerminalRenderLines(
   // emit the preceding history again as a new segment.
   const messageStart = scrollback
     ? 0
-    : Math.max(0, state.messages.length - (options.maxMessages ?? Number.MAX_SAFE_INTEGER));
+    : Math.max(0, state.messages.length - (options.maxMessages ?? 200));
   const header = options.header?.show === false ? [] : options.header ? headerRenderLines(state, options.header, width) : [];
 
-  // Both the active Todo panel and completed task summaries belong to the
-  // bottom input chrome so task state stays adjacent to the next prompt.
   const taskTodos = resolveTodoItems({ plan: state.todoPlan, todos: state.todoItems });
   const taskViewMode = taskSummaryViewMode(state.taskStatus, state.todoViewMode);
   const showTaskSummary = state.taskStatus !== "running" && state.taskTitle.trim().length > 0 && taskTodos.length > 0;
@@ -109,24 +107,21 @@ export function buildTerminalRenderLines(
     })
     : []).map((line) => ({ ...line, key: `panel-${line.key}` }));
   const panelLines = (showTaskSummary ? [] : todoPanelRenderLines({
-      plan: state.todoPlan,
-      todos: state.todoItems,
-      viewMode: state.todoViewMode,
-      maxVisibleItems: Math.max(3, Math.min(8, (options.height ?? 24) - 4)),
-    }))
-    .map((line) => ({ ...line, key: `panel-${line.key}` }));
-  // Keep both the active Todo panel and the completed task summary in the
-  // bottom input chrome. The transcript area is reserved for conversation.
+    plan: state.todoPlan,
+    todos: state.todoItems,
+    viewMode: state.todoViewMode,
+    maxVisibleItems: Math.max(3, Math.min(8, (options.height ?? 24) - 4)),
+  })).map((line) => ({ ...line, key: `panel-${line.key}` }));
+  // Task state stays adjacent to the prompt. In scrollback mode it is an
+  // ephemeral live-tail projection so committed transcript rows stay stable.
   const panelLinesAboveBody: RenderLine[] = [];
+  const taskLinesInFooter = scrollback ? taskSummaryLines.map(markEphemeral) : taskSummaryLines;
   const panelLinesInFooter = scrollback ? panelLines.map(markEphemeral) : panelLines;
 
   for (let index = messageStart; index < state.messages.length; index++) {
     const message = resolveTranscriptMessage(state.messages[index]!, state.subagentById, state.toolById);
     if (message.kind === "assistant" && isSubagentProtocolText(message.text)) continue;
     const visual = toMessageRenderModel(message);
-    // Messages are rendered compactly with no inter-message blank rows. Tool
-    // and subagent progress rows stay attached to the assistant turn that
-    // caused them, matching Claude Code's dense main-screen transcript.
     if (message.kind === "user") {
       // Claude Code keeps the prompt body white on a muted gray row. The
       // prompt marker is intentionally quiet; user text should not inherit
@@ -171,7 +166,7 @@ export function buildTerminalRenderLines(
         })));
       }
       if (message.text) {
-        const textLines = markdownLines(message.text, `message-${index}-text`, width);
+        const textLines = markdownLines(message.text, `message-${index}-text`);
         textLines.forEach((line, lineIndex) => {
           line.prefix = lineIndex === 0 ? `${focused ? "◆" : "⏺"} ` : "  ";
           line.tone = focused ? "running" : line.tone;
@@ -187,7 +182,7 @@ export function buildTerminalRenderLines(
       if (isSubagentToolName(message.name)) continue;
       // Claude Code's main-screen transcript uses compact activity rows; the
       // bordered tool card remains available in fullscreen mode.
-      lines.push(...toolCardRenderLines(message, index, scrollback ? undefined : width));
+      lines.push(...toolCardRenderLines(message, index));
       continue;
     }
     if (message.kind === "notice") {
@@ -217,8 +212,6 @@ export function buildTerminalRenderLines(
     }));
   }
   if (state.streamingText) {
-    // Strip leading blank lines so the first live row is content, not a lone
-    // "⏺ " marker (mirrors the Ink feed and the viewport estimates).
     const streamingText = stripLeadingBlankLines(state.busy
       ? compactStreamingText(stripInlineMarkdown(state.streamingText))
       : stripInlineMarkdown(state.streamingText));
@@ -229,13 +222,8 @@ export function buildTerminalRenderLines(
   const wrappedBody = width === undefined ? bodyLines : bodyLines.flatMap((line) => wrapRenderLine(line, width));
   const wrappedHeader = width === undefined ? header : header.flatMap((line) => wrapRenderLine(line, width));
   const footer: RenderLine[] = [];
-  footer.push(...taskSummaryLines);
+  footer.push(...taskLinesInFooter);
   footer.push(...panelLinesInFooter);
-  // Slot reserved for the picker or the Todo editor. The picker is filled in
-  // once the rest of the frame is known: fullscreen modes reserve the welcome
-  // panel and the prompt chrome first and hand the overlay what is left, so a
-  // short terminal shrinks (or drops) the picker instead of cutting the panel
-  // mid-border. That mirrors what `getPickerLayout` does for the Ink client.
   const overlaySlot = footer.length;
   if (options.todoEditor) footer.push(...todoEditorRenderLines(options.todoEditor, width));
   footer.push(...permissionPanelRenderLines(state.pendingPermission, width));
@@ -249,10 +237,11 @@ export function buildTerminalRenderLines(
       dim: true,
     });
   }
-  // The Todo tip is folded into the single activity row below; a second
-  // spinner row above the prompt duplicated the same live state.
   const now = options.now ?? Date.now();
-  const activity = activityPresentation({ ...state, todoPanelVisible: panelLines.length > 0 || taskSummaryLines.length > 0 }, { now });
+  const activity = activityPresentation({
+    ...state,
+    todoPanelVisible: panelLines.length > 0 || taskSummaryLines.length > 0,
+  }, { now, queuedCount: options.queuedCount });
   if (activity) {
     const activityPrefix = `${loadingGlyph(now, state.turnStartedAt)} `;
     const activityWidth = width === undefined ? undefined : Math.max(1, width - terminalStringWidth(activityPrefix));
@@ -267,7 +256,6 @@ export function buildTerminalRenderLines(
     });
   }
   if (options.includeStatus !== false) {
-    // Reuse the Ink StatusBar's segment definitions for the headless projection.
     const segments = buildStatusSegments({
       modelName: state.modelName,
       cwd: options.header?.cwd?.trim() || undefined,
@@ -302,27 +290,19 @@ export function buildTerminalRenderLines(
     });
     const inputLines = inputRenderLines(options.input, options.cursor, options.maskInput, {
       busy: state.busy,
-      // A hint is clipped, never wrapped: wrapping it would add prompt rows the
-      // frame budget does not reserve. Two columns for the marker, one for the
-      // block cursor.
       placeholder: width === undefined ? placeholder : truncateEnd(placeholder, Math.max(1, width - 3)),
     });
     footer.push(...(width === undefined ? inputLines : inputLines.flatMap((line) => wrapRenderLine(line, width))));
   }
-  if (!options.todoEditor) {
-    const reserved = wrappedHeader.length + wrappedPanel.length + footer.length;
-    // The same budget the Ink client computes in `getPickerLayout`: keep the
-    // last terminal row free, reserve the panel and the prompt chrome, and hold
-    // three spare rows back before the picker claims them.
-    const budget = options.height === undefined
-      ? undefined
-      : Math.max(1, options.height) - 1 - reserved - 3 - pickerChromeRows(options.autocomplete?.mode ?? undefined);
-    footer.splice(overlaySlot, 0, ...autocompleteRenderLines(options.autocomplete, {
-      input: options.input,
-      currentModel: options.currentModel ?? options.header?.model,
-      maxItems: budget,
-    }));
-  }
+  const reserved = wrappedHeader.length + wrappedPanel.length + footer.length;
+  const budget = options.height === undefined
+    ? undefined
+    : Math.max(0, options.height - 1 - reserved - 3 - pickerChromeRows(options.autocomplete?.mode ?? undefined));
+  footer.splice(overlaySlot, 0, ...autocompleteRenderLines(options.autocomplete, {
+    input: options.input,
+    currentModel: options.currentModel ?? options.header?.model,
+    maxItems: budget,
+  }));
   const visibleFooter = scrollback ? footer.map(markEphemeral) : footer;
 
   if (options.height === undefined) return [...wrappedHeader, ...wrappedPanel, ...wrappedBody, ...visibleFooter];
@@ -337,25 +317,32 @@ export function buildTerminalRenderLines(
   const visiblePanel = wrappedPanel.slice(0, remaining);
   remaining = Math.max(0, remaining - visiblePanel.length);
   const bodyHeight = remaining;
-  const maxOffset = Math.max(0, wrappedBody.length - bodyHeight);
-  const offset = Math.max(0, Math.min(options.scrollOffset ?? 0, maxOffset));
+  const offset = Math.max(0, options.scrollOffset ?? 0);
   const end = Math.max(0, wrappedBody.length - offset);
   const cropStart = Math.max(0, end - bodyHeight);
   const clipped = wrappedBody.slice(cropStart, end);
-  // Unused body rows stay below the visible window, whether the transcript is
-  // bottom-pinned or the user scrolled up. Placing them above the slice left
-  // a black band between the header and the visible rows whenever the
-  // transcript did not fill the viewport, so the frame looked half-empty on
-  // scroll; bottom-anchoring the gap keeps the slice flush under the header.
+  // Keep a stable number of physical rows without splitting the transcript.
+  // Spare rows are inserted into the footer below the live activity so the
+  // prompt remains anchored while message and subagent rows stay together.
   const padding = Math.max(0, bodyHeight - clipped.length);
-  const spacers = padding > 0
-    ? Array.from({ length: padding }, (_, index) => ({
-        key: `frame-spacer-${index}`,
-        text: "",
-        style: "muted" as const,
-      }))
-    : [];
-  return [...visibleHeader, ...visiblePanel, ...clipped, ...spacers, ...clippedFooter];
+  if (padding > 0) {
+    const spacers = Array.from({ length: padding }, (_, index) => ({
+      key: `frame-spacer-${index}`,
+      text: "",
+      style: "muted" as const,
+    }));
+    // Keep the transcript and the live activity contiguous. The spare rows
+    // belong between activity metadata and the fixed prompt chrome; putting
+    // them before the body makes old history look disconnected from the work
+    // currently happening (especially with multiple subagents).
+    const activityIndex = clippedFooter.findIndex((line) => line.key === "activity");
+    const promptChromeIndex = clippedFooter.findIndex((line) => line.key === "status" || line.key === "prompt-rule" || line.key.startsWith("input-"));
+    const insertAt = activityIndex >= 0
+      ? activityIndex + 1
+      : promptChromeIndex >= 0 ? promptChromeIndex : clippedFooter.length;
+    clippedFooter.splice(insertAt, 0, ...spacers);
+  }
+  return [...visibleHeader, ...visiblePanel, ...clipped, ...clippedFooter];
 }
 
 function truncateEnd(value: string, maxWidth: number): string {
@@ -379,32 +366,48 @@ function markEphemeral(line: RenderLine): RenderLine {
 function toolCardRenderLines(
   message: Extract<ChatMessage, { kind: "tool_call" }>,
   index: number,
-  _width?: number,
+  width?: number,
 ): RenderLine[] {
-  // One compact tool-use row plus a nested result gutter, matching Ink's feed
-  // and Claude Code's AssistantToolUseMessage/MessageResponse pair.
+  // Claude Code renders the shell command itself inside the tool title rather
+  // than adding a second `$` prompt inside the parentheses.
   const summary = toolArgumentSummary(message.name, message.rawArgs, message.args).replace(/^\$\s*/, "");
   const tone = message.status === "error" ? "error" : undefined;
   const prefixTone = message.status === "error" ? "error" : message.status === "running" ? "running" : "success";
   const label = `${toolVisualName(message.name)}${summary ? `(${summary})` : ""}`;
-  const rows: RenderLine[] = [{
-    key: `message-${index}-tool`,
-    text: label,
-    prefix: `${toolVisualStatusIcon(message.status)} `,
-    style: "tool",
-    tone,
-    prefixTone,
-    bold: true,
-  }];
-  if (message.result) {
-    const resultRows = plainPreviewLines(message.result, `message-${index}-result`);
-    rows.push(...resultRows.map((line, lineIndex) => ({
-      ...line,
-      prefix: toolResultPrefix(lineIndex, resultRows.length),
-    })));
-  } else if (message.status === "running") {
-    rows.push({ key: `message-${index}-result-running`, text: "Working…", prefix: toolResultPrefix(0, 1), style: "muted", tone: "running", dim: true });
+  const title = `${toolVisualStatusIcon(message.status)} ${label}`;
+  if (width === undefined) {
+    const marker = `${toolVisualStatusIcon(message.status)} `;
+    const rows: RenderLine[] = [{
+      key: `message-${index}-tool`,
+      text: label,
+      prefix: marker,
+      style: "tool",
+      tone,
+      prefixTone,
+      bold: true,
+    }];
+    if (message.result) {
+      const resultRows = plainPreviewLines(message.result, `message-${index}-result`);
+      rows.push(...resultRows.map((line, lineIndex) => ({
+        ...line,
+        // Claude Code's MessageResponse uses one nested result marker and
+        // plain continuation indentation instead of a box-drawing column.
+        prefix: toolResultPrefix(lineIndex, resultRows.length),
+      })));
+    } else if (message.status === "running") {
+      rows.push({ key: `message-${index}-result-running`, text: "Working…", prefix: "  ⎿ ", style: "muted", tone: "running", dim: true });
+    }
+    return rows;
   }
+  const rows: RenderLine[] = [panelTopLine(`message-${index}-tool`, title, width, tone)];
+  if (message.result) {
+    rows.push(...plainPreviewLines(message.result, `message-${index}-result`).map((line) => panelContentLine(line.key, line.text, "muted", { width, dim: true })));
+  } else if (message.status === "running") {
+    rows.push(panelContentLine(`message-${index}-result-running`, "Working…", "tool", { width, tone: "running", dim: true }));
+  } else {
+    rows.push(panelContentLine(`message-${index}-result-empty`, "No output", "muted", { width, dim: true }));
+  }
+  rows.push(panelBottomLine(`message-${index}-tool-bottom`, width));
   return rows;
 }
 
@@ -471,52 +474,44 @@ function wrapRenderLine(line: RenderLine, width: number): RenderLine[] {
   // incremental renderer reuse unchanged rows while still giving continuation
   // rows deterministic identities of their own.
   const continuationPrefix = " ".repeat(terminalStringWidth(line.prefix ?? ""));
-  return rows.map((text, index) => {
-    const wrapped: RenderLine = {
-      ...line,
-      key: index === 0 ? line.key : `${line.key}-w${index}`,
-      prefix: index === 0 ? line.prefix : continuationPrefix,
-      text,
-    };
-    // Inline color runs only describe the unwrapped row. Once a row is split
-    // the segment boundaries no longer line up with the text, so fall back to
-    // the single-color projection instead of repeating stale segments.
-    if (rows.length > 1) delete wrapped.segments;
-    return wrapped;
-  });
+  return rows.map((text, index) => ({
+    ...line,
+    key: index === 0 ? line.key : `${line.key}-w${index}`,
+    prefix: index === 0 ? line.prefix : continuationPrefix,
+    text,
+  }));
 }
 
 function inputRenderLines(
   value: string,
   cursor?: number,
   mask = false,
-  options?: { placeholder?: string; busy?: boolean },
+  options: { busy?: boolean; placeholder?: string } = {},
 ): RenderLine[] {
   const source = splitGraphemes(value);
-  // Ink's prompt pointer is a colored, bold `❯` that becomes a `⟳` while a turn
-  // is running; the typed text itself stays regular weight.
-  const marker = options?.busy ? "⟳ " : "❯ ";
-  const markerLine = {
+  const marker = options.busy ? "⟳ " : "❯ ";
+  const markerLine: Pick<RenderLine, "prefix" | "prefixTone" | "prefixBold" | "style"> = {
     prefix: marker,
-    prefixTone: (options?.busy ? "running" : "default") as RenderLine["prefixTone"],
+    prefixTone: options.busy ? "running" : "default",
     prefixBold: true,
-    style: "user" as const,
+    style: "user",
   };
-  if (source.length === 0 && options?.placeholder) {
-    // Same hint Ink's PromptInput shows: a block cursor followed by dim text.
+  const position = Math.max(0, Math.min(source.length, cursor ?? source.length));
+  const visible = mask ? source.map(() => "*") : source;
+  const withCursor = visible.length === 0 && options.placeholder
+    ? `▌${options.placeholder}`
+    : [...visible.slice(0, position), "▌", ...visible.slice(position)].join("");
+  if (visible.length === 0 && options.placeholder) {
     return [{
       key: "input-0",
       ...markerLine,
-      text: `▌${options.placeholder}`,
+      text: withCursor,
       segments: [
         { text: "▌", color: C.assistant },
         { text: options.placeholder, color: C.muted, dim: true },
       ],
     }];
   }
-  const position = Math.max(0, Math.min(source.length, cursor ?? source.length));
-  const visible = mask ? source.map(() => "*") : source;
-  const withCursor = [...visible.slice(0, position), "▌", ...visible.slice(position)].join("");
   const rows = withCursor.split("\n");
   return rows.map((text, index) => ({
     key: `input-${index}`,
@@ -525,42 +520,37 @@ function inputRenderLines(
   }));
 }
 
-/** Module-level singleton – Intl.Segmenter construction is expensive. */
-const _graphemeSegmenter: Intl.Segmenter | undefined =
-  typeof Intl !== "undefined" && "Segmenter" in Intl
-    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
-    : undefined;
-
 function splitGraphemes(value: string): string[] {
-  if (_graphemeSegmenter) {
-    return [..._graphemeSegmenter.segment(value)].map((part) => part.segment);
+  if (typeof Intl !== "undefined" && "Segmenter" in Intl) {
+    const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+    return [...segmenter.segment(value)].map((part) => part.segment);
   }
   return [...value];
 }
 
-/**
- * Project Markdown onto terminal rows.
- *
- * Row text comes from `markdownRowText`, also used by the Ink `MarkdownText`
- * component. Fenced code renders behind a `▌` gutter instead of literal ```
- * markers; headings keep their `▸`/`·` bullet and tables are column-aligned.
- */
-function markdownLines(text: string, prefix: string, width?: number): RenderLine[] {
+function markdownLines(text: string, prefix: string): RenderLine[] {
   return parseMarkdownLines(text).map((line, index) => ({
     key: `${prefix}-${index}`,
-    text: line.kind === "rule" ? markdownRuleText(width) : markdownRowText(line),
-    style: line.kind === "code" || line.kind === "code-fence" ? "thinking" : line.kind === "rule" ? "border" : "assistant",
+    text: line.kind === "rule" ? "─".repeat(48)
+      : line.kind === "heading" ? stripInlineMarkdown(line.text)
+        : line.kind === "list" ? `${line.ordered ? line.marker : "•"} ${stripInlineMarkdown(line.text)}`
+          : line.kind === "quote" ? `│ ${stripInlineMarkdown(line.text)}`
+            : line.kind === "code" || line.kind === "code-fence" ? line.text
+              : stripInlineMarkdown(line.text),
+    style: line.kind === "code" || line.kind === "code-fence" ? "thinking" : line.kind === "heading" ? "assistant" : "assistant",
     indent: line.kind === "list" ? line.indent * 2 : undefined,
-    bold: line.kind === "heading" || (line.kind === "table" && line.role === "header"),
-    dim: line.kind === "code" || line.kind === "code-fence" || (line.kind === "table" && line.role === "rule"),
+    bold: line.kind === "heading",
+    dim: line.kind === "code" || line.kind === "code-fence",
   }));
 }
 
 function plainPreviewLines(text: string, prefix: string): RenderLine[] {
   const source = text.split("\n");
   const visible = source.slice(0, 15).map((line, index) => ({ key: `${prefix}-${index}`, text: line, style: "muted" as const, dim: true }));
-  const hidden = source.length - visible.length;
-  if (hidden > 0) visible.push({ key: `${prefix}-more`, text: `… ${hidden} more ${hidden === 1 ? "line" : "lines"}`, style: "muted" as const, dim: true });
+  if (source.length > visible.length) {
+    const remaining = source.length - visible.length;
+    visible.push({ key: `${prefix}-more`, text: `… ${remaining} more ${remaining === 1 ? "line" : "lines"}`, style: "muted" as const, dim: true });
+  }
   return visible;
 }
 

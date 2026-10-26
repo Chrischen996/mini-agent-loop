@@ -1437,7 +1437,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       const next = max === undefined
         ? Math.max(0, state.scrollOffset + action.delta)
         : Math.max(0, Math.min(max, state.scrollOffset + action.delta));
-      return next === state.scrollOffset ? state : { ...state, scrollOffset: next };
+      if (next === state.scrollOffset) return state;
+      return { ...state, scrollOffset: next };
     }
 
     case "SCROLL_TO": {
@@ -1453,10 +1454,12 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
 
     case "SET_MAX_SCROLL_OFFSET": {
       if (state.maxScrollOffset === action.offset) return state;
-      const clamped = Math.max(0, Math.min(action.offset ?? 0, state.scrollOffset));
+      const clamped =
+        action.offset == null
+          ? state.scrollOffset
+          : Math.max(0, Math.min(action.offset, state.scrollOffset));
       return { ...state, maxScrollOffset: action.offset, scrollOffset: clamped };
     }
-
     default:
       return state;
   }
