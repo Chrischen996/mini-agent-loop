@@ -132,6 +132,16 @@ describe("skills", () => {
     assert.match(formatSkillStatus(activation), /Missing: missing/);
   });
 
+  it("keeps inactive skill catalog descriptions compact", () => {
+    const description = "word ".repeat(100);
+    const catalog = formatSkillCatalog([{ name: "large", description }]);
+    assert.match(catalog, /large:/);
+    const line = catalog.split("\n").find((value) => value.startsWith("- large:"));
+    assert.ok(line);
+    assert.ok((line?.length ?? 0) < 190);
+    assert.match(line ?? "", /\.\.\.$/);
+  });
+
   it("parses /skill commands for the current session", () => {
     const registry = new InMemorySkillRegistry();
     registry.register(createPromptSkill("research", "Research helper", "Use evidence."));

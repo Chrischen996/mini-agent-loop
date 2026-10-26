@@ -474,13 +474,31 @@ function mergeLoopSignals(...signals: (AbortSignal | undefined)[]): {
   return { signal: AbortSignal.any(active), cleanup: () => {} };
 }
 
+/** Maximum characters of repository instructions kept in the system prompt. */
+const MAX_REPOSITORY_INSTRUCTIONS_CHARS = 4_096;
+
 /** Maximum characters of the injected memory section (Claude Code caps its MEMORY.md index similarly). */
 const MAX_MEMORY_SECTION_CHARS = 2_000;
+
+function compactRepositoryInstructions(instructions: string): string {
+  const trimmed = instructions.trim();
+  if (trimmed.length <= MAX_REPOSITORY_INSTRUCTIONS_CHARS) return trimmed;
+
+  const marker = "[... repository instructions truncated; read AGENT.MD/AGENTS.md for the full file ...]";
+  const available = Math.max(0, MAX_REPOSITORY_INSTRUCTIONS_CHARS - marker.length - 4);
+  const headLength = Math.ceil(available * 0.75);
+  const tailLength = available - headLength;
+  return [
+    trimmed.slice(0, headLength).trimEnd(),
+    marker,
+    trimmed.slice(-tailLength).trimStart(),
+  ].join("\n\n");
+}
 
 export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string, memorySection?: string): string {
   const parts: string[] = [];
   if (agentsMd) {
-    parts.push(`# Repository Agent Instructions (from AGENT.MD)\n${agentsMd}\n`);
+    parts.push(`# Repository Agent Instructions (from AGENT.MD)\n${compactRepositoryInstructions(agentsMd)}\n`);
   }
   if (memorySection && memorySection.trim()) {
     let section = memorySection.trim();

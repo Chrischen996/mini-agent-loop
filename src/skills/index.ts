@@ -143,7 +143,13 @@ export async function discoverWorkspaceSkills(
 export function formatSkillCatalog(skills: Iterable<Skill>): string {
   const items = [...skills];
   if (items.length === 0) return "";
-  const lines = items.map((skill) => `- ${skill.name}: ${skill.description}`);
+  const lines = items.map((skill) => {
+    const description = skill.description.replace(/\s+/g, " ").trim();
+    const compact = description.length > 160
+      ? `${description.slice(0, 157).trimEnd()}...`
+      : description;
+    return `- ${skill.name}: ${compact}`;
+  });
   return [
     "# Available Skills",
     "Discovered skills are listed below. Activate one with MINI_AGENT_SKILLS, /skill, or the session skills API before following its full instructions.",

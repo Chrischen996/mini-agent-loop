@@ -91,6 +91,14 @@ describe("buildSystemPrompt with agentsMd", () => {
     assert.ok(!prompt.includes("Repository Agent Instructions"));
     assert.ok(prompt.includes("You are a local file assistant"));
   });
+
+  it("bounds very large agentsMd content while preserving its boundaries", () => {
+    const prompt = buildSystemPrompt(undefined, `${"head rule\n".repeat(800)}tail rule`);
+    assert.match(prompt, /repository instructions truncated/);
+    assert.match(prompt, /head rule/);
+    assert.match(prompt, /tail rule/);
+    assert.ok(prompt.length < 7_000);
+  });
 });
 
 import { discoverGrokSkills } from "../src/skills/index.ts";
