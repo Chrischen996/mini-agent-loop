@@ -18,6 +18,7 @@ import { createSandboxRunner, type SandboxRunner } from "../../sandbox/index.ts"
 import { createCodebaseRuntimeFromEnv, type CodebaseRuntime } from "../../codebase/runtime.ts";
 import { createMcpRuntimeFromEnv, type McpRuntime } from "../../mcp/runtime.ts";
 import { createTools, createAllTools } from "../../tools/index.ts";
+import { getAvailableModels } from "../../models.ts";
 import type { ToolProvider } from "../../tools/types.ts";
 import { SubagentToolsFactory } from "../subagent-tools-factory.ts";
 import {
@@ -186,6 +187,9 @@ export async function bootstrapTui(options: TuiBootstrapOptions = {}): Promise<T
   const globalTokenBudget = loadGlobalTokenBudgetFromEnv();
   const globalConcurrencyLimit = loadGlobalConcurrencyLimitFromEnv();
   const activeThinkingMode = options.thinkingMode ?? loadThinkingModeFromEnv();
+  // Opt-in: exposes `search_orchestrate`, which fans a web-researched question
+  // out to subagents. Off by default so the tool set is unchanged unless asked.
+  const searchOrchestrationEnabled = process.env.MINI_AGENT_SEARCH_ORCHESTRATION === "1";
 
   return {
     cwd,
@@ -214,6 +218,16 @@ export async function bootstrapTui(options: TuiBootstrapOptions = {}): Promise<T
       globalTokenBudget,
       globalConcurrencyLimit,
       roleLlmConfigs,
+      searchOrchestrationEnabled,
+      ...(searchOrchestrationEnabled
+        ? {
+            orchestratorModels: () => getAvailableModels().map((model) => ({
+              id: model.id,
+              provider: model.provider,
+              name: model.name,
+            })),
+          }
+        : {}),
     });
   },
     async close() {

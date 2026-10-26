@@ -145,6 +145,8 @@ export type TuiState = {
   spinnerMessage?: string;
   /** Pending permission request shown to the user while execution waits. */
   pendingPermission?: PendingPermissionState;
+  /** Pending todo run plan awaiting user confirmation before execution. */
+  pendingTodoRunPlan?: PendingTodoRunPlan;
   /**
    * Message indices whose thinking is force-expanded (overrides summary).
    * Stored as a sorted unique array for stable React updates.
@@ -196,6 +198,8 @@ export type TuiAction =
   | { type: "SET_TODO_VIEW_MODE"; mode: TodoViewMode }
   | { type: "CLEAR_SPINNER_MESSAGE" }
   | { type: "CLEAR_PENDING_PERMISSION" }
+  | { type: "SET_TODO_RUN_PLAN"; plan: PendingTodoRunPlan }
+  | { type: "CLEAR_TODO_RUN_PLAN" }
   | { type: "TOGGLE_MESSAGE_THINKING"; index?: number }
   | { type: "SET_FOCUSED_MESSAGE"; index: number }
   | { type: "FOCUS_NEXT_REASONING"; direction: 1 | -1 }
@@ -314,6 +318,7 @@ export function createInitialState(modelName: string): TuiState {
     thinkingMode: "summary",
     permissionMode: "plan",
     pendingPermission: undefined,
+    pendingTodoRunPlan: undefined,
     expandedThinking: [],
     focusedMessageIndex: -1,
     pendingImages: [],
@@ -734,6 +739,20 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         // The request is resolved (allowed or denied), so the status moves on
         // to the tool itself instead of repeating "Waiting for permission".
         status: state.pendingPermission ? `Running ${state.pendingPermission.tool}…` : state.status,
+      };
+
+    case "SET_TODO_RUN_PLAN": {
+      return {
+        ...state,
+        pendingTodoRunPlan: action.plan,
+        status: "Todo run plan ready — press A to execute / Esc to cancel",
+      };
+    }
+
+    case "CLEAR_TODO_RUN_PLAN":
+      return {
+        ...state,
+        pendingTodoRunPlan: undefined,
       };
 
     case "TOGGLE_THINKING_MODE": {
@@ -1467,3 +1486,10 @@ export function createTuiStore(initialState: TuiState): TuiStore {
     },
   };
 }
+
+// Pending todo run plan for user confirmation before execution.
+export type PendingTodoRunPlan = {
+  plan: import('../todos/index.ts').RunnerPlan;
+  parsed: import('../todos/index.ts').ParsedTodosRunArgs;
+  todos: TodoItem[];
+};

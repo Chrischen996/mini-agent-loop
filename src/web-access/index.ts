@@ -177,6 +177,27 @@ function providerSelection(value: unknown): unknown {
   throw new Error("provider must be a provider name or a non-empty provider array");
 }
 
+/** Read the persisted search config (if any) to inject a Tavily/Brave/Exa key. */
+function loadSearchConfig(): { provider?: string; apiKey?: string; baseUrl?: string } {
+  const config = loadSearchConfigSync();
+  if (!config) return {};
+  return {
+    ...(config.provider ? { provider: config.provider } : {}),
+    ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+    ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+  };
+}
+
+/** Set an env var for the duration of a call, restoring the previous value after. */
+function installTemporaryEnv(key: string, value: string): () => void {
+  const prev = process.env[key];
+  process.env[key] = value;
+  return () => {
+    if (prev === undefined) delete process.env[key];
+    else process.env[key] = prev;
+  };
+}
+
 function makeToolResult(content: string, isError = false): ToolResult {
   return isError ? { content, isError: true } : { content };
 }
@@ -438,6 +459,20 @@ function createModuleAccessors(options: WebAccessToolOptions): WebAccessModuleAc
   };
 }
 
+import { loadSearchConfigSync } from "../search-config/index.ts";
+
+export {
+  searchWithFallback,
+  createDuckDuckGoProvider,
+  createMcpSearchProvider,
+  createBuiltinProvider,
+  setBuiltinSearchProvider,
+  clearSearchProviderCache,
+  type SearchProviderName,
+  type SearchProviderConfig,
+  type SearchOptions,
+} from "./search-providers.ts";
+
 export function createWebAccessTools(cwd: string, options: WebAccessToolOptions = {}): Tool[] {
   const resolvedCwd = path.resolve(cwd);
   const modules = createModuleAccessors(options);
@@ -460,9 +495,22 @@ export function createWebAccessTools(cwd: string, options: WebAccessToolOptions 
         const domainFilter = args.domainFilter === undefined ? undefined : stringList(args.domainFilter, "domainFilter", 50);
         const provider = providerSelection(args.provider);
         const includeContent = args.includeContent === true;
+        // Persisted search config (e.g. Tavily key from ~/.mini-agent/search.json).
+        const searchConfig = loadSearchConfig();
+        const needsKey = provider === "tavily" || provider === "brave" || provider === "exa";
+        const envVar = provider === "tavily"
+          ? "TAVILY_API_KEY"
+          : provider === "brave" ? "BRAVE_API_KEY" : "EXA_API_KEY";
+        // Inject the persisted key for the duration of this call only. The
+        // underlying module reads its credential from the environment, and
+        // mutating it globally would leak the key to unrelated requests.
+        const restoreEnv = needsKey && searchConfig.apiKey
+          ? installTemporaryEnv(envVar, searchConfig.apiKey)
+          : undefined;
         const search = await modules.search();
         const queryResults: StoredQuery[] = [];
         const inlineContent: ExtractedContent[] = [];
+        try {
         for (const query of queryValues) {
           throwIfAborted(signal);
           try {
@@ -486,6 +534,9 @@ export function createWebAccessTools(cwd: string, options: WebAccessToolOptions 
             if (isAbortError(error)) throw error;
             queryResults.push({ query, answer: "", results: [], error: errorMessage(error) });
           }
+        }
+        } finally {
+          restoreEnv?.();
         }
         const successful = queryResults.filter((entry) => !entry.error);
         if (successful.length === 0) {

@@ -10,6 +10,7 @@ import type { TuiStore } from "../state.ts";
 import type { PermissionManager } from "../../permissions.ts";
 import type { ToolProvider } from "../../tools/types.ts";
 import type { LegacyTodoCommand } from "../todo-commands.ts";
+import type { PendingTodoRunPlan } from "../state.ts";
 
 export type CommandContext = {
   store: TuiStore;
@@ -30,6 +31,12 @@ export type CommandContext = {
 export type TodosRunCommandContext = CommandContext & {
   /** Executors wiring the runner to subagents + background tasks. */
   todosRunExecutors?: import("./command-runners.ts").TodosRunExecutors;
+  /** Renderer hook used by Ink to display the explicit run confirmation panel. */
+  onConfirmTodoRun?: (pending: PendingTodoRunPlan) => void;
+  /** True only after the user accepts the plan currently shown by the TUI. */
+  todoRunConfirmed?: boolean;
+  /** Frozen Todo snapshot used to build the plan the user reviewed. */
+  todoRunSnapshot?: import("../../todo.ts").TodoItem[];
 };
 
 export type ParsedCommandArgs =

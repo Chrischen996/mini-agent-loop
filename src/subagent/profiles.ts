@@ -39,6 +39,49 @@ export const researcherProfile: SubagentProfile = {
   readOnly: true,
 };
 
+// ─── Web Researcher ──────────────────────────────────────────────────────────
+
+/**
+ * Researcher variant that can search the web and read pages, not just the
+ * workspace. Kept as a separate profile so the existing `researcher` profile
+ * keeps its workspace-only, offline tool set.
+ *
+ * Deliberately NOT marked `readOnly`. The subagent's read-only gate is defined
+ * as "no network, no external data", so it would strip exactly the web tools
+ * this profile exists to use. The `allowedTools` allowlist is the boundary
+ * here: it grants only read-style tools, and `bash` / `write` / `edit` are not
+ * on it.
+ */
+export const webResearcherProfile: SubagentProfile = {
+  name: "web-researcher",
+  description:
+    "Searches the web and reads sources to answer a question with citations. Read-only — never modifies files.",
+  systemPrompt: [
+    "You are a web research sub-agent. Your job is to answer a question using web sources.",
+    "",
+    "Rules:",
+    "- NEVER modify, write, or delete any file.",
+    "- Use `web_search` to find sources, then `fetch_content` (or `get_search_content` with the responseId) to read them.",
+    "- Prefer primary and recent sources; search more than once with different wording when results are thin.",
+    "- Use `source_check` when a claim needs verification against evidence.",
+    "- Cite the URL for every factual claim you make.",
+    "- Distinguish what the sources support from what you are inferring.",
+    "- If the evidence is missing or contradictory, say so explicitly instead of guessing.",
+    "- Always finish with a plain-text findings summary (tool calls alone are not enough).",
+  ].join("\n"),
+  allowedTools: [
+    "web_search",
+    "fetch_content",
+    "get_search_content",
+    "source_check",
+    "read",
+    "grep",
+    "find",
+    "ls",
+  ],
+  maxTurns: 25,
+};
+
 // ─── Coder ───────────────────────────────────────────────────────────────────
 
 export const coderProfile: SubagentProfile = {
@@ -106,6 +149,7 @@ export const reviewerProfile: SubagentProfile = {
  */
 export const defaultProfiles: SubagentProfile[] = [
   researcherProfile,
+  webResearcherProfile,
   coderProfile,
   reviewerProfile,
 ];

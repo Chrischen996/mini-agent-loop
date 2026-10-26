@@ -1,6 +1,8 @@
 
 import { ALL_THINKING_LEVELS } from "./pi-ai/thinking-levels.ts";
 import { builtinModels } from "./pi-ai/providers/all.ts";
+import { loadProfileStoreSync, resolveProfileStorePath } from "./profile-store.ts";
+import { statSync } from "node:fs";
 import type { Api, ThinkingLevelMap, ModelThinkingLevel, Model as PiModel } from "./pi-ai/types.ts";
 import type { ToolCallFormat } from "./hermes/types.ts";
 import { KIMI_K3_MODELS } from "./kimi-k3-models.ts";
@@ -48,6 +50,15 @@ export type ModelRef = {
   timeoutMs?: number;
   firstResponseTimeoutMs?: number;
   streamIdleTimeoutMs?: number;
+  /**
+   * Inline API key for catalog entries that are not backed by an environment
+   * variable (Web custom providers). Persisted providers keep the secret in
+   * the profile store; `apiKeyEnv` stays empty so the key is never resolved
+   * from an unrelated provider's environment variable.
+   *
+   * Never log or serialize this field.
+   */
+  apiKey?: string;
 };
 
 export type ModelReferenceMatch = {
@@ -105,6 +116,10 @@ export function customProviderModels(
         protocol: anthropic || responses ? "pi" : "openai-compatible",
         baseUrl,
         apiKeyEnv: [],
+        // Persisted providers carry their own secret; keep `apiKeyEnv` empty so
+        // the key can never be satisfied by an unrelated provider's env var
+        // (which previously let the request fall through to a wrong endpoint).
+        ...(profile.apiKey ? { apiKey: profile.apiKey } : {}),
         capabilities: {
           input: [...input],
           tools: definition.tools !== false,
@@ -399,13 +414,69 @@ function parseCustomModels(raw: string | undefined): ModelRef[] {
 }
 
 export function getAllModels(env: NodeJS.ProcessEnv = process.env): ModelRef[] {
-  const models = [...BUILT_IN_MODELS, ...parseCustomModels(env.MINI_AGENT_MODELS)];
+  const models = [
+    ...BUILT_IN_MODELS,
+    ...parseCustomModels(env.MINI_AGENT_MODELS),
+    ...getPersistedCustomProviderModels(),
+  ];
   const unique = new Map(models.map((model) => [`${model.provider}/${model.id}`.toLowerCase(), model]));
   return [...unique.values()];
 }
 
+/**
+ * Models contributed by providers persisted in the profile store.
+ *
+ * Without this overlay `resolveModel` cannot see a persisted provider and
+ * silently resolves its id onto the default OpenAI endpoint, reusing an
+ * unrelated API key.
+ *
+ * Two sources feed the overlay, in priority order:
+ *  1. An explicit value installed via {@link setPersistedCustomProviderModels}
+ *     (used by the server, which holds providers in memory across hot updates).
+ *  2. Otherwise, the profile store is re-read, memoized by path + mtime + size
+ *     so a settings change is picked up without a restart and repeated model
+ *     resolutions do not re-read the file.
+ */
+let explicitPersistedModels: ModelRef[] | undefined;
+let storeCache: { key: string; models: ModelRef[] } | undefined;
+
+/** Install an authoritative overlay (Web settings / server startup). */
+export function setPersistedCustomProviderModels(models: ModelRef[]): void {
+  explicitPersistedModels = models;
+}
+
+/**
+ * Drop the explicit overlay and return to reading the profile store from disk.
+ * Use this when a test or caller needs the on-disk value to win again.
+ */
+export function clearPersistedCustomProviderModelsOverride(): void {
+  explicitPersistedModels = undefined;
+  storeCache = undefined;
+}
+
+/** Current persisted-provider model overlay. */
+export function getPersistedCustomProviderModels(): ModelRef[] {
+  if (explicitPersistedModels !== undefined) return [...explicitPersistedModels];
+  try {
+    const storePath = resolveProfileStorePath();
+    const stat = statSync(storePath);
+    const key = `${storePath}:${stat.mtimeMs}:${stat.size}`;
+    if (storeCache?.key !== key) {
+      storeCache = { key, models: customProviderModels(loadProfileStoreSync(storePath)?.customProviders) };
+    }
+    return [...storeCache.models];
+  } catch {
+    // Missing or unreadable store: no overlay.
+    storeCache = undefined;
+    return [];
+  }
+}
+
 export function getAvailableModels(env: NodeJS.ProcessEnv = process.env): ModelRef[] {
   return getAllModels(env).filter((model) => {
+    // A persisted custom provider carries its own key, so it is selectable
+    // without any matching environment variable.
+    if (model.apiKey) return true;
     if (model.protocol === "openai-compatible") return model.apiKeyEnv.some((name) => Boolean(env[name]));
     return model.apiKeyEnv.length === 0 || model.apiKeyEnv.some((name) => Boolean(env[name]));
   });

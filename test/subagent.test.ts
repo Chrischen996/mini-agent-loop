@@ -2247,9 +2247,10 @@ describe("createSubagentTool", () => {
   describe("built-in profiles", () => {
     it("defaultProfiles contains researcher, coder, reviewer", async () => {
       const { defaultProfiles } = await import("../src/subagent/index.ts");
-      assert.equal(defaultProfiles.length, 3);
+      assert.equal(defaultProfiles.length, 4);
       const names = defaultProfiles.map((p: SubagentProfile) => p.name);
       assert.ok(names.includes("researcher"));
+      assert.ok(names.includes("web-researcher"));
       assert.ok(names.includes("coder"));
       assert.ok(names.includes("reviewer"));
     });

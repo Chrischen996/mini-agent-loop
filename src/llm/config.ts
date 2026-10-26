@@ -10,11 +10,14 @@ import {
   type RelayRegistry,
 } from "../relay.ts";
 import { getActiveProfile, loadProfileStoreSync } from "../profile-store.ts";
+import type { CustomProviderProfile } from "../profile-store.ts";
 import {
+  customProviderModels,
   getAvailableModels,
   modelReference,
   parseImagePolicy,
   resolveModel,
+  setPersistedCustomProviderModels,
   type ImagePolicy,
   type LlmGatewayProtocol,
   type ModelCapabilities,
@@ -318,10 +321,24 @@ export function loadDotEnvFile(
 
 // ─── Config loaders ──────────────────────────────────────────────────────────
 
+/**
+ * Publish the models of persisted custom providers into the model catalog so
+ * `resolveModel` / `switchLlmModel` can resolve them by id.
+ *
+ * Called on every `loadLlmConfigFromEnv` so Web settings edits are picked up by
+ * the next config load without a process restart.
+ */
+function registerPersistedCustomProviders(
+  providers: Record<string, CustomProviderProfile> | undefined,
+): void {
+  setPersistedCustomProviderModels(customProviderModels(providers));
+}
+
 export function loadLlmConfigFromEnv(): LlmConfig {
   loadDotEnvFile();
   // ── 1. Active profile (highest precedence) ─────────────────────────────────
   const profileStore = loadProfileStoreSync();
+  registerPersistedCustomProviders(profileStore?.customProviders);
   const activeProfile = profileStore ? getActiveProfile(profileStore) : null;
 
   if (activeProfile) {
@@ -510,7 +527,11 @@ export function switchLlmModel(
   // current config, reuse the existing API key. This covers the case where
   // DeepSeek (or any provider) is configured via OPENAI_API_KEY + OPENAI_BASE_URL
   // rather than the provider-specific env var name.
+  // An inline key (persisted custom provider) takes precedence over both: the
+  // provider owns its secret, so inheriting an unrelated key would send the
+  // request to the wrong endpoint.
   const effectiveApiKey = overrides.apiKey?.trim()
+    || resolved.apiKey
     || apiKey
     || (resolved.baseUrl === config.baseUrl ? config.apiKey : undefined);
 

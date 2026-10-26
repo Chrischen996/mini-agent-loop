@@ -48,6 +48,7 @@ export {
 export {
   defaultProfiles,
   researcherProfile,
+  webResearcherProfile,
   coderProfile,
   reviewerProfile,
 } from "./profiles.ts";

@@ -19,7 +19,7 @@ import type { PersistedSession } from "./session-store.ts";
 import { SessionManager } from "./session-manager.ts";
 import { sanitizeResumableMessages } from "./session-history.ts";
 import { isAbortError, loadLlmConfigFromEnv, switchLlmModel, type ChatFn, type LlmConfig } from "./llm/index.ts";
-import { customProviderModels, getAvailableModels, resolveModel, searchModels, type ModelRef } from "./models.ts";
+import { customProviderModels, getAvailableModels, resolveModel, searchModels, setPersistedCustomProviderModels, type ModelRef } from "./models.ts";
 import { getActiveProfile, loadProfileStore, loadProfileStoreSync, type CustomProviderProfile } from "./profile-store.ts";
 import {
   createAgentHistory,
@@ -743,6 +743,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
   let customProviders: Record<string, CustomProviderProfile> =
     loadProfileStoreSync(options.modelConfigPath)?.customProviders ?? {};
   const customModels = (): ModelRef[] => customProviderModels(customProviders);
+  // Providers persisted before boot must be resolvable by subagent/session
+  // model overrides, not only through the custom-provider-specific path.
+  setPersistedCustomProviderModels(customModels());
   const customProviderForModel = (reference: string): { model: ModelRef; apiKey: string } | undefined => {
     const normalized = reference.trim().toLowerCase();
     const model = customModels().find((candidate) =>
@@ -1470,7 +1473,12 @@ export function createAgentServer(options: AgentServerOptions): Express {
   });
   registerModelProviderRoutes(app, {
     getProviders: () => customProviders,
-    onProvidersChanged: (providers) => { customProviders = providers; },
+    onProvidersChanged: (providers) => {
+      customProviders = providers;
+      // Keep the model catalog in sync so a provider saved from Web settings is
+      // immediately resolvable by subagent/session model overrides.
+      setPersistedCustomProviderModels(customProviderModels(providers));
+    },
     storePath: options.modelConfigPath,
   });
 

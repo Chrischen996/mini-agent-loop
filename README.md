@@ -99,6 +99,7 @@ catalog value → env var → default. See [Per-model timeouts](#per-model-timeo
 | `MINI_AGENT_MCP_CONFIG` | no | — |
 | `MINI_AGENT_PERMISSION_MODE` | no | `plan` (or `bypass`) |
 | `MINI_AGENT_SUBAGENT` | no | `1` in CLI/server, TUI always on |
+| `MINI_AGENT_SEARCH_ORCHESTRATION` | no | `0`; set `1` to expose the `search_orchestrate` tool |
 | `MINI_AGENT_BG_TASKS` | no | `1`; set `0`/`false` to disable `bg_*` tools |
 | `MINI_AGENT_BG_BACKEND` | no | `auto`; choose `auto`, `tmux`, or `process` |
 | `MINI_AGENT_WEB_TOKEN_BUDGET` | no | unlimited per allocation |
@@ -207,7 +208,23 @@ instead of hard-failing the whole delegation. The preflight option is not
 propagated into nested subagents, so it does not recurse.
 
 The built-in `researcher` and `reviewer` profiles are read-only and cannot use
-workspace writes, process execution, network access, or external MCP data. The
+workspace writes, process execution, network access, or external MCP data.
+
+`web-researcher` is a separate profile for questions that need the web. It is
+granted `web_search`, `fetch_content`, `get_search_content`, `source_check`
+plus the read-only workspace tools, and nothing else. It is deliberately *not*
+marked `readOnly`, because the subagent read-only gate also blocks network
+access and would strip the web tools it exists to use; the tool allowlist is
+the boundary instead.
+
+Set `MINI_AGENT_SEARCH_ORCHESTRATION=1` to add the `search_orchestrate` tool.
+It searches the web, asks a `web-researcher` planner to split the question into
+a dependency-ordered task list, runs those tasks as subagents, then synthesizes
+one answer. Each task may pin its own model — any catalog id or a model from a
+provider saved in the Web settings page — so different subagents can run on
+different third-party gateways. The workflow routes every subagent call through
+the host's own subagent tool, so permissions, token budgets, preprocessors and
+`/multi-agent` role bindings apply unchanged. The
 parent and nested subagents can share a total token budget through
 `MINI_AGENT_GLOBAL_TOKEN_BUDGET`; `MINI_AGENT_GLOBAL_CONCURRENCY_LIMIT` bounds
 overlapping `subagent_batch` work. A value of `0` for the concurrency limit
