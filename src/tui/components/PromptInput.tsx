@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useInput, useStdin } from "ink";
-import { isSgrMouseEvent, parseSgrMouseWheel } from "../mouse-events.ts";
+import { isKittyProtocolKey, isMouseEvent, parseMouseWheel } from "../mouse-events.ts";
 import { TUI_COLORS as C } from "../theme.ts";
 import {
   clampCursor,
@@ -109,7 +109,7 @@ export function PromptInput({
 
   useEffect(() => {
     const handleRawInput = (data: string) => {
-      const direction = parseSgrMouseWheel(data);
+      const direction = parseMouseWheel(data);
       if (direction && onScrollContext) onScrollContext(direction);
     };
     internal_eventEmitter.on("input", handleRawInput);
@@ -121,9 +121,10 @@ export function PromptInput({
   useInput(
     (input, key) => {
       // Ink 5 does not expose wheel fields on Key. The raw listener above
-      // handles SGR wheel events; keep the complete mouse sequence out of
-      // the prompt value if Ink forwards it here as text.
-      if (isSgrMouseEvent(input)) return;
+      // handles SGR and X10 mouse reports; keep complete mouse or kitty
+      // keyboard-protocol sequences out of the prompt value if Ink forwards
+      // them here as text.
+      if (isMouseEvent(input) || isKittyProtocolKey(input)) return;
       const currentParts = partsRef.current;
       const currentCursor = clampCursor(cursorRef.current, currentParts.length);
 
