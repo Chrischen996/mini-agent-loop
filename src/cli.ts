@@ -73,6 +73,7 @@ import {
   type PermissionTurnContext,
 } from "./permissions.ts";
 import { reportUpdateToStderr } from "./update-check.ts";
+import { createCliSessionMetadata } from "./cli-session-metadata.ts";
 
 const IMAGE_EXT: Record<string, ImageMimeType> = {
   ".png": "image/png",
@@ -943,6 +944,10 @@ async function main(): Promise<void> {
   sessionManager.setSessionId(persistenceSessionId);
   runtimeContext.sessionId = persistenceSessionId;
   const turnPrompt = prompt + planSuffix || (restoredSession ? "继续完成之前的工作" : "Please analyze the attached image(s).");
+  const sessionMetadata = createCliSessionMetadata({
+    phase: restoredSession?.phase,
+    currentPlan: restoredSession?.currentPlan,
+  });
   const sessionSnapshotFields = () => ({
     id: persistenceSessionId,
     modelId: requestLlm.model,
@@ -950,8 +955,7 @@ async function main(): Promise<void> {
     thinkingMode,
     permissionMode: effectiveMode,
     skillNames: activeSkillNames,
-    phase: restoredSession?.phase,
-    currentPlan: restoredSession?.currentPlan,
+    ...sessionMetadata.snapshot(),
     todos: activeTodos,
     todoVersion: activeTodoVersion,
     parentSessionId: restoredSession?.parentSessionId,
@@ -1032,6 +1036,8 @@ async function main(): Promise<void> {
       skillNames: activeSkillNames,
       skillRegistry: defaultSkillRegistry,
       initialMessages: resumedMessages,
+      sessionPhase: sessionMetadata.snapshot().phase,
+      onPlanEvent: sessionMetadata.onPlanEvent,
     });
     if (trackingExecution) {
       const last = [...messages].reverse().find((m) => m.role === "assistant");

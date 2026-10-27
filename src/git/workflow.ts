@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
@@ -17,6 +17,14 @@ export type GitStatus = {
   staged: number;
   unstaged: number;
   untracked: number;
+};
+
+export type GitChangedFile = {
+  path: string;
+  status: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
 };
 
 export type GitCheckpoint = {
@@ -156,6 +164,43 @@ export class GitWorkflow {
     return { root, branch: branch.trim(), head: head.trim(), dirty: Boolean(porcelain.trim()), staged, unstaged, untracked };
   }
 
+  async changedFiles(): Promise<GitChangedFile[]> {
+    const root = await repositoryRoot(this.cwd);
+    const porcelain = await runGit(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+    const records = porcelain.split("\0");
+    const files: GitChangedFile[] = [];
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index]!;
+      if (record.length < 4) continue;
+      const status = record.slice(0, 2);
+      const filePath = record.slice(3);
+      const untracked = status === "??";
+      files.push({
+        path: filePath,
+        status,
+        staged: !untracked && status[0] !== " ",
+        unstaged: !untracked && status[1] !== " ",
+        untracked,
+      });
+      // Porcelain v1 -z emits a second NUL-delimited path for renames/copies.
+      if (status.includes("R") || status.includes("C")) index += 1;
+    }
+    return files.sort((left, right) => left.path.localeCompare(right.path));
+  }
+
+  async diffPath(relativePath: string): Promise<string> {
+    const root = await repositoryRoot(this.cwd);
+    const file = (await this.changedFiles()).find((candidate) => candidate.path === relativePath);
+    if (!file) throw new Error(`Not a changed workspace file: ${relativePath}`);
+    if (file.untracked) return diffUntrackedFile(root, relativePath);
+
+    const [staged, unstaged] = await Promise.all([
+      file.staged ? runGit(root, ["diff", "--cached", "--no-ext-diff", "--binary", "--no-color", "--", relativePath]) : "",
+      file.unstaged ? runGit(root, ["diff", "--no-ext-diff", "--binary", "--no-color", "--", relativePath]) : "",
+    ]);
+    return [staged, unstaged].filter(Boolean).join("\n") || "(no text diff available)";
+  }
+
   async diff(options: { staged?: boolean; path?: string } = {}): Promise<string> {
     const root = await repositoryRoot(this.cwd);
     const args = ["diff", "--no-ext-diff", "--binary", "--no-color"];
@@ -231,6 +276,50 @@ export class GitWorkflow {
     await runGit(status.root, ["worktree", "add", "-b", branch, target, status.head]);
     return { branch, path: target, base: status.head };
   }
+}
+
+const MAX_UNTRACKED_DIFF_BYTES = 512 * 1024;
+
+async function diffUntrackedFile(root: string, relativePath: string): Promise<string> {
+  const absolutePath = path.resolve(root, relativePath);
+  const fromRoot = path.relative(root, absolutePath);
+  if (fromRoot === ".." || fromRoot.startsWith(`..${path.sep}`) || path.isAbsolute(fromRoot)) {
+    throw new Error(`Changed file is outside the repository: ${relativePath}`);
+  }
+
+  const info = await lstat(absolutePath);
+  let content: Buffer;
+  let mode: string;
+  if (info.isSymbolicLink()) {
+    content = Buffer.from(await readlink(absolutePath), "utf8");
+    mode = "120000";
+  } else {
+    if (!info.isFile()) return `Untracked path is not a regular file: ${relativePath}`;
+    if (info.size > MAX_UNTRACKED_DIFF_BYTES) {
+      return `Untracked file is too large to render (${info.size} bytes): ${relativePath}`;
+    }
+    content = await readFile(absolutePath);
+    mode = info.mode & 0o111 ? "100755" : "100644";
+  }
+  if (content.includes(0)) return `Binary untracked file: ${relativePath}`;
+
+  const text = content.toString("utf8").replace(/\r\n?/g, "\n");
+  const hasTrailingNewline = text.endsWith("\n");
+  const lines = text.split("\n");
+  if (hasTrailingNewline) lines.pop();
+  const safePath = relativePath.replace(/[\r\n\t]/g, "?");
+  const hunk = lines.length > 0
+    ? `@@ -0,0 +1,${lines.length} @@\n${lines.map((line) => `+${line}`).join("\n")}`
+    : "@@ -0,0 +0,0 @@";
+  const noNewlineMarker = !hasTrailingNewline && lines.length > 0 ? "\n\\ No newline at end of file" : "";
+  return [
+    `diff --git a/${safePath} b/${safePath}`,
+    `new file mode ${mode}`,
+    "--- /dev/null",
+    `+++ b/${safePath}`,
+    hunk + noNewlineMarker,
+    "",
+  ].join("\n");
 }
 
 export async function createGitWorkflow(cwd: string, options?: { checkpointDir?: string; worktreeDir?: string }): Promise<GitWorkflow> {

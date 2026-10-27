@@ -1085,7 +1085,9 @@ async function runAgentTurnInternal(
   // Apply phase-specific prompt for Plan-Act workflow
   if (sessionPhase) {
     applyPhasePrompt(messages, sessionPhase);
-    onPlanEvent?.({ type: "planning_started", sessionId: "temp" });
+    if (sessionPhase === "planning") {
+      onPlanEvent?.({ type: "planning_started", sessionId: "temp" });
+    }
   }
 
   // ── Apply skill system prompt fragments ──────────────────────────────────

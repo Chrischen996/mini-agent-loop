@@ -334,6 +334,20 @@ describe("runAgentLoop", () => {
 });
 
 describe("runAgentTurn", () => {
+  it("does not report planning started when resuming another plan phase", async () => {
+    const events: import("../src/plan-act/types.ts").PlanActEvent[] = [];
+
+    await runAgentTurn(createAgentHistory(), "continue", {
+      llm: dummyLlm,
+      tools: [],
+      sessionPhase: "review",
+      onPlanEvent: (event) => events.push(event),
+      chat: async () => ({ role: "assistant", content: "ok" }),
+    });
+
+    assert.deepEqual(events, []);
+  });
+
   it("applies a leading thinking command before the first model call and cleans the prompt", async () => {
     let capturedConfig: typeof dummyLlm | undefined;
     let capturedMessages: import("../src/types.ts").AgentMessage[] | undefined;

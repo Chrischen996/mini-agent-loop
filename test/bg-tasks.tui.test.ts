@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import React from "react";
 import { describe, it } from "node:test";
 import { render } from "ink-testing-library";
+import * as slashCommands from "../src/tui/slash-commands.ts";
 import { SLASH_COMMANDS, formatHelpNotice } from "../src/tui/slash-commands.ts";
 import { buildStatusSegments } from "../src/tui/status-line.ts";
 import { BgTaskLivePanel } from "../src/tui/components/BgTaskLivePanel.tsx";
@@ -43,7 +44,20 @@ function fakeManager(tasks: BgTaskSummary[], logs: Record<string, string>) {
   };
 }
 
+const parseBackgroundTaskCommand = (slashCommands as unknown as {
+  parseBackgroundTaskCommand?: (input: string) => unknown;
+}).parseBackgroundTaskCommand;
+
 describe("bg-tasks TUI surface", () => {
+  it("preserves the full input text when parsing a send command", () => {
+    assert.equal(typeof parseBackgroundTaskCommand, "function");
+    assert.deepEqual(parseBackgroundTaskCommand!("/bg-tasks bg_123 send print('hello there')"), {
+      kind: "send",
+      reference: "bg_123",
+      text: "print('hello there')",
+    });
+  });
+
   it("registers /bg-tasks in the slash command catalog", () => {
     const command = SLASH_COMMANDS.find((entry) => entry.name === "bg-tasks");
     assert.ok(command);
