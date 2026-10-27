@@ -7,18 +7,25 @@ import {
   MODEL_REGISTRY,
   resolveModel,
   searchModels,
+  clearPersistedCustomProviderModelsOverride,
+  setPersistedCustomProviderModels,
 } from "../src/models.ts";
 
 describe("model selection", () => {
   it("lists only models with a configured credential", () => {
-    const models = getAvailableModels({ DEEPSEEK_API_KEY: "test" });
-    assert.deepEqual(
-      models.map((model) => model.id),
-      ["deepseek-v4-flash", "deepseek-v4-pro"],
-    );
-    assert.equal(models.find((model) => model.id === "deepseek-v4-flash")?.contextWindow, 1000000);
-    assert.equal(models.find((model) => model.id === "deepseek-v4-pro")?.contextWindow, 1000000);
-    assert.equal(getAvailableModels({ OPENAI_API_KEY: "test" }).some((model) => model.provider === "deepseek"), false);
+    setPersistedCustomProviderModels([]);
+    try {
+      const models = getAvailableModels({ DEEPSEEK_API_KEY: "test" });
+      assert.deepEqual(
+        models.map((model) => model.id),
+        ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4.1-flash-1017", "deepseek-v4.1-flash"],
+      );
+      assert.equal(models.find((model) => model.id === "deepseek-v4-flash")?.contextWindow, 1000000);
+      assert.equal(models.find((model) => model.id === "deepseek-v4-pro")?.contextWindow, 1000000);
+      assert.equal(getAvailableModels({ OPENAI_API_KEY: "test" }).some((model) => model.provider === "deepseek"), false);
+    } finally {
+      clearPersistedCustomProviderModelsOverride();
+    }
   });
 
   it("assigns and normalizes output limits for custom models", () => {
@@ -38,24 +45,29 @@ describe("model selection", () => {
   });
 
   it("covers the generated multi-provider catalog", () => {
-    const env = {
-      AGNES_API_KEY: "test",
-      OPENAI_API_KEY: "test",
-      DEEPSEEK_API_KEY: "test",
-      GEMINI_API_KEY: "test",
-      MOONSHOT_API_KEY: "test",
-      XAI_API_KEY: "test",
-      MISTRAL_API_KEY: "test",
-      GROQ_API_KEY: "test",
-      OPENROUTER_API_KEY: "test",
-      TOKENROUTER_API_KEY: "test",
-      ORCAROUTER_API_KEY: "test",
-    };
-    assert.deepEqual(
-      [...new Set(getAvailableModels(env).map((model) => model.provider))],
-      ["agnes-ai", "deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai", "tokenrouter", "orcarouter"],
-    );
-    assert.ok(getAllModels().every((model) => model.contextWindow > 0 && model.maxTokens > 0));
+    setPersistedCustomProviderModels([]);
+    try {
+      const env = {
+        AGNES_API_KEY: "test",
+        OPENAI_API_KEY: "test",
+        DEEPSEEK_API_KEY: "test",
+        GEMINI_API_KEY: "test",
+        MOONSHOT_API_KEY: "test",
+        XAI_API_KEY: "test",
+        MISTRAL_API_KEY: "test",
+        GROQ_API_KEY: "test",
+        OPENROUTER_API_KEY: "test",
+        TOKENROUTER_API_KEY: "test",
+        ORCAROUTER_API_KEY: "test",
+      };
+      assert.deepEqual(
+        [...new Set(getAvailableModels(env).map((model) => model.provider))],
+        ["agnes-ai", "deepseek", "google", "groq", "mistral", "moonshotai", "moonshotai-cn", "openai", "openai-codex", "openrouter", "xai", "tokenrouter", "orcarouter"],
+      );
+      assert.ok(getAllModels().every((model) => model.contextWindow > 0 && model.maxTokens > 0));
+    } finally {
+      clearPersistedCustomProviderModelsOverride();
+    }
   });
 
   it("registers Grok 4.6 and Gemini 3.6/3.7 Flash with documented metadata", () => {
@@ -325,6 +337,50 @@ describe("model selection", () => {
     assert.ok(searchModels("orcarouter").some((item) => item.provider === "orcarouter"));
   });
 
+  it("registers the current flagship model for each adapted provider", () => {
+    const expected = [
+      ["openai", "gpt-6.1-terra", "https://api.openai.com/v1", ["OPENAI_API_KEY"]],
+      ["openai-codex", "gpt-6.1-terra", "https://chatgpt.com/backend-api", ["OPENAI_CODEX_AUTH_JSON", "OPENAI_API_KEY"]],
+      ["azure-openai-responses", "gpt-6-astra", "", ["AZURE_OPENAI_API_KEY"]],
+      ["anthropic", "claude-sonnet-5-5", "https://api.anthropic.com", ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]],
+      ["google", "gemini-4-argon", "https://generativelanguage.googleapis.com/v1beta", ["GEMINI_API_KEY", "GOOGLE_API_KEY"]],
+      ["deepseek", "deepseek-v4.1-flash", "https://api.deepseek.com", ["DEEPSEEK_API_KEY"]],
+      ["qwen", "qwen3.8-max-prime", "https://dashscope.aliyuncs.com/compatible-mode/v1", ["DASHSCOPE_API_KEY"]],
+      ["moonshotai", "kimi-k3.1-pro", "https://api.moonshot.ai/v1", ["MOONSHOT_API_KEY"]],
+      ["moonshotai-cn", "kimi-k3.1-pro", "https://api.moonshot.cn/v1", ["MOONSHOT_API_KEY"]],
+      ["minimax", "MiniMax-M3.1-flash", "https://api.minimax.io/anthropic", ["MINIMAX_API_KEY"]],
+      ["minimax-cn", "MiniMax-M3.1-flash", "https://api.minimaxi.com/anthropic", ["MINIMAX_CN_API_KEY"]],
+      ["zai", "glm-5.3", "https://api.z.ai/api/coding/paas/v4", ["ZAI_API_KEY"]],
+      ["zai-coding-cn", "glm-5.3", "https://open.bigmodel.cn/api/coding/paas/v4", ["ZAI_CODING_CN_API_KEY"]],
+      ["xiaomi", "mimo-v2.6-pro", "https://api.xiaomimimo.com/v1", ["XIAOMI_API_KEY"]],
+      ["mistral", "mistral-large-4-0", "https://api.mistral.ai", ["MISTRAL_API_KEY"]],
+      ["nvidia", "nvidia/nemotron-3.5-super-vl", "https://integrate.api.nvidia.com/v1", ["NVIDIA_API_KEY"]],
+      ["xai", "grok-4.20", "https://api.x.ai/v1", ["XAI_API_KEY"]],
+      ["fireworks", "accounts/fireworks/models/ember-1", "https://api.fireworks.ai/inference/v1", ["FIREWORKS_API_KEY"]],
+      ["ant-ling", "Ling-3.1-flash", "https://api.ant-ling.com/v1", ["ANT_LING_API_KEY"]],
+      ["cohere", "command-a-plus", "https://api.cohere.com/compatibility/v1", ["COHERE_API_KEY"]],
+      ["perplexity", "sonar-pro", "https://api.perplexity.ai", ["PERPLEXITY_API_KEY"]],
+      ["stepfun", "step-5-preview", "https://api.stepfun.com/v1", ["STEPFUN_API_KEY"]],
+      ["openrouter", "openai/gpt-6.1-terra", "https://openrouter.ai/api/v1", ["OPENROUTER_API_KEY"]],
+    ] as const;
+
+    for (const [provider, id, baseUrl, apiKeyEnv] of expected) {
+      const model = getAllModels().find((item) => item.provider === provider && item.id === id);
+      assert.ok(model, `Expected ${provider}/${id}`);
+      assert.equal(model.baseUrl, baseUrl, `${provider}/${id} baseUrl`);
+      assert.deepEqual(model.apiKeyEnv, [...apiKeyEnv], `${provider}/${id} apiKeyEnv`);
+      assert.ok(model.contextWindow >= 128000, `${provider}/${id} contextWindow`);
+      assert.ok(model.maxTokens > 0, `${provider}/${id} maxTokens`);
+      assert.equal(resolveModel(`${provider}/${id}`).id, id);
+    }
+
+    assert.ok(getAvailableModels({ COHERE_API_KEY: "test" }).some((model) => model.provider === "cohere"));
+    assert.ok(getAvailableModels({ PERPLEXITY_API_KEY: "test" }).some((model) => model.provider === "perplexity"));
+    assert.ok(getAvailableModels({ STEPFUN_API_KEY: "test" }).some((model) => model.provider === "stepfun"));
+    assert.ok(searchModels("gpt-6.1").some((model) => model.provider === "openai" && model.id === "gpt-6.1-terra"));
+    assert.ok(searchModels("gemini-4").some((model) => model.id === "gemini-4-argon"));
+  });
+
   it("registers GPT-6 Astra on OpenAI API and OpenAI Codex", () => {
     const apiModel = getAllModels().find(
       (model) => model.provider === "openai" && model.id === "gpt-6-astra",
@@ -447,7 +503,12 @@ describe("model selection", () => {
   it("maps dotted Claude version aliases to hyphenated catalog ids", () => {
     assert.equal(resolveModel("claude-sonnet-4.6").id, "claude-sonnet-4-6");
     assert.equal(resolveModel("sonnet-4.6").id, "claude-sonnet-4-6");
+    assert.equal(resolveModel("claude-sonnet-5.5").id, "claude-sonnet-5-5");
+    assert.equal(resolveModel("opus-5.5").id, "claude-opus-5-5");
+    assert.equal(resolveModel("haiku-5.5").id, "claude-haiku-5-5");
+    assert.equal(resolveModel("fable-5.1").id, "claude-fable-5-1");
     assert.ok(searchModels("sonnet-4.6").some((model) => model.id === "claude-sonnet-4-6"));
+    assert.ok(searchModels("sonnet-5.5").some((model) => model.id === "claude-sonnet-5-5"));
   });
 
   it("keeps Anthropic native transport on the official API host", () => {

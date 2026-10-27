@@ -10,6 +10,7 @@ import { createIncrementalStdout } from "./incremental-renderer.ts";
 import { disableMouseTracking, enableMouseTracking } from "./mouse-tracking.ts";
 import { openInspectorFromArgs } from "./inspect.ts";
 import { getStartupSessionRequest } from "./session-serialization.ts";
+import { loadTuiSystemPromptContext } from "./system-prompt.ts";
 
 const cwd = process.cwd();
 
@@ -80,12 +81,14 @@ async function main(): Promise<void> {
       codebaseProvider: codebaseRuntime.semanticProvider,
       sandboxRunner,
     });
+    const systemPromptContext = await loadTuiSystemPromptContext(cwd);
     process.stdout.write(ALTERNATE_SCREEN);
     enableMouseTracking(process.stdout);
     const incrementalStdout = createIncrementalStdout(process.stdout);
     const app = render(
       <App
         cwd={cwd}
+        systemPromptContext={systemPromptContext}
         startupSessionRequest={startupSessionRequest}
         agentTools={mcpRuntime.toolProvider([...agentTools, ...bgTools])}
         allTools={mcpRuntime.toolProvider([...createAllTools(cwd, { sandboxRunner }), ...bgTools])}

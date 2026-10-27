@@ -112,6 +112,8 @@ export function App() {
     setActiveId,
     refresh,
     createSession,
+    importForeignSession,
+    importMatches,
     creating,
     loading,
     error: listError,
@@ -206,7 +208,10 @@ export function App() {
         collapsed={collapsed} connected={connected}
         workspaces={workspaces} workspaceId={selectedWorkspaceId} onWorkspaceChange={handleWorkspaceChange} onAddWorkspace={() => setWorkspacePickerOpen(true)}
         onToggle={() => setSidebarChoice(!collapsed)}
-        onNew={(workspaceId) => void createSession(workspaceId ?? (selectedWorkspaceId || undefined))} onSelect={(id) => { setActiveId(id); const selected = sessions.find((session) => session.id === id); if (selected?.workspaceId) setSelectedWorkspaceId(selected.workspaceId); }}
+        onNew={(workspaceId) => void createSession(workspaceId ?? (selectedWorkspaceId || undefined))}
+        onImport={(source, reference) => void importForeignSession(source, reference, selectedWorkspaceId || undefined)}
+        importMatches={importMatches}
+        onSelect={(id) => { setActiveId(id); const selected = sessions.find((session) => session.id === id); if (selected?.workspaceId) setSelectedWorkspaceId(selected.workspaceId); }}
         onDelete={(id) => void deleteSession(id)}
         onPresentation={updatePresentation}
         onSettings={() => setSettingsOpen(true)}

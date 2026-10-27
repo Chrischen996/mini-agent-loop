@@ -68,6 +68,7 @@ type SessionCreatedEvent = {
   forkedFromMessageId?: string;
   workspaceId?: string;
   cwd?: string;
+  origin?: ForeignSessionOrigin;
 };
 
 type SessionSnapshotEvent = {
@@ -92,9 +93,17 @@ type SessionSnapshotEvent = {
   forkedFromMessageId?: string;
   workspaceId?: string;
   cwd?: string;
+  origin?: ForeignSessionOrigin;
 };
 
 type SessionEvent = SessionCreatedEvent | SessionSnapshotEvent;
+
+export type ForeignSessionOrigin = {
+  source: "claude" | "codex";
+  sourceSessionId: string;
+  sourcePath: string;
+  importedAt: number;
+};
 
 export type PersistedSession = {
   id: string;
@@ -124,6 +133,8 @@ export type PersistedSession = {
   parentSessionId?: string;
   forkedFromMessage?: number;
   forkedFromMessageId?: string;
+  /** Set when this session was created from a Claude Code or Codex transcript. */
+  origin?: ForeignSessionOrigin;
 };
 
 /** Lightweight metadata for resume pickers (CLI `--resume`, TUI `/sessions`). */
@@ -419,6 +430,7 @@ export class SessionStore {
           ...session,
           createdAt: existing.createdAt,
           workspaceId: session.workspaceId ?? existing.workspaceId ?? this.workspaceId,
+          origin: session.origin ?? existing.origin,
           parentSessionId: session.parentSessionId ?? existing.parentSessionId,
           forkedFromMessage: session.forkedFromMessage ?? existing.forkedFromMessage,
           forkedFromMessageId: session.forkedFromMessageId ?? existing.forkedFromMessageId,
@@ -475,6 +487,7 @@ export class SessionStore {
       forkedFromMessageId: session.forkedFromMessageId,
       workspaceId: session.workspaceId ?? this.workspaceId,
       cwd: session.cwd,
+      origin: session.origin,
     });
     await this.saveLocked(session, updateActivity);
   }
@@ -514,6 +527,7 @@ export class SessionStore {
       forkedFromMessageId: session.forkedFromMessageId,
       workspaceId: session.workspaceId ?? this.workspaceId,
       cwd: session.cwd,
+      origin: session.origin,
     });
     await this.writeMeta(this.sessionMeta({ ...session, lastActiveAt }));
     // Keep the append-only log bounded (Claude Code-style transcript compaction).
@@ -576,6 +590,7 @@ export class SessionStore {
       forkedFromMessageId: session.forkedFromMessageId,
       workspaceId: session.workspaceId ?? this.workspaceId,
       cwd: session.cwd,
+      origin: session.origin,
       // null is intentional: it clears a previously persisted plan.
       currentPlan: session.currentPlan ?? null,
     };
@@ -619,6 +634,7 @@ export class SessionStore {
             forkedFromMessageId: parsed.forkedFromMessageId,
             workspaceId: parsed.workspaceId,
             cwd: parsed.cwd,
+            origin: parsed.origin,
           };
         } else if (Array.isArray(parsed.messages)) {
           snapshotCount += 1;
@@ -645,6 +661,7 @@ export class SessionStore {
             forkedFromMessageId: parsed.forkedFromMessageId ?? current?.forkedFromMessageId,
             workspaceId: parsed.workspaceId ?? current?.workspaceId,
             cwd: parsed.cwd ?? current?.cwd,
+            origin: parsed.origin ?? current?.origin,
           };
         }
       } catch {

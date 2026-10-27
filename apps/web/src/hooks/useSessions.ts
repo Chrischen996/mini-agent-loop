@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { api } from "../lib/api.ts";
-import type { SessionSummary } from "../types/api.ts";
+import { ApiError, api } from "../lib/api.ts";
+import type { ForeignSessionCandidate, SessionSummary } from "../types/api.ts";
 
 export function useSessions() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -8,6 +8,7 @@ export function useSessions() {
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [importMatches, setImportMatches] = useState<ForeignSessionCandidate[]>([]);
 
   const refresh = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -28,6 +29,27 @@ export function useSessions() {
     void refresh();
   }, [refresh]);
 
+  const importForeignSession = useCallback(async (
+    source: "claude" | "codex",
+    reference: string,
+    workspaceId?: string,
+  ): Promise<string | null> => {
+    setCreating(true);
+    setImportMatches([]);
+    try {
+      const imported = await api.importForeignSession(source, reference, workspaceId);
+      await refresh();
+      setActiveId(imported.id);
+      return imported.id;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setImportMatches(err instanceof ApiError ? err.matches : []);
+      return null;
+    } finally {
+      setCreating(false);
+    }
+  }, [refresh]);
+
   const createSession = useCallback(async (workspaceId?: string): Promise<string | null> => {
     setCreating(true);
     try {
@@ -43,5 +65,5 @@ export function useSessions() {
     }
   }, [refresh]);
 
-  return { sessions, activeId, setActiveId, refresh, createSession, creating, loading, error };
+  return { sessions, activeId, setActiveId, refresh, createSession, importForeignSession, importMatches, creating, loading, error };
 }

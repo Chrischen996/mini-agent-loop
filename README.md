@@ -68,6 +68,9 @@ npm install
 | `TOKENROUTER_API_KEY` | no | — |
 | `ORCAROUTER_API_KEY` | no | — |
 | `SILICONFLOW_API_KEY` | no | — |
+| `COHERE_API_KEY` | no | — |
+| `PERPLEXITY_API_KEY` | no | — |
+| `STEPFUN_API_KEY` | no | — |
 | `OPENAI_BASE_URL` | no | OpenAI or DeepSeek auto |
 | `OPENAI_MODEL` | no | `gpt-4o-mini` / `deepseek-chat` |
 | `MINI_AGENT_REQUEST_TIMEOUT_MS` | no | `120000` (total request; `0` disables) |
@@ -365,9 +368,12 @@ npm run tui
 
 # examples inside the TUI
 /model
-/model deepseek/deepseek-v4-flash
+/model deepseek/deepseek-v4.1-flash
+/model openai/gpt-6.1-terra
 /model openai/gpt-6-astra
 /model openai-codex/gpt-6-astra
+/model google/gemini-4-argon
+/model anthropic/claude-sonnet-5.5
 /model google/gemini-2.5-pro
 /model openrouter/anthropic/claude-sonnet-4
 # positional custom gateway: model, base URL, api key
@@ -841,6 +847,24 @@ keep vertical cursor movement). `Alt+↑`/`Alt+↓` moves focus between reasonin
 messages, and `Alt+T` expands or collapses the focused reasoning block.
 `/tasks`, `/copy`, `/skills`, and `/resume` provide argument completion;
 `/resume` loads session IDs from the shared session store.
+
+`skills/adapt-foreign-session` continues a local Claude Code or Codex CLI chat
+as a short handoff. Activate it with `/skill adapt-foreign-session` or
+`MINI_AGENT_SKILLS=adapt-foreign-session`, then ask to continue that session.
+The same reader is available without the skill:
+
+```bash
+npm start -- --resume-claude
+npm start -- --resume-claude <session-id-or-title> "continue the imported work"
+npm start -- --resume-codex latest
+```
+
+In the TUI, `/resume-claude [ref]` and `/resume-codex [ref]` import the
+transcript into a new local session. The Web sidebar has the same action.
+`/resume` still opens only this project's saved sessions. A repeated import of
+the same source session reopens the existing local session. The reader checks
+`~/.claude` or `~/.codex` on the host; a Docker sandbox that cannot see that
+home directory has no transcripts to import.
 CLI one-shot runs accept `--mode plan|bypass` (default `plan`). The former
 `approval` permission mode is no longer supported; migrate read-only runs to
 `plan`, trusted unattended execution to `bypass`, or use the plan workflow

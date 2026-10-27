@@ -187,10 +187,6 @@ function ViewportSlice({
   children: React.ReactNode;
 }): React.ReactElement | null {
   if (visibleHeight <= 0) return null;
-  // When the block is fully visible (no top clipping needed) skip the inner
-  // wrapper with marginTop={0}. Yoga has to re-layout every subtree that
-  // carries a negative marginTop; omitting it for the common case reduces
-  // layout work proportionally to the number of unclipped messages on screen.
   if (clipTop === 0) {
     return (
       <Box height={visibleHeight} flexShrink={0} overflow="hidden">

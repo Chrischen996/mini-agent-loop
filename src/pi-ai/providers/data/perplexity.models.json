@@ -1,0 +1,126 @@
+{
+	"sonar-pro-search": {
+		"id": "sonar-pro-search",
+		"name": "Sonar Pro Search",
+		"api": "openai-completions",
+		"provider": "perplexity",
+		"baseUrl": "https://api.perplexity.ai",
+		"compat": {
+			"supportsStore": false,
+			"supportsDeveloperRole": false,
+			"supportsReasoningEffort": false
+		},
+		"reasoning": true,
+		"input": [
+			"text",
+			"image"
+		],
+		"cost": {
+			"input": 3,
+			"output": 15,
+			"cacheRead": 0,
+			"cacheWrite": 0
+		},
+		"contextWindow": 200000,
+		"maxTokens": 8000
+	},
+	"sonar-reasoning-pro": {
+		"id": "sonar-reasoning-pro",
+		"name": "Sonar Reasoning Pro",
+		"api": "openai-completions",
+		"provider": "perplexity",
+		"baseUrl": "https://api.perplexity.ai",
+		"compat": {
+			"supportsStore": false,
+			"supportsDeveloperRole": false,
+			"supportsReasoningEffort": false
+		},
+		"reasoning": true,
+		"input": [
+			"text",
+			"image"
+		],
+		"cost": {
+			"input": 2,
+			"output": 8,
+			"cacheRead": 0,
+			"cacheWrite": 0
+		},
+		"contextWindow": 128000,
+		"maxTokens": 115200
+	},
+	"sonar-pro": {
+		"id": "sonar-pro",
+		"name": "Sonar Pro",
+		"api": "openai-completions",
+		"provider": "perplexity",
+		"baseUrl": "https://api.perplexity.ai",
+		"compat": {
+			"supportsStore": false,
+			"supportsDeveloperRole": false,
+			"supportsReasoningEffort": false
+		},
+		"reasoning": false,
+		"input": [
+			"text",
+			"image"
+		],
+		"cost": {
+			"input": 3,
+			"output": 15,
+			"cacheRead": 0,
+			"cacheWrite": 0
+		},
+		"contextWindow": 200000,
+		"maxTokens": 8000
+	},
+	"sonar-deep-research": {
+		"id": "sonar-deep-research",
+		"name": "Sonar Deep Research",
+		"api": "openai-completions",
+		"provider": "perplexity",
+		"baseUrl": "https://api.perplexity.ai",
+		"compat": {
+			"supportsStore": false,
+			"supportsDeveloperRole": false,
+			"supportsReasoningEffort": false
+		},
+		"reasoning": true,
+		"input": [
+			"text"
+		],
+		"cost": {
+			"input": 2,
+			"output": 8,
+			"cacheRead": 0,
+			"cacheWrite": 0
+		},
+		"contextWindow": 128000,
+		"maxTokens": 115200
+	},
+	"sonar": {
+		"id": "sonar",
+		"name": "Sonar",
+		"api": "openai-completions",
+		"provider": "perplexity",
+		"baseUrl": "https://api.perplexity.ai",
+		"compat": {
+			"supportsStore": false,
+			"supportsDeveloperRole": false,
+			"supportsReasoningEffort": false
+		},
+		"reasoning": false,
+		"input": [
+			"text",
+			"image"
+		],
+		"cost": {
+			"input": 1,
+			"output": 1,
+			"cacheRead": 0,
+			"cacheWrite": 0
+		},
+		"contextWindow": 127072,
+		"maxTokens": 114364
+	}
+}

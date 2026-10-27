@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Box, Text, useInput, useStdin } from "ink";
 import { isKittyProtocolKey, isMouseEvent, parseMouseWheel } from "../mouse-events.ts";
 import { TUI_COLORS as C } from "../theme.ts";
+import { terminalStringWidth } from "../terminal-width.ts";
 import {
   clampCursor,
   moveToLineEnd,
@@ -41,6 +42,28 @@ export type PromptInputProps = {
 };
 
 const MAX_VISIBLE_LINES = 10;
+
+export function estimatePromptInputRows(value: string, width: number, placeholder = ""): number {
+  const columns = Math.max(1, Math.floor(width));
+  if (!value) return wrappedRows(placeholder, columns);
+
+  const lines = value.split("\n");
+  const visibleLineCount = Math.min(MAX_VISIBLE_LINES, lines.length);
+  let maxRows = 1;
+  for (let start = 0; start <= lines.length - visibleLineCount; start++) {
+    const visible = lines.slice(start, start + visibleLineCount);
+    const lineRows = visible.map((line) => wrappedRows(line, columns));
+    const cursorExtraRow = Math.max(
+      ...visible.map((line, index) => wrappedRows(`${line} `, columns) - lineRows[index]!),
+    );
+    maxRows = Math.max(maxRows, lineRows.reduce((total, rows) => total + rows, 0) + cursorExtraRow);
+  }
+  return maxRows;
+}
+
+function wrappedRows(line: string, columns: number): number {
+  return Math.max(1, Math.ceil(terminalStringWidth(line) / columns));
+}
 
 function joinGraphemes(parts: string[]): string {
   return parts.join("");

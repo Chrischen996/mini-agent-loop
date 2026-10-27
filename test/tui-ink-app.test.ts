@@ -1,21 +1,17 @@
 /// <reference types="../ink-testing-library.d.ts" />
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import React, { useState } from "react";
 import { App } from "../src/tui/App.tsx";
 import { PromptInput } from "../src/tui/components/PromptInput.tsx";
+import { stableBgTaskInstanceId } from "../src/bg-tasks/manager.js";
+import { BgTaskStore } from "../src/bg-tasks/store.js";
 
-const require = createRequire(import.meta.url);
-let render: typeof import("ink-testing-library").render | undefined;
-try {
-  ({ render } = require("ink-testing-library") as typeof import("ink-testing-library"));
-} catch (error: unknown) {
-  if (!(error instanceof Error) || !("code" in error) || error.code !== "MODULE_NOT_FOUND") throw error;
-}
+const { render } = await import("ink-testing-library");
 
 const waitForRender = () => new Promise<void>((resolve) => setTimeout(resolve, 60));
 
@@ -29,9 +25,7 @@ const overrides = {
   TUI_CLAUDE_STYLE_INPUT: "1",
 } as const;
 
-const suiteDescriptor = render ? describe : describe.skip;
-
-suiteDescriptor("the single Ink terminal", () => {
+describe("the single Ink terminal", () => {
   let cwd: string;
   let previous: Record<keyof typeof overrides, string | undefined>;
 
@@ -233,6 +227,29 @@ suiteDescriptor("the single Ink terminal", () => {
     }
   });
 
+  it("recalculates the fixed viewport when the terminal is resized", async () => {
+    const view = open();
+    const stdout = (view as unknown as {
+      stdout: { rows?: number; emit: (event: string) => boolean };
+    }).stdout;
+    try {
+      await waitForRender();
+      const initialRows = (view.lastFrame() ?? "").split("\n").length;
+
+      stdout.rows = 14;
+      stdout.emit("resize");
+      await waitForRender();
+
+      const resizedFrame = view.lastFrame() ?? "";
+      const resizedRows = resizedFrame.split("\n").length;
+      assert.ok(resizedRows < initialRows, `expected viewport to shrink from ${initialRows} rows, got ${resizedRows}`);
+      assert.match(resizedFrame, /^ >/m);
+      assert.match(resizedFrame, /Ready/);
+    } finally {
+      view.cleanup();
+    }
+  });
+
   it("handles the command catalog and unknown commands locally", async () => {
     const view = open();
     try {
@@ -243,6 +260,79 @@ suiteDescriptor("the single Ink terminal", () => {
       await submit(view, "/deploy the app");
       assert.match(view.lastFrame() ?? "", /\/deploy is not a command/);
       assert.doesNotMatch(view.lastFrame() ?? "", /Working…/);
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  it("opens a selectable background task panel and its action menu", async () => {
+    const instanceId = stableBgTaskInstanceId(cwd);
+    const store = new BgTaskStore(cwd, instanceId);
+    await store.initialize();
+    const taskId = "bg_tui_fixture";
+    const paths = await store.createTask({
+      schemaVersion: 1,
+      taskId,
+      name: "fixture task",
+      command: "echo fixture",
+      cwd,
+      shell: process.env.ComSpec ?? "cmd.exe",
+      status: "running",
+      createdAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      notifyOnCompletion: true,
+      backend: "process",
+      instanceId,
+    });
+    await store.writeResult(paths, {
+      schemaVersion: 1,
+      taskId,
+      status: "completed",
+      exitCode: 0,
+      signal: null,
+      startedAt: new Date().toISOString(),
+      endedAt: new Date().toISOString(),
+    });
+
+    const view = open();
+    try {
+      await submit(view, "/bg-tasks");
+      assert.match(view.lastFrame() ?? "", /fixture task/);
+      assert.match(view.lastFrame() ?? "", /Select a task/);
+
+      view.stdin.write("\r");
+      await waitForRender();
+      const frame = view.lastFrame() ?? "";
+      assert.match(frame, /View recent logs/);
+      assert.match(frame, /Capture screen/);
+      assert.match(frame, /Send input/);
+      assert.match(frame, /Wait for completion/);
+      assert.match(frame, /Terminate task/);
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  it("opens a changed-file picker and shows the selected Git diff", async () => {
+    execFileSync("git", ["init", "-q"], { cwd });
+    execFileSync("git", ["config", "user.name", "TUI test"], { cwd });
+    execFileSync("git", ["config", "user.email", "tui-test@example.invalid"], { cwd });
+    const trackedFile = path.join(cwd, "tracked.txt");
+    writeFileSync(trackedFile, "before\n");
+    execFileSync("git", ["add", "tracked.txt"], { cwd });
+    execFileSync("git", ["commit", "-qm", "initial"], { cwd });
+    writeFileSync(trackedFile, "before\nafter\n");
+
+    const view = open();
+    try {
+      await submit(view, "/diff");
+      assert.match(view.lastFrame() ?? "", /tracked\.txt/);
+      assert.match(view.lastFrame() ?? "", /Select a changed file/);
+
+      view.stdin.write("\r");
+      await waitForRender();
+      assert.match(view.lastFrame() ?? "", /\+after/);
+      assert.match(view.lastFrame() ?? "", /diff --git a\/tracked\.txt b\/tracked\.txt/);
     } finally {
       view.cleanup();
     }

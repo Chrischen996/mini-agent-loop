@@ -294,4 +294,22 @@ export const FIREWORKS_MODELS = {
 		contextWindow: 262000,
 		maxTokens: 262000,
 	} satisfies Model<"anthropic-messages">,
+	"accounts/fireworks/models/ember-1": {
+		id: "accounts/fireworks/models/ember-1",
+		name: "Ember-1",
+		api: "openai-completions",
+		provider: "fireworks",
+		baseUrl: "https://api.fireworks.ai/inference/v1",
+		compat: {"supportsStore":false,"supportsDeveloperRole":false},
+		reasoning: true,
+		input: ["text", "image"],
+		cost: {
+			input: 3,
+			output: 15,
+			cacheRead: 0.3,
+			cacheWrite: 0,
+		},
+		contextWindow: 1048576,
+		maxTokens: 943718,
+	} satisfies Model<"openai-completions">,
 } as const;

@@ -34,7 +34,7 @@ export function isSgrMouseEvent(data: string): boolean {
 export function parseX10MouseWheel(data: string): MouseWheelDirection | undefined {
   const match = /^\x1b?\[M(.{1,3})$/.exec(data);
   if (!match) return undefined;
-  const buttonChar = match[1]!.slice(-1);
+  const buttonChar = match[1]![0];
   if (buttonChar === "`") return "up";
   if (buttonChar === "a") return "down";
   return undefined;

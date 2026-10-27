@@ -514,4 +514,21 @@ export const MISTRAL_MODELS = {
 		contextWindow: 128000,
 		maxTokens: 128000,
 	} satisfies Model<"mistral-conversations">,
+	"mistral-large-4-0": {
+		id: "mistral-large-4-0",
+		name: "Mistral Large 4",
+		api: "mistral-conversations",
+		provider: "mistral",
+		baseUrl: "https://api.mistral.ai",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: {
+			input: 1.36,
+			output: 4.18,
+			cacheRead: 0.14,
+			cacheWrite: 0,
+		},
+		contextWindow: 1048576,
+		maxTokens: 262144,
+	} satisfies Model<"mistral-conversations">,
 } as const;

@@ -28,6 +28,31 @@ export type SessionSummary = {
   thinkingMode: string;
 };
 
+export type ForeignSessionCandidate = {
+  tool: "claude" | "codex";
+  source: string;
+  session_id: string;
+  path: string;
+  title: string | null;
+  updated_at?: string | null;
+};
+
+export type ForeignSessionListResponse = {
+  source: "claude" | "codex";
+  cwd: string;
+  configDir: string;
+  configDirExists: boolean;
+  sessions: ForeignSessionCandidate[];
+};
+
+export type ImportSessionResponse = {
+  id: string;
+  created: boolean;
+  workspaceId?: string;
+  sourceSessionId: string;
+  title: string | null;
+};
+
 export type CreateSessionResponse = {
   id: string;
   workspaceId?: string;

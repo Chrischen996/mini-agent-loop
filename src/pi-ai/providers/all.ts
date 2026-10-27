@@ -8,6 +8,7 @@ import { antLingProvider } from "./ant-ling.ts";
 import { anthropicProvider } from "./anthropic.ts";
 import { azureOpenAIResponsesProvider } from "./azure-openai-responses.ts";
 import { cerebrasProvider } from "./cerebras.ts";
+import { cohereProvider } from "./cohere.ts";
 import { cloudflareAIGatewayProvider } from "./cloudflare-ai-gateway.ts";
 import { cloudflareWorkersAIProvider } from "./cloudflare-workers-ai.ts";
 import { deepseekProvider } from "./deepseek.ts";
@@ -26,6 +27,7 @@ import { moonshotaiCnProvider } from "./moonshotai-cn.ts";
 import { nvidiaProvider } from "./nvidia.ts";
 import { openaiProvider } from "./openai.ts";
 import { openaiCodexProvider } from "./openai-codex.ts";
+import { perplexityProvider } from "./perplexity.ts";
 import { opencodeProvider } from "./opencode.ts";
 import { opencodeGoProvider } from "./opencode-go.ts";
 import { openrouterProvider } from "./openrouter.ts";
@@ -40,6 +42,7 @@ import { xiaomiTokenPlanSgpProvider } from "./xiaomi-token-plan-sgp.ts";
 import { zaiProvider } from "./zai.ts";
 import { zaiCodingCnProvider } from "./zai-coding-cn.ts";
 import { qwenProvider } from "./qwen.ts";
+import { stepfunProvider } from "./stepfun.ts";
 
 type BuiltinModelApi<
 	TProvider extends KnownProvider,
@@ -77,6 +80,7 @@ export function builtinProviders(): Provider[] {
 		anthropicProvider(),
 		azureOpenAIResponsesProvider(),
 		cerebrasProvider(),
+		cohereProvider(),
 		cloudflareAIGatewayProvider(),
 		cloudflareWorkersAIProvider(),
 		deepseekProvider(),
@@ -95,6 +99,7 @@ export function builtinProviders(): Provider[] {
 		nvidiaProvider(),
 		openaiProvider(),
 		openaiCodexProvider(),
+		perplexityProvider(),
 		opencodeProvider(),
 		opencodeGoProvider(),
 		openrouterProvider(),
@@ -108,6 +113,7 @@ export function builtinProviders(): Provider[] {
 		zaiProvider(),
 		zaiCodingCnProvider(),
 		qwenProvider(),
+		stepfunProvider(),
 	];
 }
 

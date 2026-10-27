@@ -59,4 +59,22 @@ export const ANT_LING_MODELS = {
 		contextWindow: 262144,
 		maxTokens: 65536,
 	} satisfies Model<"openai-completions">,
+	"Ling-3.1-flash": {
+		id: "Ling-3.1-flash",
+		name: "Ling 3.1 Flash",
+		api: "openai-completions",
+		provider: "ant-ling",
+		baseUrl: "https://api.ant-ling.com/v1",
+		compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","thinkingFormat":"ant-ling","supportsLongCacheRetention":false},
+		reasoning: true,
+		input: ["text"],
+		cost: {
+			input: 0.075,
+			output: 0.225,
+			cacheRead: 0.015,
+			cacheWrite: 0,
+		},
+		contextWindow: 262144,
+		maxTokens: 235929,
+	} satisfies Model<"openai-completions">,
 } as const;

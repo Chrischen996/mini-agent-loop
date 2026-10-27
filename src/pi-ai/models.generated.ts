@@ -9,6 +9,7 @@ import { AZURE_OPENAI_RESPONSES_MODELS } from "./providers/azure-openai-response
 import { CEREBRAS_MODELS } from "./providers/cerebras.models.ts";
 import { CLOUDFLARE_AI_GATEWAY_MODELS } from "./providers/cloudflare-ai-gateway.models.ts";
 import { CLOUDFLARE_WORKERS_AI_MODELS } from "./providers/cloudflare-workers-ai.models.ts";
+import { COHERE_MODELS } from "./providers/cohere.models.ts";
 import { DEEPSEEK_MODELS } from "./providers/deepseek.models.ts";
 import { FIREWORKS_MODELS } from "./providers/fireworks.models.ts";
 import { GITHUB_COPILOT_MODELS } from "./providers/github-copilot.models.ts";
@@ -28,7 +29,9 @@ import { OPENAI_CODEX_MODELS } from "./providers/openai-codex.models.ts";
 import { OPENCODE_MODELS } from "./providers/opencode.models.ts";
 import { OPENCODE_GO_MODELS } from "./providers/opencode-go.models.ts";
 import { OPENROUTER_MODELS } from "./providers/openrouter.models.ts";
+import { PERPLEXITY_MODELS } from "./providers/perplexity.models.ts";
 import { QWEN_MODELS } from "./providers/qwen.models.ts";
+import { STEPFUN_MODELS } from "./providers/stepfun.models.ts";
 import { TOGETHER_MODELS } from "./providers/together.models.ts";
 import { VERCEL_AI_GATEWAY_MODELS } from "./providers/vercel-ai-gateway.models.ts";
 import { XAI_MODELS } from "./providers/xai.models.ts";
@@ -48,6 +51,7 @@ export const MODELS = {
 	"cerebras": CEREBRAS_MODELS,
 	"cloudflare-ai-gateway": CLOUDFLARE_AI_GATEWAY_MODELS,
 	"cloudflare-workers-ai": CLOUDFLARE_WORKERS_AI_MODELS,
+	"cohere": COHERE_MODELS,
 	"deepseek": DEEPSEEK_MODELS,
 	"fireworks": FIREWORKS_MODELS,
 	"github-copilot": GITHUB_COPILOT_MODELS,
@@ -67,7 +71,9 @@ export const MODELS = {
 	"opencode": OPENCODE_MODELS,
 	"opencode-go": OPENCODE_GO_MODELS,
 	"openrouter": OPENROUTER_MODELS,
+	"perplexity": PERPLEXITY_MODELS,
 	"qwen": QWEN_MODELS,
+	"stepfun": STEPFUN_MODELS,
 	"together": TOGETHER_MODELS,
 	"vercel-ai-gateway": VERCEL_AI_GATEWAY_MODELS,
 	"xai": XAI_MODELS,

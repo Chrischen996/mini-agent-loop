@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { EventEmitter } from "node:events";
 import {
   createIncrementalStdout,
   IncrementalTerminalRenderer,
@@ -7,9 +8,11 @@ import {
 import { disableMouseTracking, enableMouseTracking } from "../src/tui/mouse-tracking.ts";
 import { isSgrMouseEvent, parseSgrMouseWheel } from "../src/tui/mouse-events.ts";
 
-function sink(): { writes: string[]; target: { write(value: string): boolean } } {
+function sink(): { writes: string[]; target: EventEmitter & { write(value: string): boolean } } {
   const writes: string[] = [];
-  return { writes, target: { write(value: string) { writes.push(value); return true; } } };
+  const target = new EventEmitter() as EventEmitter & { write(value: string): boolean };
+  target.write = (value) => { writes.push(value); return true; };
+  return { writes, target };
 }
 
 describe("incremental terminal renderer", () => {
@@ -117,9 +120,39 @@ describe("incremental terminal renderer", () => {
     assert.ok(!output.writes[0]?.includes("\x1b[2J"));
   });
 
+  it("redraws unchanged rows after Ink requests a terminal clear", () => {
+    const output = sink();
+    const renderer = new IncrementalTerminalRenderer(output.target as never);
+
+    renderer.write("header\ntranscript\nfooter");
+    output.writes.length = 0;
+    renderer.write("\x1b[2J\x1b[3J\x1b[Hheader\ntranscript\nfooter");
+
+    assert.equal(output.writes.length, 1);
+    assert.match(output.writes[0]!, /1;1H.*header/);
+    assert.match(output.writes[0]!, /2;1H.*transcript/);
+    assert.match(output.writes[0]!, /3;1H.*footer/);
+    assert.ok(!output.writes[0]?.includes("\x1b[2J"));
+  });
+
+  it("redraws unchanged rows after a terminal resize", () => {
+    const output = sink();
+    const facade = createIncrementalStdout(output.target as never);
+
+    facade.write("header\ntranscript\nfooter");
+    output.writes.length = 0;
+    output.target.emit("resize");
+    facade.write("header\ntranscript\nfooter");
+
+    assert.equal(output.writes.length, 1);
+    assert.match(output.writes[0]!, /1;1H.*header/);
+    assert.match(output.writes[0]!, /2;1H.*transcript/);
+    assert.match(output.writes[0]!, /3;1H.*footer/);
+  });
+
   it("preserves WriteStream dimensions through the Ink facade", () => {
     const writes: string[] = [];
-    const target = {
+    const target = Object.assign(new EventEmitter(), {
       rows: 24,
       columns: 80,
       isTTY: true,
@@ -127,7 +160,7 @@ describe("incremental terminal renderer", () => {
         writes.push(value);
         return true;
       },
-    };
+    });
     const facade = createIncrementalStdout(target as never);
 
     assert.equal(facade.rows, 24);

@@ -28,8 +28,6 @@ function formatLlmTimeoutMessage(err: InstanceType<typeof LlmTimeoutError>): str
 import { useAutocomplete } from "./hooks/useAutocomplete.ts";
 import { tuiReducer, createInitialState } from "./state.ts";
 import {
-  buildSystemPrompt,
-  createAgentHistory,
   MaxTurnsExceededError,
   runAgentTurn,
   type AgentRuntimeRef,
@@ -76,6 +74,7 @@ import {
 import { TurnEventBuffer } from "./stream-buffer.ts";
 import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./layout.ts";
 import { estimateViewportContentHeight } from "./message-viewport.ts";
+import { terminalStringWidth } from "./terminal-width.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
 import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
@@ -83,8 +82,9 @@ import { addPendingImage, handlePasteImage } from "./image-handler.ts";
 import { startModelSetup, commitModelSetup, openProfileList } from "./profile-manager.ts";
 import { selectModel } from "./model-switcher.ts";
 import { SubagentToolsFactory } from "./subagent-tools-factory.ts";
-import { formatAmbiguousSessionNotice, parseResumeCommand, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
+import { formatAmbiguousSessionNotice, parseForeignResumeCommand, parseResumeCommand, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
 import { resolveSessionByPrefix, SessionManager } from "../session-manager.ts";
+import { ForeignSessionError, formatForeignSessionList, importForeignSession, listForeignSessions } from "../foreign-session.ts";
 import type { PersistedSession } from "../session-store.ts";
 import { formatMcpStatus } from "../mcp/status.ts";
 import type { McpServerStatus } from "../mcp/types.ts";
@@ -93,9 +93,10 @@ import { BgTaskLivePanel } from "./components/BgTaskLivePanel.tsx";
 import { TodoRunPanel } from "./components/TodoRunPanel.tsx";
 import { useKeyboardHandler } from "./hooks/useKeyboardHandler.ts";
 import { TerminalInputHistory } from "./terminal-input-history.ts";
+import { buildTuiSystemPrompt, createTuiAgentHistory, type TuiSystemPromptContext } from "./system-prompt.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
-import { PromptInput } from "./components/PromptInput.tsx";
+import { estimatePromptInputRows, PromptInput } from "./components/PromptInput.tsx";
 import {
   sanitizeInput,
   shouldAcceptAutocompleteOnEnter,
@@ -130,6 +131,7 @@ import type { StartupSessionRequest } from "./session-serialization.ts";
 
 type AppProps = {
   cwd: string;
+  systemPromptContext?: TuiSystemPromptContext;
   startupSessionRequest?: StartupSessionRequest;
   agentTools?: ToolProvider;
   allTools?: ToolProvider;
@@ -144,13 +146,34 @@ function useLazyRef<T>(factory: () => T): React.MutableRefObject<T> {
   return ref as React.MutableRefObject<T>;
 }
 
-export function App({ cwd, startupSessionRequest, agentTools, allTools, mcpStatuses }: AppProps): React.ReactElement {
+export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agentTools, allTools, mcpStatuses }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
-  const termWidth = stdout?.columns ?? 80;
+  const [terminalSize, setTerminalSize] = useState(() => ({
+    columns: stdout?.columns || 80,
+    rows: stdout?.rows || 24,
+  }));
+  useEffect(() => {
+    if (!stdout) return;
+    const syncTerminalSize = () => {
+      const columns = stdout.columns || 80;
+      const rows = stdout.rows || 24;
+      setTerminalSize((current) =>
+        current.columns === columns && current.rows === rows
+          ? current
+          : { columns, rows },
+      );
+    };
+    stdout.on("resize", syncTerminalSize);
+    syncTerminalSize();
+    return () => {
+      stdout.off("resize", syncTerminalSize);
+    };
+  }, [stdout]);
+  const termWidth = terminalSize.columns;
   // Leave one terminal row unused so Ink never enters its full-screen clear
   // path (`outputHeight >= rows`) while streamed reasoning is growing.
-  const termHeight = getTuiViewportHeight(stdout?.rows);
+  const termHeight = getTuiViewportHeight(terminalSize.rows);
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const llmRef = useRef(llm);
   llmRef.current = llm;
@@ -333,10 +356,10 @@ export function App({ cwd, startupSessionRequest, agentTools, allTools, mcpStatu
   const abortControllerRef = useRef<AbortController>(new AbortController());
   /** Alias for `abortControllerRef` (keeps the long-standing `abortRef` name). */
   const abortRef = abortControllerRef;
-  const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "plan"));
+  const historyRef = useRef<AgentMessage[]>(createTuiAgentHistory("plan", systemPromptContext));
   const activeTodosRef = useRef(state.todoItems);
   const thinkingPolicyModeRef = useRef(loadThinkingModeFromEnv());
-  const sessionProvenanceRef = useRef<Pick<PersistedSession, "parentSessionId" | "forkedFromMessage" | "forkedFromMessageId">>({});
+  const sessionProvenanceRef = useRef<Pick<PersistedSession, "parentSessionId" | "forkedFromMessage" | "forkedFromMessageId" | "origin">>({});
   const getPermissionManager = useCallback(() => {
     return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("plan"));
   }, []);
@@ -408,7 +431,7 @@ export function App({ cwd, startupSessionRequest, agentTools, allTools, mcpStatu
       }
 
       const permissionMode = session.permissionMode ?? "plan";
-      const restored = restoreTuiSession(session, buildSystemPrompt(permissionMode));
+      const restored = restoreTuiSession(session, buildTuiSystemPrompt(permissionMode, systemPromptContext));
       const restoredLlm = restoreLlmConfig(llmRef.current, session);
       const restoredSkillNames = session.skillNames ? [...session.skillNames] : loadSkillNamesFromEnv();
       manager.setSessionId(session.id);
@@ -420,6 +443,7 @@ export function App({ cwd, startupSessionRequest, agentTools, allTools, mcpStatu
         parentSessionId: session.parentSessionId,
         forkedFromMessage: session.forkedFromMessage,
         forkedFromMessageId: session.forkedFromMessageId,
+        origin: session.origin,
       };
       getPermissionManager().setMode(permissionMode);
       llmRef.current = restoredLlm;
@@ -447,7 +471,52 @@ export function App({ cwd, startupSessionRequest, agentTools, allTools, mcpStatu
       });
       return false;
     }
-  }, [dispatch, getPermissionManager, getSessionManager, setConversationId, setLlm, setSkillNames]);
+  }, [dispatch, getPermissionManager, getSessionManager, setConversationId, setLlm, setSkillNames, systemPromptContext]);
+
+  const importForeign = useCallback(async (source: "claude" | "codex", reference: string): Promise<void> => {
+    const manager = getSessionManager();
+    if (!reference) {
+      try {
+        const listed = formatForeignSessionList(source, (await listForeignSessions(source, cwd)).sessions);
+        dispatch({ type: "ADD_NOTICE", title: source === "claude" ? "Claude Code sessions" : "Codex sessions", text: listed });
+      } catch (error) {
+        dispatch({ type: "ADD_NOTICE", title: "Import session", text: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+    try {
+      const imported = await importForeignSession(manager, source, cwd, reference, cwd);
+      const permissionMode = imported.session.permissionMode ?? "plan";
+      const restored = restoreTuiSession(imported.session, buildTuiSystemPrompt(permissionMode, systemPromptContext));
+      manager.setSessionId(imported.session.id);
+      setConversationId(imported.session.id);
+      sessionProvenanceRef.current = { origin: imported.session.origin };
+      historyRef.current = restored.history;
+      activeTodosRef.current = restored.todos;
+      getPermissionManager().setMode(permissionMode);
+      dispatch({
+        type: "RESTORE_SESSION",
+        history: restored.history,
+        modelName: llmRef.current.model,
+        thinkingMode: stateRef.current.thinkingMode,
+        permissionMode,
+        phase: imported.session.phase,
+        currentPlan: imported.session.currentPlan,
+        todos: restored.todos,
+        todoRevision: restored.todoRevision,
+      });
+      dispatch({
+        type: "ADD_NOTICE",
+        title: source === "claude" ? "Imported Claude Code session" : "Imported Codex session",
+        text: `${imported.created ? "Imported" : "Reopened"} ${imported.transcript.session_id} as ${imported.session.id}.`,
+      });
+    } catch (error) {
+      const text = error instanceof ForeignSessionError && error.matches.length > 0
+        ? `${error.message}\n${formatForeignSessionList(source, error.matches)}`
+        : error instanceof Error ? error.message : String(error);
+      dispatch({ type: "ADD_NOTICE", title: "Import session", text });
+    }
+  }, [cwd, dispatch, getPermissionManager, getSessionManager, setConversationId, systemPromptContext]);
 
   const startupSessionHandledRef = useRef(false);
   useEffect(() => {
@@ -601,6 +670,19 @@ export function App({ cwd, startupSessionRequest, agentTools, allTools, mcpStatu
         : acMode === "model" || acMode === "model-picker" ? Math.min(12, modelCandidates.length)
           : acMode === "profile-list" ? Math.min(10, profileListState?.profiles.length ?? 0)
             : acMode ? 4 : 0;
+  const promptPlaceholder = state.busy ? "运行中，可输入消息并排队"
+    : acMode === "model-picker" ? "搜索模型"
+      : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "输入 Base URL"
+        : acMode === "model-setup" ? "输入 API Key，可留空使用环境变量"
+          : acMode === "profile-name" ? "输入配置文件名称（例如 coding-fast）"
+            : acMode === "profile-list" ? "↑↓ 选择配置文件，Enter 激活"
+              : "输入消息，/ 命令，或 @文件 引用";
+  const promptWidth = Math.max(
+    1,
+    termWidth - 4 - (state.busy && queuedCount > 0 ? terminalStringWidth(`队列 ${queuedCount}`) : 0),
+  );
+  const promptRows = estimatePromptInputRows(input, promptWidth, promptPlaceholder);
+  const extraFooterRows = state.spinnerMessage ? 1 : 0;
   const todoRows = getTodoPanelRows(
     { plan: state.todoPlan, todos: state.todoItems },
     state.todoViewMode,
@@ -610,19 +692,23 @@ export function App({ cwd, startupSessionRequest, agentTools, allTools, mcpStatu
   const permissionRows = (state.pendingPermission ? 4 : 0) + (pendingTodoRunPlan ? 5 : 0);
   const planApprovalRows = state.phase === "review" && state.currentPlan ? 3 : 0;
   const pickerLayout = getPickerLayout({
-    termRows: stdout?.rows,
+    termRows: terminalSize.rows,
     requestedItems: requestedPickerItems,
+    inputRows: promptRows,
     hasPendingImages: state.pendingImages.length > 0,
     todoRows,
+    extraFooterRows,
     extraRows: acMode === "model" || acMode === "model-picker" || acMode === "file" ? 3 : 2,
     permissionRows,
     planApprovalRows,
   });
   const feedHeight = getMessageFeedHeight({
-    termRows: stdout?.rows,
+    termRows: terminalSize.rows,
+    inputRows: promptRows,
     hasPendingImages: state.pendingImages.length > 0,
     todoRows,
     pickerRows: pickerLayout.totalRows,
+    extraFooterRows,
     permissionRows,
     planApprovalRows,
   });
@@ -674,6 +760,7 @@ export function App({ cwd, startupSessionRequest, agentTools, allTools, mcpStatu
     exit, abortRef, copyResolvedText, pasteImage: handlePasteImageRef, getPermissionManager,
     adjustThinkingLevel, resolvePendingPermission, dispatch,
     acMode, state, feedHeight, handleAutocompleteKey, historyRef,
+    systemPromptContext,
     suppressInputEchoRef, pendingPermissionRef,
     bgPanelOpen, onCloseBgPanel: () => setBgPanelOpen(false),
   });
@@ -762,6 +849,12 @@ export function App({ cwd, startupSessionRequest, agentTools, allTools, mcpStatu
 
     clearAc();
 
+    const foreignResume = parseForeignResumeCommand(trimmed);
+    if (foreignResume) {
+      setInput("");
+      await importForeign(foreignResume.source, foreignResume.reference);
+      return;
+    }
     const resumeCommand = parseResumeCommand(trimmed);
     if (resumeCommand) {
       setInput("");
@@ -821,7 +914,7 @@ export function App({ cwd, startupSessionRequest, agentTools, allTools, mcpStatu
     }
     if (trimmed === "/exit" || trimmed === "/quit") { exit(); return; }
     if (trimmed === "/clear") {
-      historyRef.current = createAgentHistory(undefined, getPermissionManager().getMode());
+      historyRef.current = createTuiAgentHistory(getPermissionManager().getMode(), systemPromptContext);
       pendingImagesRef.current = [];
       dispatch({ type: "RESET" });
       setInput("");
@@ -1246,7 +1339,7 @@ export function App({ cwd, startupSessionRequest, agentTools, allTools, mcpStatu
       });
       await persistSessionSnapshot(historyRef.current);
     }
-  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit, getBgManager, refreshBgTaskCount, resumeSession, sessionSnapshotFields, getSessionManager, persistSessionSnapshot]);
+  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit, getBgManager, refreshBgTaskCount, resumeSession, importForeign, sessionSnapshotFields, getSessionManager, persistSessionSnapshot]);
 
   // Start the next queued prompt only after the current turn has emitted done/error/aborted.
   useEffect(() => {
@@ -1409,15 +1502,7 @@ export function App({ cwd, startupSessionRequest, agentTools, allTools, mcpStatu
                 }
                 void handleSubmit(val);
               }}
-              placeholder={
-                state.busy ? "运行中，可输入消息并排队"
-                  : acMode === "model-picker" ? "搜索模型"
-                    : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "输入 Base URL"
-                      : acMode === "model-setup" ? "输入 API Key，可留空使用环境变量"
-                        : acMode === "profile-name" ? "输入配置文件名称（例如 coding-fast）"
-                          : acMode === "profile-list" ? "↑↓ 选择配置文件，Enter 激活"
-                            : "输入消息，/ 命令，或 @文件 引用"
-              }
+              placeholder={promptPlaceholder}
             />
             {state.busy && queuedCount > 0 && <Text color={C.running}>队列 {queuedCount}</Text>}
           </Box>

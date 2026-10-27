@@ -23,6 +23,7 @@ import { customProviderModels, getAvailableModels, resolveModel, searchModels, s
 import { getActiveProfile, loadProfileStore, loadProfileStoreSync, type CustomProviderProfile } from "./profile-store.ts";
 import {
   createAgentHistory,
+  restoreAgentHistory,
   buildSystemPrompt,
   MaxTurnsExceededError,
   RunStoppedError,
@@ -119,6 +120,7 @@ import { registerSubagentProfileRoutes } from "./server/routes/subagent-profiles
 import { registerPlanActRoutes } from "./server/routes/plan-act.ts";
 import { registerPermissionRoutes } from "./server/routes/permissions.ts";
 import { registerSkillRoutes } from "./server/routes/skills.ts";
+import { ForeignSessionError, formatForeignSessionList, importForeignSession, listForeignSessions, type ForeignSessionSource } from "./foreign-session.ts";
 import { registerFileRoutes } from "./server/routes/files.ts";
 import { registerPlanDocumentRoutes, planHttpError } from "./server/routes/plan-document.ts";
 import { registerBackgroundTaskRoutes } from "./server/routes/background-tasks.ts";
@@ -198,6 +200,7 @@ type Session = {
   todos: TodoItem[];
   todoVersion: number;
   runState?: import("./session-store.ts").WebRunState | null;
+  origin?: import("./session-store.ts").ForeignSessionOrigin;
 };
 
 export type AgentServerOptions = {
@@ -1071,6 +1074,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     parentSessionId: session.parentSessionId,
     forkedFromMessage: session.forkedFromMessage,
     forkedFromMessageId: session.forkedFromMessageId,
+    origin: session.origin,
   });
   const saveSession = async (session: Session): Promise<void> => {
     session.lastActiveAt = Date.now();
@@ -1171,6 +1175,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
         currentPlan: restoredPlan,
         todos: persisted.todos ?? [],
         todoVersion: persisted.todoVersion ?? 0,
+        origin: persisted.origin,
         runState: persisted.runState?.status === "running"
           ? {
               ...persisted.runState,
@@ -1609,6 +1614,115 @@ export function createAgentServer(options: AgentServerOptions): Express {
     response.json({ sessions: items });
   });
   registerSessionPresentationRoutes(app, { hasSession: (id) => sessions.has(id), store: sessionPresentation });
+
+  app.get("/api/foreign-sessions", async (request, response) => {
+    const source = request.query.source === "codex" ? "codex" : request.query.source === "claude" ? "claude" : undefined;
+    if (!source) {
+      response.status(400).json({ error: "source must be claude or codex" });
+      return;
+    }
+    const selected = typeof request.query.workspaceId === "string"
+      ? workspaceRegistry.get(request.query.workspaceId)
+      : defaultWorkspace();
+    if (!selected) {
+      response.status(404).json({ error: "Workspace not found" });
+      return;
+    }
+    try {
+      const listed = await listForeignSessions(source, selected.path);
+      response.json({
+        source,
+        cwd: selected.path,
+        configDir: listed.configDir,
+        configDirExists: listed.configDirExists,
+        sessions: listed.sessions,
+      });
+    } catch (error) {
+      const status = error instanceof ForeignSessionError && error.exitCode === 2 ? 409 : 400;
+      response.status(status).json({
+        error: error instanceof Error ? error.message : String(error),
+        matches: error instanceof ForeignSessionError ? error.matches : [],
+      });
+    }
+  });
+
+  app.post("/api/sessions/import", async (request, response) => {
+    const source = request.body?.source === "codex" ? "codex" as const : request.body?.source === "claude" ? "claude" as const : undefined;
+    if (!source) {
+      response.status(400).json({ error: "source must be claude or codex" });
+      return;
+    }
+    const selected = request.body?.workspaceId
+      ? workspaceRegistry.get(String(request.body.workspaceId))
+      : defaultWorkspace();
+    if (!selected) {
+      response.status(400).json({ error: "Unknown workspaceId" });
+      return;
+    }
+    const reference = typeof request.body?.reference === "string" ? request.body.reference : "";
+    try {
+      const imported = await importForeignSession(
+        sessionManagerForWorkspace(selected),
+        source satisfies ForeignSessionSource,
+        selected.path,
+        reference,
+        selected.id,
+      );
+      const existing = sessions.get(imported.session.id);
+      if (!imported.created && existing) {
+        response.status(200).json({
+          id: existing.id,
+          created: false,
+          workspaceId: workspaceIdForSession(existing),
+          sourceSessionId: imported.transcript.session_id,
+          title: imported.transcript.title,
+          preview: imported.transcript.summary.last_user_request ?? "",
+        });
+        return;
+      }
+      const instructions = selected.path === workspace
+        ? instructionContent
+        : (await loadInstructionBundle(selected.path)).content;
+      const session: Session = {
+        id: imported.session.id,
+        workspaceId: selected.id,
+        cwd: selected.path,
+        messages: restoreAgentHistory(
+          imported.session.messages,
+          buildSystemPrompt(defaultPermissionMode, instructions || undefined, memorySectionContent || undefined),
+        ),
+        createdAt: imported.session.createdAt,
+        lastActiveAt: imported.session.lastActiveAt,
+        busy: false,
+        permissionManager: new PermissionManager("plan"),
+        skillNames: [...defaultSkillNames],
+        todos: [],
+        todoVersion: 0,
+        origin: imported.session.origin,
+      };
+      sessions.set(session.id, session);
+      response.status(imported.created ? 201 : 200).json({
+        id: session.id,
+        created: imported.created,
+        workspaceId: session.workspaceId,
+        sourceSessionId: imported.transcript.session_id,
+        title: imported.transcript.title,
+        preview: formatForeignSessionList(source, [{
+          tool: source,
+          source: imported.transcript.source,
+          session_id: imported.transcript.session_id,
+          path: imported.transcript.path,
+          title: imported.transcript.title,
+        }]).split("\n").slice(1).join("\n"),
+      });
+    } catch (error) {
+      const status = error instanceof ForeignSessionError && error.exitCode === 2 ? 409 : 400;
+      response.status(status).json({
+        error: error instanceof Error ? error.message : String(error),
+        matches: error instanceof ForeignSessionError ? error.matches : [],
+      });
+    }
+  });
 
   app.post("/api/sessions", async (request, response) => {
     const selectedWorkspace = request.body?.workspaceId

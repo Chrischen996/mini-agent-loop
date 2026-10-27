@@ -179,6 +179,9 @@ const PROVIDER_ENV_KEYS: Record<string, string[]> = {
   zai: ["ZAI_API_KEY"],
   "zai-coding-cn": ["ZAI_CODING_CN_API_KEY"],
   qwen: ["DASHSCOPE_API_KEY"],
+  cohere: ["COHERE_API_KEY"],
+  perplexity: ["PERPLEXITY_API_KEY"],
+  stepfun: ["STEPFUN_API_KEY"],
 };
 
 const piRuntime = builtinModels();
@@ -569,6 +572,18 @@ const LEGACY_MODEL_ALIASES: Record<string, string> = {
   "claude-opus-4.8": "anthropic/claude-opus-4-8",
   "anthropic/claude-opus-4.8": "anthropic/claude-opus-4-8",
   "opus-4.8": "anthropic/claude-opus-4-8",
+  "claude-opus-5.5": "anthropic/claude-opus-5-5",
+  "anthropic/claude-opus-5.5": "anthropic/claude-opus-5-5",
+  "opus-5.5": "anthropic/claude-opus-5-5",
+  "claude-sonnet-5.5": "anthropic/claude-sonnet-5-5",
+  "anthropic/claude-sonnet-5.5": "anthropic/claude-sonnet-5-5",
+  "sonnet-5.5": "anthropic/claude-sonnet-5-5",
+  "claude-haiku-5.5": "anthropic/claude-haiku-5-5",
+  "anthropic/claude-haiku-5.5": "anthropic/claude-haiku-5-5",
+  "haiku-5.5": "anthropic/claude-haiku-5-5",
+  "claude-fable-5.1": "anthropic/claude-fable-5-1",
+  "anthropic/claude-fable-5.1": "anthropic/claude-fable-5-1",
+  "fable-5.1": "anthropic/claude-fable-5-1",
 };
 
 export function resolveModel(modelId: string, baseUrl?: string, protocol?: LlmGatewayProtocol): ModelRef {

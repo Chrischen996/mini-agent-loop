@@ -18,6 +18,13 @@ import {
   resolveSessionByPrefix,
   SessionManager,
 } from "./session-manager.ts";
+import {
+  ForeignSessionError,
+  formatForeignSessionList,
+  importForeignSession,
+  listForeignSessions,
+  type ForeignSessionSource,
+} from "./foreign-session.ts";
 import type { AgentMessage } from "./types.ts";
 import { MemoryStore } from "./orchestration/memory-store.ts";
 import { createAutoMemoryHook, isAutoMemoryEnabled } from "./memory/auto-memory.ts";
@@ -199,6 +206,8 @@ export type ParsedCliArgs = {
   continueSession: boolean;
   /** Resume a specific session id, or list sessions when no id is given. */
   resumeSessionId?: string;
+  /** Import a Claude Code or Codex transcript. Empty string lists candidates. */
+  foreignResume?: { source: ForeignSessionSource; reference: string };
   /** With --resume/--continue: start a new session seeded with old messages. */
   forkSession: boolean;
   /** Run the /init generator and exit without starting the agent loop. */
@@ -228,6 +237,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let planArchive = false;
   let continueSession = false;
   let resumeSessionId: string | undefined;
+  let foreignResume: ParsedCliArgs["foreignResume"];
   let forkSession = false;
   let sandboxEnabled = process.env.MINI_AGENT_SANDBOX !== "0";
   let init: ParsedCliArgs["init"] | undefined;
@@ -361,6 +371,20 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
       resumeSessionId = arg.slice("--resume=".length);
       continue;
     }
+    if (arg === "--resume-claude" || arg === "--resume-codex" || arg.startsWith("--resume-claude=") || arg.startsWith("--resume-codex=")) {
+      const source: ForeignSessionSource = arg.startsWith("--resume-claude") ? "claude" : "codex";
+      const inline = arg.indexOf("=");
+      if (inline >= 0) {
+        foreignResume = { source, reference: arg.slice(inline + 1) };
+      } else {
+        const next = argv[i + 1];
+        foreignResume = !next || next.startsWith("--")
+          ? { source, reference: "" }
+          : { source, reference: next };
+        if (next && !next.startsWith("--")) i += 1;
+      }
+      continue;
+    }
     if (arg === "--fork-session") {
       forkSession = true;
       // Claude Code's fork flag is a resume operation that writes to a new
@@ -444,6 +468,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     sandboxEnabled,
     continueSession,
     resumeSessionId,
+    foreignResume,
     forkSession,
     init,
   };
@@ -536,6 +561,7 @@ async function main(): Promise<void> {
     sandboxEnabled,
     continueSession,
     resumeSessionId,
+    foreignResume,
     forkSession,
     init: initOptions,
   } = parsed;
@@ -680,9 +706,9 @@ async function main(): Promise<void> {
   }
 
   if (!prompt && imagePaths.length === 0 && !planExecute && !planRetry
-    && !continueSession && resumeSessionId === undefined && !forkSession) {
+    && !continueSession && resumeSessionId === undefined && !foreignResume && !forkSession) {
     console.error(
-      'Usage: npx tsx src/cli.ts "<prompt>" [--image path.png]... [--continue] [--resume <id>] [--fork-session]',
+      'Usage: npx tsx src/cli.ts "<prompt>" [--image path.png]... [--continue] [--resume <id>] [--resume-claude [ref]] [--resume-codex [ref]] [--fork-session]',
     );
     process.exit(1);
   }
@@ -745,6 +771,30 @@ async function main(): Promise<void> {
     }
     resumedMessages = restoredSession.messages;
     console.error(`[session] resumed ${resumedSessionId} (${restoredSession.messages.length} messages)`);
+  }
+
+  if (foreignResume) {
+    if (foreignResume.reference === "" && !prompt) {
+      const listed = await listForeignSessions(foreignResume.source, cwd);
+      console.error(formatForeignSessionList(foreignResume.source, listed.sessions));
+      if (!listed.configDirExists) console.error(`Checked ${listed.configDir}; that directory is not available.`);
+      return;
+    }
+    try {
+      const imported = await importForeignSession(sessionManager, foreignResume.source, cwd, foreignResume.reference, cwd);
+      resumedSessionId = imported.session.id;
+      restoredSession = imported.session;
+      resumedMessages = imported.session.messages;
+      console.error(`[session] ${imported.created ? "imported" : "reused"} ${foreignResume.source} ${imported.transcript.session_id} as ${imported.session.id}`);
+    } catch (error) {
+      if (error instanceof ForeignSessionError && error.matches.length > 0) {
+        console.error(error.message);
+        console.error(formatForeignSessionList(foreignResume.source, error.matches));
+      } else {
+        console.error(error instanceof Error ? error.message : error);
+      }
+      process.exit(1);
+    }
   }
 
   if (restoredSession?.skillNames) activeSkillNames = [...restoredSession.skillNames];
@@ -961,6 +1011,7 @@ async function main(): Promise<void> {
     parentSessionId: restoredSession?.parentSessionId,
     forkedFromMessage: restoredSession?.forkedFromMessage,
     forkedFromMessageId: restoredSession?.forkedFromMessageId,
+    origin: restoredSession?.origin,
   });
   const persistSessionSnapshot = async (
     messages: AgentMessage[],

@@ -51,6 +51,8 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "sessions", usage: "/sessions", description: "List saved sessions" },
   { name: "bg-tasks", usage: "/bg-tasks", description: "List background tasks started by this session" },
   { name: "resume", usage: "/resume [id]", description: "Resume a saved session" },
+  { name: "resume-claude", usage: "/resume-claude [ref]", description: "Import a Claude Code session" },
+  { name: "resume-codex", usage: "/resume-codex [ref]", description: "Import a Codex session" },
   { name: "continue", usage: "/continue", description: "Continue saved work with a new run budget" },
   { name: "rewind", usage: "/rewind", description: "Rewind the current session to an earlier message" },
   { name: "tasks", usage: TODO_COMMAND_USAGE, description: "Show or manage todos" },
@@ -109,6 +111,8 @@ export function parseSlashCommand(input: string): SlashCommand {
     case "find": return { cmd: "find", pattern: parts[1] ?? "*", path: parts[2] ?? "." };
     case "grep": { const pattern = parts[1] ?? ""; const path = parts[2] ?? "."; return pattern ? { cmd: "grep", pattern, path } : null; }
     case "resume": return { cmd: "resume", raw: s.slice(1).trim() };
+    case "resume-claude":
+    case "resume-codex": return { cmd: "resume", raw: s.slice(1).trim() };
     case "web-ui": return { cmd: "web-ui", raw: s.slice(1).trim() };
     default: return null;
   }

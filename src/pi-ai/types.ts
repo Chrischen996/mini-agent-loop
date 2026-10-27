@@ -66,7 +66,10 @@ export type KnownProvider =
 	| "xiaomi-token-plan-cn"
 	| "xiaomi-token-plan-ams"
 	| "xiaomi-token-plan-sgp"
-	| "qwen";
+	| "qwen"
+	| "cohere"
+	| "perplexity"
+	| "stepfun";
 export type ProviderId = KnownProvider | string;
 
 export type KnownImagesProvider = "openrouter";

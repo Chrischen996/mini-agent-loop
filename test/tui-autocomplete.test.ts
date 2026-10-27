@@ -15,6 +15,7 @@ import {
   resolveAutocompleteNav,
   sessionListCommand,
 } from "../src/tui/autocomplete.ts";
+import { shouldAcceptAutocompleteOnEnter } from "../src/tui/input-utils.ts";
 import { SLASH_COMMANDS } from "../src/tui/slash-commands.ts";
 
 describe("autocomplete index helpers", () => {
@@ -52,6 +53,15 @@ describe("autocomplete mode helpers", () => {
     assert.equal(isOverlayAcMode("profile-list"), true);
     assert.equal(isOverlayAcMode("command"), true);
     assert.equal(isOverlayAcMode(null), false);
+  });
+
+  it("classifies background-task and workspace-diff pickers as input overlays", () => {
+    const modes = ["background-task-list", "background-task-actions", "workspace-diff-files"] as never[];
+    for (const mode of modes) {
+      assert.equal(isPickerAcMode(mode), true);
+      assert.equal(isOverlayAcMode(mode), true);
+      assert.equal(shouldAcceptAutocompleteOnEnter(mode), true);
+    }
   });
 });
 
@@ -216,6 +226,18 @@ describe("autocomplete keyboard mapping", () => {
     assert.deepEqual(
       resolveAutocompleteNav(null, { tab: true }, 0, lengths),
       { type: "none" },
+    );
+  });
+
+  it("navigates and closes the workbench pickers", () => {
+    const mode = "background-task-list" as never;
+    assert.deepEqual(
+      resolveAutocompleteNav(mode, { downArrow: true }, 0, { ...lengths, tasks: 2 }),
+      { type: "move", index: 1 },
+    );
+    assert.deepEqual(
+      resolveAutocompleteNav(mode, { escape: true }, 0, { ...lengths, tasks: 2 }),
+      { type: "cancel" },
     );
   });
 });

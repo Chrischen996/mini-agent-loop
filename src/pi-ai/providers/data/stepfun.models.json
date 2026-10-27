@@ -1,0 +1,76 @@
+{
+	"step-5-preview": {
+		"id": "step-5-preview",
+		"name": "Step 5 Preview",
+		"api": "openai-completions",
+		"provider": "stepfun",
+		"baseUrl": "https://api.stepfun.com/v1",
+		"compat": {
+			"supportsStore": false,
+			"supportsDeveloperRole": false,
+			"supportsReasoningEffort": false
+		},
+		"reasoning": true,
+		"input": [
+			"text",
+			"image"
+		],
+		"cost": {
+			"input": 1,
+			"output": 2.7,
+			"cacheRead": 0.1,
+			"cacheWrite": 0
+		},
+		"contextWindow": 1048576,
+		"maxTokens": 64000
+	},
+	"step-3.7-flash": {
+		"id": "step-3.7-flash",
+		"name": "Step 3.7 Flash",
+		"api": "openai-completions",
+		"provider": "stepfun",
+		"baseUrl": "https://api.stepfun.com/v1",
+		"compat": {
+			"supportsStore": false,
+			"supportsDeveloperRole": false,
+			"supportsReasoningEffort": false
+		},
+		"reasoning": true,
+		"input": [
+			"text",
+			"image"
+		],
+		"cost": {
+			"input": 0.2,
+			"output": 1.15,
+			"cacheRead": 0.04,
+			"cacheWrite": 0
+		},
+		"contextWindow": 262144,
+		"maxTokens": 230400
+	},
+	"step-3.5-flash": {
+		"id": "step-3.5-flash",
+		"name": "Step 3.5 Flash",
+		"api": "openai-completions",
+		"provider": "stepfun",
+		"baseUrl": "https://api.stepfun.com/v1",
+		"compat": {
+			"supportsStore": false,
+			"supportsDeveloperRole": false,
+			"supportsReasoningEffort": false
+		},
+		"reasoning": true,
+		"input": [
+			"text"
+		],
+		"cost": {
+			"input": 0.1,
+			"output": 0.3,
+			"cacheRead": 0,
+			"cacheWrite": 0
+		},
+		"contextWindow": 262144,
+		"maxTokens": 65536
+	}
+}

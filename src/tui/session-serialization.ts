@@ -62,6 +62,20 @@ export function parseResumeCommand(value: string): { prefix: string } | undefine
   return match ? { prefix: match[1]?.trim() ?? "" } : undefined;
 }
 
+export type ForeignResumeCommand = {
+  source: "claude" | "codex";
+  reference: string;
+};
+
+export function parseForeignResumeCommand(value: string): ForeignResumeCommand | undefined {
+  const match = value.trim().match(/^\/?resume-(claude|codex)(?:\s+(.*))?$/i);
+  if (!match) return undefined;
+  return {
+    source: match[1]!.toLowerCase() as ForeignResumeCommand["source"],
+    reference: match[2]?.trim() ?? "",
+  };
+}
+
 /** Parse startup session flags shared by the ANSI, legacy, and Ink entrypoints. */
 export function getStartupSessionRequest(
   argv: readonly string[] = process.argv.slice(2),

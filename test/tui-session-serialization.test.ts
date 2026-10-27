@@ -43,21 +43,25 @@ describe("TUI session serialization", () => {
     assert.deepEqual(getStartupSessionRequest(["--continue"], {}), {
       sessionId: undefined,
       resume: true,
+      continueSession: true,
       fork: false,
     });
     assert.deepEqual(getStartupSessionRequest(["--resume", "abc123", "--fork-session"], {}), {
       sessionId: "abc123",
       resume: true,
+      continueSession: false,
       fork: true,
     });
     assert.deepEqual(getStartupSessionRequest(["--resume"], { MINI_AGENT_SESSION_ID: "env-session" }), {
       sessionId: "env-session",
       resume: true,
+      continueSession: false,
       fork: false,
     });
     assert.deepEqual(getStartupSessionRequest(["--fork-session"], {}), {
       sessionId: undefined,
       resume: true,
+      continueSession: false,
       fork: true,
     });
   });

@@ -12,10 +12,12 @@ const ANSI_CLEAR_TERMINAL = "\x1b[2J";
  */
 export class IncrementalTerminalRenderer {
   private previousLines: string[] | undefined;
+  private forceRedrawOnNextFrame = false;
 
   constructor(private readonly target: WriteStream) {}
 
   write(data: string): boolean {
+    const forceRedraw = this.forceRedrawOnNextFrame || data.includes(ANSI_CLEAR_TERMINAL);
     const frame = extractInkFrame(data);
     if (frame === undefined) {
       this.target.write(data);
@@ -24,7 +26,11 @@ export class IncrementalTerminalRenderer {
 
     const nextLines = frame.split("\n");
     if (nextLines.at(-1) === "") nextLines.pop();
-    this.renderLines(nextLines.map((text, index) => ({ key: `ink-${index}`, text, style: "assistant" as const })));
+    this.renderRows(
+      nextLines.map((text, index) => formatRenderLine({ key: `ink-${index}`, text, style: "assistant" })),
+      forceRedraw,
+    );
+    this.forceRedrawOnNextFrame = false;
     return true;
   }
 
@@ -33,12 +39,12 @@ export class IncrementalTerminalRenderer {
     this.renderRows(lines.map(formatRenderLine));
   }
 
-  private renderRows(nextLines: string[]): void {
+  private renderRows(nextLines: string[], forceRedraw = false): void {
     const previous = this.previousLines ?? [];
     let output = "";
 
     for (let index = 0; index < nextLines.length; index++) {
-      if (nextLines[index] === previous[index]) continue;
+      if (!forceRedraw && nextLines[index] === previous[index]) continue;
       output += `\x1b[${index + 1};1H${ANSI_ERASE_LINE}${nextLines[index] ?? ""}`;
     }
     for (let index = nextLines.length; index < previous.length; index++) {
@@ -55,12 +61,18 @@ export class IncrementalTerminalRenderer {
 
   reset(): void {
     this.previousLines = undefined;
+    this.forceRedrawOnNextFrame = false;
+  }
+
+  invalidate(): void {
+    this.forceRedrawOnNextFrame = true;
   }
 }
 
 /** Create a stdout-compatible facade without mutating process.stdout. */
 export function createIncrementalStdout(stdout: WriteStream): WriteStream {
   const renderer = new IncrementalTerminalRenderer(stdout);
+  stdout.on("resize", () => renderer.invalidate());
   // A proxy keeps rows/columns, isTTY, resize listeners, and stream internals
   // from the real WriteStream. Object.create(stdout) loses own properties such
   // as `rows`, which makes Ink believe the terminal has zero height.

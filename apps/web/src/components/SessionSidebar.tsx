@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { SessionSummary, WorkspaceRecord } from "../types/api.ts";
+import type { ForeignSessionCandidate, SessionSummary, WorkspaceRecord } from "../types/api.ts";
+import { api } from "../lib/api.ts";
 import { Icon } from "./Icon.tsx";
 import { FishLogo } from "./FishLogo.tsx";
 
-export function SessionSidebar({ sessions, activeId, busy, streaming, loading, error, collapsed, connected, workspaces, workspaceId, onWorkspaceChange, onAddWorkspace, onToggle, onNew, onSelect, onDelete, onPresentation, onSettings }: {
+export function SessionSidebar({ sessions, activeId, busy, streaming, loading, error, collapsed, connected, workspaces, workspaceId, onWorkspaceChange, onAddWorkspace, onToggle, onNew, onImport, importMatches = [], onSelect, onDelete, onPresentation, onSettings }: {
   sessions: SessionSummary[];
   activeId: string | null;
   busy: boolean;
@@ -18,6 +19,8 @@ export function SessionSidebar({ sessions, activeId, busy, streaming, loading, e
   onAddWorkspace: () => void;
   onToggle: () => void;
   onNew: (workspaceId?: string) => void;
+  onImport: (source: "claude" | "codex", reference: string) => void;
+  importMatches?: ForeignSessionCandidate[];
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onPresentation: (id: string, patch: { title?: string; pinned?: boolean; archived?: boolean }) => Promise<void>;
@@ -33,6 +36,11 @@ export function SessionSidebar({ sessions, activeId, busy, streaming, loading, e
   const [renaming, setRenaming] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
   const [presentationError, setPresentationError] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importSource, setImportSource] = useState<"claude" | "codex">("claude");
+  const [importSessions, setImportSessions] = useState<ForeignSessionCandidate[]>([]);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importLoading, setImportLoading] = useState(false);
   const searchInput = useRef<HTMLInputElement | null>(null);
   const viewMenu = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -49,6 +57,20 @@ export function SessionSidebar({ sessions, activeId, busy, streaming, loading, e
     document.addEventListener("keydown", closeEscape);
     return () => { document.removeEventListener("pointerdown", closeOutside); document.removeEventListener("keydown", closeEscape); };
   }, [viewMenuOpen]);
+  useEffect(() => {
+    if (!importOpen) return;
+    let cancelled = false;
+    setImportLoading(true);
+    setImportError(null);
+    void api.listForeignSessions(importSource, workspaceId || undefined).then((listed) => {
+      if (cancelled) return;
+      setImportSessions(listed.sessions);
+      if (!listed.configDirExists) setImportError(`Checked ${listed.configDir}; that directory is not available.`);
+    }).catch((err) => {
+      if (!cancelled) setImportError(err instanceof Error ? err.message : String(err));
+    }).finally(() => { if (!cancelled) setImportLoading(false); });
+    return () => { cancelled = true; };
+  }, [importOpen, importSource, workspaceId]);
   const normalizedQuery = query.trim().toLowerCase();
   const orderedSessions = useMemo(() => [...sessions].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.lastActiveAt - a.lastActiveAt), [sessions]);
   const matches = (session: SessionSummary) => `${session.id} ${session.preview ?? ""} ${session.modelId ?? ""}`.toLowerCase().includes(normalizedQuery);
@@ -68,6 +90,30 @@ export function SessionSidebar({ sessions, activeId, busy, streaming, loading, e
         <button type="button" className="icon-button sidebar__toggle" aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} title={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!collapsed} onClick={onToggle}><Icon name="sidebar" /></button>
       </div>
       <button type="button" className="btn btn--new" onClick={() => onNew(workspaceId || undefined)} disabled={busy} aria-label="New session" title="New session"><Icon name="new" />{!collapsed && <span>New session</span>}</button>
+      {!collapsed && <button type="button" className="sidebar__import" onClick={() => setImportOpen((open) => !open)} aria-expanded={importOpen}>Import Claude or Codex</button>}
+      {!collapsed && importOpen && <div className="sidebar__import-panel">
+        <div className="sidebar__import-sources">
+          <button type="button" aria-pressed={importSource === "claude"} onClick={() => setImportSource("claude")}>Claude</button>
+          <button type="button" aria-pressed={importSource === "codex"} onClick={() => setImportSource("codex")}>Codex</button>
+        </div>
+        {importLoading && <p className="muted">Loading…</p>}
+        {importError && <p className="error" role="alert">{importError}</p>}
+        {importMatches.length > 0 && <ul className="sidebar__import-list">
+          {importMatches.map((session) => <li key={`match-${session.session_id}`}>
+            <button type="button" disabled={busy} onClick={() => onImport(importSource, session.session_id)}>
+              {session.title || session.session_id.slice(0, 8)}
+            </button>
+          </li>)}
+        </ul>}
+        {!importLoading && importSessions.length === 0 && !importError && <p className="muted">No sessions for this workspace.</p>}
+        <ul className="sidebar__import-list">
+          {importSessions.slice(0, 8).map((session) => <li key={session.session_id}>
+            <button type="button" disabled={busy} onClick={() => { onImport(importSource, session.session_id); setImportOpen(false); }}>
+              {session.title || session.session_id.slice(0, 8)}
+            </button>
+          </li>)}
+        </ul>
+      </div>}
       {!collapsed && <div className={`sidebar__section-heading${searchOpen ? " sidebar__section-heading--search" : ""}`}>
         {!searchOpen ? <><span>Workspaces</span><button type="button" className="icon-button" aria-label="Search sessions" title="Search sessions" onClick={() => { setSearchOpen(true); requestAnimationFrame(() => searchInput.current?.focus()); }}><Icon name="search" /></button><div className="sidebar__view-menu" ref={viewMenu}><button type="button" className="icon-button" aria-label="View options" title="View options" aria-expanded={viewMenuOpen} onClick={() => setViewMenuOpen((open) => !open)}><Icon name="more" /></button>{viewMenuOpen && <div className="session-menu view-menu" role="menu"><div className="view-menu__label">Sessions</div><button type="button" role="menuitemcheckbox" aria-checked={showArchived} onClick={() => { setShowArchived((value) => !value); setViewMenuOpen(false); }}><span className="view-menu__check">{showArchived ? "✓" : ""}</span>Show archived</button></div>}</div><button type="button" className="icon-button" aria-label="Add workspace" title="Add workspace" onClick={onAddWorkspace}><Icon name="plus" /></button></> : <>
           <Icon name="search" /><input ref={searchInput} type="search" aria-label="Search sessions" placeholder="Search sessions" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") { setQuery(""); setSearchOpen(false); } }} /><button type="button" className="icon-button" aria-label="Close search" title="Close search" onClick={() => { setQuery(""); setSearchOpen(false); }}><Icon name="close" /></button>

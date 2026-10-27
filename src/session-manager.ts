@@ -161,6 +161,7 @@ export class SessionManager {
       messages: structuredClone(parent.messages),
       todos: structuredClone(parent.todos),
       skillNames: parent.skillNames ? [...parent.skillNames] : parent.skillNames,
+      origin: parent.origin ? { ...parent.origin } : parent.origin,
       currentPlan: parent.currentPlan
         ? { ...structuredClone(parent.currentPlan), sessionId: newSessionId }
         : undefined,

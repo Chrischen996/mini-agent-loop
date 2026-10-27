@@ -1,3 +1,5 @@
+import { cpSync } from "node:fs";
+import path from "node:path";
 import { build } from "vite";
 import { nodeResolve } from "@rollup/plugin-node-resolve";
 import { builtinModules } from "node:module";
@@ -48,3 +50,8 @@ await buildEntry("src/tui/ink-main.tsx", "tui.js", false);
 await buildEntry("src/bg-tasks/runner.ts", "runner.js", false);
 await buildEntry("src/server.ts", "server.js", false);
 await buildEntry("src/web-launcher.ts", "web-launcher.js", false);
+cpSync(
+  path.resolve("skills/adapt-foreign-session"),
+  path.resolve("dist/skills/adapt-foreign-session"),
+  { recursive: true },
+);

@@ -8,6 +8,9 @@ import type {
   ModelSelectionResponse,
   ModelsListResponse,
   PlanSummary,
+  ForeignSessionCandidate,
+  ForeignSessionListResponse,
+  ImportSessionResponse,
   SessionDetail,
   SessionSummary,
   ThinkingLevelResponse,
@@ -17,17 +20,29 @@ import type {
   WorkspaceRecord,
 } from "../types/api.ts";
 
+export class ApiError extends Error {
+  readonly matches: ForeignSessionCandidate[];
+
+  constructor(message: string, matches: ForeignSessionCandidate[] = []) {
+    super(message);
+    this.name = "ApiError";
+    this.matches = matches;
+  }
+}
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
   if (!response.ok) {
     let message = `HTTP ${response.status}`;
+    let matches: ForeignSessionCandidate[] = [];
     try {
-      const body = (await response.json()) as { error?: unknown };
+      const body = (await response.json()) as { error?: unknown; matches?: unknown };
       if (body && typeof body.error === "string") message = body.error;
+      if (Array.isArray(body.matches)) matches = body.matches as ForeignSessionCandidate[];
     } catch {
       // Body was not JSON; keep the status-based message.
     }
-    throw new Error(message);
+    throw new ApiError(message, matches);
   }
   return (await response.json()) as T;
 }
@@ -46,6 +61,16 @@ export const api = {
     const body = await requestJson<{ sessions: SessionSummary[] }>("/api/sessions");
     return body.sessions;
   },
+
+  listForeignSessions: (source: "claude" | "codex", workspaceId?: string): Promise<ForeignSessionListResponse> =>
+    requestJson(`/api/foreign-sessions?source=${source}${workspaceId ? `&workspaceId=${encodeURIComponent(workspaceId)}` : ""}`),
+
+  importForeignSession: (source: "claude" | "codex", reference: string, workspaceId?: string): Promise<ImportSessionResponse> =>
+    requestJson("/api/sessions/import", {
+      method: "POST",
+      headers: json,
+      body: JSON.stringify({ source, reference, workspaceId }),
+    }),
 
   createSession: (workspaceId?: string): Promise<CreateSessionResponse> =>
     requestJson<CreateSessionResponse>("/api/sessions", {
