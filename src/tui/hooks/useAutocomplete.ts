@@ -23,6 +23,7 @@ export type UseAutocompleteOptions = {
   setInput: (value: string) => void;
   resetInputCursorToEnd: () => void;
   listSessions?: () => Promise<PersistedSessionMeta[]>;
+  onResumeSession?: (sessionId: string) => void;
 };
 
 export function useAutocomplete({
@@ -31,6 +32,7 @@ export function useAutocomplete({
   setInput,
   resetInputCursorToEnd,
   listSessions,
+  onResumeSession,
 }: UseAutocompleteOptions) {
   const [acMode, setAcMode] = useState<AcMode>(null);
   const [acIndex, setAcIndex] = useState(0);
@@ -329,7 +331,10 @@ export function useAutocomplete({
           return true;
         case "accept-session": {
           const selected = sessionCandidates[acIndex];
-          if (selected) setInput(`/resume ${selected.id}`);
+          if (selected) {
+            if (onResumeSession) onResumeSession(selected.id);
+            else setInput(`/resume ${selected.id}`);
+          }
           clearAc();
           return true;
         }
@@ -353,6 +358,7 @@ export function useAutocomplete({
       acceptModel,
       clearAc,
       setInput,
+      onResumeSession,
     ],
   );
 

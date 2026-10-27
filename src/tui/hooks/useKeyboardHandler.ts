@@ -190,6 +190,37 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
         dispatch({ type: "SCROLL_TO_BOTTOM" });
         return;
       }
+      // Kitty keyboard protocol terminals report function/modified keys as
+      // `ESC [ <keycode>[;<mods>]u` (Ink delivers them ESC-stripped). Map the
+      // scroll keys so PgUp/PgDn, Ctrl+Up/Down and Ctrl+G keep working there.
+      // Kitty keycodes: Page up = 9, Page down = 10, Up = 12, Down = 14, 'g' = 103;
+      // mods: shift = 1, ctrl = 4.
+      const kitty = /^\[(\d+)(?:;(\d+))?u$/.exec(_ch);
+      if (kitty) {
+        const code = Number.parseInt(kitty[1]!, 10);
+        const ctrl = !!(Number.parseInt(kitty[2] ?? "1", 10) & 4);
+        if (code === 9) {
+          dispatch({ type: "SCROLL_BY", delta: Math.max(1, feedHeight - 2) });
+          return;
+        }
+        if (code === 10) {
+          dispatch({ type: "SCROLL_BY", delta: -Math.max(1, feedHeight - 2) });
+          return;
+        }
+        if (ctrl && code === 12) {
+          dispatch({ type: "SCROLL_BY", delta: 1 });
+          return;
+        }
+        if (ctrl && code === 14) {
+          dispatch({ type: "SCROLL_BY", delta: -1 });
+          return;
+        }
+        if (ctrl && code === 103) {
+          suppressInputEchoRef.current = true;
+          dispatch({ type: "SCROLL_TO_BOTTOM" });
+          return;
+        }
+      }
     }
 
     if (handleAutocompleteKey(key)) return;

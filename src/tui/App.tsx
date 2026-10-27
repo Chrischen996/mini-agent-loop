@@ -28,6 +28,7 @@ function formatLlmTimeoutMessage(err: InstanceType<typeof LlmTimeoutError>): str
 import { useAutocomplete } from "./hooks/useAutocomplete.ts";
 import { tuiReducer, createInitialState } from "./state.ts";
 import {
+  buildSystemPrompt,
   createAgentHistory,
   MaxTurnsExceededError,
   runAgentTurn,
@@ -82,13 +83,16 @@ import { addPendingImage, handlePasteImage } from "./image-handler.ts";
 import { startModelSetup, commitModelSetup, openProfileList } from "./profile-manager.ts";
 import { selectModel } from "./model-switcher.ts";
 import { SubagentToolsFactory } from "./subagent-tools-factory.ts";
-import { SessionManager } from "../session-manager.ts";
+import { formatAmbiguousSessionNotice, parseResumeCommand, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
+import { resolveSessionByPrefix, SessionManager } from "../session-manager.ts";
+import type { PersistedSession } from "../session-store.ts";
 import { formatMcpStatus } from "../mcp/status.ts";
 import type { McpServerStatus } from "../mcp/types.ts";
 import { BgTaskManager, stableBgTaskInstanceId } from "../bg-tasks/manager.js";
 import { BgTaskLivePanel } from "./components/BgTaskLivePanel.tsx";
 import { TodoRunPanel } from "./components/TodoRunPanel.tsx";
 import { useKeyboardHandler } from "./hooks/useKeyboardHandler.ts";
+import { TerminalInputHistory } from "./terminal-input-history.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
 import { PromptInput } from "./components/PromptInput.tsx";
@@ -122,9 +126,11 @@ import { PlanApprovalBar } from "./components/PlanApprovalBar.tsx";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
 import { isTuiFeatureEnabled } from "./execution-policy.ts";
+import type { StartupSessionRequest } from "./session-serialization.ts";
 
 type AppProps = {
   cwd: string;
+  startupSessionRequest?: StartupSessionRequest;
   agentTools?: ToolProvider;
   allTools?: ToolProvider;
   /** Compact MCP status source for the status bar; polled when present. */
@@ -138,7 +144,7 @@ function useLazyRef<T>(factory: () => T): React.MutableRefObject<T> {
   return ref as React.MutableRefObject<T>;
 }
 
-export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React.ReactElement {
+export function App({ cwd, startupSessionRequest, agentTools, allTools, mcpStatuses }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const termWidth = stdout?.columns ?? 80;
@@ -239,6 +245,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
   }, [getBgManager, getSubagentTools, subagentFactory]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
+  const inputHistoryRef = useLazyRef(() => new TerminalInputHistory());
   // Generate a stable conversation session ID on startup
   const [conversationId, setConversationId] = useState(() => process.env.MINI_AGENT_SESSION_ID ?? randomUUID());
 
@@ -327,12 +334,16 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
   /** Alias for `abortControllerRef` (keeps the long-standing `abortRef` name). */
   const abortRef = abortControllerRef;
   const historyRef = useRef<AgentMessage[]>(createAgentHistory(undefined, "plan"));
+  const activeTodosRef = useRef(state.todoItems);
+  const thinkingPolicyModeRef = useRef(loadThinkingModeFromEnv());
+  const sessionProvenanceRef = useRef<Pick<PersistedSession, "parentSessionId" | "forkedFromMessage" | "forkedFromMessageId">>({});
   const getPermissionManager = useCallback(() => {
     return permissionManagerRef.current ?? (permissionManagerRef.current = new PermissionManager("plan"));
   }, []);
 
   // Re-sync refs each render.
   stateRef.current = state;
+  activeTodosRef.current = state.todoItems;
   dispatchRef.current = dispatch;
   conversationIdRef.current = conversationId;
   setInputRef.current = setInput;
@@ -366,12 +377,122 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
 
   // ── session list + MCP status for the session overlay ──────────────────────
   const sessionManagerRef = useRef<SessionManager | null>(null);
-  const listSessions = useCallback(() => {
+  const getSessionManager = useCallback(() => {
     if (!sessionManagerRef.current) {
-      sessionManagerRef.current = new SessionManager({ workspaceId: cwd, sessionId: conversationId });
+      sessionManagerRef.current = new SessionManager({ workspaceId: cwd, sessionId: conversationIdRef.current });
     }
-    return sessionManagerRef.current.list();
-  }, [cwd, conversationId]);
+    return sessionManagerRef.current;
+  }, [cwd]);
+  const listSessions = useCallback(() => getSessionManager().list(), [getSessionManager]);
+
+  const resumeSession = useCallback(async (prefix: string, fork = false): Promise<boolean> => {
+    const manager = getSessionManager();
+    try {
+      const selection = resolveSessionByPrefix(await manager.list(), prefix);
+      if (!selection.session) {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "Resume session",
+          text: selection.candidates.length > 1
+            ? formatAmbiguousSessionNotice(prefix, selection.candidates)
+            : prefix ? `Session not found: ${prefix}` : "No resumable sessions found.",
+        });
+        return false;
+      }
+
+      const loaded = await manager.load(selection.session.id);
+      const session = loaded && fork ? await manager.fork(loaded.id) : loaded;
+      if (!session) {
+        dispatch({ type: "ADD_NOTICE", title: "Resume session", text: `Session not found: ${selection.session.id}` });
+        return false;
+      }
+
+      const permissionMode = session.permissionMode ?? "plan";
+      const restored = restoreTuiSession(session, buildSystemPrompt(permissionMode));
+      const restoredLlm = restoreLlmConfig(llmRef.current, session);
+      const restoredSkillNames = session.skillNames ? [...session.skillNames] : loadSkillNamesFromEnv();
+      manager.setSessionId(session.id);
+      setConversationId(session.id);
+      historyRef.current = restored.history;
+      activeTodosRef.current = restored.todos;
+      thinkingPolicyModeRef.current = session.thinkingMode ?? loadThinkingModeFromEnv();
+      sessionProvenanceRef.current = {
+        parentSessionId: session.parentSessionId,
+        forkedFromMessage: session.forkedFromMessage,
+        forkedFromMessageId: session.forkedFromMessageId,
+      };
+      getPermissionManager().setMode(permissionMode);
+      llmRef.current = restoredLlm;
+      setLlm(restoredLlm);
+      setSkillNames(restoredSkillNames);
+      skillNamesRef.current = restoredSkillNames;
+      dispatch({ type: "MODEL_CHANGED", modelName: restoredLlm.model });
+      dispatch({
+        type: "RESTORE_SESSION",
+        history: restored.history,
+        modelName: restoredLlm.model,
+        thinkingMode: stateRef.current.thinkingMode,
+        permissionMode,
+        phase: session.phase,
+        currentPlan: session.currentPlan,
+        todos: restored.todos,
+        todoRevision: restored.todoRevision,
+      });
+      return true;
+    } catch (error) {
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "Resume session",
+        text: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }, [dispatch, getPermissionManager, getSessionManager, setConversationId, setLlm, setSkillNames]);
+
+  const startupSessionHandledRef = useRef(false);
+  useEffect(() => {
+    if (startupSessionHandledRef.current || !startupSessionRequest?.resume) return;
+    startupSessionHandledRef.current = true;
+    if (!startupSessionRequest.sessionId && !startupSessionRequest.continueSession && !startupSessionRequest.fork) {
+      setInput("/resume");
+      return;
+    }
+    void resumeSession(startupSessionRequest.sessionId ?? "", startupSessionRequest.fork);
+  }, [resumeSession, startupSessionRequest]);
+
+  const resumeSelectedSession = useCallback((sessionId: string) => {
+    void resumeSession(sessionId);
+  }, [resumeSession]);
+
+  const sessionSnapshotFields = useCallback(() => {
+    const current = stateRef.current;
+    return {
+      id: conversationIdRef.current,
+      modelId: llmRef.current.model,
+      thinkingLevel: llmRef.current.thinkingLevel,
+      thinkingMode: thinkingPolicyModeRef.current,
+      permissionMode: getPermissionManager().getMode(),
+      skillNames: [...skillNamesRef.current],
+      phase: current.phase,
+      currentPlan: current.currentPlan,
+      todos: toPersistedTodos(activeTodosRef.current),
+      todoVersion: current.todoRevision,
+      cwd,
+      ...sessionProvenanceRef.current,
+    };
+  }, [cwd, getPermissionManager]);
+
+  const persistSessionSnapshot = useCallback(async (messages: AgentMessage[]) => {
+    try {
+      await getSessionManager().save({ ...sessionSnapshotFields(), messages: [...messages] });
+    } catch (error) {
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "Session save failed",
+        text: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [dispatch, getSessionManager, sessionSnapshotFields]);
 
   const [mcpStatus, setMcpStatus] = useState<string | undefined>(undefined);
   useEffect(() => {
@@ -420,6 +541,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
     setInput,
     resetInputCursorToEnd,
     listSessions,
+    onResumeSession: resumeSelectedSession,
   });
 
   const resolvePendingPermission = useCallback((decision: PermissionDecision) => {
@@ -640,6 +762,21 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
 
     clearAc();
 
+    const resumeCommand = parseResumeCommand(trimmed);
+    if (resumeCommand) {
+      setInput("");
+      if (resumeCommand.prefix) {
+        await resumeSession(resumeCommand.prefix);
+      } else {
+        setInput("/resume");
+      }
+      return;
+    }
+    if (trimmed === "/sessions") {
+      setInput("/sessions");
+      return;
+    }
+
     if (trimmed === "/bg-tasks") {
       setBgPanelOpen(true);
       const manager = getBgManager();
@@ -689,7 +826,11 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
       dispatch({ type: "RESET" });
       setInput("");
       // Generate new conversation ID for fresh session
-      setConversationId(randomUUID());
+      const nextSessionId = randomUUID();
+      sessionManagerRef.current?.newSession(nextSessionId);
+      sessionProvenanceRef.current = {};
+      activeTodosRef.current = undefined;
+      setConversationId(nextSessionId);
       return;
     }
     if (trimmed === "/context") {
@@ -860,7 +1001,10 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
     let turnLlm = parsedThinking.intensity
       ? buildIntenseLlm(llm, parsedThinking.intensity)
       : llm;
-    if (parsedThinking.intensity) setLlm(turnLlm);
+    if (parsedThinking.intensity) {
+      llmRef.current = turnLlm;
+      setLlm(turnLlm);
+    }
     let imageParts: import("../types.ts").ImagePart[];
     try {
       imageParts = await Promise.all(pendingImgs.map(imageAttachmentToPart));
@@ -912,17 +1056,21 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
       ? prompt
       : prompt.replace(/@\S+/g, "").replace(/\s{2,}/g, " ").trim();
     const thinkingMode = planTurnOverride
-      ? loadThinkingModeFromEnv()
+      ? thinkingPolicyModeRef.current
       : parsedThinking.intensity
         ? "fixed"
-        : parseThinkingCommandMode(prompt) ?? loadThinkingModeFromEnv();
+        : parseThinkingCommandMode(prompt) ?? thinkingPolicyModeRef.current;
+    thinkingPolicyModeRef.current = thinkingMode;
     let turnSucceeded = false;
     let turnErrorMessage: string | undefined;
 
     const onLoopEvent = (event: LoopEvent) => {
       if (event.type === "thinking_policy") {
         turnLlm = withThinkingLevel(turnLlm, event.level);
+        llmRef.current = turnLlm;
         setLlm(turnLlm);
+      } else if (event.type === "todo_updated") {
+        activeTodosRef.current = event.todos;
       } else if (event.type === "auto_subagent") {
         const status = event.executed
           ? `自动子 agent 已启动 (${event.profile}, score=${event.score})`
@@ -956,6 +1104,19 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
         currentUserContent = [...contentParts, ...imageParts];
       }
 
+      try {
+        await getSessionManager().saveTurnStart({
+          ...sessionSnapshotFields(),
+          messages: historyRef.current,
+          content: currentUserContent,
+        });
+      } catch (error) {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "Session save failed",
+          text: error instanceof Error ? error.message : String(error),
+        });
+      }
 
       // Auto-continue loop: re-invoke runAgentTurn when maxTurns is exceeded.
       while (true) {
@@ -968,6 +1129,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
             signal: abortRef.current.signal,
             userContent: currentUserContent,
             permissionTurn,
+            sessionPhase: stateRef.current.currentPlan ? stateRef.current.phase : undefined,
             runtimeContext: {
               sessionId: conversationId,
               workspaceId: cwd,
@@ -981,6 +1143,10 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
             skillNames: skillNamesRef.current,
             skillRegistry: defaultSkillRegistry,
             onEvent: onLoopEvent,
+            onCheckpoint: async (checkpoint) => {
+              historyRef.current = checkpoint.messages;
+              await persistSessionSnapshot(checkpoint.messages);
+            },
           });
           streamBuffer.finish(runId);
           turnSucceeded = true;
@@ -1078,8 +1244,9 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
         errorMessage: turnErrorMessage,
         dispatch,
       });
+      await persistSessionSnapshot(historyRef.current);
     }
-  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit, getBgManager, refreshBgTaskCount]);
+  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit, getBgManager, refreshBgTaskCount, resumeSession, sessionSnapshotFields, getSessionManager, persistSessionSnapshot]);
 
   // Start the next queued prompt only after the current turn has emitted done/error/aborted.
   useEffect(() => {
@@ -1198,6 +1365,8 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
             <PromptInput
               key={inputEpoch}
               value={input}
+              inputHistory={inputHistoryRef.current}
+              disableArrowNavigation={Boolean(acMode)}
               onChange={setInputSafe}
               onPasteImage={handlePasteImageRef}
               onTab={handleTabAt}
@@ -1206,10 +1375,12 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
               focus={!state.pendingPermission && !pendingTodoRunPlan && !bgPanelOpen}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {
+                if (acMode === "session-list") return;
                 if (shouldAcceptAutocompleteOnEnter(acMode)) {
                   if (acMode === "command") {
                     const selectedCommand = cmdCandidates[acIndex];
                     if (selectedCommand && isExactSlashCommand(val, selectedCommand.name)) {
+                      inputHistoryRef.current.add(val);
                       void handleSubmit(val);
                       return;
                     }
@@ -1221,6 +1392,7 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
                     return;
                   }
                   if ((acMode === "model" || acMode === "model-picker") && shouldSubmitTypedModelCommand(val)) {
+                    inputHistoryRef.current.add(val);
                     void handleSubmit(val);
                     return;
                   }
@@ -1231,6 +1403,9 @@ export function App({ cwd, agentTools, allTools, mcpStatuses }: AppProps): React
                     selectModelRef(chosen);
                     return;
                   }
+                }
+                if (acMode === null || acMode === "command" || acMode === "model" || acMode === "model-picker") {
+                  inputHistoryRef.current.add(val);
                 }
                 void handleSubmit(val);
               }}

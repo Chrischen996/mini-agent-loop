@@ -15,6 +15,7 @@ export { findSessionByPrefix, formatSessionCandidates, resolveSessionByPrefix };
 export type StartupSessionRequest = {
   sessionId?: string;
   resume: boolean;
+  continueSession: boolean;
   fork: boolean;
 };
 
@@ -67,12 +68,15 @@ export function getStartupSessionRequest(
   env: { MINI_AGENT_SESSION_ID?: string } = process.env,
 ): StartupSessionRequest {
   let sessionId = env.MINI_AGENT_SESSION_ID?.trim() || undefined;
+  let explicitSessionId = false;
   let resume = Boolean(sessionId);
+  let continueSession = false;
   let fork = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--continue") {
       resume = true;
+      continueSession = true;
       continue;
     }
     if (arg === "--fork-session") {
@@ -87,6 +91,7 @@ export function getStartupSessionRequest(
       const next = argv[index + 1];
       if (next && !next.startsWith("--")) {
         sessionId = next.trim() || undefined;
+        explicitSessionId = Boolean(sessionId);
         index += 1;
       }
       continue;
@@ -94,9 +99,15 @@ export function getStartupSessionRequest(
     if (arg?.startsWith("--resume=")) {
       resume = true;
       sessionId = arg.slice("--resume=".length).trim() || undefined;
+      explicitSessionId = Boolean(sessionId);
     }
   }
-  return { sessionId, resume, fork };
+  return {
+    sessionId: continueSession && !explicitSessionId ? undefined : sessionId,
+    resume,
+    continueSession,
+    fork,
+  };
 }
 
 /** A normal TUI launch starts a new session; restore only when explicitly requested. */

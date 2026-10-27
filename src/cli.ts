@@ -747,6 +747,8 @@ async function main(): Promise<void> {
   }
 
   if (restoredSession?.skillNames) activeSkillNames = [...restoredSession.skillNames];
+  let activeTodos = restoredSession?.todos ?? [];
+  let activeTodoVersion = restoredSession?.todoVersion ?? 0;
 
   const agentsMd = (await loadInstructionBundle(cwd)).content || undefined;
 
@@ -941,26 +943,43 @@ async function main(): Promise<void> {
   sessionManager.setSessionId(persistenceSessionId);
   runtimeContext.sessionId = persistenceSessionId;
   const turnPrompt = prompt + planSuffix || (restoredSession ? "继续完成之前的工作" : "Please analyze the attached image(s).");
+  const sessionSnapshotFields = () => ({
+    id: persistenceSessionId,
+    modelId: requestLlm.model,
+    thinkingLevel: requestLlm.thinkingLevel,
+    thinkingMode,
+    permissionMode: effectiveMode,
+    skillNames: activeSkillNames,
+    phase: restoredSession?.phase,
+    currentPlan: restoredSession?.currentPlan,
+    todos: activeTodos,
+    todoVersion: activeTodoVersion,
+    parentSessionId: restoredSession?.parentSessionId,
+    forkedFromMessage: restoredSession?.forkedFromMessage,
+    forkedFromMessageId: restoredSession?.forkedFromMessageId,
+  });
+  const persistSessionSnapshot = async (
+    messages: AgentMessage[],
+    reason: string,
+  ): Promise<PersistedSession | undefined> => {
+    try {
+      return await sessionManager.save({
+        ...sessionSnapshotFields(),
+        messages: [...messages],
+      });
+    } catch (error) {
+      console.error(`[session] ${reason} save failed: ${error instanceof Error ? error.message : error}`);
+      return undefined;
+    }
+  };
   const persistTurnStart = async (): Promise<void> => {
     try {
       const userMessage = userContent ?? turnPrompt;
       await sessionManager.saveTurnStart({
-        id: persistenceSessionId,
-        modelId: requestLlm.model,
-        thinkingLevel: requestLlm.thinkingLevel,
-        thinkingMode,
-        permissionMode: effectiveMode,
-        skillNames: activeSkillNames,
+        ...sessionSnapshotFields(),
         messages: [
           ...(resumedMessages ?? []),
         ],
-        phase: restoredSession?.phase,
-        currentPlan: restoredSession?.currentPlan,
-        todos: restoredSession?.todos,
-        todoVersion: restoredSession?.todoVersion,
-        parentSessionId: restoredSession?.parentSessionId,
-        forkedFromMessage: restoredSession?.forkedFromMessage,
-        forkedFromMessageId: restoredSession?.forkedFromMessageId,
         content: userMessage,
       });
     } catch (error) {
@@ -987,7 +1006,27 @@ async function main(): Promise<void> {
       runtimeRef: parentRuntime,
       runtimeContext,
       globalTokenBudget,
-      onEvent: logEvent,
+      onEvent: (event) => {
+        if (event.type === "todo_updated") {
+          activeTodos = event.todos.map((todo) => ({
+            id: todo.id,
+            content: todo.content,
+            activeForm: todo.activeForm,
+            status: todo.status === "completed"
+              ? "completed" as const
+              : todo.status === "in_progress"
+                ? "in_progress" as const
+                : "pending" as const,
+          }));
+          activeTodoVersion = event.revision;
+        } else if (event.type === "thinking_policy") {
+          requestLlm = withThinkingLevel(requestLlm, event.level);
+        }
+        logEvent(event);
+      },
+      onCheckpoint: async (checkpoint) => {
+        await persistSessionSnapshot(checkpoint.messages, `checkpoint ${checkpoint.reason}`);
+      },
       agentsMd,
       memorySection,
       skillNames: activeSkillNames,
@@ -1038,27 +1077,8 @@ async function main(): Promise<void> {
 
   // ── Persist the session and extract memories (Claude Code-style) ──────────
   if (messages.length > 0) {
-    try {
-      const persisted = await sessionManager.save({
-        id: persistenceSessionId,
-        modelId: requestLlm.model,
-        thinkingLevel: requestLlm.thinkingLevel,
-        thinkingMode,
-        permissionMode: effectiveMode,
-        skillNames: activeSkillNames,
-        phase: restoredSession?.phase,
-        currentPlan: restoredSession?.currentPlan,
-        todos: restoredSession?.todos,
-        todoVersion: restoredSession?.todoVersion,
-        parentSessionId: restoredSession?.parentSessionId,
-        forkedFromMessage: restoredSession?.forkedFromMessage,
-        forkedFromMessageId: restoredSession?.forkedFromMessageId,
-        messages: [...messages],
-      });
-      console.error(`[session] saved ${persisted.id} (${persisted.messages.length} messages)`);
-    } catch (error) {
-      console.error(`[session] save failed: ${error instanceof Error ? error.message : error}`);
-    }
+    const persisted = await persistSessionSnapshot(messages, "final");
+    if (persisted) console.error(`[session] saved ${persisted.id} (${persisted.messages.length} messages)`);
     // Turn-end memory extraction — fire-and-forget, never blocks the answer.
     // Reuses memoryStoreForPrompt (same records.json path) created above.
     if (isAutoMemoryEnabled()) {

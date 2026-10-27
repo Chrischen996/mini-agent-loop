@@ -9,6 +9,7 @@ import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
 import { createIncrementalStdout } from "./incremental-renderer.ts";
 import { disableMouseTracking, enableMouseTracking } from "./mouse-tracking.ts";
 import { openInspectorFromArgs } from "./inspect.ts";
+import { getStartupSessionRequest } from "./session-serialization.ts";
 
 const cwd = process.cwd();
 
@@ -20,6 +21,7 @@ const MAIN_SCREEN = "\x1b[?1049l";
 
 // Parse command line arguments for debugging/inspection
 const args = process.argv.slice(2);
+const startupSessionRequest = getStartupSessionRequest(args);
 
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
   process.stderr.write("mini-agent TUI requires an interactive terminal\n");
@@ -84,6 +86,7 @@ async function main(): Promise<void> {
     const app = render(
       <App
         cwd={cwd}
+        startupSessionRequest={startupSessionRequest}
         agentTools={mcpRuntime.toolProvider([...agentTools, ...bgTools])}
         allTools={mcpRuntime.toolProvider([...createAllTools(cwd, { sandboxRunner }), ...bgTools])}
         mcpStatuses={() => mcpRuntime.statuses()}
