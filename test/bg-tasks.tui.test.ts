@@ -26,8 +26,10 @@ function summary(taskId: string, name: string): BgTaskSummary {
 function fakeManager(tasks: BgTaskSummary[], logs: Record<string, string>) {
   const offsets = new Map<string, number>();
   const calls: string[] = [];
+  const terminated: string[] = [];
   return {
     calls,
+    terminated,
     manager: {
       initialize: async () => {},
       list: async () => tasks,
@@ -39,6 +41,12 @@ function fakeManager(tasks: BgTaskSummary[], logs: Record<string, string>) {
         offsets.set(taskId, full.length);
         void offsets;
         return { taskId, text, offset: start, nextOffset: full.length, endOfLog: true };
+      },
+      terminate: async (taskId: string) => {
+        terminated.push(taskId);
+        const task = tasks.find((entry) => entry.taskId === taskId);
+        if (!task) throw new Error(`Task not found: ${taskId}`);
+        return task;
       },
     },
   };
@@ -65,6 +73,14 @@ describe("bg-tasks TUI surface", () => {
     assert.match(command!.description, /background task/i);
   });
 
+  it("registers the task dashboard command and lists it in help", () => {
+    const command = SLASH_COMMANDS.find((entry) => entry.name === "dashboard");
+    assert.ok(command);
+    assert.equal(command!.usage, "/dashboard");
+    assert.match(command!.description, /background task/i);
+    assert.match(formatHelpNotice(), /\/dashboard/);
+  });
+
   it("lists /bg-tasks in the help notice", () => {
     const help = formatHelpNotice();
     assert.match(help, /\/bg-tasks/);
@@ -81,6 +97,28 @@ describe("bg-tasks TUI surface", () => {
   });
 
   describe("BgTaskLivePanel", () => {
+    it("summarizes multiple tasks and stops the selected running task with x", async () => {
+      const { manager, terminated } = fakeManager(
+        [summary("bg_aaaa1111", "build"), { ...summary("bg_bbbb2222", "lint"), status: "completed" }],
+        {},
+      );
+      const view = render(React.createElement(BgTaskLivePanel, { manager, width: 70 }), { columns: 100, rows: 40 });
+      try {
+        await waitForRender();
+        const frame = view.lastFrame() ?? "";
+        assert.match(frame, /Background task dashboard/i);
+        assert.match(frame, /1 running/);
+        assert.match(frame, /1 finished/);
+        assert.match(frame, /x stop/);
+
+        view.stdin.write("x");
+        await waitForRender();
+        assert.deepEqual(terminated, ["bg_aaaa1111"]);
+      } finally {
+        view.cleanup();
+      }
+    });
+
     it("shows the selected task's log without splicing in another task's output", async () => {
       const { manager } = fakeManager(
         [summary("bg_aaaa1111", "build"), summary("bg_bbbb2222", "lint")],

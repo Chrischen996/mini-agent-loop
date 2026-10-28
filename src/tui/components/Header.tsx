@@ -12,10 +12,11 @@ type HeaderProps = {
   cwd?: string;
   width?: number;
   showWelcome?: boolean;
+  dashboardOpen?: boolean;
 };
 
 /** Claude Code-style welcome frame, with a compact identity after chat starts. */
-export const Header = React.memo(function Header({ modelName, billingLabel, version, cwd, width = 80, showWelcome = false }: HeaderProps): React.ReactElement {
+export const Header = React.memo(function Header({ modelName, billingLabel, version, cwd, width = 80, showWelcome = false, dashboardOpen = false }: HeaderProps): React.ReactElement {
   if (showWelcome && width >= WELCOME_PANEL_MIN_WIDTH) {
     const rows = buildWelcomePanelRows(width, {
       title: TUI_BRAND_NAME,
@@ -40,16 +41,21 @@ export const Header = React.memo(function Header({ modelName, billingLabel, vers
     );
   }
   const markWidth = terminalStringWidth(`${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}`);
-  const pathBudget = Math.max(12, width - terminalStringWidth(modelName ?? "") - terminalStringWidth(TUI_BRAND_NAME) - markWidth - 9);
+  const dashboardLabel = width < 50 ? "▣" : "▣ Dashboard Ctrl+\\";
+  const dashboardWidth = terminalStringWidth(dashboardLabel);
+  const pathBudget = Math.max(4, width - terminalStringWidth(modelName ?? "") - terminalStringWidth(TUI_BRAND_NAME) - markWidth - dashboardWidth - 12);
   const visibleCwd = cwd ? truncateTerminalPath(cwd, pathBudget) : undefined;
   return (
     <Box flexDirection="column" width={width} height={TUI_BRAND_HEADER_HEIGHT} minWidth={0} overflow="hidden">
       <Text color={C.primary} bold>{`  ${TUI_BRAND_SPARK}`}</Text>
-      <Box paddingX={1} gap={1} width={width} height={1} minWidth={0} overflow="hidden">
-        <Text color={C.primary} bold>{`${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}`}</Text>
-        <Text color={C.assistant} bold>{TUI_BRAND_NAME}</Text>
-        {modelName && <Text color={C.info} dimColor wrap="truncate-end">{modelName}</Text>}
-        {visibleCwd && <Text color={C.muted} dimColor wrap="truncate-end">· {visibleCwd}</Text>}
+      <Box paddingX={1} justifyContent="space-between" width={width} height={1} minWidth={0} overflow="hidden">
+        <Box gap={1} flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+          <Text color={C.primary} bold>{`${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}`}</Text>
+          <Text color={C.assistant} bold>{TUI_BRAND_NAME}</Text>
+          {modelName && <Text color={C.info} dimColor wrap="truncate-end">{modelName}</Text>}
+          {visibleCwd && <Text color={C.muted} dimColor wrap="truncate-end">· {visibleCwd}</Text>}
+        </Box>
+        <Text backgroundColor={dashboardOpen ? C.primary : C.selection} color={C.assistant} bold wrap="truncate-end">{` ${dashboardLabel} `}</Text>
       </Box>
       <Text color={C.primary} bold>{`  ${TUI_BRAND_SPARK}`}</Text>
     </Box>

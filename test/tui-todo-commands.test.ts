@@ -26,6 +26,13 @@ describe("manual todo commands", () => {
     });
   });
 
+  it("parses the MCP status command and optional server selector", () => {
+    assert.deepEqual(parseSlashCommand("/mcp"), { cmd: "mcp" });
+    assert.deepEqual(parseSlashCommand("/MCP status"), { cmd: "mcp" });
+    assert.deepEqual(parseSlashCommand("/mcp docs"), { cmd: "mcp", serverId: "docs" });
+    assert.ok(SLASH_COMMANDS.some((command) => command.name === "mcp"));
+  });
+
   it("adds the smallest available id and returns an isolated snapshot", () => {
     const result = applyTodoCommand(todos, { action: "add", content: "Third" });
     assert.equal(result.ok, true);

@@ -120,10 +120,19 @@ describe("GitWorkflow", () => {
       await writeFile(path.join(root, "tracked.txt"), "dirty\n", "utf8");
       await assert.rejects(workflow.createIsolatedBranch("task"), /clean worktree/);
       await git(root, "restore", "tracked.txt");
-      const isolated = await workflow.createIsolatedBranch("task");
+      const [isolated, concurrent] = await Promise.all([
+        workflow.createIsolatedBranch("task"),
+        workflow.createIsolatedBranch("task"),
+      ]);
       assert.match(isolated.branch, /^mini-agent\/task-/);
+      assert.notEqual(isolated.branch, concurrent.branch);
+      assert.notEqual(isolated.path, concurrent.path);
+      assert.equal(await workflow.isRegisteredWorktree(isolated.path), true, await git(root, "worktree", "list", "--porcelain"));
+      assert.equal(await workflow.isRegisteredWorktree(concurrent.path), true);
       assert.equal(await readFile(path.join(isolated.path, "tracked.txt"), "utf8"), "one\n");
       await git(root, "worktree", "remove", "--force", isolated.path);
+      await git(root, "worktree", "remove", "--force", concurrent.path);
+      assert.equal(await workflow.isRegisteredWorktree(isolated.path), false);
       await rm(worktreeDir, { recursive: true, force: true });
     } finally {
       await rm(root, { recursive: true, force: true });

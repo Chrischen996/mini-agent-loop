@@ -6,6 +6,7 @@ import type { ToolProvider, ToolResult } from "../tools/types.ts";
 import { resolveToolProvider } from "../tools/types.ts";
 import { ToolExecutionBroker } from "../runtime/tool-execution-broker.ts";
 import { nextTodoRevision } from "../todo.ts";
+import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 
 export type DirectToolRunnerDeps = {
   allTools: ToolProvider;
@@ -14,6 +15,7 @@ export type DirectToolRunnerDeps = {
   abortSignal: AbortSignal;
   dispatch: (action: TuiAction) => void;
   toolExecutionBroker?: ToolExecutionBroker;
+  runtimeContext?: RuntimeExecutionContext;
 };
 
 export type DirectToolRunResult = {
@@ -56,6 +58,7 @@ export async function runDirectTool(
     const result = await (deps.toolExecutionBroker ?? new ToolExecutionBroker()).execute(tool, args, {
       signal: abortSignal,
       permissionTurn,
+      ...deps.runtimeContext,
     });
     if (result.todoUpdate) {
       dispatch({

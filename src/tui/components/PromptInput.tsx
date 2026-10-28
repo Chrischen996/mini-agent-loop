@@ -39,6 +39,8 @@ export type PromptInputProps = {
   enhancedEditingEnabled?: boolean;
   /** Called when an empty single-line prompt has no history entry to navigate. */
   onScrollContext?: (direction: "up" | "down") => void;
+  /** Let an owning overlay handle selected control chords before prompt editing. */
+  onControlKey?: (input: string, key: { ctrl?: boolean; meta?: boolean }) => boolean;
 };
 
 const MAX_VISIBLE_LINES = 10;
@@ -100,6 +102,7 @@ export function PromptInput({
   disableArrowNavigation = false,
   enhancedEditingEnabled = false,
   onScrollContext,
+  onControlKey,
 }: PromptInputProps): React.ReactElement {
   const { internal_eventEmitter } = useStdin();
   const parts = useMemo(() => splitGraphemes(value), [value]);
@@ -166,6 +169,8 @@ export function PromptInput({
         onTab?.(valueRef.current);
         return;
       }
+
+      if ((key.ctrl || key.meta) && onControlKey?.(input, key)) return;
 
       if (key.return) {
         if (key.meta || key.ctrl) {

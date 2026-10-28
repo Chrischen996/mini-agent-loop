@@ -824,6 +824,8 @@ Use `/model`, `/profiles`, `/sessions`, `/resume [id]` (or `resume [id]`), `/cle
 inside the TUI. Typing `/sessions` or `/resume` opens the saved-session
 picker with IDs, message counts, and prompt previews. Enter on `/resume` restores
 the selected session; `/resume <id-prefix>` selects a specific one directly.
+Use `/mcp` to inspect configured MCP server states and `/mcp <server>` to list
+that server's available tools.
 Startup flags mirror the CLI: `npm run tui -- --continue`,
 `npm run tui -- --resume <id>`, and `npm run tui -- --resume <id> --fork-session`.
 `/model` also accepts `--base-url`, `--api-key-env`, and temporary `--api-key`

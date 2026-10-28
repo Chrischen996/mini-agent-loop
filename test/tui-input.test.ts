@@ -49,6 +49,17 @@ function createTerminal() {
 }
 
 describe("TUI input utils", () => {
+  it("navigates submitted prompts and restores the draft", () => {
+    const history = new TerminalInputHistory();
+    history.add("first prompt");
+    history.add("second prompt");
+
+    assert.equal(history.navigate(-1, ""), "second prompt");
+    assert.equal(history.navigate(-1, "second prompt"), "first prompt");
+    assert.equal(history.navigate(1, "first prompt"), "second prompt");
+    assert.equal(history.navigate(1, "second prompt"), "");
+  });
+
   it("does not treat Ctrl+Shift+C as the exit shortcut", () => {
     assert.equal(shouldExitOnCtrlC("c", { ctrl: true, shift: true }), false);
     assert.equal(shouldExitOnCtrlC("c", { ctrl: true, shift: false }), true);

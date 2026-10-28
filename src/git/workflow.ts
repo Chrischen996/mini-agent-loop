@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, readlink, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
@@ -268,13 +268,26 @@ export class GitWorkflow {
 
   async createIsolatedBranch(label = "task"): Promise<IsolatedBranch> {
     const status = await this.status();
-    if (status.dirty) throw new Error("Create an isolated branch only from a clean worktree; create a checkpoint first");
-    const branch = `mini-agent/${safeLabel(label)}-${Date.now().toString(36)}`;
+    if (status.dirty) throw new Error("Create an isolated branch only from a clean worktree; commit or stash changes first");
+    const branch = `mini-agent/${safeLabel(label)}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
     const baseDir = this.worktreeDir;
     await (await import("node:fs/promises")).mkdir(baseDir, { recursive: true });
     const target = path.join(baseDir, branch.slice("mini-agent/".length));
     await runGit(status.root, ["worktree", "add", "-b", branch, target, status.head]);
     return { branch, path: target, base: status.head };
+  }
+
+  async isRegisteredWorktree(target: string): Promise<boolean> {
+    const root = await repositoryRoot(this.cwd);
+    const paths = (await runGit(root, ["worktree", "list", "--porcelain"]))
+      .split("\n")
+      .filter((line) => line.startsWith("worktree "))
+      .map((line) => path.resolve(line.slice("worktree ".length)));
+    const [targetPath, entries] = await Promise.all([
+      realpath(target).catch(() => path.resolve(target)),
+      Promise.all(paths.map((entry) => realpath(entry).catch(() => entry))),
+    ]);
+    return entries.includes(targetPath);
   }
 }
 

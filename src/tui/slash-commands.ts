@@ -8,6 +8,7 @@ export type SlashCommand =
   | { cmd: "find"; pattern: string; path: string }
   | { cmd: "grep"; pattern: string; path: string }
   | { cmd: "todo"; todo: LegacyTodoCommand }
+  | { cmd: "mcp"; serverId?: string }
   | { cmd: "resume"; raw: string }
   | { cmd: "web-ui"; raw: string }
   | { cmd: "todos-run"; args: ParsedTodosRunArgs }
@@ -49,6 +50,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "grep", usage: "/grep <pattern> [path]", description: "Search file contents" },
   { name: "clear", usage: "/clear", description: "Clear the conversation" },
   { name: "sessions", usage: "/sessions", description: "List saved sessions" },
+  { name: "dashboard", usage: "/dashboard", description: "Show active agents and subagents" },
   { name: "bg-tasks", usage: "/bg-tasks", description: "List background tasks started by this session" },
   { name: "resume", usage: "/resume [id]", description: "Resume a saved session" },
   { name: "resume-claude", usage: "/resume-claude [ref]", description: "Import a Claude Code session" },
@@ -60,6 +62,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   // palette list `/tasks […]` twice, once described as "Alias of /tasks".
   { name: "todo", usage: TODO_COMMAND_USAGE.replace("/tasks", "/todo"), description: "Alias of /tasks", alias: true },
   { name: "context", usage: "/context", description: "Show context and token usage" },
+  { name: "mcp", usage: "/mcp [server]", description: "Show MCP server status and tools" },
   { name: "plan", usage: "/plan [task]", description: "Generate an execution plan (plan mode)" },
   { name: "plan-show", usage: "/plan-show", description: "Show the current plan" },
   { name: "plan-approve", usage: "/plan-approve", description: "Approve the current plan" },
@@ -104,6 +107,10 @@ export function parseSlashCommand(input: string): SlashCommand {
       const runArgs = parseTodosRunCommand(s);
       if (runArgs) return { cmd: "todos-run", args: runArgs };
       return null;
+    }
+    case "mcp": {
+      const serverId = parts.slice(1).join(" ").trim();
+      return { cmd: "mcp", ...(serverId && serverId.toLowerCase() !== "status" ? { serverId } : {}) };
     }
     case "read": { const path = parts.slice(1).join(" "); return path ? { cmd: "read", path } : null; }
     case "bash": case "sh": { const command = parts.slice(1).join(" "); return command ? { cmd: "bash", command } : null; }

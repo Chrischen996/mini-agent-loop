@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import React from "react";
 import { render } from "ink";
+import path from "node:path";
 import { App } from "./App.tsx";
-import { createAllTools, createTools, createBgTaskSuite } from "../tools/index.ts";
+import { createAllTools, createTools, createBgTaskSuite, createBgTaskTools } from "../tools/index.ts";
+import { BgTaskManager, stableBgTaskInstanceId } from "../bg-tasks/manager.js";
 import { createSandboxRunner } from "../sandbox/index.ts";
 import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
@@ -65,22 +67,43 @@ async function main(): Promise<void> {
   try {
     let bgTaskDispose: (() => void) | undefined;
     let bgTools: import("../tools/types.ts").Tool[] = [];
+    const bgToolsByCwd = new Map<string, import("../tools/types.ts").Tool[]>();
+    const childBgManagers = new Map<string, BgTaskManager>();
     const bgEnabled = process.env.MINI_AGENT_BG_TASKS !== "0" && process.env.MINI_AGENT_BG_TASKS !== "false";
     if (bgEnabled) {
       try {
         const bg = await createBgTaskSuite(cwd);
         bgTools = bg.tools;
+        bgToolsByCwd.set(path.resolve(cwd), bgTools);
         bgTaskDispose = bg.dispose;
       } catch (bgError) {
         console.error(`[bg-tasks] failed to initialize: ${bgError instanceof Error ? bgError.message : String(bgError)}\n`);
       }
     }
-    const agentTools = createTools(cwd, {
-      codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
-      codebaseStore: codebaseRuntime.store,
-      codebaseProvider: codebaseRuntime.semanticProvider,
-      sandboxRunner,
-    });
+    const bgToolsForCwd = (workspaceCwd: string) => {
+      const key = path.resolve(workspaceCwd);
+      const existing = bgToolsByCwd.get(key);
+      if (existing) return existing;
+      if (!bgEnabled) return [];
+      const manager = new BgTaskManager(key, stableBgTaskInstanceId(key));
+      childBgManagers.set(key, manager);
+      const tools = createBgTaskTools(manager);
+      bgToolsByCwd.set(key, tools);
+      return tools;
+    };
+    const agentToolsForCwd = (workspaceCwd: string) => mcpRuntime.toolProvider([
+      ...createTools(workspaceCwd, {
+        codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
+        codebaseStore: codebaseRuntime.store,
+        codebaseProvider: codebaseRuntime.semanticProvider,
+        sandboxRunner,
+      }),
+      ...bgToolsForCwd(workspaceCwd),
+    ]);
+    const allToolsForCwd = (workspaceCwd: string) => mcpRuntime.toolProvider([
+      ...createAllTools(workspaceCwd, { sandboxRunner }),
+      ...bgToolsForCwd(workspaceCwd),
+    ]);
     const systemPromptContext = await loadTuiSystemPromptContext(cwd);
     process.stdout.write(ALTERNATE_SCREEN);
     enableMouseTracking(process.stdout);
@@ -90,14 +113,16 @@ async function main(): Promise<void> {
         cwd={cwd}
         systemPromptContext={systemPromptContext}
         startupSessionRequest={startupSessionRequest}
-        agentTools={mcpRuntime.toolProvider([...agentTools, ...bgTools])}
-        allTools={mcpRuntime.toolProvider([...createAllTools(cwd, { sandboxRunner }), ...bgTools])}
+        agentToolsForCwd={agentToolsForCwd}
+        allToolsForCwd={allToolsForCwd}
         mcpStatuses={() => mcpRuntime.statuses()}
+        mcpTools={() => mcpRuntime.snapshot()}
       />,
       { stdout: incrementalStdout },
     );
     await app.waitUntilExit();
     bgTaskDispose?.();
+    for (const manager of childBgManagers.values()) manager.dispose();
   } finally {
     disableMouseTracking(process.stdout);
     process.stdout.write(MAIN_SCREEN);

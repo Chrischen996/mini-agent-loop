@@ -1,5 +1,7 @@
 import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from "react";
 import { randomUUID } from "node:crypto";
+import { realpath, stat } from "node:fs/promises";
+import path from "node:path";
 import { Box, Text, useApp, useStdout, useInput } from "ink";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
@@ -86,12 +88,15 @@ import { formatAmbiguousSessionNotice, parseForeignResumeCommand, parseResumeCom
 import { resolveSessionByPrefix, SessionManager } from "../session-manager.ts";
 import { ForeignSessionError, formatForeignSessionList, importForeignSession, listForeignSessions } from "../foreign-session.ts";
 import type { PersistedSession } from "../session-store.ts";
-import { formatMcpStatus } from "../mcp/status.ts";
+import { formatMcpStatus, formatMcpStatusDetails } from "../mcp/status.ts";
 import type { McpServerStatus } from "../mcp/types.ts";
 import { BgTaskManager, stableBgTaskInstanceId } from "../bg-tasks/manager.js";
+import { GitWorkflow } from "../git/workflow.ts";
 import { BgTaskLivePanel } from "./components/BgTaskLivePanel.tsx";
+import { AgentDashboard, type DashboardAgent } from "./components/AgentDashboard.tsx";
 import { TodoRunPanel } from "./components/TodoRunPanel.tsx";
 import { useKeyboardHandler } from "./hooks/useKeyboardHandler.ts";
+import { SmoothScrollController } from "./smooth-scroll.ts";
 import { TerminalInputHistory } from "./terminal-input-history.ts";
 import { buildTuiSystemPrompt, createTuiAgentHistory, type TuiSystemPromptContext } from "./system-prompt.ts";
 
@@ -131,12 +136,38 @@ import type { StartupSessionRequest } from "./session-serialization.ts";
 
 type AppProps = {
   cwd: string;
+  /** Stable project identity; a session may execute from an isolated worktree. */
+  projectCwd?: string;
   systemPromptContext?: TuiSystemPromptContext;
   startupSessionRequest?: StartupSessionRequest;
   agentTools?: ToolProvider;
   allTools?: ToolProvider;
+  agentToolsForCwd?: (cwd: string) => ToolProvider;
+  allToolsForCwd?: (cwd: string) => ToolProvider;
+  worktreeIsolation?: boolean;
   /** Compact MCP status source for the status bar; polled when present. */
   mcpStatuses?: () => readonly McpServerStatus[];
+  /** Current MCP tool catalog, used by `/mcp <server>` details. */
+  mcpTools?: () => readonly Tool[];
+};
+type ManagedAgent = DashboardAgent & {
+  initialSessionId: string;
+  initialPrompt?: string;
+  cwd?: string;
+  launching?: boolean;
+};
+type DashboardAgentSnapshot = Omit<DashboardAgent, "name">;
+type AgentSessionAppProps = AppProps & {
+  agentId: string;
+  initialSessionId: string;
+  initialPrompt?: string;
+  projectCwd: string;
+  active: boolean;
+  dashboardOpen: boolean;
+  onOpenDashboard: () => void;
+  onCloseDashboard: () => void;
+  onSnapshot: (snapshot: DashboardAgentSnapshot) => void;
+  onWorkspaceChange: (agentId: string, cwd: string, branch?: string) => void;
 };
 const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
 
@@ -146,7 +177,39 @@ function useLazyRef<T>(factory: () => T): React.MutableRefObject<T> {
   return ref as React.MutableRefObject<T>;
 }
 
-export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agentTools, allTools, mcpStatuses }: AppProps): React.ReactElement {
+async function resolveSessionWorkspaceCwd(projectCwd: string, candidatePath?: string): Promise<string> {
+  const root = await realpath(projectCwd).catch(() => path.resolve(projectCwd));
+  const requested = path.resolve(candidatePath ?? root);
+  let candidate: string;
+  try {
+    if (!(await stat(requested)).isDirectory()) return root;
+    candidate = await realpath(requested);
+  } catch {
+    return root;
+  }
+  const relative = path.relative(root, candidate);
+  if (relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))) {
+    return candidate;
+  }
+  try {
+    if (await new GitWorkflow(root).isRegisteredWorktree(candidate)) return candidate;
+  } catch {
+    // Missing or unregistered session paths fall back to the project root.
+  }
+  return root;
+}
+
+async function startupSessionCwd(projectCwd: string, request: StartupSessionRequest): Promise<string> {
+  const manager = new SessionManager({ workspaceId: projectCwd });
+  const session = request.sessionId
+    ? await manager.load(request.sessionId)
+    : request.resume || request.continueSession || request.fork
+      ? await manager.loadMostRecent()
+      : undefined;
+  return resolveSessionWorkspaceCwd(projectCwd, session?.cwd);
+}
+
+function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSessionRequest, agentTools, allTools, agentToolsForCwd, allToolsForCwd, mcpStatuses, mcpTools, agentId, initialSessionId, initialPrompt, active, dashboardOpen, onOpenDashboard, onCloseDashboard, onSnapshot, onWorkspaceChange }: AgentSessionAppProps): React.ReactElement | null {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [terminalSize, setTerminalSize] = useState(() => ({
@@ -184,12 +247,21 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
   const [skillNames, setSkillNames] = useState<string[]>(() => loadSkillNamesFromEnv());
   const skillNamesRef = useRef(skillNames);
   skillNamesRef.current = skillNames;
-  const allToolsRef = useLazyRef(() => allTools ?? createAllTools(cwd));
-  const agentToolsRef = useLazyRef(() => agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
+  const allToolsRef = useLazyRef(() => allToolsForCwd?.(cwd) ?? allTools ?? createAllTools(cwd));
+  const agentToolsRef = useLazyRef(() => agentToolsForCwd?.(cwd) ?? agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
+  useEffect(() => {
+    if (allToolsForCwd) allToolsRef.current = allToolsForCwd(cwd);
+    if (agentToolsForCwd) agentToolsRef.current = agentToolsForCwd(cwd);
+  }, [cwd, allToolsForCwd, agentToolsForCwd]);
 
   // Lazy background-task manager for the /bg-tasks slash command. Created on
   // first use so TUI startup is not blocked when tmux is unavailable.
   const bgManagerRef = useRef<BgTaskManager | null | "unavailable">(null);
+  useEffect(() => {
+    const manager = bgManagerRef.current;
+    if (manager && manager !== "unavailable") manager.dispose();
+    bgManagerRef.current = null;
+  }, [cwd]);
   const getBgManager = useCallback((): BgTaskManager | null => {
     if (bgManagerRef.current === "unavailable") return null;
     if (bgManagerRef.current) return bgManagerRef.current;
@@ -268,9 +340,10 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
   }, [getBgManager, getSubagentTools, subagentFactory]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
+  const jumpToBottomRef = useRef<() => void>(() => undefined);
   const inputHistoryRef = useLazyRef(() => new TerminalInputHistory());
   // Generate a stable conversation session ID on startup
-  const [conversationId, setConversationId] = useState(() => process.env.MINI_AGENT_SESSION_ID ?? randomUUID());
+  const [conversationId, setConversationId] = useState(() => initialSessionId || process.env.MINI_AGENT_SESSION_ID || randomUUID());
 
   // ── /tasks run /todos run --parallel runner ───────────────────────────────
   const runTodosCommand = useCallback(
@@ -282,6 +355,7 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
       if (!parsed || parsed.cmd !== "todos-run") return;
       const approvedPlan = confirmed ? confirmedTodoRunRef.current : undefined;
       setInputRef.current("");
+      jumpToBottomRef.current();
       dispatch({ type: "USER_MESSAGE", text: input });
       await runTodos(
         {
@@ -371,6 +445,26 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
   conversationIdRef.current = conversationId;
   setInputRef.current = setInput;
 
+  const smoothScrollRef = useLazyRef(() => new SmoothScrollController({
+    getOffset: () => stateRef.current.scrollOffset,
+    getMaxOffset: () => stateRef.current.maxScrollOffset,
+    scrollTo: (offset) => dispatchRef.current({ type: "SCROLL_TO", offset }),
+  }));
+  const scrollBy = useCallback((delta: number) => {
+    smoothScrollRef.current.scrollBy(delta);
+  }, [smoothScrollRef]);
+  const jumpToBottom = useCallback(() => {
+    smoothScrollRef.current.jumpTo(0);
+  }, [smoothScrollRef]);
+  jumpToBottomRef.current = jumpToBottom;
+  const previousMaxScrollOffsetRef = useRef(state.maxScrollOffset);
+  useLayoutEffect(() => {
+    const maxOffsetChanged = previousMaxScrollOffsetRef.current !== state.maxScrollOffset;
+    previousMaxScrollOffsetRef.current = state.maxScrollOffset;
+    smoothScrollRef.current.sync(state.scrollOffset, maxOffsetChanged);
+  }, [smoothScrollRef, state.scrollOffset, state.maxScrollOffset]);
+  useEffect(() => () => smoothScrollRef.current.dispose(), [smoothScrollRef]);
+
   const addPendingImageRef = useCallback((image: ImageAttachment): boolean => {
     return addPendingImage(image, { pendingImages: pendingImagesRef.current, pendingImagesRef, dispatch, cwd });
   }, [dispatch, cwd]);
@@ -402,10 +496,10 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
   const sessionManagerRef = useRef<SessionManager | null>(null);
   const getSessionManager = useCallback(() => {
     if (!sessionManagerRef.current) {
-      sessionManagerRef.current = new SessionManager({ workspaceId: cwd, sessionId: conversationIdRef.current });
+      sessionManagerRef.current = new SessionManager({ workspaceId: projectCwd, sessionId: conversationIdRef.current });
     }
     return sessionManagerRef.current;
-  }, [cwd]);
+  }, [projectCwd]);
   const listSessions = useCallback(() => getSessionManager().list(), [getSessionManager]);
 
   const resumeSession = useCallback(async (prefix: string, fork = false): Promise<boolean> => {
@@ -428,6 +522,15 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
       if (!session) {
         dispatch({ type: "ADD_NOTICE", title: "Resume session", text: `Session not found: ${selection.session.id}` });
         return false;
+      }
+
+      const sessionCwd = await resolveSessionWorkspaceCwd(projectCwd, session.cwd);
+      if (path.resolve(sessionCwd) !== path.resolve(cwd)) {
+        const projectRoot = await realpath(projectCwd).catch(() => path.resolve(projectCwd));
+        const branch = sessionCwd === projectRoot
+          ? undefined
+          : await new GitWorkflow(sessionCwd).status().then((status) => status.branch).catch(() => undefined);
+        onWorkspaceChange(agentId, sessionCwd, branch);
       }
 
       const permissionMode = session.permissionMode ?? "plan";
@@ -471,7 +574,7 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
       });
       return false;
     }
-  }, [dispatch, getPermissionManager, getSessionManager, setConversationId, setLlm, setSkillNames, systemPromptContext]);
+  }, [agentId, cwd, dispatch, getPermissionManager, getSessionManager, onWorkspaceChange, projectCwd, setConversationId, setLlm, setSkillNames, systemPromptContext]);
 
   const importForeign = useCallback(async (source: "claude" | "codex", reference: string): Promise<void> => {
     const manager = getSessionManager();
@@ -516,7 +619,7 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
         : error instanceof Error ? error.message : String(error);
       dispatch({ type: "ADD_NOTICE", title: "Import session", text });
     }
-  }, [cwd, dispatch, getPermissionManager, getSessionManager, setConversationId, systemPromptContext]);
+  }, [agentId, cwd, dispatch, getPermissionManager, getSessionManager, onWorkspaceChange, projectCwd, setConversationId, systemPromptContext]);
 
   const startupSessionHandledRef = useRef(false);
   useEffect(() => {
@@ -752,30 +855,38 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
       setPendingTodoRunPlan(undefined);
       dispatch({ type: "ADD_NOTICE", title: "Todo runner", text: "Run cancelled." });
     }
-  }, { isActive: Boolean(pendingTodoRunPlan) });
+  }, { isActive: active && Boolean(pendingTodoRunPlan) });
 
   // ── keyboard handler ─────────────────────────────────────────────────────
 
   useKeyboardHandler({
     exit, abortRef, copyResolvedText, pasteImage: handlePasteImageRef, getPermissionManager,
-    adjustThinkingLevel, resolvePendingPermission, dispatch,
+    adjustThinkingLevel, resolvePendingPermission, dispatch, scrollBy, jumpToBottom,
     acMode, state, feedHeight, handleAutocompleteKey, historyRef,
-    systemPromptContext,
     suppressInputEchoRef, pendingPermissionRef,
     bgPanelOpen, onCloseBgPanel: () => setBgPanelOpen(false),
+    dashboardOpen, onCloseDashboard, onOpenDashboard,
+    isActive: active,
   });
 
   // ── direct tool invocation ────────────────────────────────────────────────
 
   const runDirectToolRef = useCallback(async (toolName: string, args: Record<string, unknown>) => {
-    return runDirectTool(toolName, args, { allTools: allToolsRef.current, permissionSessionId, getPermissionManager, abortSignal: abortRef.current.signal, dispatch });
-  }, [getPermissionManager, abortRef, dispatch]);
+    return runDirectTool(toolName, args, {
+      allTools: allToolsRef.current,
+      permissionSessionId,
+      getPermissionManager,
+      abortSignal: abortRef.current.signal,
+      dispatch,
+      runtimeContext: { sessionId: conversationId, workspaceId: projectCwd, cwd },
+    });
+  }, [getPermissionManager, abortRef, conversationId, dispatch, cwd, projectCwd]);
 
   // ── @file resolver ────────────────────────────────────────────────────────
 
   const resolveAtRefsRef = useCallback(async (text: string, permissionTurn: PermissionTurnContext): Promise<MessageContent> => {
-    return resolveAtRefs(text, permissionTurn, allToolsRef.current);
-  }, [allToolsRef]);
+    return resolveAtRefs(text, permissionTurn, allToolsRef.current, undefined, { sessionId: conversationId, workspaceId: projectCwd, cwd });
+  }, [allToolsRef, conversationId, cwd, projectCwd]);
 
   // ── submit handler ────────────────────────────────────────────────────────
 
@@ -784,6 +895,13 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
     const allowEmptyApiKey = acMode === "model-setup" && modelSetup?.field === "apiKey";
     const hasPendingImages = pendingImagesRef.current.length > 0;
     if (!trimmed && !allowEmptyApiKey && !hasPendingImages) return;
+    jumpToBottom();
+    if (trimmed === "/dashboard") {
+      onOpenDashboard();
+      setAcMode(null);
+      setInput("");
+      return;
+    }
     if (state.busy) {
       if (trimmed) {
         promptQueueRef.current.push(trimmed);
@@ -908,6 +1026,29 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
           title: "Background tasks",
           text: error instanceof Error ? error.message : String(error),
         });
+      }
+      setInput("");
+      return;
+    }
+    if (/^\/mcp(?:\s+.*)?$/i.test(trimmed)) {
+      const command = parseSlashCommand(trimmed);
+      if (command?.cmd === "mcp") {
+        let text: string;
+        try {
+          const tools = command.serverId
+            ? mcpTools?.() ?? resolveToolProvider(allToolsRef.current)
+            : [];
+          text = formatMcpStatusDetails(
+            mcpStatuses?.(),
+            tools,
+            command.serverId,
+          );
+        } catch {
+          text = "Unable to read MCP status in this session.";
+        }
+        dispatch({ type: "ADD_NOTICE", title: "MCP status", text });
+      } else {
+        dispatch({ type: "ADD_NOTICE", title: "MCP status", text: "Usage: /mcp [server]" });
       }
       setInput("");
       return;
@@ -1225,7 +1366,8 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
             sessionPhase: stateRef.current.currentPlan ? stateRef.current.phase : undefined,
             runtimeContext: {
               sessionId: conversationId,
-              workspaceId: cwd,
+              workspaceId: projectCwd,
+              cwd,
             } satisfies RuntimeExecutionContext,
             globalTokenBudget,
             autoValidate: isTuiFeatureEnabled(process.env.MINI_AGENT_AUTO_VALIDATE),
@@ -1339,7 +1481,14 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
       });
       await persistSessionSnapshot(historyRef.current);
     }
-  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit, getBgManager, refreshBgTaskCount, resumeSession, importForeign, sessionSnapshotFields, getSessionManager, persistSessionSnapshot]);
+  }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, projectCwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit, getBgManager, refreshBgTaskCount, resumeSession, sessionSnapshotFields, getSessionManager, persistSessionSnapshot, mcpStatuses, mcpTools, jumpToBottom, onOpenDashboard]);
+
+  const initialPromptStartedRef = useRef(false);
+  useEffect(() => {
+    if (!initialPrompt || initialPromptStartedRef.current) return;
+    initialPromptStartedRef.current = true;
+    void handleSubmit(initialPrompt);
+  }, [handleSubmit, initialPrompt]);
 
   // Start the next queued prompt only after the current turn has emitted done/error/aborted.
   useEffect(() => {
@@ -1362,8 +1511,8 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
     maxMessages: 200,
   });
   const handleScrollContext = useCallback((direction: "up" | "down") => {
-    dispatch({ type: "SCROLL_BY", delta: direction === "up" ? 3 : -3 });
-  }, [dispatch]);
+    scrollBy(direction === "up" ? 3 : -3);
+  }, [scrollBy]);
   const previousViewportHeightRef = useRef(viewportContentHeight);
   useLayoutEffect(() => {
     const previous = previousViewportHeightRef.current;
@@ -1380,9 +1529,33 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
     });
   }, [dispatch, viewportContentHeight, feedHeight]);
 
+  useEffect(() => {
+    const status = state.pendingPermission ? "Needs input"
+      : state.busy ? "Working"
+        : state.taskStatus === "failed" ? "Failed"
+          : state.taskStatus === "cancelled" ? "Cancelled"
+            : state.taskStatus === "paused" ? "Paused"
+              : state.taskStatus === "completed" ? (state.goal ? "Completed" : "Idle")
+                : "Idle";
+    onSnapshot({
+      id: agentId,
+      task: state.taskTitle || state.goal || "No request submitted",
+      status,
+      activity: state.activeToolId
+        ? state.toolById[state.activeToolId]?.name ?? state.status
+        : state.status,
+      active: state.busy || Boolean(state.pendingPermission),
+      failed: state.taskStatus === "failed",
+      startedAt: state.taskStartedAt,
+      workspace: cwd,
+    });
+  }, [agentId, cwd, onSnapshot, state]);
+
+  if (!active || dashboardOpen) return null;
+
   return (
     <Box flexDirection="column" width={termWidth} height={termHeight} overflow="hidden">
-      <Header modelName={state.modelName} cwd={cwd} />
+      <Header modelName={state.modelName} cwd={cwd} dashboardOpen={dashboardOpen} />
 
       {(state.todoPlan || state.todoItems) && (
         <TodoPanel
@@ -1465,7 +1638,7 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
               onTab={handleTabAt}
               onScrollContext={handleScrollContext}
               pasteEnabled={!state.pendingPermission && !pendingTodoRunPlan}
-              focus={!state.pendingPermission && !pendingTodoRunPlan && !bgPanelOpen}
+              focus={active && !state.pendingPermission && !pendingTodoRunPlan && !bgPanelOpen && !dashboardOpen}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {
                 if (acMode === "session-list") return;
@@ -1535,5 +1708,190 @@ export function App({ cwd, systemPromptContext = {}, startupSessionRequest, agen
         )}
       </Box>
     </Box>
+  );
+}
+
+export function App(props: AppProps): React.ReactElement {
+  const projectCwd = props.projectCwd ?? props.cwd;
+  const { stdout } = useStdout();
+  const [terminalSize, setTerminalSize] = useState(() => ({
+    columns: stdout?.columns || 80,
+    rows: stdout?.rows || 24,
+  }));
+  useEffect(() => {
+    if (!stdout) return;
+    const syncTerminalSize = () => {
+      const columns = stdout.columns || 80;
+      const rows = stdout.rows || 24;
+      setTerminalSize((current) => current.columns === columns && current.rows === rows
+        ? current
+        : { columns, rows });
+    };
+    stdout.on("resize", syncTerminalSize);
+    syncTerminalSize();
+    return () => {
+      stdout.off("resize", syncTerminalSize);
+    };
+  }, [stdout]);
+  const initialAgentIdRef = useRef<string | undefined>(undefined);
+  if (!initialAgentIdRef.current) initialAgentIdRef.current = randomUUID();
+  const initialAgentId = initialAgentIdRef.current;
+  const initialSessionId = props.startupSessionRequest?.sessionId
+    ?? process.env.MINI_AGENT_SESSION_ID
+    ?? initialAgentId;
+  const shouldResolveStartupCwd = Boolean(props.startupSessionRequest
+    && (props.startupSessionRequest.resume || props.startupSessionRequest.continueSession || props.startupSessionRequest.fork));
+  const [agents, setAgents] = useState<ManagedAgent[]>(() => [{
+    id: initialAgentId,
+    initialSessionId,
+    name: "Main agent",
+    task: "No request submitted",
+    status: shouldResolveStartupCwd ? "Preparing" : "Idle",
+    activity: shouldResolveStartupCwd ? "Restoring workspace" : "Ready",
+    active: false,
+    failed: false,
+    cwd: shouldResolveStartupCwd ? undefined : props.cwd,
+    workspace: shouldResolveStartupCwd ? undefined : props.cwd,
+    launching: shouldResolveStartupCwd,
+  }]);
+  const [activeAgentId, setActiveAgentId] = useState(initialAgentId);
+  const [dashboardOpen, setDashboardOpen] = useState(false);
+  const [worktreeIsolation, setWorktreeIsolation] = useState(props.worktreeIsolation ?? true);
+  const nextAgentNumberRef = useRef(2);
+
+  useEffect(() => {
+    const request = props.startupSessionRequest;
+    if (!request || !shouldResolveStartupCwd) return;
+    let cancelled = false;
+    void startupSessionCwd(projectCwd, request).then((cwd) => {
+      if (cancelled) return;
+      setAgents((current) => current.map((agent) => agent.id === initialAgentId
+        ? { ...agent, cwd, workspace: cwd, launching: false, status: "Idle", activity: "Ready" }
+        : agent));
+    }).catch(() => {
+      if (cancelled) return;
+      setAgents((current) => current.map((agent) => agent.id === initialAgentId
+        ? { ...agent, cwd: props.cwd, workspace: props.cwd, launching: false, status: "Idle", activity: "Ready" }
+        : agent));
+    });
+    return () => { cancelled = true; };
+  }, [initialAgentId, projectCwd, props.cwd, props.startupSessionRequest, shouldResolveStartupCwd]);
+
+  const updateAgentSnapshot = useCallback((snapshot: DashboardAgentSnapshot) => {
+    setAgents((current) => current.map((agent) => agent.id === snapshot.id
+      ? { ...agent, ...snapshot }
+      : agent));
+  }, []);
+  const updateAgentWorkspace = useCallback((agentId: string, cwd: string, branch?: string) => {
+    setAgents((current) => current.map((agent) => agent.id === agentId
+      ? { ...agent, cwd, workspace: cwd, branch, launching: false }
+      : agent));
+  }, []);
+  const openDashboard = useCallback(() => setDashboardOpen(true), []);
+  const closeDashboard = useCallback(() => setDashboardOpen(false), []);
+  const dispatchAgent = useCallback((prompt: string, attach: boolean) => {
+    const id = randomUUID();
+    const agentNumber = nextAgentNumberRef.current++;
+    const isolate = worktreeIsolation;
+    setAgents((current) => [{
+      id,
+      initialSessionId: id,
+      initialPrompt: prompt,
+      name: `Agent ${agentNumber}`,
+      task: prompt,
+      status: isolate ? "Preparing" : "Working",
+      activity: isolate ? "Creating isolated worktree" : "Starting",
+      active: !isolate,
+      failed: false,
+      startedAt: Date.now(),
+      cwd: isolate ? undefined : props.cwd,
+      workspace: isolate ? undefined : props.cwd,
+      launching: isolate,
+    }, ...current]);
+
+    if (!isolate) {
+      if (attach) {
+        setActiveAgentId(id);
+        setDashboardOpen(false);
+      }
+      return;
+    }
+
+    void new GitWorkflow(projectCwd).createIsolatedBranch(`agent-${agentNumber}-${id.slice(0, 8)}`).then((isolated) => {
+      setAgents((current) => current.map((agent) => agent.id === id
+        ? {
+            ...agent,
+            cwd: isolated.path,
+            workspace: isolated.path,
+            branch: isolated.branch,
+            launching: false,
+            status: "Working",
+            activity: "Starting",
+            active: true,
+          }
+        : agent));
+      if (attach) {
+        setActiveAgentId(id);
+        setDashboardOpen(false);
+      }
+    }).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      setAgents((current) => current.map((agent) => agent.id === id
+        ? {
+            ...agent,
+            launching: false,
+            status: "Failed",
+            activity: "Worktree setup failed",
+            active: false,
+            failed: true,
+            setupError: message,
+          }
+        : agent));
+    });
+  }, [projectCwd, props.cwd, worktreeIsolation]);
+  const openAgent = useCallback((id: string) => {
+    const agent = agents.find((candidate) => candidate.id === id);
+    if (!agent?.cwd) return;
+    setActiveAgentId(id);
+    setDashboardOpen(false);
+  }, [agents]);
+  const toggleWorktreeIsolation = useCallback(() => {
+    setWorktreeIsolation((current) => !current);
+  }, []);
+
+  return (
+    <>
+      {agents.filter((agent) => Boolean(agent.cwd) && !agent.launching).map((agent) => (
+        <AgentSessionApp
+          key={agent.id}
+          {...props}
+          cwd={agent.cwd!}
+          projectCwd={projectCwd}
+          startupSessionRequest={agent.id === initialAgentId ? props.startupSessionRequest : undefined}
+          agentId={agent.id}
+          initialSessionId={agent.initialSessionId}
+          initialPrompt={agent.initialPrompt}
+          active={activeAgentId === agent.id && !dashboardOpen}
+          dashboardOpen={dashboardOpen}
+          onOpenDashboard={openDashboard}
+          onCloseDashboard={closeDashboard}
+          onSnapshot={updateAgentSnapshot}
+          onWorkspaceChange={updateAgentWorkspace}
+        />
+      ))}
+      {dashboardOpen && (
+        <AgentDashboard
+          agents={agents}
+          activeAgentId={activeAgentId}
+          width={terminalSize.columns}
+          height={getTuiViewportHeight(terminalSize.rows)}
+          onClose={closeDashboard}
+          onDispatch={dispatchAgent}
+          onOpenAgent={openAgent}
+          worktreeIsolation={worktreeIsolation}
+          onToggleWorktreeIsolation={toggleWorktreeIsolation}
+        />
+      )}
+    </>
   );
 }

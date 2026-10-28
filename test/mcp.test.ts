@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import { contentAsString } from "../src/content.ts";
 import { loadMcpConfig } from "../src/mcp/config.ts";
 import { createMcpApprovalGate, isMcpCallAllowed, parseMcpAllowlist } from "../src/mcp/approval.ts";
-import { formatMcpStatus } from "../src/mcp/status.ts";
+import { formatMcpStatus, formatMcpStatusDetails } from "../src/mcp/status.ts";
 import { createMcpToolName, createMcpTools, mcpResultToToolResult } from "../src/mcp/tool-adapter.ts";
 import { McpRuntime, mergeToolSets } from "../src/mcp/runtime.ts";
 import type {
@@ -221,6 +221,41 @@ describe("MCP approval gate", () => {
     assert.equal(formatMcpStatus([
       { id: "off", transport: "stdio", required: false, state: "disabled", toolCount: 0 },
     ]), undefined);
+  });
+
+  it("formats detailed, credential-free MCP server status and tool lists", () => {
+    const statuses = [
+      {
+        id: "docs", transport: "http", required: false, state: "ready", toolCount: 1,
+        warning: "Skipped task-required tools: long_task",
+      },
+      {
+        id: "local", transport: "stdio", required: true, state: "reconnecting", toolCount: 0,
+        reconnectAttempt: 2, error: "connection closed",
+      },
+    ] as const;
+    const tools: Tool[] = [{
+      name: "mcp__docs__search",
+      displayName: "Search",
+      description: "Remote search",
+      source: { kind: "mcp", serverId: "docs", toolName: "search" },
+      parameters: { type: "object" },
+      execute: async () => ({ content: "unused" }),
+    }];
+
+    const overview = formatMcpStatusDetails(statuses, tools);
+    assert.match(overview, /docs  ready/);
+    assert.match(overview, /Transport: http/);
+    assert.match(overview, /Warning: Skipped task-required tools: long_task/);
+    assert.match(overview, /Reconnect attempt: 2/);
+    assert.doesNotMatch(overview, /Tool names:/);
+
+    const detail = formatMcpStatusDetails(statuses, tools, "docs");
+    assert.match(detail, /Tool names:\n    search/);
+    assert.doesNotMatch(detail, /connection closed/);
+    assert.match(formatMcpStatusDetails(statuses, tools, "missing"), /No MCP server found: missing/);
+    assert.match(formatMcpStatusDetails(undefined), /unavailable/);
+    assert.match(formatMcpStatusDetails([]), /No MCP servers configured/);
   });
 });
 
