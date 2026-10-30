@@ -268,13 +268,15 @@ export class GitWorkflow {
 
   async createIsolatedBranch(label = "task"): Promise<IsolatedBranch> {
     const status = await this.status();
-    if (status.dirty) throw new Error("Create an isolated branch only from a clean worktree; commit or stash changes first");
+    // Snapshot dirty state without touching the source index or worktree so the
+    // new agent sees the same project contents while keeping its own checkout.
+    const base = status.dirty ? await snapshotTree(status.root) : status.head;
     const branch = `mini-agent/${safeLabel(label)}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
     const baseDir = this.worktreeDir;
     await (await import("node:fs/promises")).mkdir(baseDir, { recursive: true });
     const target = path.join(baseDir, branch.slice("mini-agent/".length));
-    await runGit(status.root, ["worktree", "add", "-b", branch, target, status.head]);
-    return { branch, path: target, base: status.head };
+    await runGit(status.root, ["worktree", "add", "-b", branch, target, base]);
+    return { branch, path: target, base };
   }
 
   async isRegisteredWorktree(target: string): Promise<boolean> {

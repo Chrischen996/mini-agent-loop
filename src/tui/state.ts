@@ -246,9 +246,11 @@ function updateExecutionTodo(
 ): TuiState {
   const items = state.todoItems ?? (state.currentPlan ? executionPlanToTodoItems(state.currentPlan) : []);
   if (items.length === 0) return state;
+  const next = items.map((item) => item.id === stepId ? { ...item, status, ...(error ? { error } : {}) } : item);
   return {
     ...state,
-    todoItems: items.map((item) => item.id === stepId ? { ...item, status, ...(error ? { error } : {}) } : item),
+    todos: next,
+    todoItems: next,
     todoRevision: nextTodoRevision(),
   };
 }
@@ -622,6 +624,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         phase: action.phase ?? "planning",
         currentPlan: action.currentPlan,
         todoPlan: state.todoPlan,
+        todos: action.todos ?? [],
         todoItems: action.todos && action.todos.length > 0 ? action.todos : undefined,
         todoRevision: action.todoRevision ?? nextTodoRevision(),
         status: "Session resumed",
@@ -647,6 +650,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       return {
         ...state,
         todoPlan: action.plan,
+        todos: [],
         todoItems: undefined,
         todoRevision: nextTodoRevision(),
       };
@@ -655,6 +659,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       if (!isTodoRevisionNewer(state.todoRevision, action.revision)) return state;
       return {
         ...state,
+        todos: action.todos,
         todoItems: action.todos,
         todoRevision: action.revision,
       };
@@ -662,6 +667,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     case "CLEAR_TODO_ITEMS":
       return {
         ...state,
+        todos: [],
         todoItems: undefined,
         todoRevision: nextTodoRevision(),
       };
@@ -834,6 +840,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           const nextTodoTask = event.todos.find(t => t.status !== "completed");
           return {
             ...state,
+            todos: event.todos,
             todoItems: event.todos,
             todoRevision: event.revision,
             status: "Todos updated",
@@ -971,7 +978,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         case "run_stopped":
         case "max_turns": {
           const details = event.type === "max_turns"
-            ? `Turn limit reached (${event.maxTurns}).`
+            ? "Run stopped by its safety cap."
             : event.details ?? event.message ?? `Run stopped: ${event.stopReason}.`;
           const usage = event.type === "run_stopped" ? event.budgetUsage : undefined;
           const consumption = usage
@@ -1203,6 +1210,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             phase: "review",
             currentPlan: event.plan,
+            todos: executionPlanToTodoItems(event.plan),
             todoItems: executionPlanToTodoItems(event.plan),
             todoRevision: nextTodoRevision(),
             status: "Plan ready for review (A approve / R reject)",
@@ -1256,7 +1264,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             currentPlan: state.currentPlan
               ? { ...state.currentPlan, status: "completed" as const }
               : undefined,
-            todoItems: state.todoItems?.map((item) => ({ ...item, status: "completed" })),
+            todos: (state.todoItems ?? state.todos).map((item) => ({ ...item, status: "completed" as const })),
+            todoItems: (state.todoItems ?? state.todos).map((item) => ({ ...item, status: "completed" as const })),
             todoRevision: nextTodoRevision(),
             status: "Plan execution completed",
           };
@@ -1267,7 +1276,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             currentPlan: state.currentPlan
               ? { ...state.currentPlan, status: "failed" as const }
               : undefined,
-            todoItems: state.todoItems?.map((item) => item.status === "completed" ? item : { ...item, status: "failed" }),
+            todos: (state.todoItems ?? state.todos).map((item) => item.status === "completed" ? item : { ...item, status: "failed" as const }),
+            todoItems: (state.todoItems ?? state.todos).map((item) => item.status === "completed" ? item : { ...item, status: "failed" as const }),
             todoRevision: nextTodoRevision(),
             status: "Execution failed",
           };

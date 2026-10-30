@@ -67,6 +67,8 @@ export type {
 
 export { calculateSubagentCost } from "./cost.ts";
 
+export type { GlobalBudgetState } from "../loop.ts";
+
 export type {
   AutoSubagentDecision,
   AutoSubagentOptions,

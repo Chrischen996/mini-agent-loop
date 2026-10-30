@@ -158,11 +158,9 @@ export function toPersistedTodos(
     content: item.content,
     activeForm: item.activeForm,
     // The wire format predates TUI-only failed/skipped states.
-    status: item.status === "completed"
-      ? "completed" as const
-      : item.status === "in_progress"
-        ? "in_progress" as const
-        : "pending" as const,
+    status: item.status === "completed" || item.status === "in_progress" || item.status === "failed" || item.status === "skipped"
+      ? item.status
+      : "pending" as const,
   }));
 }
 

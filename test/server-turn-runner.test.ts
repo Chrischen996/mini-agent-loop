@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { makeLlmConfig } from "../src/llm/index.ts";
-import { MaxTurnsExceededError, type AgentRuntimeRef, type LoopEvent } from "../src/loop.ts";
+import { MaxTurnsExceededError, RunStoppedError, type AgentRuntimeRef, type LoopEvent } from "../src/loop.ts";
 import { PermissionManager } from "../src/permissions.ts";
 import { runServerAgentTurn, type AutoContinueEvent } from "../src/server/turn-runner.ts";
 import type { Tool } from "../src/tools/types.ts";
@@ -75,18 +75,18 @@ describe("server turn continuation", () => {
         lastState = structuredClone(state);
       },
     }), (error: unknown) => {
-      assert.ok(error instanceof MaxTurnsExceededError);
-      assert.equal(error.maxTurns, 4);
-      assert.match(error.message, /Execution limit reached/);
+      assert.ok(error instanceof RunStoppedError);
+      assert.equal(error.stopReason, "safety_cap_reached");
+      assert.match(error.message, /Safety cap reached \(4 steps\)/);
       assert.equal(error.messages.filter((message) => message.role === "tool").length, 4);
       return true;
     });
     assert.equal(calls, 4);
-    assert.equal(events.filter((event) => event.type === "max_turns").length, 1);
+    assert.equal(events.filter((event) => event.type === "run_stopped").length, 1);
     assert.equal(events.some((event) => event.type === "done" || event.type === "error"), false);
     assert.equal(snapshot.at(-1)?.role, "tool");
     assert.equal(lastState?.status, "paused");
-    assert.equal(lastState?.reason, "step_limit");
+    assert.equal(lastState?.reason, "safety_cap_reached");
   });
 
   it("does not repeat automatic preflight delegation on a continuation block", async () => {

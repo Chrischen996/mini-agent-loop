@@ -22,7 +22,9 @@ import { LlmTimeoutError, switchLlmModel, type LlmConfig } from "../llm/index.ts
 import {
   MaxTurnsExceededError,
   runAgentLoop,
+  RunStoppedError,
   type AgentRuntimeRef,
+  type GlobalBudgetState,
   type LoopEvent,
 } from "../loop.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
@@ -42,7 +44,7 @@ import type {
   SubagentToolOptions,
 } from "./types.ts";
 import { calculateSubagentCost } from "./cost.ts";
-import { readAsyncBatch, resumeAsyncBatches, submitAsyncBatch, waitAsyncBatch } from "./async-batch.ts";
+import { readAsyncBatch, resumeAsyncBatches, submitAsyncBatch, validateAsyncDag, waitAsyncBatch } from "./async-batch.ts";
 import type { PermissionTurnContext } from "../permissions.ts";
 import type { ThinkingMode } from "../thinking-policy.ts";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "../types.ts";
@@ -176,16 +178,27 @@ function buildChildTools(
 
 function resolveSharedGlobalBudgetState(
   options: SubagentToolOptions,
-): { used: number; limit: number } | undefined {
+): GlobalBudgetState | undefined {
   const existing = options.globalBudgetState ?? options.parentRuntime?.globalBudgetState;
   if (existing) {
     if (options.parentRuntime && !options.parentRuntime.globalBudgetState) {
       options.parentRuntime.globalBudgetState = existing;
     }
+    if (existing.callsLimit === undefined && options.agentBudgetCalls !== undefined) {
+      existing.callsLimit = options.agentBudgetCalls;
+      existing.callsUsed = existing.callsUsed ?? 0;
+    }
     return existing;
   }
-  if (options.globalTokenBudget === undefined) return undefined;
-  const created = { used: 0, limit: options.globalTokenBudget };
+  if (options.globalTokenBudget === undefined && options.agentBudgetCalls === undefined) {
+    return undefined;
+  }
+  const created: GlobalBudgetState = { used: 0 };
+  if (options.globalTokenBudget !== undefined) created.limit = options.globalTokenBudget;
+  if (options.agentBudgetCalls !== undefined) {
+    created.callsUsed = 0;
+    created.callsLimit = options.agentBudgetCalls;
+  }
   if (options.parentRuntime) options.parentRuntime.globalBudgetState = created;
   return created;
 }
@@ -269,6 +282,12 @@ function classifySubagentError(error: unknown): SubagentErrorKind {
   if (/permission denied|plan mode|authorization|policy revision|sandbox policy/i.test(message)) return "permission";
   if (/context (?:window|length)|too many tokens|prompt is too long|token limit/i.test(message)) return "compaction";
   if (/budget|tokens? exhausted|cost budget/i.test(message)) return "budget";
+  const numericStatus = (error as { status?: unknown })?.status;
+  const numericCode = (error as { code?: unknown })?.code;
+  if (numericStatus === 429 || numericCode === 429) return "rate_limit";
+  if (/\b429\b|rate.?limit|too many requests|overloaded|quota exceeded/i.test(message)) {
+    return "rate_limit";
+  }
   if (/model .*not found|invalid model|thinking cannot be disabled|reasoning without a final answer/i.test(message)) return "model";
   return "api";
 }
@@ -381,6 +400,31 @@ async function runWithConcurrency<T>(
   return results;
 }
 
+/**
+ * Group batch tasks into dependency waves (topological levels). Callers must
+ * validate labels/dependencies first (validateAsyncDag), so cycles and
+ * unknown dependencies are rejected before this runs.
+ */
+function topologicalWaves(tasks: SubagentBatchTask[]): SubagentBatchTask[][] {
+  const remaining = new Set(tasks.map((task) => task.label));
+  const done = new Set<string>();
+  const waves: SubagentBatchTask[][] = [];
+  while (remaining.size > 0) {
+    const ready = tasks.filter(
+      (task) =>
+        remaining.has(task.label) &&
+        (task.dependsOn ?? []).every((dep) => done.has(dep)),
+    );
+    if (ready.length === 0) break; // unreachable: cycles rejected up front
+    waves.push(ready);
+    for (const task of ready) {
+      remaining.delete(task.label);
+      done.add(task.label);
+    }
+  }
+  return waves;
+}
+
 // ─── Main factory ────────────────────────────────────────────────────────────
 
 /**
@@ -417,7 +461,7 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
     roleLlmConfigs = {},
   } = options;
   const configuredGlobalBudgetState = resolveSharedGlobalBudgetState(options);
-  const resolveGlobalBudgetState = (): { used: number; limit: number } | undefined =>
+  const resolveGlobalBudgetState = (): GlobalBudgetState | undefined =>
     options.parentRuntime?.globalBudgetState ?? configuredGlobalBudgetState;
 
   // Build the parameter schema dynamically to include available profile names.
@@ -605,11 +649,23 @@ ${args.sharedContext}
       }
 
       const globalBudgetState = resolveGlobalBudgetState();
-      if (globalBudgetState && globalBudgetState.used >= globalBudgetState.limit) {
+      if (globalBudgetState?.limit !== undefined && globalBudgetState.used >= globalBudgetState.limit) {
         return {
           content: `Sub-agent global token budget exhausted (${globalBudgetState.limit}).`,
           isError: true,
         };
+      }
+      // Call budget (Grok Build-style agent_budget): reject the launch when
+      // the shared invocation cap is exhausted, otherwise count this launch.
+      if (globalBudgetState?.callsLimit !== undefined) {
+        const callsUsed = globalBudgetState.callsUsed ?? 0;
+        if (callsUsed >= globalBudgetState.callsLimit) {
+          return {
+            content: `Sub-agent call budget exhausted (${callsUsed}/${globalBudgetState.callsLimit}). No further sub-agents will be launched.`,
+            isError: true,
+          };
+        }
+        globalBudgetState.callsUsed = callsUsed + 1;
       }
 
       // Build runtime info for observability events
@@ -827,6 +883,22 @@ ${args.sharedContext}
               kind: "max_turns",
             });
           }
+        } else if (err instanceof RunStoppedError || (err instanceof Error && err.name === "RunStoppedError")) {
+          // Bounded loop stop (safety cap / run budgets / block boundary):
+          // the error carries the partial history, so recover it the same
+          // way as maxTurns instead of hard-failing. The parent can adopt
+          // the findings, retry with a bigger budget, or continue the run.
+          const stopped = err as RunStoppedError;
+          hitMaxTurns = true;
+          finalMessages = stopped.messages ?? [];
+          const stopKind: SubagentErrorKind =
+            stopped.stopReason === "budget_exhausted" ? "budget"
+            : stopped.stopReason === "cancelled" ? "abort"
+            : stopped.stopReason === "context_exhausted" ? "compaction"
+            : "max_turns";
+          if (!errors.some((item) => item.kind === stopKind)) {
+            errors.push({ message: stopped.message, kind: stopKind });
+          }
         } else {
           success = false;
           const errorMessage =
@@ -973,8 +1045,12 @@ const SUBAGENT_BATCH_TOOL_NAME = "subagent_batch";
  * Semantics:
  * - No `allocation` or no finite `remainingGlobalBudget` → keep each task's
  *   explicit `tokenBudget` (or undefined).
- * - `equal` / `dynamic`: floor(remaining / n) for every task, then apply
+ * - `equal`: floor(remaining / n) for every task, then apply
  *   `perTaskLimit` as a hard ceiling.
+ * - `dynamic`: same static split for allocation, but execution runs
+ *   dependency waves sequentially and re-splits the REMAINING global token
+ *   budget at the start of each wave (wave-level rebalancing in the batch
+ *   tool; this static function only models the first-wave split).
  * - `priority`: tasks with an explicit `tokenBudget` keep
  *   min(explicit, perTaskLimit, remaining); those amounts are reserved from
  *   remaining; leftover is split equally among tasks without an explicit budget.
@@ -1163,6 +1239,8 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
         inheritContextHistory: task.inheritContextHistory,
         tokenBudget: task.tokenBudget,
       }, execSignal);
+      const sharedGlobalBudgetState = normalizedOptions.parentRuntime?.globalBudgetState
+        ?? normalizedOptions.globalBudgetState;
       if (args.mode === "async" || args.action) {
         try {
           const action = args.action ?? "submit";
@@ -1177,11 +1255,24 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
           }
           if (!args.tasks?.length) return { content: "tasks are required to submit an async job.", isError: true };
           const allocated = allocateBatchTokenBudgets(args.tasks, args.budgetAllocation, undefined);
+          // Pre-launch panel check (Grok Build agent_budget style): reject the
+          // whole panel when the shared call budget cannot cover it.
+          const callState = sharedGlobalBudgetState;
+          const callLimit = callState?.callsLimit;
+          const callBudgetCheck = callLimit !== undefined
+            ? (taskCount: number): string | undefined => {
+                const remaining = Math.max(0, callLimit - (callState?.callsUsed ?? 0));
+                if (taskCount > remaining) {
+                  return `Sub-agent call budget exhausted: this batch needs ${taskCount} calls but only ${remaining} remain (limit ${callLimit}). Panel rejected before launch.`;
+                }
+                return undefined;
+              }
+            : undefined;
           const jobId = await submitAsyncBatch(args.tasks, async (task, dependencyContext) => {
             const index = args.tasks!.indexOf(task);
             const tokenBudget = allocated[index] === undefined ? task.tokenBudget : task.tokenBudget === undefined ? allocated[index] : Math.min(task.tokenBudget, allocated[index]!);
             return singleTool.execute({ ...task, tokenBudget, sharedContext: [task.sharedContext, dependencyContext].filter(Boolean).join("\\n\\n") }, execSignal);
-          }, args.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY_BATCH);
+          }, args.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY_BATCH, callBudgetCheck);
           return { content: JSON.stringify({ jobId, status: "running" }) };
         } catch (error) {
           return { content: error instanceof Error ? error.message : String(error), isError: true };
@@ -1193,10 +1284,8 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
 
       const maxConcurrency = args.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY_BATCH;
       const globalLimit = normalizedOptions.globalConcurrencyLimit ?? 0;
-      const sharedGlobalBudgetState = normalizedOptions.parentRuntime?.globalBudgetState
-        ?? normalizedOptions.globalBudgetState;
 
-      const remainingGlobalBudget = sharedGlobalBudgetState
+      const remainingGlobalBudget = sharedGlobalBudgetState?.limit !== undefined
         ? Math.max(0, sharedGlobalBudgetState.limit - sharedGlobalBudgetState.used)
         : undefined;
       const allocatedBudgets = allocateBatchTokenBudgets(
@@ -1205,48 +1294,99 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
         args.budgetAllocation ? remainingGlobalBudget : undefined,
       );
 
-      // Run all tasks respecting both local and global concurrency limits.
-      // Keep each task's outcome so a failed sibling does not erase successes.
-      const settled = await runWithConcurrency(
-        args.tasks.map((task: SubagentBatchTask, taskIndex: number) => async () => {
-          // Wait for a global concurrency slot if limit is set
-          await acquireGlobalSlot(globalLimit, execSignal);
-          try {
-            const allocated = allocatedBudgets[taskIndex];
-            let tokenBudget = task.tokenBudget;
-            if (allocated !== undefined) {
-              tokenBudget = task.tokenBudget !== undefined
-                ? Math.min(task.tokenBudget, allocated)
-                : allocated;
-            }
-            return await singleTool.execute(
-              {
-                task: task.task,
-                profile: task.profile,
-                model: task.model,
-                maxTurns: task.maxTurns,
-                sharedContext: task.sharedContext,
-                thinkingMode: task.thinkingMode,
-                maxThinkingEscalations: task.maxThinkingEscalations,
-                contextPolicy: task.contextPolicy,
-                skillNames: task.skillNames,
-                inheritContextHistory: task.inheritContextHistory,
-                tokenBudget,
-              },
-              execSignal,
-            );
-          } finally {
-            releaseGlobalSlot();
+      // Pre-launch panel check (Grok Build agent_budget style): if the shared
+      // call budget cannot cover this whole batch, reject the panel before
+      // any sub-agent is launched.
+      if (sharedGlobalBudgetState?.callsLimit !== undefined) {
+        const callRemaining = Math.max(0, sharedGlobalBudgetState.callsLimit - (sharedGlobalBudgetState.callsUsed ?? 0));
+        if (args.tasks.length > callRemaining) {
+          return {
+            content: `Sub-agent call budget exhausted: this batch needs ${args.tasks.length} calls but only ${callRemaining} remain (limit ${sharedGlobalBudgetState.callsLimit}). Panel rejected before launch.`,
+            isError: true,
+          };
+        }
+      }
+
+      // Run a single batch task, honoring the global concurrency slot and the
+      // token budget allocated to that task.
+      const runTask = async (
+        task: SubagentBatchTask,
+        allocated: number | undefined,
+      ): Promise<import("../tools/types.ts").ToolResult> => {
+        // Wait for a global concurrency slot if limit is set
+        await acquireGlobalSlot(globalLimit, execSignal);
+        try {
+          let tokenBudget = task.tokenBudget;
+          if (allocated !== undefined) {
+            tokenBudget = task.tokenBudget !== undefined
+              ? Math.min(task.tokenBudget, allocated)
+              : allocated;
           }
-        }),
-        maxConcurrency,
-      );
+          return await singleTool.execute(
+            {
+              task: task.task,
+              profile: task.profile,
+              model: task.model,
+              maxTurns: task.maxTurns,
+              sharedContext: task.sharedContext,
+              thinkingMode: task.thinkingMode,
+              maxThinkingEscalations: task.maxThinkingEscalations,
+              contextPolicy: task.contextPolicy,
+              skillNames: task.skillNames,
+              inheritContextHistory: task.inheritContextHistory,
+              tokenBudget,
+            },
+            execSignal,
+          );
+        } finally {
+          releaseGlobalSlot();
+        }
+      };
+
+      let ordered: Array<PromiseSettledResult<import("../tools/types.ts").ToolResult>>;
+      if (args.budgetAllocation?.strategy === "dynamic") {
+        // Wave-level rebalancing: run dependency waves sequentially and
+        // re-split the remaining global token budget at the start of every
+        // wave, so later waves inherit savings from earlier waves.
+        const dagError = validateAsyncDag(args.tasks);
+        if (dagError) {
+          return { content: `Cannot use dynamic budget strategy: ${dagError}`, isError: true };
+        }
+        ordered = new Array<PromiseSettledResult<import("../tools/types.ts").ToolResult>>(args.tasks.length);
+        const indexByLabel = new Map(args.tasks.map((task, index) => [task.label, index]));
+        const perTaskLimit = args.budgetAllocation?.perTaskLimit;
+        for (const wave of topologicalWaves(args.tasks)) {
+          const remaining = sharedGlobalBudgetState?.limit !== undefined
+            ? Math.max(0, sharedGlobalBudgetState.limit - sharedGlobalBudgetState.used)
+            : undefined;
+          const share = remaining === undefined
+            ? undefined
+            : Math.max(0, Math.floor(remaining / wave.length));
+          const allocatedWave = share === undefined || perTaskLimit === undefined
+            ? share
+            : Math.min(share, perTaskLimit);
+          const settledWave = await runWithConcurrency(
+            wave.map((task) => () => runTask(task, allocatedWave)),
+            maxConcurrency,
+          );
+          wave.forEach((task, i) => {
+            ordered![indexByLabel.get(task.label)!] = settledWave[i]!;
+          });
+        }
+      } else {
+        // Run all tasks respecting both local and global concurrency limits.
+        // Keep each task's outcome so a failed sibling does not erase successes.
+        ordered = await runWithConcurrency(
+          args.tasks.map((task: SubagentBatchTask, taskIndex: number) => () => runTask(task, allocatedBudgets[taskIndex])),
+          maxConcurrency,
+        );
+      }
 
       // Collect results in order
       const parts: string[] = [];
       for (let i = 0; i < args.tasks.length; i++) {
         const task = args.tasks[i]!;
-        const settledOutcome = settled[i]!;
+        const settledOutcome = ordered[i]!;
         const outcome: import("../tools/types.ts").ToolResult = settledOutcome.status === "fulfilled"
           ? settledOutcome.value
           : { content: settledOutcome.reason instanceof Error ? settledOutcome.reason.message : String(settledOutcome.reason), isError: true };
@@ -1258,7 +1398,7 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
         parts.push(`${header}\n${outcome.isError ? "[ERROR] " : ""}${content}`);
       }
 
-      const hasErrors = settled.some((s) =>
+      const hasErrors = ordered.some((s) =>
         s.status === "rejected" || (s.status === "fulfilled" && s.value.isError === true),
       );
 

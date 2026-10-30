@@ -105,7 +105,7 @@ describe("GitWorkflow", () => {
     }
   });
 
-  it("reports branch state and refuses isolation from a dirty worktree", async () => {
+  it("snapshots a dirty source into isolated branches without changing it", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-git-status-"));
     try {
       await git(root, "init", "-q");
@@ -118,8 +118,7 @@ describe("GitWorkflow", () => {
       const status = await workflow.status();
       assert.equal(status.dirty, false);
       await writeFile(path.join(root, "tracked.txt"), "dirty\n", "utf8");
-      await assert.rejects(workflow.createIsolatedBranch("task"), /clean worktree/);
-      await git(root, "restore", "tracked.txt");
+      await writeFile(path.join(root, "untracked.txt"), "new file\n", "utf8");
       const [isolated, concurrent] = await Promise.all([
         workflow.createIsolatedBranch("task"),
         workflow.createIsolatedBranch("task"),
@@ -129,7 +128,14 @@ describe("GitWorkflow", () => {
       assert.notEqual(isolated.path, concurrent.path);
       assert.equal(await workflow.isRegisteredWorktree(isolated.path), true, await git(root, "worktree", "list", "--porcelain"));
       assert.equal(await workflow.isRegisteredWorktree(concurrent.path), true);
-      assert.equal(await readFile(path.join(isolated.path, "tracked.txt"), "utf8"), "one\n");
+      assert.equal(await readFile(path.join(isolated.path, "tracked.txt"), "utf8"), "dirty\n");
+      assert.equal(await readFile(path.join(concurrent.path, "tracked.txt"), "utf8"), "dirty\n");
+      assert.equal(await readFile(path.join(isolated.path, "untracked.txt"), "utf8"), "new file\n");
+      assert.equal(await readFile(path.join(concurrent.path, "untracked.txt"), "utf8"), "new file\n");
+      assert.equal(await readFile(path.join(root, "tracked.txt"), "utf8"), "dirty\n");
+      assert.equal(await readFile(path.join(root, "untracked.txt"), "utf8"), "new file\n");
+      assert.match(await git(root, "status", "--porcelain"), /^ M tracked\.txt$/m);
+      assert.match(await git(root, "status", "--porcelain"), /^\?\? untracked\.txt$/m);
       await git(root, "worktree", "remove", "--force", isolated.path);
       await git(root, "worktree", "remove", "--force", concurrent.path);
       assert.equal(await workflow.isRegisteredWorktree(isolated.path), false);

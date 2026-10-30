@@ -29,6 +29,7 @@ import { appendFile, mkdir } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { contentAsString } from "../../content.ts";
 import type { ChatFn, LlmConfig } from "../../llm/index.ts";
+import type { GlobalBudgetState } from "../../loop.ts";
 import { createSubagentTool, defaultProfiles } from "../../subagent/index.ts";
 import type { SubagentArgs } from "../../subagent/types.ts";
 import { resolveToolProvider, type Tool, type ToolProvider } from "../../tools/types.ts";
@@ -148,6 +149,14 @@ export interface PipelineOrchestratorOptions {
    * reported as `failed` (design doc §9 cost control).
    */
   globalTokenBudget?: number;
+  /**
+   * Subagent call budget shared across every worker/reviewer dispatch of
+   * this orchestrator: the total number of subagent launches (logical
+   * child-agent calls) allowed before further launches are rejected.
+   * Waves that cannot be covered by the remaining call budget are blocked
+   * before any of their tasks launch (Grok Build `agent_budget` style).
+   */
+  agentBudgetCalls?: number;
   /** Forward raw subagent lifecycle events (start/end/budget warnings) for observability. */
   onSubagentEvent?: (event: import("../../subagent/types.ts").SubagentEvent) => void;
 }
@@ -495,6 +504,8 @@ export class PipelineOrchestrator {
   private readonly subagentTool: Tool<SubagentArgs>;
   private readonly workspaceRoot: string;
   private readonly attemptCounters = new Map<string, number>();
+  /** Shared token + call budget state, when either is configured. */
+  private readonly globalBudgetState?: GlobalBudgetState;
   /** In-memory event log for the orchestrator's whole lifetime. */
   readonly events: PipelineLogEvent[] = [];
   /** Serialised JSONL write chain — keeps event order in the log file. */
@@ -505,6 +516,17 @@ export class PipelineOrchestrator {
   constructor(options: PipelineOrchestratorOptions) {
     this.options = options;
     this.workspaceRoot = options.workspaceRoot ?? process.cwd();
+    // Build the shared budget state (token + call budgets) so wave-level
+    // pre-launch checks and the subagent tool see the same counters.
+    if (options.globalTokenBudget !== undefined || options.agentBudgetCalls !== undefined) {
+      const state: GlobalBudgetState = { used: 0 };
+      if (options.globalTokenBudget !== undefined) state.limit = options.globalTokenBudget;
+      if (options.agentBudgetCalls !== undefined) {
+        state.callsUsed = 0;
+        state.callsLimit = options.agentBudgetCalls;
+      }
+      this.globalBudgetState = state;
+    }
     // The subagent tool is created ONCE and shared by worker and reviewer
     // dispatches so a single injected faux chat can drive both offline.
     this.subagentTool = createSubagentTool({
@@ -514,14 +536,27 @@ export class PipelineOrchestrator {
       ...(options.chat !== undefined ? { chat: options.chat } : {}),
       ...(options.timeout !== undefined ? { timeout: options.timeout } : {}),
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
-      ...(options.globalTokenBudget !== undefined
-        ? { globalTokenBudget: options.globalTokenBudget }
+      ...(this.globalBudgetState !== undefined
+        ? { globalBudgetState: this.globalBudgetState }
         : {}),
       ...(options.roleLlmConfigs !== undefined ? { roleLlmConfigs: options.roleLlmConfigs } : {}),
       ...(options.onSubagentEvent !== undefined
         ? { onSubagentEvent: options.onSubagentEvent }
         : {}),
     });
+  }
+
+  /**
+   * Pre-launch panel check (Grok Build agent_budget style): returns an error
+   * message when the shared subagent call budget cannot cover `needed`
+   * launches in the next wave, otherwise undefined.
+   */
+  private waveCallBudgetMessage(needed: number): string | undefined {
+    const state = this.globalBudgetState;
+    if (state?.callsLimit === undefined || needed <= 0) return undefined;
+    const remaining = Math.max(0, state.callsLimit - (state.callsUsed ?? 0));
+    if (needed <= remaining) return undefined;
+    return `Agent call budget exhausted: this wave needs ${needed} sub-agent calls but only ${remaining} remain (limit ${state.callsLimit}).`;
   }
 
   /**
@@ -694,7 +729,32 @@ export class PipelineOrchestrator {
     const batches = this.planBatches(specs);
     const results = new Map<string, WorkerResult>();
     const notDone = new Set<string>();
-    for (const batch of batches) {
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+      const batch = batches[batchIndex]!;
+      // Pre-launch panel check: when the shared call budget cannot cover this
+      // wave's dispatchable specs, block every remaining spec without
+      // launching any of them.
+      const dispatchable = batch.filter(
+        (spec) => !(spec.depends_on ?? []).some((dep) => notDone.has(dep)),
+      );
+      const budgetMessage = this.waveCallBudgetMessage(dispatchable.length);
+      if (budgetMessage !== undefined) {
+        for (const laterBatch of batches.slice(batchIndex)) {
+          for (const spec of laterBatch) {
+            if (!results.has(spec.id)) {
+              results.set(spec.id, {
+                id: spec.id,
+                status: "blocked",
+                message: budgetMessage,
+                changed_files: [],
+                summary: "",
+              });
+              this.emit(spec.id, "fail", { status: "blocked", blocked_by: ["agent call budget exhausted"] }, 0);
+            }
+          }
+        }
+        break;
+      }
       await this.mapWithConcurrency(batch, this.maxConcurrency(), async (spec) => {
         const blockedBy = (spec.depends_on ?? []).filter((dep) => notDone.has(dep));
         if (blockedBy.length > 0) {
@@ -764,6 +824,31 @@ export class PipelineOrchestrator {
           if (!entries.some((entry) => entry.spec.id === spec.id)) {
             entries.push({ spec, result: blocked, attempts: 0 });
             this.emit(spec.id, "fail", { status: "blocked", blocked_by: ["run aborted"] }, 0);
+          }
+        }
+        continue;
+      }
+      // Pre-launch panel check: when the shared call budget cannot cover this
+      // wave's dispatchable specs, record them as blocked and skip dispatch.
+      const dispatchableInBatch = batch.filter(
+        (spec) => !(spec.depends_on ?? []).some((dep) => !completed.has(dep)),
+      );
+      const budgetMessage = this.waveCallBudgetMessage(dispatchableInBatch.length);
+      if (budgetMessage !== undefined) {
+        for (const spec of batch) {
+          if (!entries.some((entry) => entry.spec.id === spec.id)) {
+            entries.push({
+              spec,
+              result: {
+                id: spec.id,
+                status: "blocked",
+                message: budgetMessage,
+                changed_files: [],
+                summary: "",
+              },
+              attempts: 0,
+            });
+            this.emit(spec.id, "fail", { status: "blocked", blocked_by: ["agent call budget exhausted"] }, 0);
           }
         }
         continue;

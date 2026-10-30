@@ -8,6 +8,7 @@ import {
   createAgentHistory,
   restoreAgentHistory,
   MaxTurnsExceededError,
+  RunStoppedError,
   runAgentLoop,
   runAgentTurn,
   buildSystemPrompt,
@@ -315,6 +316,30 @@ describe("runAgentLoop", () => {
     assert.match(contentAsString(toolMsg.content), /Missing required argument: path/);
   });
 
+  it("continues past 80 turns until the model completes when no cap is configured", async () => {
+    const tools: Tool[] = [createReadTool(process.cwd()) as Tool];
+    let calls = 0;
+    const messages = await runAgentLoop("continue until done", {
+      llm: dummyLlm,
+      tools,
+      chat: async () => {
+        calls += 1;
+        if (calls <= 81) {
+          return {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: `read_${calls}`, name: "read", arguments: { path: "package.json" } }],
+          };
+        }
+        return { role: "assistant", content: "finished" };
+      },
+    });
+
+    assert.equal(calls, 82);
+    assert.equal(messages.filter((message) => message.role === "tool").length, 81);
+    assert.equal(messages.at(-1)?.role, "assistant");
+  });
+
   it("exceeding maxTurns preserves partial history in a typed stop error", async () => {
     const tools = createDefaultTools(process.cwd());
     const chat = createInfiniteToolFauxChat();
@@ -323,13 +348,14 @@ describe("runAgentLoop", () => {
     await assert.rejects(
       () => runAgentLoop("loop forever", { llm: dummyLlm, tools, chat, maxTurns: 2, onEvent: (event) => events.push(event) }),
       (error: unknown) => {
-        assert.ok(error instanceof MaxTurnsExceededError);
-        assert.equal(error.maxTurns, 2);
+        assert.ok(error instanceof RunStoppedError);
+        assert.equal(error.stopReason, "safety_cap_reached");
         assert.equal(error.messages.filter((message) => message.role === "tool").length, 2);
         return true;
       },
     );
-    assert.ok(events.some((event) => event.type === "max_turns" && event.maxTurns === 2));
+    assert.ok(events.some((event) => event.type === "run_stopped" && event.stopReason === "safety_cap_reached"));
+    assert.equal(events.some((event) => event.type === "max_turns"), false);
   });
 });
 

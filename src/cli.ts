@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { imagePart, textPart } from "./content.ts";
 import type { ImageMimeType } from "./types.ts";
 import { loadLlmConfigFromEnv, switchLlmModel } from "./llm/index.ts";
-import { MaxTurnsExceededError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
+import { MaxTurnsExceededError, RunStoppedError, previewContent, runAgentLoop, type AgentRuntimeRef, type LoopEvent } from "./loop.ts";
 import { loadInstructionBundle } from "./agents-md.ts";
 import { initAgentMd } from "./init-agent-md.ts";
 import { getDataRoot, type PersistedSession } from "./session-store.ts";
@@ -136,7 +136,9 @@ function logEvent(event: LoopEvent): void {
       console.error(`[thinking] mode=adaptive phase=${event.phase} level=${event.level} reasons=${event.reasons.join(",")}`);
       break;
     case "max_turns":
-      console.error(`[max_turns] reached limit ${event.maxTurns}; partial history preserved`);
+      break;
+    case "run_stopped":
+      console.error(`[run_stopped] ${event.stopReason}; partial history preserved`);
       break;
     case "done":
       console.error(`[done] messages=${event.messages.length}`);
@@ -1058,6 +1060,7 @@ async function main(): Promise<void> {
       validationWorkspace: process.cwd(),
       autoCheckpoint: process.env.MINI_AGENT_AUTO_CHECKPOINT === "1",
       thinkingMode,
+      runPolicy: { stallPolicy: { sameActionLimit: 3, noProgressLimit: 6 } },
       runtimeRef: parentRuntime,
       runtimeContext,
       globalTokenBudget,
@@ -1119,9 +1122,15 @@ async function main(): Promise<void> {
         console.error(failed.execution.auditReport);
       }
     }
-    if (!(error instanceof MaxTurnsExceededError)) throw error;
-    messages = error.messages;
-    console.error(`[max_turns] reached limit ${error.maxTurns}; returning partial history`);
+    if (error instanceof RunStoppedError) {
+      messages = error.messages;
+      console.error(`[run_stopped] ${error.stopReason}; partial history preserved`);
+    } else if (error instanceof MaxTurnsExceededError) {
+      messages = error.messages;
+      console.error(`[max_turns] reached limit ${error.maxTurns}; returning partial history`);
+    } else {
+      throw error;
+    }
     if (trackingExecution) {
       // MaxTurns is partial success for history, but treat as failed execution
       // already marked above only if we rethrow path; MaxTurns is caught so mark failed already

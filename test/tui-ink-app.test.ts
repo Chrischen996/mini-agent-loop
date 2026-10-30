@@ -555,7 +555,8 @@ describe("the single Ink terminal", () => {
     }
   });
 
-  it("does not silently share a dirty checkout when worktree creation fails", async () => {
+  it("starts an isolated dashboard agent with a snapshot of the dirty source checkout", async () => {
+    const originalFetch = globalThis.fetch;
     const project = path.join(cwd, "dirty-project");
     mkdirSync(project);
     execFileSync("git", ["init", "-q"], { cwd: project });
@@ -565,7 +566,18 @@ describe("the single Ink terminal", () => {
     execFileSync("git", ["add", "tracked.txt"], { cwd: project });
     execFileSync("git", ["commit", "-qm", "initial"], { cwd: project });
     writeFileSync(path.join(project, "tracked.txt"), "uncommitted change\n");
+    writeFileSync(path.join(project, "untracked.txt"), "uncommitted file\n");
+    globalThis.fetch = (async () => {
+      const payload = [
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "isolated result" }, finish_reason: null }] })}`,
+        `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}`,
+        "data: [DONE]",
+        "",
+      ].join("\n\n");
+      return new Response(payload, { headers: { "content-type": "text/event-stream" } });
+    }) as typeof fetch;
     const providerCwds: string[] = [];
+    let createdWorktreeCwd: string | undefined;
     const view = open({}, undefined, {
       cwd: project,
       worktreeIsolation: true,
@@ -578,16 +590,25 @@ describe("the single Ink terminal", () => {
       view.stdin.write("Inspect this change");
       await waitForRender();
       view.stdin.write("\r");
-      for (let attempt = 0; attempt < 20 && !(view.lastFrame() ?? "").includes("Failed"); attempt += 1) {
+      for (let attempt = 0; attempt < 30 && !(view.lastFrame() ?? "").includes("Completed"); attempt += 1) {
         await waitForRender();
       }
-      view.stdin.write("\x1b[A");
-      await waitForRender();
-      assert.match(view.lastFrame() ?? "", /Create an isolated branch only from a clean worktree/);
-      assert.ok(providerCwds.length > 0);
-      assert.ok(providerCwds.every((workspaceCwd) => workspaceCwd === project));
+      createdWorktreeCwd = providerCwds.find((workspaceCwd) => workspaceCwd !== project);
+      const frame = view.lastFrame() ?? "";
+      assert.match(frame, /Completed/);
+      assert.doesNotMatch(frame, /Create an isolated branch only from a clean worktree/);
+      assert.ok(createdWorktreeCwd, "the agent should receive an isolated worktree");
+      assert.equal(readFileSync(path.join(project, "tracked.txt"), "utf8"), "uncommitted change\n");
+      assert.equal(readFileSync(path.join(project, "untracked.txt"), "utf8"), "uncommitted file\n");
+      assert.equal(readFileSync(path.join(createdWorktreeCwd, "tracked.txt"), "utf8"), "uncommitted change\n");
+      assert.equal(readFileSync(path.join(createdWorktreeCwd, "untracked.txt"), "utf8"), "uncommitted file\n");
+      assert.match(execFileSync("git", ["status", "--porcelain"], { cwd: project, encoding: "utf8" }), /^ M tracked\.txt$/m);
     } finally {
       view.cleanup();
+      globalThis.fetch = originalFetch;
+      if (createdWorktreeCwd) {
+        execFileSync("git", ["worktree", "remove", "--force", createdWorktreeCwd], { cwd: project });
+      }
     }
   });
 

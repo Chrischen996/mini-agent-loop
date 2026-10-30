@@ -132,7 +132,7 @@ export class RunStoppedError extends Error {
   }
 }
 
-/** Raised when the loop reaches its configured safety limit with partial history. */
+/** Compatibility error used by callers that translate bounded loop blocks. */
 export class MaxTurnsExceededError extends Error {
   readonly messages: AgentMessage[];
   readonly maxTurns: number;
@@ -194,7 +194,11 @@ export type AgentLoopOptions = {
    */
   autoSubagent?: AutoSubagentOptions;
   systemPrompt?: string;
-  /** Legacy hard stop for runaway loops. Default: 80; 0 disables it. */
+  /**
+   * Optional safety-cap override when no policy or server block cap is set.
+   * 0 disables the cap.
+   * Stopping emits `run_stopped` / `safety_cap_reached`, not a separate turn counter.
+   */
   maxTurns?: number;
   /** Optional total token budget shared by this loop and nested subagents. */
   globalTokenBudget?: number;
@@ -287,8 +291,30 @@ export type AgentLoopOptions = {
   isContinuation?: boolean;
   /** Optional policy-driven execution rules (replaces fixed maxTurns). */
   runPolicy?: AgentRunPolicy;
+  /**
+   * Server block bound. The loop returns after this many model turns
+   * instead of emitting safety_cap_reached, so the caller can continue.
+   */
+  blockTurns?: number;
   /** Usage already charged to this allocation when resuming its remaining budget. */
   initialBudgetUsage?: AgentBudgetUsage;
+};
+
+/**
+ * Shared budget state between a parent loop and all nested subagents.
+ * A token budget and a subagent call budget can each be enabled
+ * independently (Grok Build-style `agent_budget`: a cap on child-agent
+ * invocations, checked per panel before launch).
+ */
+export type GlobalBudgetState = {
+  /** Total tokens consumed by this loop and its nested subagents. */
+  used: number;
+  /** Token ceiling. Undefined when only a call budget is configured. */
+  limit?: number;
+  /** Subagent invocations consumed against the shared call budget. */
+  callsUsed?: number;
+  /** Hard cap on total subagent invocations (all depths, all batches). */
+  callsLimit?: number;
 };
 
 export type AgentRuntimeRef = {
@@ -303,8 +329,8 @@ export type AgentRuntimeRef = {
   executionContext?: RuntimeExecutionContext;
   toolExecutionBroker?: ToolExecutionBroker;
   onToolExecutionAudit?: (event: ToolExecutionAuditEvent) => void;
-  /** Shared token budget state, when the caller enables a global budget. */
-  globalBudgetState?: { used: number; limit: number };
+  /** Shared budget state, when the caller enables a global budget. */
+  globalBudgetState?: GlobalBudgetState;
 };
 
 export type LoopEvent =
@@ -737,7 +763,9 @@ async function runAgentTurnInternal(
   const envTurns = envTurnsRaw !== undefined && envTurnsRaw !== "" ? Number(envTurnsRaw) : undefined;
   // A caller-supplied limit is authoritative; the environment is the default
   // for entrypoints that do not pass an explicit compatibility limit.
-  const configuredMaxTurns = options.maxTurns ?? envTurns ?? 80;
+  // An explicit caller or MINI_AGENT_MAX_TURNS value is a safety cap.
+  // There is no default 80-turn stop; policy events decide when to pause.
+  const configuredMaxTurns = options.maxTurns ?? envTurns;
   const maxTurns = configuredMaxTurns === 0 ? undefined : configuredMaxTurns;
 
   const {
@@ -995,7 +1023,7 @@ async function runAgentTurnInternal(
   let writeCallsUsed = options.initialBudgetUsage?.writeCallsUsed ?? 0;
   let tokensUsed = options.initialBudgetUsage?.tokensUsed ?? 0;
   const startTime = Date.now() - (options.initialBudgetUsage?.elapsedMs ?? 0);
-  const maxEmergencyTurns = runPolicy?.emergencyIterationCap ?? (runPolicy ? 2000 : maxTurns);
+  const maxEmergencyTurns = options.blockTurns ?? runPolicy?.emergencyIterationCap ?? maxTurns;
   const budgetUsage = (): AgentBudgetUsage => ({
     tokensUsed,
     toolCallsUsed,
@@ -1041,7 +1069,8 @@ async function runAgentTurnInternal(
     if (runPolicy?.writeCallBudget && writeCallsUsed >= runPolicy.writeCallBudget) {
       return "budget_exhausted";
     }
-    if (maxEmergencyTurns !== undefined && turnNumber > maxEmergencyTurns) {
+    // The cap is settled after a completed turn, not before the first model call.
+    if (maxEmergencyTurns !== undefined && turnNumber > maxEmergencyTurns + 1) {
       return "safety_cap_reached";
     }
     return undefined;
@@ -1070,7 +1099,7 @@ async function runAgentTurnInternal(
     let exceeded = false;
     if (budget && usage?.totalTokens) {
       budget.used += usage.totalTokens;
-      exceeded = budget.used > budget.limit;
+      exceeded = budget.limit !== undefined && budget.used > budget.limit;
     }
     if (usage?.totalTokens) {
       tokensUsed += usage.totalTokens;
@@ -1477,8 +1506,9 @@ async function runAgentTurnInternal(
       const details = `Run budget exhausted (tokens=${tokensUsed}, tools=${toolCallsUsed}, writes=${writeCallsUsed}, elapsedMs=${Date.now() - startTime}); progress was saved.`;
       return stopRun(budgetExhaustedReason, details, turn - 1);
     }
-    if (activeRuntimeRef?.globalBudgetState && activeRuntimeRef.globalBudgetState.used >= activeRuntimeRef.globalBudgetState.limit) {
-      throw new Error(`Global agent token budget exhausted (${activeRuntimeRef.globalBudgetState.limit}).`);
+    const loopBudget = activeRuntimeRef?.globalBudgetState;
+    if (loopBudget?.limit !== undefined && loopBudget.used >= loopBudget.limit) {
+      throw new Error(`Global agent token budget exhausted (${loopBudget.limit}).`);
     }
     try {
       permissionTurn?.assertCurrent();
@@ -1867,16 +1897,9 @@ async function runAgentTurnInternal(
     if (action === "done" || action === "aborted") return messages;
   }
 
-  if (runPolicy) {
-    const details = `Emergency iteration cap reached (${maxEmergencyTurns} steps); progress was saved.`;
-    return stopRun("safety_cap_reached", details, maxEmergencyTurns);
-  }
-
-  const reportedMaxTurns = maxTurns ?? maxEmergencyTurns ?? 80;
-  const stopError = new MaxTurnsExceededError(messages, reportedMaxTurns);
-  onEvent?.({ type: "max_turns", maxTurns: reportedMaxTurns, messages });
-  await triggerCheckpoint("paused", { turn: reportedMaxTurns });
-  throw stopError;
+  if (options.blockTurns !== undefined) return messages;
+  const details = `Safety cap reached (${maxEmergencyTurns} steps); progress was saved.`;
+  return stopRun("safety_cap_reached", details, maxEmergencyTurns ?? 0);
 }
 
 /** Helper for logging / tests */

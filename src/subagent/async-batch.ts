@@ -96,10 +96,18 @@ export async function submitAsyncBatch(
   tasks: SubagentBatchTask[],
   execute: (task: SubagentBatchTask, dependencyResults: string) => Promise<ToolResult>,
   maxConcurrency = 0,
+  /**
+   * Pre-launch panel check (Grok Build agent_budget style): given the total
+   * number of sub-agent calls this panel will make, return an error message
+   * to reject the whole panel before any task starts, or undefined to accept.
+   */
+  precheckCalls?: (taskCount: number) => string | undefined,
 ): Promise<string> {
   await recoverJobs();
   const validationError = validateAsyncDag(tasks);
   if (validationError) throw new Error(validationError);
+  const precheckError = precheckCalls?.(tasks.length);
+  if (precheckError) throw new Error(precheckError);
   while (jobs.size >= MAX_JOBS) jobs.delete(jobs.keys().next().value!);
   const job: AsyncJob = {
     id: `saj_${randomUUID()}`,

@@ -17,6 +17,7 @@ import {
   messageBoundaryForSelection,
 } from "../src/tui/session-serialization.ts";
 import type { AgentMessage } from "../src/types.ts";
+import { nextTodoRevision } from "../src/todo.ts";
 
 describe("TUI session serialization", () => {
   it("moves through session picker candidates and returns the selected session", () => {
@@ -95,21 +96,21 @@ describe("TUI session serialization", () => {
     assert.match(formatAmbiguousSessionNotice("abc", sessions), /msgs=1/);
   });
 
-  it("normalizes TUI-only todo statuses for persistence and restores the TUI shape", () => {
-    const persisted = toPersistedTodos([
-      { id: "done", content: "Done", activeForm: "Finishing", status: "completed", source: "model" },
-      { id: "failed", content: "Failed", activeForm: "Retrying", status: "failed", source: "plan", error: "nope" },
-    ]);
+  it("round-trips rich todo status, source, and error through persistence", () => {
+    const todos = [
+      { id: "done", content: "Done", activeForm: "Finishing", status: "completed" as const, source: "model" as const },
+      { id: "failed", content: "Failed", activeForm: "Retrying", status: "failed" as const, source: "plan" as const, error: "nope" },
+      { id: "skipped", content: "Skipped", activeForm: "Skipping", status: "skipped" as const, source: "plan" as const },
+    ];
 
-    assert.deepEqual(persisted, [
-      { id: "done", content: "Done", activeForm: "Finishing", status: "completed" },
-      { id: "failed", content: "Failed", activeForm: "Retrying", status: "pending" },
-    ]);
-    assert.deepEqual(fromPersistedTodos([
-      { id: "restored", content: "Restore", status: "pending" },
-    ]), [
-      { id: "restored", content: "Restore", activeForm: "Restore", status: "pending", source: "model" },
-    ]);
+    const persisted = toPersistedTodos(todos);
+    assert.deepEqual(persisted, todos);
+    assert.deepEqual(fromPersistedTodos(persisted), todos);
+  });
+
+  it("advances generated todo revisions beyond a restored session version", () => {
+    restoreTuiSession({ id: "saved", createdAt: 1, messages: [], todos: [], todoVersion: 100_000 }, "system");
+    assert.ok(nextTodoRevision() > 100_000);
   });
 
   it("maps selectable resume messages to safe visible boundaries", () => {

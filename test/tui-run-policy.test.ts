@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { CheckpointContext, LoopEvent, AgentRunPolicy } from "../src/loop.ts";
-import { createAgentHistory, runAgentTurn, MaxTurnsExceededError } from "../src/loop.ts";
+import { createAgentHistory, runAgentTurn, MaxTurnsExceededError, RunStoppedError } from "../src/loop.ts";
 import { makeLlmConfig } from "../src/llm/index.ts";
 import { PermissionManager } from "../src/permissions.ts";
 import { resolveTuiRunOptions, runTuiAgentTurn, tuiContinuationPrompt } from "../src/tui/agent-turn.ts";
@@ -154,11 +154,11 @@ describe("TUI task execution and recovery", () => {
       llm, tools: [echo], maxTurns: 1, chat: async () => reply(++calls), onEvent: (event) => events.push(event),
     });
     assert.equal(calls, 1);
-    assert.equal(result.stop?.reason, "step_limit");
-    assert.equal(events.filter((event) => event.type === "max_turns").length, 1);
+    assert.equal(result.stop?.reason, "safety_cap_reached");
+    assert.equal(events.filter((event) => event.type === "run_stopped" && event.stopReason === "safety_cap_reached").length, 1);
     await assert.rejects(runAgentTurn([], "core hard stop", {
       llm, tools: [echo], maxTurns: 1, chat: async () => reply(++calls),
-    }), MaxTurnsExceededError);
+    }), (error: unknown) => error instanceof RunStoppedError && error.stopReason === "safety_cap_reached");
   }));
 
   it("rejects invalid Continue commands locally without spending a model request", async () => withDefaultEnv(async () => {

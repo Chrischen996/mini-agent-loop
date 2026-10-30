@@ -7,7 +7,7 @@
  * context.
  */
 
-import type { AgentRuntimeRef, LoopEvent } from "../loop.ts";
+import type { AgentRuntimeRef, GlobalBudgetState, LoopEvent } from "../loop.ts";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import type { ToolExecutionAuditEvent, ToolExecutionBroker } from "../runtime/tool-execution-broker.ts";
 import type { ChatFn, LlmConfig } from "../llm/index.ts";
@@ -101,8 +101,16 @@ export type SubagentToolOptions = {
    * When set, each subagent checks against the budget before running.
    */
   globalTokenBudget?: number;
+  /**
+   * Global call budget shared across all subagents (parent + children):
+   * the total number of subagent launches allowed before further launches
+   * are rejected. Panels (batch waves) that cannot be covered by the
+   * remaining call budget are rejected before any child launches
+   * (Grok Build `agent_budget` semantics).
+   */
+  agentBudgetCalls?: number;
   /** Internal shared state used by nested subagents and batch siblings. */
-  globalBudgetState?: { used: number; limit: number };
+  globalBudgetState?: GlobalBudgetState;
   /**
    * Callback to deduct tokens from the global budget and check limits.
    * Called with accumulated tokens after each assistant event.
@@ -276,7 +284,8 @@ export type SubagentBatchArgs = {
    * Budget allocation strategy for parallel tasks.
    * "equal" – divide remaining global budget evenly across tasks.
    * "priority" – use task.tokenBudget when provided, otherwise fall back to equal share.
-   * "dynamic" – currently treated like "equal" (runtime rebalancing reserved for later).
+   * "dynamic" – wave-level rebalancing: the remaining global token budget is
+   * re-split evenly at the start of each dependency wave (sync batches only).
    */
   budgetAllocation?: {
     strategy: "equal" | "priority" | "dynamic";
@@ -327,6 +336,7 @@ export type SubagentCost = {
 export type SubagentErrorKind =
   | "timeout"
   | "api"
+  | "rate_limit"
   | "compaction"
   | "max_turns"
   | "abort"

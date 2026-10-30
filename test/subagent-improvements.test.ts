@@ -103,8 +103,12 @@ describe("subagent delegation improvements", () => {
   });
 
   describe("profiles are well-configured", () => {
-    it("has exactly 3 built-in profiles", () => {
-      assert.equal(defaultProfiles.length, 3);
+    it("has the 4 built-in profiles", () => {
+      assert.equal(defaultProfiles.length, 4);
+      assert.deepEqual(
+        defaultProfiles.map((profile) => profile.name),
+        ["researcher", "web-researcher", "coder", "reviewer"],
+      );
     });
 
     it("researcher profile has correct tools and a higher turn budget", () => {

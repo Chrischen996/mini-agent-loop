@@ -69,9 +69,9 @@ describe("Web turn limit recovery", () => {
       const response = await request(app).post(`/api/sessions/${id}/messages`).field("prompt", "original request");
       const events = eventsFrom(response.text);
       assert.equal(calls, 4);
-      assert.equal(events.filter((event) => event.type === "max_turns").length, 1);
-      assert.equal(events.at(-1)?.type, "max_turns");
-      assert.equal(events.at(-1)?.maxTurns, 4);
+      assert.equal(events.filter((event) => event.type === "run_stopped").length, 1);
+      assert.equal(events.at(-1)?.type, "run_stopped");
+      assert.equal(events.at(-1)?.stopReason, "safety_cap_reached");
       assert.equal(events.some((event) => event.type === "error" || event.type === "done"), false);
 
       const stopped = await request(app).get(`/api/sessions/${id}`);

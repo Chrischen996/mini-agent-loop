@@ -68,7 +68,8 @@ export async function runServerAgentTurn(
     previousRunState, budgetMode = "new",
   } = options;
   const maxAutoContinues = runPolicy ? 0 : options.maxAutoContinues ?? DEFAULT_MAX_AUTO_CONTINUES;
-  const maxTurnsPerBlock = runPolicy?.emergencyIterationCap ?? (runPolicy ? 2000 : loop.maxTurns ?? 80);
+  // Blocks stay bounded for legacy callers. The default is the safety cap, never a displayed 80.
+  const maxTurnsPerBlock = runPolicy?.emergencyIterationCap ?? loop.maxTurns ?? 2000;
   const totalMaxSteps = maxTurnsPerBlock * (maxAutoContinues + 1);
   const initialUsage = usage(budgetMode === "remaining" ? previousRunState?.budgetUsage : undefined);
   const previousTotal = usage(previousRunState?.cumulativeBudgetUsage ?? previousRunState?.budgetUsage);
@@ -136,7 +137,8 @@ export async function runServerAgentTurn(
       messages = await runAgentTurn(currentHistory, currentPrompt, {
         ...loop, runtimeRef, isContinuation, runPolicy,
         initialBudgetUsage: runPolicy ? initialUsage : undefined,
-        maxTurns: maxTurnsPerBlock,
+        maxTurns: runPolicy ? maxTurnsPerBlock : undefined,
+        blockTurns: runPolicy ? undefined : maxTurnsPerBlock,
         llm: attempt > 0 ? runtimeRef.llm ?? loop.llm : loop.llm,
         context: attempt > 0 ? runtimeRef.context ?? loop.context : loop.context,
         autoSubagent: attempt > 0 ? undefined : loop.autoSubagent,
@@ -175,6 +177,9 @@ export async function runServerAgentTurn(
           } else if (event.type !== "max_turns") loop.onEvent?.(event);
         },
       });
+      if (!runPolicy && !terminalEvent && blockTurnCount >= maxTurnsPerBlock) {
+        throw new MaxTurnsExceededError(messages, maxTurnsPerBlock);
+      }
     } catch (error) {
       if (persistenceFailed) throw error;
       const partial = error instanceof MaxTurnsExceededError || error instanceof RunStoppedError
@@ -207,9 +212,12 @@ export async function runServerAgentTurn(
         return partial;
       }
       if (attempt === maxAutoContinues) {
-        const stopped = new MaxTurnsExceededError(partial, totalMaxSteps);
-        stopped.message = `Execution limit reached (${totalMaxSteps} steps); progress saved. Use Continue to resume.`;
-        loop.onEvent?.({ type: "max_turns", maxTurns: totalMaxSteps, messages: partial });
+        const details = `Safety cap reached (${totalMaxSteps} steps); progress saved. Use Continue to resume.`;
+        await saveState(partial, "paused", "safety_cap_reached", 0, details);
+        const stopped = new RunStoppedError(partial, "safety_cap_reached", details);
+        loop.onEvent?.({
+          type: "run_stopped", stopReason: "safety_cap_reached", details, message: details, messages: partial,
+        });
         throw stopped;
       }
       await saveState(partial, "running");
