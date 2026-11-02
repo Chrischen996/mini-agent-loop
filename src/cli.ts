@@ -890,26 +890,21 @@ async function main(): Promise<void> {
   const globalTokenBudget = loadGlobalTokenBudgetFromEnv();
   const globalConcurrencyLimit = loadGlobalConcurrencyLimitFromEnv();
   try {
-    const { tools: configuredTools, cleanup } = await createToolsWithSandbox(cwd, {
-      tools: selectedTools,
-      excludeTools,
-      codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
-      codebaseStore: codebaseRuntime.store,
-      codebaseProvider: codebaseRuntime.semanticProvider,
-      sandbox: sandboxConfig,
-    });
-    sandboxCleanup = cleanup;
-
     // Optional background task suite (tmux-backed), controlled by env flag
     let bgTools: import("./tools/types.ts").Tool[] = [];
+    let backgroundTaskManager: import("./bg-tasks/manager.js").BgTaskManager | undefined;
     const bgEnabled = process.env.MINI_AGENT_BG_TASKS !== "0" && process.env.MINI_AGENT_BG_TASKS !== "false";
     if (bgEnabled) {
       try {
         const bg = await createBgTaskSuite(cwd);
+        backgroundTaskManager = bg.manager;
         bgTools = bg.tools.filter((tool) =>
           (!selectedTools || selectedTools.includes(tool.name as ToolName))
           && !excludeTools?.includes(tool.name as ToolName),
         );
+        if (!bgTools.some((tool) => ["bg_status", "bg_logs", "bg_wait", "bg_kill"].includes(tool.name))) {
+          backgroundTaskManager = undefined;
+        }
         bgTaskDispose = bg.dispose;
       } catch (bgError) {
         console.error(
@@ -917,6 +912,17 @@ async function main(): Promise<void> {
         );
       }
     }
+
+    const { tools: configuredTools, cleanup } = await createToolsWithSandbox(cwd, {
+      tools: selectedTools,
+      excludeTools,
+      codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
+      codebaseStore: codebaseRuntime.store,
+      codebaseProvider: codebaseRuntime.semanticProvider,
+      sandbox: sandboxConfig,
+      backgroundTaskManager,
+    });
+    sandboxCleanup = cleanup;
 
     const mcpApproval = createMcpApprovalGate({
       allow: allowMcpTools || mcpAutoApproveFromEnv(),

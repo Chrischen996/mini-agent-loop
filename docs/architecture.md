@@ -46,23 +46,25 @@ Loop invariants:
 2. A tool failure is a *message* (`isError`), not a loop crash.
 3. Every tool call receives a tool result before the next LLM call.
 4. The loop stops when the assistant emits zero tool calls.
-5. `AgentRunPolicy` pauses Web runs with a typed `RunStoppedError` carrying
-   partial history, the stop reason and usage. Explicit legacy `maxTurns` remains
-   a hard stop with `MaxTurnsExceededError`.
+5. Runs finish when the assistant returns no tool calls, the caller cancels, or
+   a policy emits a typed `RunStoppedError` carrying partial history, the stop
+   reason and usage. There is no default 80-turn stop; `maxTurns` is an optional
+   compatibility safety cap.
 
 ## Web policy and checkpoints
 
 `src/server/run-policy.ts` resolves defaults, environment variables and
 `AgentServerOptions.runPolicy`, and validates Continue budget requests.
 `src/server/turn-runner.ts` drives policy execution and serializes checkpoints.
-The core checks token, time, tool, write and compaction budgets plus stalled
-actions. The emergency iteration cap is the final safety fallback. Explicit
-`maxTurns` selects the legacy bounded-block path when no policy is supplied.
+The core checks configured token, time, tool, write and compaction budgets plus
+stalled actions. The emergency iteration cap is an optional safety fallback
+configured by entrypoints that need one. Explicit `maxTurns` remains a
+compatibility safety cap when no policy cap is supplied.
 The Ink TUI resolves a policy by default using `MINI_AGENT_TUI_*` limits and
 pauses at policy boundaries. `/continue` starts a new allocation from the saved
 history without appending a synthetic user message. Setting
-`MINI_AGENT_MAX_TURNS` (or passing `maxTurns`) opts TUI callers into the legacy
-hard-stop path for compatibility.
+`MINI_AGENT_MAX_TURNS` (or passing `maxTurns`) opts callers into a compatibility
+safety cap.
 
 Policy pauses checkpoint their actual reason before emitting a single
 `run_stopped` event. They bypass the error checkpoint handler, so ordinary

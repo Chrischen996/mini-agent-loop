@@ -1439,7 +1439,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         ...state.messages,
         { kind: "notice", text: action.text, ...(action.title ? { title: action.title } : {}) },
       ];
-      return { ...state, messages, status: "Ready", scrollOffset: 0 };
+      return { ...state, messages, status: state.busy ? state.status : "Ready", scrollOffset: 0 };
     }
 
     case "SCROLL_BY": {

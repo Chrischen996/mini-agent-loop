@@ -77,6 +77,7 @@ export interface StartTaskInput {
   maxConcurrent?: number;
   cpuLimit?: number;
   memoryLimit?: string;
+  notifyOnCompletion?: boolean;
 }
 
 export interface SnapshotInput {
@@ -146,6 +147,9 @@ export class BgTaskManager extends EventEmitter {
   private readonly timeoutTimers = new Map<string, NodeJS.Timeout>();
   private readonly seenCompletions = new Set<string>();
   private readonly activeWaiters = new Map<string, number>();
+  private readonly foregroundWaiters = new Map<string, () => Promise<boolean>>();
+  private readonly pendingCompletionNotifications = new Map<string, BgTaskSummary>();
+  private readonly crashingTasks = new Set<string>();
   private reconciliationTimer?: NodeJS.Timeout;
   private cleanupHandler?: () => void;
   private healthCheckTimer?: NodeJS.Timeout;
@@ -211,20 +215,30 @@ export class BgTaskManager extends EventEmitter {
       await this.restoreTimeout(taskId);
     }
     await this.reconcile();
-    this.reconciliationTimer = setInterval(() => void this.reconcile(), 1000);
+    this.reconciliationTimer = setInterval(() => {
+      void this.reconcile().catch((error) => {
+        console.error(`[bg-tasks] reconciliation failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }, 1000);
     this.reconciliationTimer.unref();
-    this.healthCheckTimer = setInterval(async () => {
-      for (const taskId of await this.store.listOwnTaskIds()) {
-        const paths = await this.store.findTask(taskId);
-        if (!paths) continue;
-        const meta = await this.store.readMeta(paths);
-        if (meta?.status === "running" && meta.pid) {
-          const alive = await this.isProcessAlive(meta.pid);
-          if (!alive) await this.handleCrash(taskId);
-        }
-      }
+    this.healthCheckTimer = setInterval(() => {
+      void this.checkTaskHealth().catch((error) => {
+        console.error(`[bg-tasks] health check failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }, 5000);
     this.healthCheckTimer.unref();
+  }
+
+  private async checkTaskHealth(): Promise<void> {
+    for (const taskId of await this.store.listOwnTaskIds()) {
+      const paths = await this.store.findTask(taskId);
+      if (!paths) continue;
+      const meta = await this.store.readMeta(paths);
+      if (meta?.status === "running" && meta.pid) {
+        const alive = await this.isProcessAlive(meta.pid);
+        if (!alive) await this.handleCrash(taskId);
+      }
+    }
   }
 
   async start(input: StartTaskInput): Promise<BgTaskSummary> {
@@ -253,7 +267,7 @@ export class BgTaskManager extends EventEmitter {
       shell: process.env.SHELL || "/bin/sh",
       status: "starting",
       createdAt: new Date().toISOString(),
-      notifyOnCompletion: true,
+      notifyOnCompletion: input.notifyOnCompletion ?? true,
       backend: this.backend.kind,
       sessionName,
       socketName: this.backend.socketName,
@@ -311,17 +325,23 @@ export class BgTaskManager extends EventEmitter {
   }
 
   private async handleCrash(taskId: string) {
-    const paths = await this.store.findTask(taskId);
-    if (!paths) return;
-    await this.store.updateMeta(paths, (meta) => ({
-      ...meta,
-      status: "crashed",
-      lastCrashReason: `pid ${meta.pid} dead`,
-    }));
-    const meta = await this.store.readMeta(paths);
-    if (meta?.restartable && (meta.currentRetry ?? 0) < (meta.maxRetries ?? 3)) {
-      await this.store.updateMeta(paths, (m) => ({ ...m, currentRetry: (m.currentRetry ?? 0) + 1 }));
-      await this.start({ command: meta.command, name: meta.name, cwd: meta.cwd });
+    if (this.crashingTasks.has(taskId)) return;
+    this.crashingTasks.add(taskId);
+    try {
+      const paths = await this.store.findTask(taskId);
+      if (!paths) return;
+      await this.store.updateMeta(paths, (meta) => ({
+        ...meta,
+        status: "crashed",
+        lastCrashReason: `pid ${meta.pid} dead`,
+      }));
+      const meta = await this.store.readMeta(paths);
+      if (meta?.restartable && (meta.currentRetry ?? 0) < (meta.maxRetries ?? 3)) {
+        await this.store.updateMeta(paths, (m) => ({ ...m, currentRetry: (m.currentRetry ?? 0) + 1 }));
+        await this.start({ command: meta.command, name: meta.name, cwd: meta.cwd });
+      }
+    } finally {
+      this.crashingTasks.delete(taskId);
     }
   }
 
@@ -611,6 +631,47 @@ export class BgTaskManager extends EventEmitter {
     return (this.activeWaiters.get(taskId) ?? 0) > 0;
   }
 
+  registerForegroundWait(taskId: string, promote: () => Promise<boolean>): () => void {
+    this.foregroundWaiters.set(taskId, promote);
+    return () => {
+      if (this.foregroundWaiters.get(taskId) === promote) this.foregroundWaiters.delete(taskId);
+    };
+  }
+
+  async backgroundForegroundTask(): Promise<string | undefined> {
+    const entries = [...this.foregroundWaiters.entries()].reverse();
+    for (const [taskId, promote] of entries) {
+      const promoted = await promote().catch(() => false);
+      this.foregroundWaiters.delete(taskId);
+      if (promoted) return taskId;
+    }
+    return undefined;
+  }
+
+  async enableCompletionNotification(taskId: string): Promise<void> {
+    const paths = await this.store.findTask(taskId);
+    if (!paths) throw new Error(`Task not found: ${taskId}`);
+    let changed = false;
+    await this.store.updateMeta(paths, (meta) => {
+      if (meta.notifyOnCompletion) return meta;
+      changed = true;
+      return { ...meta, notifyOnCompletion: true };
+    });
+    if (changed && existsSync(paths.result)) {
+      this.seenCompletions.delete(taskId);
+      await this.processCompletion(taskId);
+    }
+  }
+
+  onCompletion(listener: (task: BgTaskSummary) => void): () => void {
+    this.on("completion", listener);
+    for (const [taskId, task] of this.pendingCompletionNotifications) {
+      this.pendingCompletionNotifications.delete(taskId);
+      listener(task);
+    }
+    return () => this.off("completion", listener);
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -625,6 +686,7 @@ export class BgTaskManager extends EventEmitter {
     for (const timer of this.timeoutTimers.values()) clearTimeout(timer);
     this.watchers.clear();
     this.timeoutTimers.clear();
+    this.pendingCompletionNotifications.clear();
     this.backend.dispose();
     this.removeAllListeners();
   }
@@ -666,7 +728,17 @@ export class BgTaskManager extends EventEmitter {
     this.timeoutTimers.delete(taskId);
     const summary = await this.get(taskId);
     if (summary) {
-      this.emit("completion", summary);
+      let shouldNotify = false;
+      await this.store.updateMeta(paths, (meta) => {
+        if (!meta.notifyOnCompletion || meta.notifiedAt) return meta;
+        shouldNotify = true;
+        return { ...meta, notifiedAt: new Date().toISOString() };
+      });
+      this.emit("settled", summary);
+      if (shouldNotify) {
+        if (this.listenerCount("completion") > 0) this.emit("completion", summary);
+        else this.pendingCompletionNotifications.set(taskId, summary);
+      }
       this.emit("changed", summary);
     }
   }
@@ -737,11 +809,11 @@ export class BgTaskManager extends EventEmitter {
       };
       const cleanup = () => {
         clearTimeout(timer);
-        this.off("completion", done);
+        this.off("settled", done);
         signal?.removeEventListener("abort", aborted);
       };
       const timer = setTimeout(done, timeoutMs);
-      this.once("completion", done);
+      this.once("settled", done);
       signal?.addEventListener("abort", aborted, { once: true });
     });
   }

@@ -75,12 +75,16 @@ export function createDefaultTools(cwd: string, selection: ToolSelection = {}): 
   return selectTools(createAllTools(cwd), selection);
 }
 
-type CoreToolOptions = { sandboxRunner?: SandboxRunner; sandboxConfig?: SandboxConfig };
+type CoreToolOptions = {
+  sandboxRunner?: SandboxRunner;
+  sandboxConfig?: SandboxConfig;
+  backgroundTaskManager?: BgTaskManager;
+};
 
 function createCoreTools(cwd: string, options: CoreToolOptions = {}): Tool[] {
   const bashTool = createBashTool(cwd, options.sandboxRunner
     ? { runner: options.sandboxRunner, config: { ...DEFAULT_SANDBOX_CONFIG, ...options.sandboxConfig } }
-    : undefined);
+    : undefined, options.backgroundTaskManager);
   return [
     createReadTool(cwd) as Tool,
     bashTool as Tool,
@@ -118,11 +122,14 @@ export function createTools(
     sandboxConfig?: SandboxConfig;
     /** Inline sandbox config — creates a noop runner if provided (sync path). */
     sandbox?: SandboxConfig;
+    /** Enables `bash` with `is_background` in the same task manager as bg_* tools. */
+    backgroundTaskManager?: BgTaskManager;
   } = {},
 ): Tool[] {
   const baseTools = createCoreTools(cwd, {
     sandboxRunner: options.sandboxRunner,
     sandboxConfig: options.sandboxConfig ?? options.sandbox,
+    backgroundTaskManager: options.backgroundTaskManager,
   });
 
   const tools = selectTools(baseTools, options);
@@ -169,6 +176,7 @@ export async function createToolsWithSandbox(
     codebaseProvider?: CodebaseSemanticProvider;
     webAccess?: boolean;
     sandbox?: SandboxConfig;
+    backgroundTaskManager?: BgTaskManager;
   } = {},
 ): Promise<{ tools: Tool[]; cleanup: () => Promise<void> }> {
   let sandboxRunner: SandboxRunner | undefined;

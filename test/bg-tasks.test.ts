@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -87,6 +87,33 @@ describe("BgTaskStore persistence", () => {
       const read = await store.readResult(paths);
       assert.equal(read?.status, "completed");
       assert.equal(read?.exitCode, 0);
+    });
+  });
+
+  it("writes concurrent metadata updates without temporary-file collisions", async () => {
+    await withTempDir(async (cwd) => {
+      const store = new BgTaskStore(cwd, "test-instance");
+      await store.initialize();
+      const paths = await store.createTask({
+        schemaVersion: 1,
+        taskId: "bg_concurrent_metadata",
+        name: "initial",
+        command: "true",
+        cwd,
+        shell: "/bin/sh",
+        status: "running",
+        createdAt: new Date().toISOString(),
+        notifyOnCompletion: true,
+      });
+
+      await Promise.all(Array.from({ length: 64 }, (_, index) =>
+        store.updateMeta(paths, (meta) => ({ ...meta, name: `writer-${index}` })),
+      ));
+
+      const saved = await store.readMeta(paths);
+      assert.match(saved?.name ?? "", /^writer-\d+$/);
+      const entries = await readdir(paths.dir);
+      assert.equal(entries.some((entry) => entry.endsWith(".tmp")), false);
     });
   });
 

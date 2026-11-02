@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { TUI_BRAND_HEADER_HEIGHT, TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK, TUI_BRAND_VERSION } from "../brand.ts";
+import { TUI_BRAND_HEADER_HEIGHT, TUI_BRAND_NAME, TUI_BRAND_VERSION } from "../brand.ts";
 import { TUI_COLORS as C } from "../theme.ts";
 import { terminalStringWidth, truncateTerminalPath } from "../terminal-width.ts";
 import { buildWelcomePanelRows, WELCOME_PANEL_MIN_WIDTH } from "../welcome-panel.ts";
@@ -40,24 +40,20 @@ export const Header = React.memo(function Header({ modelName, billingLabel, vers
       </Box>
     );
   }
-  const markWidth = terminalStringWidth(`${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}`);
-  const dashboardLabel = width < 50 ? "▣" : "▣ Dashboard Ctrl+\\";
+  const dashboardLabel = width < 50 ? "Dashboard" : "Dashboard Ctrl+\\";
   const dashboardWidth = terminalStringWidth(dashboardLabel);
-  const pathBudget = Math.max(4, width - terminalStringWidth(modelName ?? "") - terminalStringWidth(TUI_BRAND_NAME) - markWidth - dashboardWidth - 12);
+  const pathBudget = Math.max(4, width - terminalStringWidth(modelName ?? "") - terminalStringWidth(TUI_BRAND_NAME) - dashboardWidth - 10);
   const visibleCwd = cwd ? truncateTerminalPath(cwd, pathBudget) : undefined;
   return (
     <Box flexDirection="column" width={width} height={TUI_BRAND_HEADER_HEIGHT} minWidth={0} overflow="hidden">
-      <Text color={C.primary} bold>{`  ${TUI_BRAND_SPARK}`}</Text>
       <Box paddingX={1} justifyContent="space-between" width={width} height={1} minWidth={0} overflow="hidden">
         <Box gap={1} flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
-          <Text color={C.primary} bold>{`${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}`}</Text>
           <Text color={C.assistant} bold>{TUI_BRAND_NAME}</Text>
           {modelName && <Text color={C.info} dimColor wrap="truncate-end">{modelName}</Text>}
           {visibleCwd && <Text color={C.muted} dimColor wrap="truncate-end">· {visibleCwd}</Text>}
         </Box>
         <Text backgroundColor={dashboardOpen ? C.primary : C.selection} color={C.assistant} bold wrap="truncate-end">{` ${dashboardLabel} `}</Text>
       </Box>
-      <Text color={C.primary} bold>{`  ${TUI_BRAND_SPARK}`}</Text>
     </Box>
   );
 });

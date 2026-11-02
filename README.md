@@ -181,9 +181,13 @@ The Continue button allocates a new default budget from the saved checkpoint.
 `{ "budgetMode": "remaining" }` to reuse the saved allocation. Downtime is
 excluded from execution time. Exhausted remaining budgets pause immediately.
 
-Explicit `maxTurns` without `runPolicy` enables the legacy hard stop per block
-and bounded `maxAutoContinues` behavior. See [Web policy and API events](docs/web-run-policy.md)
-for configuration, counting rules, checkpoint fields and request examples.
+The core loop runs until the assistant completes, the caller cancels, or a run
+policy emits a stop event. There is no default 80-turn stop. CLI runs detect
+repeated actions and sustained no-progress from tool events; TUI and Web also
+apply their configured budgets and emergency safety caps. Explicit `maxTurns`
+or `MINI_AGENT_MAX_TURNS` remains available as a compatibility safety cap.
+See [Web policy and API events](docs/web-run-policy.md) for Web configuration,
+checkpoint fields and request examples.
 
 ### Automatic subagent preflight
 
@@ -232,6 +236,24 @@ parent and nested subagents can share a total token budget through
 `MINI_AGENT_GLOBAL_TOKEN_BUDGET`; `MINI_AGENT_GLOBAL_CONCURRENCY_LIMIT` bounds
 overlapping `subagent_batch` work. A value of `0` for the concurrency limit
 means unlimited.
+
+Subagent budgets are two-dimensional and can be combined: besides the token
+budget above, the shared budget state (`GlobalBudgetState` on
+`AgentRuntimeRef`, or the `agentBudgetCalls` option of the subagent tools and
+`PipelineOrchestratorOptions`) carries a **call budget** — a hard cap on total
+subagent launches across all depths, batches, and worker/reviewer dispatches.
+Panels are validated **before launch**: a sync batch, an async batch
+submission, or a pipeline wave that needs more calls than the remaining budget
+is rejected whole, so no child starts at a loss (Grok Build `agent_budget`
+semantics). The `dynamic` batch allocation strategy additionally re-splits the
+remaining global token budget at the start of each dependency wave, so later
+waves inherit savings from earlier ones. Provider rate-limit failures (429 /
+"rate limit") surface as `rate_limit` subagent errors instead of generic
+`api` errors.
+
+When the inner loop stops at a bounded stop (safety cap or run budget), the
+subagent recovers its partial tool progress and returns it to the parent with a
+`[Partial]` marker instead of discarding the work.
 
 To restore pure LLM-only delegation:
 
@@ -618,6 +640,17 @@ workspace-scoped `/api/background-tasks` control routes and initializes
 the suite on the first background-task request. Set
 `MINI_AGENT_BG_TASKS=0` to disable it.
 
+When background tasks are enabled and Bash is not using an isolated sandbox,
+the `bash` tool also accepts `is_background: true` to start a command and
+immediately return its task ID.
+The resulting task is managed by the same `bg_status`, `bg_logs`, `bg_wait`,
+and `bg_kill` tools. Omitting the flag starts the command in the foreground.
+Foreground Bash commands that exceed the default 15-second wait budget are
+automatically returned as background tasks; `Ctrl+G` promotes the currently
+waiting command immediately in the TUI. Set `MINI_AGENT_BG_FOREGROUND_MS` to
+change the wait budget (`0` waits until the Bash `timeout` value). Background
+completion appears as a TUI notice.
+
 The HTTP API accepts `workspaceId` or `sessionId` to select a workspace. Its
 routes are `GET/POST /api/background-tasks`,
 `GET /api/background-tasks/:taskId`,
@@ -926,7 +959,7 @@ Coverage includes:
 - Tool call id ↔ tool result pairing
 - Unknown tool → `isError` tool message (no crash)
 - Validation failure → `isError` tool message (no crash)
-- Web policy stops, budget persistence and Continue allocation; legacy `maxTurns` hard stop
+- Event-driven loop completion, policy stops, budget persistence and Continue allocation
 - `read` sandbox / missing file behavior
 - symlink escape rejection
 - vision/non-vision message preparation
@@ -965,12 +998,11 @@ mini-agent-loop/
 2. Tool failure is a **message** (`isError`), not a loop crash
 3. Every tool call gets a tool result before the next LLM call
 4. Loop stops when assistant has zero tool calls
-5. Web defaults to `AgentRunPolicy`; explicit legacy `maxTurns` remains a hard stop
+5. Runs finish on the assistant's terminal response, cancellation, or a policy stop event
 
-In legacy mode, when `maxTurns` is reached, the loop raises the typed `MaxTurnsExceededError`
-with the partial message history attached. The TUI preserves that history and
-shows a controlled-stop status, while the CLI reports the limit and returns the
-latest partial assistant output instead of treating the stop as an API failure.
+`maxTurns` and `MINI_AGENT_MAX_TURNS` are optional compatibility safety caps.
+Policy stops emit `run_stopped` with the stop reason and preserve partial
+history; normal completion is driven by the assistant returning no tool calls.
 
 ## Current boundaries
 

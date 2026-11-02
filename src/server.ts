@@ -990,14 +990,12 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
     return runtime;
   };
-  const backgroundToolsForWorkspace = (root: string): Tool[] => {
-    return backgroundTaskRuntimeForWorkspace(root)?.tools ?? [];
-  };
   const sharedToolProviders = new Map<string, ToolProvider>();
   const toolsForWorkspace = (root: string): ToolProvider => {
     if (options.tools) return options.tools;
     const existing = sharedToolProviders.get(root);
     if (existing) return existing;
+    const backgroundRuntime = backgroundTaskRuntimeForWorkspace(root);
     const sharedToolProvider = createWebWorkspaceToolProvider({
       workspace: root,
       codebaseEnabled,
@@ -1006,10 +1004,11 @@ export function createAgentServer(options: AgentServerOptions): Express {
       sandbox: options.sandbox,
       sandboxRunner: options.sandboxRunner,
       mcpTools: options.mcpTools,
+      backgroundTaskManager: backgroundRuntime?.manager,
       mcpApproval: async (tool, args, signal) => {
         await mcpApproval(tool, args, signal);
       },
-      backgroundTaskTools: backgroundToolsForWorkspace(root),
+      backgroundTaskTools: backgroundRuntime?.tools ?? [],
     });
     sharedToolProviders.set(root, sharedToolProvider);
     return sharedToolProvider;

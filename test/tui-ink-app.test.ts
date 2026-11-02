@@ -7,6 +7,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import React, { useState } from "react";
 import { App } from "../src/tui/App.tsx";
+import { Header } from "../src/tui/components/Header.tsx";
 import { PromptInput } from "../src/tui/components/PromptInput.tsx";
 import { stableBgTaskInstanceId } from "../src/bg-tasks/manager.js";
 import { BgTaskStore } from "../src/bg-tasks/store.js";
@@ -143,6 +144,27 @@ describe("the single Ink terminal", () => {
       const frame = view.lastFrame() ?? "";
       assert.doesNotMatch(frame, /╭/);
       assert.match(frame, /❯/);
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  it("renders a one-row compact header without decorative brand icons", () => {
+    const view = render!(React.createElement(Header, {
+      modelName: "test-model",
+      cwd: "/workspace",
+      width: 80,
+    }));
+    try {
+      const frame = view.lastFrame() ?? "";
+      const rows = frame.split("\n").filter((line) => line.trim().length > 0);
+
+      assert.equal(rows.length, 1);
+      assert.match(rows[0] ?? "", /mini-agent/);
+      assert.match(rows[0] ?? "", /test-model/);
+      assert.match(rows[0] ?? "", /\/workspace/);
+      assert.match(rows[0] ?? "", /Dashboard Ctrl/);
+      assert.doesNotMatch(frame, /[✦✣▣]/);
     } finally {
       view.cleanup();
     }

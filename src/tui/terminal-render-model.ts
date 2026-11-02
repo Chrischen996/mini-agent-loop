@@ -17,7 +17,7 @@ import { buildStatusSegments } from "./status-line.ts";
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import { isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from "./subagent-lines.ts";
 import { activityPresentation, formatActivity, loadingGlyph, loadingMarkerBright } from "./activity.ts";
-import { TUI_BRAND_MARK, TUI_BRAND_NAME, TUI_BRAND_SPARK } from "./brand.ts";
+import { TUI_BRAND_NAME } from "./brand.ts";
 import { welcomePanelRenderLines, type WelcomePanelData } from "./welcome-panel.ts";
 import { compactStreamingText, stripLeadingBlankLines } from "./text-utils.ts";
 import type { TodoEditorState } from "./todo-editor.ts";
@@ -426,15 +426,16 @@ function headerRenderLines(
     };
     return welcomePanelRenderLines(width, welcome);
   }
-  // Claude Code keeps model and cwd in its footer/status chrome. The optional
-  // title remains for compatibility with callers that explicitly request a
-  // welcome row, but no project-specific identity leaks into the transcript.
-  const title = options.title ?? TUI_BRAND_NAME;
-  return [
-    { key: "header-spark-top", text: TUI_BRAND_SPARK, prefix: "  ", style: "assistant", bold: true, tone: "running" },
-    { key: "header-title", text: title, prefix: `${TUI_BRAND_SPARK} ${TUI_BRAND_MARK} ${TUI_BRAND_SPARK}  `, prefixTone: "running", style: "assistant", bold: true },
-    { key: "header-spark-bottom", text: TUI_BRAND_SPARK, prefix: "  ", style: "assistant", bold: true, tone: "running" },
-  ];
+  // The standalone renderer keeps model and cwd in the status row.
+  const title = options.title || TUI_BRAND_NAME;
+  const availableWidth = width === undefined ? undefined : Math.max(1, width - 1);
+  return [{
+    key: "header-title",
+    text: availableWidth === undefined ? title : truncateEnd(title, availableWidth),
+    prefix: " ",
+    style: "assistant",
+    bold: true,
+  }];
 }
 
 function thinkingHeaderLines(content: string, mode: TuiState["thinkingMode"], streaming: boolean, key: number | string, focused: boolean): RenderLine[] {

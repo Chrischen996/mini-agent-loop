@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "taskId": "bg_fc7bb8d7119146ff97acf7170576b650",
+  "name": "npm-test",
+  "command": "cd \"/Users/chenjiaxu/Project/agent loop/mini-agent\" && npm test 2>&1 | tail -60",
+  "cwd": "/Users/chenjiaxu/Project/agent loop/mini-agent",
+  "shell": "/bin/zsh",
+  "status": "crashed",
+  "createdAt": "2026-10-26T09:34:23.868Z",
+  "notifyOnCompletion": true,
+  "backend": "process",
+  "sessionName": "pi-bg_fc7bb8d7119146ff97acf7170576b650",
+  "socketName": "process",
+  "instanceId": "project_430863f4f9cb1df6ff61",
+  "timeoutSeconds": 600,
+  "tags": [
+    "test"
+  ],
+  "startedAt": "2026-10-26T09:34:23.872Z",
+  "pid": 20870,
+  "lastCrashReason": "pid 20870 dead"
+}

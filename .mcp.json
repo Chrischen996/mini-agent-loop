@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "browser-use": {
+      "command": "/Users/chenjiaxu/.local/bin/uvx",
+      "args": ["--from", "browser-use[cli]", "browser-use", "--mcp"],
+      "timeoutMs": 60000,
+      "required": false
+    }
+  }
+}

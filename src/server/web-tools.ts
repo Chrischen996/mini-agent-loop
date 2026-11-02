@@ -48,6 +48,7 @@ export type WebWorkspaceToolsConfig = {
   sandboxRunner?: SandboxRunner;
   mcpTools?: ToolProvider;
   mcpApproval?: (tool: Tool, args: Record<string, unknown>, signal?: AbortSignal) => Promise<void>;
+  backgroundTaskManager?: BgTaskManager;
   backgroundTaskTools?: Tool[];
   toolSelection?: ToolSelection;
 };
@@ -93,6 +94,7 @@ export function createWebWorkspaceToolProvider(config: WebWorkspaceToolsConfig):
     codebaseProvider: config.codebaseProvider,
     sandbox: config.sandbox,
     sandboxRunner: config.sandboxRunner,
+    backgroundTaskManager: config.backgroundTaskManager,
     tools: config.toolSelection?.tools,
     excludeTools: config.toolSelection?.excludeTools,
   });

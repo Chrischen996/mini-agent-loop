@@ -582,4 +582,15 @@ describe("TUI sidebar state", () => {
     });
     assert.deepEqual(state.messages.at(-1), { kind: "notice", title: "Help", text: "/help show help" });
   });
+
+  it("keeps the active run status when a notice arrives", () => {
+    const running = tuiReducer(createInitialState("test-model"), { type: "USER_MESSAGE", text: "working" });
+    const state = tuiReducer({ ...running, status: "Running command" }, {
+      type: "ADD_NOTICE",
+      title: "Background task completed",
+      text: "build: completed",
+    });
+    assert.equal(state.busy, true);
+    assert.equal(state.status, "Running command");
+  });
 });

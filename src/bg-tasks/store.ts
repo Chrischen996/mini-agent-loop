@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, linkSync, unlinkSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, open, readFile, readdir, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -110,7 +111,7 @@ export class BgTaskStore {
 
   async writeCancellation(paths: TaskPaths, reason: "cancelled" | "timed_out" | "quit"): Promise<void> {
     if (existsSync(paths.cancel)) return;
-    const temp = `${paths.cancel}.${process.pid}.${Date.now()}.tmp`;
+    const temp = `${paths.cancel}.${randomUUID()}.tmp`;
     await writeFile(temp, `${JSON.stringify({ reason, requestedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     try {
       linkSync(temp, paths.cancel);
@@ -123,7 +124,7 @@ export class BgTaskStore {
 
   async writeResult(paths: TaskPaths, result: TaskResult): Promise<void> {
     if (existsSync(paths.result)) return;
-    const temp = `${paths.result}.${process.pid}.${Date.now()}.tmp`;
+    const temp = `${paths.result}.${randomUUID()}.tmp`;
     await writeFile(temp, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     try {
       linkSync(temp, paths.result);
@@ -154,7 +155,7 @@ export class BgTaskStore {
 
   private async writeJson(path: string, value: unknown): Promise<void> {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
+    const temp = `${path}.${randomUUID()}.tmp`;
     await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     await rename(temp, path);
     await chmod(path, 0o600).catch(() => undefined);

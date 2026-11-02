@@ -7,5 +7,5 @@ export const TUI_BRAND_SPARK = "✦";
  * `test/tui-brand.test.ts` fails when the two drift apart.
  */
 export const TUI_BRAND_VERSION = "0.2.5";
-export const TUI_BRAND_HEADER_HEIGHT = 3;
+export const TUI_BRAND_HEADER_HEIGHT = 1;
 export const TUI_WELCOME_PANEL_HEIGHT = 10;

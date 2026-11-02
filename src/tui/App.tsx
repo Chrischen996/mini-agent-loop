@@ -91,6 +91,7 @@ import type { PersistedSession } from "../session-store.ts";
 import { formatMcpStatus, formatMcpStatusDetails } from "../mcp/status.ts";
 import type { McpServerStatus } from "../mcp/types.ts";
 import { BgTaskManager, stableBgTaskInstanceId } from "../bg-tasks/manager.js";
+import type { BgTaskSummary } from "../bg-tasks/manager.js";
 import { GitWorkflow } from "../git/workflow.ts";
 import { BgTaskLivePanel } from "./components/BgTaskLivePanel.tsx";
 import { AgentDashboard, type DashboardAgent } from "./components/AgentDashboard.tsx";
@@ -144,6 +145,7 @@ type AppProps = {
   allTools?: ToolProvider;
   agentToolsForCwd?: (cwd: string) => ToolProvider;
   allToolsForCwd?: (cwd: string) => ToolProvider;
+  bgManagerForCwd?: (cwd: string) => BgTaskManager | undefined;
   worktreeIsolation?: boolean;
   /** Compact MCP status source for the status bar; polled when present. */
   mcpStatuses?: () => readonly McpServerStatus[];
@@ -209,7 +211,7 @@ async function startupSessionCwd(projectCwd: string, request: StartupSessionRequ
   return resolveSessionWorkspaceCwd(projectCwd, session?.cwd);
 }
 
-function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSessionRequest, agentTools, allTools, agentToolsForCwd, allToolsForCwd, mcpStatuses, mcpTools, agentId, initialSessionId, initialPrompt, active, dashboardOpen, onOpenDashboard, onCloseDashboard, onSnapshot, onWorkspaceChange }: AgentSessionAppProps): React.ReactElement | null {
+function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSessionRequest, agentTools, allTools, agentToolsForCwd, allToolsForCwd, bgManagerForCwd, mcpStatuses, mcpTools, agentId, initialSessionId, initialPrompt, active, dashboardOpen, onOpenDashboard, onCloseDashboard, onSnapshot, onWorkspaceChange }: AgentSessionAppProps): React.ReactElement | null {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [terminalSize, setTerminalSize] = useState(() => ({
@@ -257,14 +259,21 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   // Lazy background-task manager for the /bg-tasks slash command. Created on
   // first use so TUI startup is not blocked when tmux is unavailable.
   const bgManagerRef = useRef<BgTaskManager | null | "unavailable">(null);
+  const bgManagerOwnedRef = useRef(false);
   useEffect(() => {
     const manager = bgManagerRef.current;
-    if (manager && manager !== "unavailable") manager.dispose();
+    if (manager && manager !== "unavailable" && bgManagerOwnedRef.current) manager.dispose();
     bgManagerRef.current = null;
-  }, [cwd]);
+    bgManagerOwnedRef.current = false;
+  }, [cwd, bgManagerForCwd]);
   const getBgManager = useCallback((): BgTaskManager | null => {
     if (bgManagerRef.current === "unavailable") return null;
     if (bgManagerRef.current) return bgManagerRef.current;
+    if (bgManagerForCwd) {
+      const manager = bgManagerForCwd(cwd);
+      bgManagerRef.current = manager ?? "unavailable";
+      return manager ?? null;
+    }
     const bgEnabled = process.env.MINI_AGENT_BG_TASKS !== "0" && process.env.MINI_AGENT_BG_TASKS !== "false";
     if (!bgEnabled) {
       bgManagerRef.current = "unavailable";
@@ -273,12 +282,13 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     try {
       const instanceId = stableBgTaskInstanceId(cwd);
       bgManagerRef.current = new BgTaskManager(cwd, instanceId);
+      bgManagerOwnedRef.current = true;
       return bgManagerRef.current;
     } catch {
       bgManagerRef.current = "unavailable";
       return null;
     }
-  }, [cwd]);
+  }, [cwd, bgManagerForCwd]);
   const [bgTaskCount, setBgTaskCount] = useState(0);
   const [bgPanelOpen, setBgPanelOpen] = useState(false);
   const [pendingTodoRunPlan, setPendingTodoRunPlan] = useState<import("./state.ts").PendingTodoRunPlan | undefined>(undefined);
@@ -340,6 +350,26 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   }, [getBgManager, getSubagentTools, subagentFactory]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
+  useEffect(() => {
+    if (!active) return;
+    const manager = getBgManager();
+    if (!manager) return;
+    const onCompletion = (task: BgTaskSummary) => {
+      const exit = task.exitCode === 0 || task.exitCode === null || task.exitCode === undefined
+        ? ""
+        : ` (exit ${task.exitCode})`;
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "Background task completed",
+        text: `${task.name}: ${task.status}${exit}`,
+      });
+      void refreshBgTaskCount();
+    };
+    const unsubscribe = manager.onCompletion(onCompletion);
+    return () => {
+      unsubscribe();
+    };
+  }, [active, dispatch, getBgManager, refreshBgTaskCount]);
   const jumpToBottomRef = useRef<() => void>(() => undefined);
   const inputHistoryRef = useLazyRef(() => new TerminalInputHistory());
   // Generate a stable conversation session ID on startup
@@ -865,6 +895,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     acMode, state, feedHeight, handleAutocompleteKey, historyRef,
     suppressInputEchoRef, pendingPermissionRef,
     bgPanelOpen, onCloseBgPanel: () => setBgPanelOpen(false),
+    backgroundForegroundTask: async () => getBgManager()?.backgroundForegroundTask(),
     dashboardOpen, onCloseDashboard, onOpenDashboard,
     isActive: active,
   });
@@ -1697,7 +1728,12 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         {bgPanelOpen && (
           <>
             <BgTaskLivePanel
-              manager={getBgManager() ?? { initialize: async () => {}, list: async () => [], logs: async () => ({ taskId: "", text: "", offset: 0, nextOffset: 0, endOfLog: true }) }}
+              manager={getBgManager() ?? {
+                initialize: async () => {},
+                list: async () => [],
+                logs: async () => ({ taskId: "", text: "", offset: 0, nextOffset: 0, endOfLog: true }),
+                terminate: async () => { throw new Error("Background tasks are unavailable"); },
+              }}
               width={Math.min(80, Math.max(60, termWidth - 4))}
               onClose={() => setBgPanelOpen(false)}
             />

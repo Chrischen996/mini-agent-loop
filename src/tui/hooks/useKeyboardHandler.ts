@@ -28,6 +28,7 @@ export type UseKeyboardHandlerDeps = {
   /** Background live-panel open/close; Esc closes the panel before other work. */
   bgPanelOpen?: boolean;
   onCloseBgPanel?: () => void;
+  backgroundForegroundTask?: () => Promise<string | undefined>;
   dashboardOpen?: boolean;
   onCloseDashboard?: () => void;
   onOpenDashboard?: () => void;
@@ -40,6 +41,7 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
     adjustThinkingLevel, resolvePendingPermission, dispatch, scrollBy, jumpToBottom,
     acMode, state, feedHeight, handleAutocompleteKey,
     suppressInputEchoRef, pendingPermissionRef, bgPanelOpen, onCloseBgPanel,
+    backgroundForegroundTask,
     dashboardOpen, onCloseDashboard, onOpenDashboard, isActive = true,
   } = deps;
   const requestScroll = scrollBy ?? ((delta: number) => dispatch({ type: "SCROLL_BY", delta }));
@@ -206,6 +208,24 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
       }
       if (key.ctrl && (_ch === "g" || _ch === "G")) {
         suppressInputEchoRef.current = true;
+        if (state.busy && backgroundForegroundTask) {
+          const scrollToBottom = () => {
+            if (jumpToBottom) jumpToBottom();
+            else dispatch({ type: "SCROLL_TO_BOTTOM" });
+          };
+          void backgroundForegroundTask().then((taskId) => {
+            if (taskId) {
+              dispatch({
+                type: "ADD_NOTICE",
+                title: "Background task",
+                text: `Command moved to background: ${taskId}`,
+              });
+            } else {
+              scrollToBottom();
+            }
+          }).catch(scrollToBottom);
+          return;
+        }
         if (jumpToBottom) jumpToBottom();
         else dispatch({ type: "SCROLL_TO_BOTTOM" });
         return;

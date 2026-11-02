@@ -68,6 +68,7 @@ async function main(): Promise<void> {
     let bgTaskDispose: (() => void) | undefined;
     let bgTools: import("../tools/types.ts").Tool[] = [];
     const bgToolsByCwd = new Map<string, import("../tools/types.ts").Tool[]>();
+    const bgManagersByCwd = new Map<string, BgTaskManager>();
     const childBgManagers = new Map<string, BgTaskManager>();
     const bgEnabled = process.env.MINI_AGENT_BG_TASKS !== "0" && process.env.MINI_AGENT_BG_TASKS !== "false";
     if (bgEnabled) {
@@ -75,18 +76,28 @@ async function main(): Promise<void> {
         const bg = await createBgTaskSuite(cwd);
         bgTools = bg.tools;
         bgToolsByCwd.set(path.resolve(cwd), bgTools);
+        bgManagersByCwd.set(path.resolve(cwd), bg.manager);
         bgTaskDispose = bg.dispose;
       } catch (bgError) {
         console.error(`[bg-tasks] failed to initialize: ${bgError instanceof Error ? bgError.message : String(bgError)}\n`);
       }
     }
+    const bgManagerForCwd = (workspaceCwd: string): BgTaskManager | undefined => {
+      if (!bgEnabled) return undefined;
+      const key = path.resolve(workspaceCwd);
+      const existing = bgManagersByCwd.get(key);
+      if (existing) return existing;
+      const manager = new BgTaskManager(key, stableBgTaskInstanceId(key));
+      bgManagersByCwd.set(key, manager);
+      childBgManagers.set(key, manager);
+      return manager;
+    };
     const bgToolsForCwd = (workspaceCwd: string) => {
       const key = path.resolve(workspaceCwd);
       const existing = bgToolsByCwd.get(key);
       if (existing) return existing;
-      if (!bgEnabled) return [];
-      const manager = new BgTaskManager(key, stableBgTaskInstanceId(key));
-      childBgManagers.set(key, manager);
+      const manager = bgManagerForCwd(workspaceCwd);
+      if (!manager) return [];
       const tools = createBgTaskTools(manager);
       bgToolsByCwd.set(key, tools);
       return tools;
@@ -97,11 +108,12 @@ async function main(): Promise<void> {
         codebaseStore: codebaseRuntime.store,
         codebaseProvider: codebaseRuntime.semanticProvider,
         sandboxRunner,
+        backgroundTaskManager: bgManagerForCwd(workspaceCwd),
       }),
       ...bgToolsForCwd(workspaceCwd),
     ]);
     const allToolsForCwd = (workspaceCwd: string) => mcpRuntime.toolProvider([
-      ...createAllTools(workspaceCwd, { sandboxRunner }),
+      ...createAllTools(workspaceCwd, { sandboxRunner, backgroundTaskManager: bgManagerForCwd(workspaceCwd) }),
       ...bgToolsForCwd(workspaceCwd),
     ]);
     const systemPromptContext = await loadTuiSystemPromptContext(cwd);
@@ -115,6 +127,7 @@ async function main(): Promise<void> {
         startupSessionRequest={startupSessionRequest}
         agentToolsForCwd={agentToolsForCwd}
         allToolsForCwd={allToolsForCwd}
+        bgManagerForCwd={bgManagerForCwd}
         mcpStatuses={() => mcpRuntime.statuses()}
         mcpTools={() => mcpRuntime.snapshot()}
       />,

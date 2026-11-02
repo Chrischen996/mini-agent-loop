@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "taskId": "bg_072faa59ad4748cea525cce3947c0d0d",
+  "name": "full-test-suite",
+  "command": "npm test 2>&1 | tail -80",
+  "cwd": "/Users/chenjiaxu/Project/agent loop/mini-agent",
+  "shell": "/bin/zsh",
+  "status": "crashed",
+  "createdAt": "2026-10-27T02:45:22.728Z",
+  "notifyOnCompletion": true,
+  "backend": "process",
+  "sessionName": "pi-bg_072faa59ad4748cea525cce3947c0d0d",
+  "socketName": "process",
+  "instanceId": "project_430863f4f9cb1df6ff61",
+  "tags": [
+    "test"
+  ],
+  "startedAt": "2026-10-27T02:45:22.738Z",
+  "pid": 59537,
+  "lastCrashReason": "pid 59537 dead"
+}

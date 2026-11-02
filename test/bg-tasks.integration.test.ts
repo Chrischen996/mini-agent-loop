@@ -9,6 +9,8 @@ import { describe, it } from "node:test";
 import { BgTaskManager } from "../src/bg-tasks/manager.js";
 import { BgTaskStore } from "../src/bg-tasks/store.js";
 import { createBgTaskTools } from "../src/bg-tasks/tools.js";
+import { createBashTool } from "../src/tools/bash.ts";
+import { NodeSandboxRunner } from "../src/sandbox/node-runner.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -31,6 +33,118 @@ async function withTempDir(callback: (dir: string) => Promise<void>): Promise<vo
 }
 
 describe("BgTaskManager tmux integration", () => {
+  it("starts bash commands in the persistent task manager when is_background is true", { timeout: 30_000 }, async () => {
+    await withTempDir(async (cwd) => {
+      const manager = new BgTaskManager(cwd, "integration-test-bash", undefined, { backend: "process" });
+      try {
+        const bash = createBashTool(cwd, undefined, manager);
+        assert.ok("is_background" in (bash.parameters.properties as Record<string, unknown>));
+        const sandboxedBash = createBashTool(cwd, { runner: new NodeSandboxRunner() }, manager);
+        assert.ok(!("is_background" in (sandboxedBash.parameters.properties as Record<string, unknown>)));
+        const blockedBackground = await sandboxedBash.execute({ command: "echo should-not-start", is_background: true });
+        assert.equal(blockedBackground.isError, true);
+
+        const foreground = await bash.execute({ command: "printf foreground-ok" });
+        assert.match(String(foreground.content), /foreground-ok/);
+
+        const started = await bash.execute({
+          command: "printf background-started; sleep 0.1; printf background-finished",
+          is_background: true,
+          timeout: 10,
+        });
+        const startText = String(started.content);
+        const taskId = /Started background task (bg_[a-f0-9]+)/.exec(startText)?.[1];
+        assert.ok(taskId, startText);
+
+        const wait = await manager.wait([taskId], "all", 10);
+        assert.equal(wait.completed[0]?.status, "completed");
+        const logs = await manager.logs(taskId);
+        assert.match(logs.text, /background-started/);
+        assert.match(logs.text, /background-finished/);
+      } finally {
+        manager.dispose();
+      }
+    });
+  });
+
+  it("auto-backgrounds a long bash command and notifies when it finishes", { timeout: 15_000 }, async () => {
+    await withTempDir(async (cwd) => {
+      const previousBudget = process.env.MINI_AGENT_BG_FOREGROUND_MS;
+      process.env.MINI_AGENT_BG_FOREGROUND_MS = "40";
+      const manager = new BgTaskManager(cwd, "integration-test-auto-background", undefined, { backend: "process" });
+      const completion = new Promise<{ taskId: string; status: string }>((resolve) => {
+        manager.once("completion", resolve);
+      });
+      try {
+        const bash = createBashTool(cwd, undefined, manager);
+        const startedAt = Date.now();
+        const result = await bash.execute({ command: "sleep 0.25; printf auto-background-finished" });
+        const text = String(result.content);
+        const taskId = /command running in background: (bg_[a-f0-9]+)/.exec(text)?.[1];
+        assert.ok(taskId, text);
+        assert.ok(Date.now() - startedAt < 1_000, "the foreground wait should release promptly");
+
+        const wait = await manager.wait([taskId], "all", 5);
+        assert.equal(wait.completed[0]?.status, "completed");
+        const notice = await completion;
+        assert.equal(notice.taskId, taskId);
+        const logs = await manager.logs(taskId);
+        assert.match(logs.text, /auto-background-finished/);
+      } finally {
+        manager.dispose();
+        if (previousBudget === undefined) delete process.env.MINI_AGENT_BG_FOREGROUND_MS;
+        else process.env.MINI_AGENT_BG_FOREGROUND_MS = previousBudget;
+      }
+    });
+  });
+
+  it("replays a completion notification to a subscriber that attaches after completion", { timeout: 15_000 }, async () => {
+    await withTempDir(async (cwd) => {
+      const manager = new BgTaskManager(cwd, "integration-test-delayed-notice", undefined, { backend: "process" });
+      try {
+        const task = await manager.start({ command: "printf completed-before-subscribe" });
+        const result = await manager.wait([task.taskId], "all", 5);
+        assert.equal(result.completed[0]?.status, "completed");
+
+        const notified = new Promise<string>((resolve) => {
+          manager.onCompletion((summary) => resolve(summary.taskId));
+        });
+        assert.equal(await notified, task.taskId);
+      } finally {
+        manager.dispose();
+      }
+    });
+  });
+
+  it("lets Ctrl+G promote the currently foreground-waited bash command", { timeout: 15_000 }, async () => {
+    await withTempDir(async (cwd) => {
+      const previousBudget = process.env.MINI_AGENT_BG_FOREGROUND_MS;
+      process.env.MINI_AGENT_BG_FOREGROUND_MS = "5000";
+      const manager = new BgTaskManager(cwd, "integration-test-shortcut", undefined, { backend: "process" });
+      try {
+        const bash = createBashTool(cwd, undefined, manager);
+        const commandResult = bash.execute({ command: "sleep 1; printf shortcut-background-finished" });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const taskId = await manager.backgroundForegroundTask();
+        assert.match(taskId ?? "", /^bg_[a-f0-9]+$/);
+
+        const result = await commandResult;
+        assert.match(String(result.content), new RegExp(`command running in background: ${taskId}`));
+        const wait = await manager.wait([taskId!], "all", 5);
+        assert.equal(wait.completed[0]?.status, "completed");
+      } finally {
+        for (const task of await manager.list()) {
+          if (task.status === "running" || task.status === "starting") {
+            await manager.terminate(task.taskId, true).catch(() => undefined);
+          }
+        }
+        manager.dispose();
+        if (previousBudget === undefined) delete process.env.MINI_AGENT_BG_FOREGROUND_MS;
+        else process.env.MINI_AGENT_BG_FOREGROUND_MS = previousBudget;
+      }
+    });
+  });
+
   it("start → status → logs → kill → verify persisted result", { timeout: 60_000 }, async () => {
     if (!(await tmuxAvailable())) {
       // Auto-skip when tmux is not installed

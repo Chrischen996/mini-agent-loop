@@ -1,17 +1,71 @@
 import { spawn } from "node:child_process";
+import { realpath } from "node:fs/promises";
+import path from "node:path";
 import type { Tool, ToolResult, ToolExecutionOptions } from "./types.ts";
 import { DEFAULT_SANDBOX_CONFIG, type SandboxConfig, type SandboxResult, type SandboxRunner } from "../sandbox/types.ts";
 import { terminateProcessTree } from "../process-tree.ts";
 import { describeShell, resolveShell } from "./shell.ts";
+import type { BgTaskManager } from "../bg-tasks/manager.js";
 
-export type BashArgs = { command: string; timeout?: number };
+export type BashArgs = { command: string; timeout?: number; is_background?: boolean };
 
 /** Maximum output size in bytes before truncation notice is appended. */
 const MAX_OUTPUT_BYTES = 100 * 1024;
+const DEFAULT_FOREGROUND_BLOCK_BUDGET_MS = 15_000;
+
+function foregroundBlockBudgetMs(timeoutSeconds: number): number {
+  const configured = process.env.MINI_AGENT_BG_FOREGROUND_MS;
+  const parsed = configured === undefined ? DEFAULT_FOREGROUND_BLOCK_BUDGET_MS : Number(configured);
+  const budget = Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_FOREGROUND_BLOCK_BUDGET_MS;
+  return budget === 0 ? timeoutSeconds * 1000 : Math.min(budget, timeoutSeconds * 1000);
+}
+
+async function readBackgroundOutput(manager: Pick<BgTaskManager, "logs">, taskId: string): Promise<{ text: string; truncated: boolean }> {
+  const chunks: string[] = [];
+  let offset = 0;
+  let endOfLog = false;
+  while (!endOfLog && offset < MAX_OUTPUT_BYTES) {
+    const limitBytes = Math.min(65_536, MAX_OUTPUT_BYTES - offset);
+    if (limitBytes < 4) break;
+    const chunk = await manager.logs(taskId, offset, limitBytes);
+    chunks.push(chunk.text);
+    endOfLog = chunk.endOfLog;
+    if (chunk.nextOffset === offset && !endOfLog) break;
+    offset = chunk.nextOffset;
+  }
+  return { text: chunks.join(""), truncated: !endOfLog };
+}
+
+async function completedBackgroundResult(
+  manager: Pick<BgTaskManager, "get" | "logs">,
+  taskId: string,
+): Promise<ToolResult> {
+  const task = await manager.get(taskId);
+  if (!task) return { content: `Background task disappeared: ${taskId}`, isError: true };
+  const output = await readBackgroundOutput(manager, taskId);
+  const truncation = output.truncated ? `\n\n[notice: output truncated to ${MAX_OUTPUT_BYTES} bytes]` : "";
+  const suffix = task.status === "timed_out"
+    ? "\n\n[command timed out]"
+    : task.status === "completed" && task.exitCode === 0
+      ? ""
+      : `\n\n[exit code: ${task.exitCode ?? task.signal ?? task.status}]`;
+  return { content: output.text + truncation + suffix, isError: task.status !== "completed" || task.exitCode !== 0 };
+}
 
 export function createBashTool(
   cwd: string,
   sandbox?: { runner: SandboxRunner; config?: Partial<SandboxConfig> },
+  backgroundTaskManager?: Pick<
+    BgTaskManager,
+    | "projectCwd"
+    | "start"
+    | "wait"
+    | "get"
+    | "logs"
+    | "terminate"
+    | "registerForegroundWait"
+    | "enableCompletionNotification"
+  >,
 ): Tool<BashArgs> {
   const sandboxConfig = sandbox
     ? { ...DEFAULT_SANDBOX_CONFIG, ...sandbox.config }
@@ -21,15 +75,20 @@ export function createBashTool(
   const shell = sandbox?.runner.type === "docker"
     ? { command: "bash", args: ["-lc"], kind: "bash" as const }
     : resolveShell();
+  const backgroundTasksAvailable = Boolean(backgroundTaskManager)
+    && (!sandbox || sandbox.runner.type === "none");
 
   return {
     name: "bash",
-    description: describeShell(shell),
+    description: `${describeShell(shell)}${backgroundTasksAvailable ? " Long foreground commands automatically continue as persistent background tasks after the foreground wait budget (default 15 seconds). Set is_background=true to background immediately." : ""}`,
     parameters: {
       type: "object",
       properties: {
         command: { type: "string", description: "Command in the shell syntax described by this tool" },
-        timeout: { type: "number", minimum: 0.1, description: "Timeout in seconds" },
+        timeout: { type: "number", minimum: 0.1, description: "Maximum foreground wait or background runtime, in seconds" },
+        ...(backgroundTasksAvailable
+          ? { is_background: { type: "boolean", description: "Start as a persistent background task and return immediately with its task ID" } }
+          : {}),
       },
       required: ["command"],
       additionalProperties: false,
@@ -50,6 +109,84 @@ export function createBashTool(
       const effectiveTimeoutMs = Math.min(timeoutSeconds * 1000, Number.MAX_SAFE_INTEGER);
 
       const executionCwd = execution?.cwd ?? cwd;
+
+      if (args.is_background === true) {
+        if (!backgroundTaskManager || !backgroundTasksAvailable) {
+          return { content: "Background execution is unavailable for this bash configuration", isError: true };
+        }
+        try {
+          const [projectRoot, commandCwd] = await Promise.all([
+            realpath(backgroundTaskManager.projectCwd),
+            realpath(executionCwd),
+          ]);
+          const task = await backgroundTaskManager.start({
+            command: args.command,
+            cwd: path.relative(projectRoot, commandCwd) || undefined,
+            timeoutSeconds: args.timeout,
+          });
+          return {
+            content: `Started background task ${task.taskId} (${task.name}); status: ${task.status}. Use bg_status, bg_logs, bg_wait, or bg_kill to manage it.`,
+          };
+        } catch (err) {
+          if (signal?.aborted || (err instanceof Error && err.name === "AbortError")) throw err;
+          return { content: `Background task failed to start: ${err instanceof Error ? err.message : String(err)}`, isError: true };
+        }
+      }
+
+      if (backgroundTasksAvailable && backgroundTaskManager) {
+        try {
+          const [projectRoot, commandCwd] = await Promise.all([
+            realpath(backgroundTaskManager.projectCwd),
+            realpath(executionCwd),
+          ]);
+          const task = await backgroundTaskManager.start({
+            command: args.command,
+            cwd: path.relative(projectRoot, commandCwd) || undefined,
+            notifyOnCompletion: false,
+          });
+          const budgetMs = foregroundBlockBudgetMs(timeoutSeconds);
+          let resolvePromoted!: (value: "background") => void;
+          const promoted = new Promise<"background">((resolve) => {
+            resolvePromoted = resolve;
+          });
+          let promotedByShortcut = false;
+          const unregisterForegroundWait = backgroundTaskManager.registerForegroundWait(task.taskId, async () => {
+            const current = await backgroundTaskManager.get(task.taskId);
+            if (!current || !["starting", "running", "unknown"].includes(current.status)) return false;
+            await backgroundTaskManager.enableCompletionNotification(task.taskId);
+            promotedByShortcut = true;
+            resolvePromoted("background");
+            return true;
+          });
+          try {
+            const outcome = await Promise.race([
+              backgroundTaskManager.wait([task.taskId], "all", budgetMs / 1000, signal)
+                .then((result) => result.timedOut ? "background" as const : "completed" as const),
+              promoted,
+            ]);
+            if (outcome === "completed") return await completedBackgroundResult(backgroundTaskManager, task.taskId);
+
+            await backgroundTaskManager.enableCompletionNotification(task.taskId);
+            const output = await readBackgroundOutput(backgroundTaskManager, task.taskId);
+            const prefix = output.text ? `${output.text}\n\n` : "";
+            const truncation = output.truncated ? `[notice: output truncated to ${MAX_OUTPUT_BYTES} bytes]\n\n` : "";
+            return {
+              content: `${prefix}${truncation}[command running in background: ${task.taskId}] Use bg_status, bg_logs, bg_wait, or bg_kill to manage it.`,
+            };
+          } catch (err) {
+            if (signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
+              if (!promotedByShortcut) await backgroundTaskManager.terminate(task.taskId, true).catch(() => undefined);
+              throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
+            }
+            throw err;
+          } finally {
+            unregisterForegroundWait();
+          }
+        } catch (err) {
+          if (signal?.aborted || (err instanceof Error && err.name === "AbortError")) throw err;
+          return { content: `Background command failed: ${err instanceof Error ? err.message : String(err)}`, isError: true };
+        }
+      }
 
       // Sandbox mode: use the runner directly (command-level exec only)
       if (sandbox && sandbox.runner.type !== "none") {

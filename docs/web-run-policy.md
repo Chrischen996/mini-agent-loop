@@ -116,8 +116,9 @@ the reason, allocation consumption and session totals.
 
 ## Compatibility
 
-Explicit server `maxTurns`, with no `runPolicy`, enables the legacy hard stop
-per block and `maxAutoContinues` bounded continuation. Its terminal event is
-`max_turns`, and its persisted reason is `step_limit`. Supplying a new budget
-on Continue opts that invocation into policy execution. CLI, TUI and subagent
-limits retain their existing behavior; shared-policy migration is separate work.
+Explicit server `maxTurns`, with no `runPolicy`, bounds each block and
+`maxAutoContinues` bounds continuation. The final stop emits `run_stopped` with
+`safety_cap_reached`; ordinary completion and policy stops use the same event
+contract as other entrypoints. Supplying a new budget on Continue opts that
+invocation into policy execution. CLI uses event-based stall detection, while
+TUI and subagent profiles retain their own configured limits.

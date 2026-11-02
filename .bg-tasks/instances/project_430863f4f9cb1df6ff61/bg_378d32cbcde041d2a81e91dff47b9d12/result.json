@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "taskId": "bg_378d32cbcde041d2a81e91dff47b9d12",
+  "status": "timed_out",
+  "exitCode": null,
+  "signal": null,
+  "startedAt": "2026-10-29T09:39:54.282Z",
+  "endedAt": "2026-10-29T09:54:54.387Z",
+  "reason": "timed_out"
+}
