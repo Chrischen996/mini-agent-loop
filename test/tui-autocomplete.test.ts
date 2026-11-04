@@ -198,6 +198,33 @@ describe("autocomplete keyboard mapping", () => {
     );
   });
 
+  it("switches between configured models and the full catalog with left and right arrows", () => {
+    assert.deepEqual(
+      resolveAutocompleteNav("model-picker", { rightArrow: true }, 1, {
+        ...lengths,
+        configuredModels: 2,
+        modelPickerSection: "configured",
+      }),
+      { type: "toggle-model-section", section: "catalog" },
+    );
+    assert.deepEqual(
+      resolveAutocompleteNav("model-picker", { leftArrow: true }, 1, {
+        ...lengths,
+        configuredModels: 2,
+        modelPickerSection: "catalog",
+      }),
+      { type: "toggle-model-section", section: "configured" },
+    );
+    assert.deepEqual(
+      resolveAutocompleteNav("model-picker", { tab: true }, 0, {
+        ...lengths,
+        configuredModels: 2,
+        modelPickerSection: "configured",
+      }),
+      { type: "ignore" },
+    );
+  });
+
   it("owns sticky overlay keys so App shortcuts do not fire", () => {
     assert.deepEqual(
       resolveAutocompleteNav("model-setup", { upArrow: true }, 0, lengths),

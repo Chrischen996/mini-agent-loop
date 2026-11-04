@@ -77,6 +77,65 @@ describe("TUI todo state", () => {
     assert.deepEqual(next.todoItems, todos);
   });
 
+  it("uses the in-progress Todo as the loading tip, regardless of list order", () => {
+    const next = tuiReducer(createInitialState("model"), {
+      type: "LOOP_EVENT",
+      event: {
+        type: "todo_updated",
+        revision: 1,
+        todos: [
+          { id: "later", content: "Review output", activeForm: "Reviewing output", status: "pending", source: "model" },
+          { id: "active", content: "Run tests", activeForm: "Running tests", status: "in_progress", source: "model" },
+        ],
+      },
+    });
+
+    assert.equal(next.spinnerMessage, "▶ Running tests");
+  });
+
+  it("clears the loading tip when the active Todo completes or the run ends", () => {
+    const activeTodo: TodoItem = {
+      id: "active",
+      content: "Run tests",
+      activeForm: "Running tests",
+      status: "in_progress",
+      source: "model",
+    };
+    const state = tuiReducer(createInitialState("model"), {
+      type: "SET_TODOS",
+      todos: [activeTodo],
+    });
+    assert.equal(state.spinnerMessage, "▶ Running tests");
+
+    const completed = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "todo_updated",
+        revision: state.todoRevision + 1,
+        todos: [{ ...activeTodo, status: "completed" }],
+      },
+    });
+    assert.equal(completed.spinnerMessage, undefined);
+
+    const finished = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "done", messages: [] },
+    });
+    assert.equal(finished.spinnerMessage, undefined);
+
+    const failed = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "error", message: "request failed" },
+    });
+    assert.equal(failed.spinnerMessage, undefined);
+
+    const nextTurn = tuiReducer(state, {
+      type: "USER_MESSAGE",
+      text: "Start a new request",
+    });
+    assert.equal(nextTurn.spinnerMessage, undefined);
+  });
+
   it("ignores stale todo snapshots", () => {
     const state = tuiReducer(createInitialState("model"), {
       type: "SET_TODO_ITEMS",

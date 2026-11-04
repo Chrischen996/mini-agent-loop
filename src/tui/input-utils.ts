@@ -72,6 +72,9 @@ export type AcMode =
   | "model-picker"
   | "session-list"
   | "resume-messages"
+  | "background-task-list"
+  | "background-task-actions"
+  | "workspace-diff-files"
   | "model-setup"
   | "profile-name"
   | "profile-list"
@@ -131,7 +134,10 @@ export function shouldAcceptAutocompleteOnEnter(acMode: AcMode): boolean {
     || acMode === "model"
     || acMode === "model-picker"
     || acMode === "session-list"
-    || acMode === "resume-messages";
+    || acMode === "resume-messages"
+    || acMode === "background-task-list"
+    || acMode === "background-task-actions"
+    || acMode === "workspace-diff-files";
 }
 
 function extractAtFileAcTrigger(input: string): FileAcTrigger | null {

@@ -102,14 +102,18 @@ describe("BgTaskManager tmux integration", () => {
     await withTempDir(async (cwd) => {
       const manager = new BgTaskManager(cwd, "integration-test-delayed-notice", undefined, { backend: "process" });
       try {
-        const task = await manager.start({ command: "printf completed-before-subscribe" });
+        const task = await manager.start({ command: "printf completed-before-subscribe", ownerSessionId: "session-a" });
         const result = await manager.wait([task.taskId], "all", 5);
         assert.equal(result.completed[0]?.status, "completed");
 
+        let wrongSessionNotifications = 0;
+        manager.onCompletion(() => { wrongSessionNotifications += 1; }, "session-b");
         const notified = new Promise<string>((resolve) => {
-          manager.onCompletion((summary) => resolve(summary.taskId));
+          manager.onCompletion((summary) => resolve(summary.taskId), "session-a", () => false);
         });
         assert.equal(await notified, task.taskId);
+        assert.equal(wrongSessionNotifications, 0);
+        assert.equal((await manager.get(task.taskId))?.ownerSessionId, "session-a");
       } finally {
         manager.dispose();
       }
@@ -123,13 +127,18 @@ describe("BgTaskManager tmux integration", () => {
       const manager = new BgTaskManager(cwd, "integration-test-shortcut", undefined, { backend: "process" });
       try {
         const bash = createBashTool(cwd, undefined, manager);
+        const waitStates: boolean[] = [];
+        manager.on("foreground-wait-changed", (waiting: boolean) => waitStates.push(waiting));
         const commandResult = bash.execute({ command: "sleep 1; printf shortcut-background-finished" });
         await new Promise((resolve) => setTimeout(resolve, 100));
+        assert.deepEqual(waitStates, [true]);
         const taskId = await manager.backgroundForegroundTask();
         assert.match(taskId ?? "", /^bg_[a-f0-9]+$/);
+        assert.deepEqual(waitStates, [true, false]);
 
         const result = await commandResult;
         assert.match(String(result.content), new RegExp(`command running in background: ${taskId}`));
+        assert.equal(manager.isActivelyWaited(taskId!), false, "promotion must release the abandoned foreground wait");
         const wait = await manager.wait([taskId!], "all", 5);
         assert.equal(wait.completed[0]?.status, "completed");
       } finally {
@@ -141,6 +150,52 @@ describe("BgTaskManager tmux integration", () => {
         manager.dispose();
         if (previousBudget === undefined) delete process.env.MINI_AGENT_BG_FOREGROUND_MS;
         else process.env.MINI_AGENT_BG_FOREGROUND_MS = previousBudget;
+      }
+    });
+  });
+
+  it("tracks active waits by the session that issued them", { timeout: 15_000 }, async () => {
+    await withTempDir(async (cwd) => {
+      const manager = new BgTaskManager(cwd, "integration-test-session-wait", undefined, { backend: "process" });
+      try {
+        const task = await manager.start({ command: "sleep 0.15", ownerSessionId: "owner-session" });
+        const wait = manager.wait([task.taskId], "all", 5, undefined, "observer-session");
+        assert.equal(manager.isActivelyWaited(task.taskId, "observer-session"), true);
+        assert.equal(manager.isActivelyWaited(task.taskId, "owner-session"), false);
+        assert.equal((await wait).completed[0]?.status, "completed");
+        assert.equal(manager.isActivelyWaited(task.taskId, "observer-session"), false);
+      } finally {
+        manager.dispose();
+      }
+    });
+  });
+
+  it("does not suppress completion when a foreground task ends during promotion", { timeout: 15_000 }, async () => {
+    await withTempDir(async (cwd) => {
+      const manager = new BgTaskManager(cwd, "integration-test-promotion-race", undefined, { backend: "process" });
+      try {
+        const task = await manager.start({ command: "sleep 0.15", ownerSessionId: "session-a" });
+        const waiting = manager.wait([task.taskId], "all", 5, undefined, "session-a");
+        let shouldWake = false;
+        const notification = new Promise<void>((resolve) => {
+          manager.onCompletion((summary) => {
+            if (summary.taskId !== task.taskId) return;
+            shouldWake = !manager.isActivelyWaited(task.taskId, "session-a")
+              && !manager.wasWaitedToCompletion(task.taskId, "session-a");
+            resolve();
+          }, "session-a");
+        });
+        manager.registerForegroundWait(task.taskId, async () => {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          return true;
+        });
+
+        await manager.backgroundForegroundTask();
+        await notification;
+        assert.equal(shouldWake, true);
+        assert.equal((await waiting).completed[0]?.status, "completed");
+      } finally {
+        manager.dispose();
       }
     });
   });

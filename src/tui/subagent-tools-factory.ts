@@ -2,7 +2,8 @@ import type { LlmConfig } from "../llm/index.ts";
 import type { Tool } from "../tools/types.ts";
 import type { ToolProvider } from "../tools/types.ts";
 import type { AgentRuntimeRef } from "../loop.ts";
-import { createSubagentTool, createSubagentBatchTool, defaultProfiles } from "../subagent/index.ts";
+import { createSubagentTool, createSubagentBatchTool, createSubagentTaskTools, defaultProfiles } from "../subagent/index.ts";
+import type { SubagentTaskRegistry } from "../subagent/task-registry.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
 import type { SubagentArgs } from "../subagent/types.ts";
 import type { MessagePreprocessor } from "../preprocessors/types.ts";
@@ -16,6 +17,8 @@ export type SubagentToolsFactoryDeps = {
   visionPreprocessors: MessagePreprocessor[];
   onSubagentEvent: (event: SubagentEvent) => void;
   getPermissionTurn: () => PermissionTurnContext | undefined;
+  getBackgroundPermissionTurn?: () => PermissionTurnContext;
+  taskRegistry?: SubagentTaskRegistry;
   parentRuntime: AgentRuntimeRef;
   globalTokenBudget?: number;
   globalConcurrencyLimit?: number;
@@ -54,6 +57,7 @@ export class SubagentToolsFactory {
     const orchestrationChanged =
       this.lastDeps === null ||
       Boolean(this.lastDeps.searchOrchestrationEnabled) !== Boolean(deps.searchOrchestrationEnabled) ||
+      this.lastDeps.taskRegistry !== deps.taskRegistry ||
       JSON.stringify(this.lastDeps.orchestratorModelMapping ?? {}) !==
         JSON.stringify(deps.orchestratorModelMapping ?? {});
     // The deps object is rebuilt on every call, so reference equality is
@@ -62,10 +66,12 @@ export class SubagentToolsFactory {
       const sharedOptions = {
         parentLlm: deps.parentLlm,
         parentTools: deps.parentTools,
+        taskRegistry: deps.taskRegistry,
         profiles: defaultProfiles,
         preprocessors: deps.visionPreprocessors,
         onSubagentEvent: deps.onSubagentEvent,
         getPermissionTurn: deps.getPermissionTurn,
+        getBackgroundPermissionTurn: deps.getBackgroundPermissionTurn,
         parentRuntime: deps.parentRuntime,
         globalTokenBudget: deps.globalTokenBudget,
         globalConcurrencyLimit: deps.globalConcurrencyLimit,
@@ -75,6 +81,7 @@ export class SubagentToolsFactory {
       const tools: Tool[] = [
         subagent as Tool,
         createSubagentBatchTool(sharedOptions) as Tool,
+        ...(deps.taskRegistry ? createSubagentTaskTools(deps.taskRegistry) : []),
       ];
       if (deps.searchOrchestrationEnabled) {
         // Route orchestrated subagent calls through the tool built above so

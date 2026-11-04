@@ -113,10 +113,10 @@ export function activityPresentation(
     label = `Running ${toolVisualName(runningTool.name)}…`;
   } else if (state.streamingText) {
     phase = "responding";
-    label = stalled ? "Waiting for response tokens…" : "Responding…";
+    label = stalled ? "Response paused; waiting for more tokens…" : "Responding…";
   } else if (state.streamingReasoning) {
     phase = "thinking";
-    label = stalled ? "Waiting for reasoning tokens…" : "Thinking…";
+    label = stalled ? "Reasoning paused; waiting for more tokens…" : "Thinking…";
   } else if (!state.todoPanelVisible && spinnerTipLabel(state.spinnerMessage)) {
     // The Todo tip is the only live information between tool calls. It shares
     // this row instead of stacking a second spinner above the prompt, and it
@@ -136,7 +136,9 @@ export function activityPresentation(
       label = visibleStatus;
     } else {
       phase = "requesting";
-      label = elapsedMs >= STREAM_STALL_NOTICE_MS ? "Still waiting for model…" : "Waiting for model…";
+      label = elapsedMs >= STREAM_STALL_NOTICE_MS
+        ? "The model is taking longer than usual…"
+        : "Waiting for the first response…";
     }
   }
 

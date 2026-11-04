@@ -32,7 +32,10 @@
  */
 
 export { createSubagentTool, createSubagentBatchTool, allocateBatchTokenBudgets } from "./tool.ts";
-export { readAsyncBatch, resumeAsyncBatches, submitAsyncBatch, validateAsyncDag, waitAsyncBatch } from "./async-batch.ts";
+export { claimAsyncBatchWorker, getAsyncBatchWorkerOptions, pendingAsyncBatchJobs, readAsyncBatch, resumeAsyncBatches, setAsyncBatchWorkerPid, submitAsyncBatch, validateAsyncDag, waitAsyncBatch } from "./async-batch.ts";
+export { SubagentTaskRegistry, createSubagentTaskId } from "./task-registry.ts";
+export type { SubagentTaskRecord, SubagentTaskStatus, SubagentWaitResult } from "./task-registry.ts";
+export { createSubagentTaskTools } from "./task-tools.ts";
 
 export {
   buildCoordinatorPromptFragment,

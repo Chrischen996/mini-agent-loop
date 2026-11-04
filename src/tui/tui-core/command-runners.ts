@@ -221,6 +221,7 @@ export type TodosRunExecutors = {
 
 export function todosRunExecutors(options: {
   getBgManager: () => BgTaskManager | null;
+  getSessionId?: () => string | undefined;
   subagentFactory: SubagentToolsFactoryDeps & { getTools: (deps: SubagentToolsFactoryDeps) => import("../../tools/types.ts").Tool[] };
   getSubagentTools?: () => import("../../tools/types.ts").Tool[];
 }): TodosRunExecutors {
@@ -231,12 +232,13 @@ export function todosRunExecutors(options: {
       command: plan.command,
       ...(plan.timeoutSeconds ? { timeoutSeconds: plan.timeoutSeconds } : {}),
       ...(plan.tags ? { tags: plan.tags } : {}),
+      ownerSessionId: options.getSessionId?.(),
     });
     return started.taskId;
   };
   const pollBgTask = async (taskId: string, signal?: AbortSignal) => {
     if (!manager) return { ok: false, done: true, error: "Background tasks are not available" };
-    const result = await manager.wait([taskId], "all", signal ? 30 : 300);
+    const result = await manager.wait([taskId], "all", signal ? 30 : 300, signal, options.getSessionId?.());
     const summary = await manager.get(taskId);
     if (!summary) return { ok: false, done: true, error: "Background task not found" };
     const ok = summary.status === "completed" && (summary.exitCode ?? 0) === 0;
@@ -252,6 +254,7 @@ export function todosRunExecutors(options: {
     const subagentTool = tools.find((t) => t.name === "subagent");
     if (!subagentTool) throw new Error("subagent tool is not available");
     const result = await subagentTool.execute({
+      runInBackground: false,
       task: plan.task,
       profile: plan.profile ?? "coder",
       ...(plan.model ? { model: plan.model } : {}),

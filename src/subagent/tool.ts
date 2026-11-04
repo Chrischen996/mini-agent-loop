@@ -27,7 +27,7 @@ import {
   type GlobalBudgetState,
   type LoopEvent,
 } from "../loop.ts";
-import { resolveToolProvider, type Tool, type ToolProvider } from "../tools/types.ts";
+import { resolveToolProvider, type Tool, type ToolExecutionOptions, type ToolProvider } from "../tools/types.ts";
 import { resolveToolCapabilities } from "../runtime/tool-types.ts";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import type { ToolExecutionAuditEvent, ToolExecutionBroker } from "../runtime/tool-execution-broker.ts";
@@ -44,7 +44,9 @@ import type {
   SubagentToolOptions,
 } from "./types.ts";
 import { calculateSubagentCost } from "./cost.ts";
-import { readAsyncBatch, resumeAsyncBatches, submitAsyncBatch, validateAsyncDag, waitAsyncBatch } from "./async-batch.ts";
+import { claimAsyncBatchWorker, getAsyncBatchWorkerOptions, readAsyncBatch, resumeAsyncBatches, setAsyncBatchWorkerPid, submitAsyncBatch, validateAsyncDag, waitAsyncBatch } from "./async-batch.ts";
+import { createSubagentTaskId, type SubagentTaskRecord } from "./task-registry.ts";
+import { createSubagentTaskTools } from "./task-tools.ts";
 import type { PermissionTurnContext } from "../permissions.ts";
 import type { ThinkingMode } from "../thinking-policy.ts";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "../types.ts";
@@ -54,10 +56,24 @@ import type { AgentMessage, AssistantMessage, ToolResultMessage } from "../types
 const DEFAULT_MAX_TURNS = 8;
 const DEFAULT_MAX_DEPTH = 3;
 const DEFAULT_MAX_CONCURRENCY_BATCH = 0; // 0 = unlimited (all concurrent)
+const DEFAULT_SUBAGENT_AWAIT_BUDGET_MS = 10 * 60_000;
+const MAX_SUBAGENT_AWAIT_BUDGET_MS = 2_147_483_647;
 const SUBAGENT_TOOL_NAME = "subagent";
-const SUBAGENT_TOOL_NAMES = new Set(["subagent", "subagent_batch"]);
+const SUBAGENT_TOOL_NAMES = new Set(["subagent", "subagent_batch", "subagent_tasks", "subagent_output", "subagent_wait", "subagent_kill"]);
 const MAX_PARTIAL_TOOL_SNIPPETS = 4;
 const MAX_PARTIAL_TOOL_CHARS = 400;
+
+function resolveSubagentAwaitBudgetMs(configured?: number): number {
+  if (configured !== undefined) {
+    return Math.min(MAX_SUBAGENT_AWAIT_BUDGET_MS, Math.max(0, configured));
+  }
+  const configuredValue = process.env.MINI_AGENT_SUBAGENT_AWAIT_BUDGET_MS?.trim();
+  if (configuredValue === "0") return 0;
+  const environmentValue = Number(configuredValue);
+  return Number.isSafeInteger(environmentValue) && environmentValue > 0
+    ? Math.min(MAX_SUBAGENT_AWAIT_BUDGET_MS, environmentValue)
+    : DEFAULT_SUBAGENT_AWAIT_BUDGET_MS;
+}
 
 const DEFAULT_SUBAGENT_SYSTEM_PROMPT = [
   "You are a focused sub-agent. Complete the given task precisely and return a clear, concise result.",
@@ -438,6 +454,10 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
   const {
     parentLlm,
     parentTools,
+    taskRegistry,
+    launchBackgroundTask,
+    workerTaskId,
+    subagentAwaitBudgetMs: configuredAwaitBudgetMs,
     profiles = [],
     preprocessors = [],
     signal,
@@ -448,6 +468,7 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
     permissionMode,
     permissionTurn,
     getPermissionTurn,
+    getBackgroundPermissionTurn,
     getPermissionMode,
     authorizeTool,
     timeout: constructorTimeout,
@@ -458,8 +479,10 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
     runtimeContext,
     toolExecutionBroker,
     onToolExecutionAudit,
+    globalConcurrencyLimit,
     roleLlmConfigs = {},
   } = options;
+  const foregroundAwaitBudgetMs = resolveSubagentAwaitBudgetMs(configuredAwaitBudgetMs);
   const configuredGlobalBudgetState = resolveSharedGlobalBudgetState(options);
   const resolveGlobalBudgetState = (): GlobalBudgetState | undefined =>
     options.parentRuntime?.globalBudgetState ?? configuredGlobalBudgetState;
@@ -479,7 +502,9 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
     displayName: "Sub-Agent",
     description: [
       "Spawn a sub-agent to handle a focused sub-task independently.",
-      "The sub-agent runs in its own context with its own tool set and returns a text result.",
+      taskRegistry
+        ? "By default the sub-agent runs in the background and this tool returns a task ID; use subagent_tasks, subagent_output, subagent_wait, or subagent_kill to manage it. Set runInBackground=false to wait for the text result in this call. Use resumeFrom with the task ID and a new task prompt to continue a completed transcript."
+        : "The sub-agent runs in its own context with its own tool set and returns a text result.",
       "Use this to delegate complex or independent pieces of work.",
       profileDescription,
     ].join(" "),
@@ -496,6 +521,14 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
         task: {
           type: "string",
           description: "The task description / prompt for the sub-agent.",
+        },
+        runInBackground: {
+          type: "boolean",
+          description: "Return immediately with a task ID. Defaults to true when background task management is available.",
+        },
+        resumeFrom: {
+          type: "string",
+          description: "Continue a completed sub-agent transcript. The task prompt is appended to its prior conversation and the same task ID is retained.",
         },
         ...(profileEnum
           ? {
@@ -569,7 +602,7 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
       additionalProperties: false,
     },
 
-    execute: async (args: SubagentArgs, execSignal?: AbortSignal): Promise<import("../tools/types.ts").ToolResult> => {
+    execute: async (args: SubagentArgs, execSignal?: AbortSignal, execution?: ToolExecutionOptions): Promise<import("../tools/types.ts").ToolResult> => {
       // ── Depth check ─────────────────────────────────────────────
       if (currentDepth >= maxDepth) {
         return {
@@ -578,7 +611,35 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
         };
       }
 
-      const invocationId = randomUUID();
+      const ownerSessionId = execution?.sessionId ?? parentRuntime?.executionContext?.sessionId ?? runtimeContext?.sessionId;
+      let resumeRecord: SubagentTaskRecord | undefined;
+      if (workerTaskId) {
+        if (!taskRegistry) {
+          return { content: "Detached worker requires sub-agent task management.", isError: true };
+        }
+        resumeRecord = await taskRegistry.get(workerTaskId, ownerSessionId);
+        if (!resumeRecord || resumeRecord.killed || (resumeRecord.status !== "queued" && resumeRecord.status !== "running")) {
+          return { content: "Detached sub-agent task is missing or no longer active.", isError: true };
+        }
+        args = { ...resumeRecord.args, ...args, task: resumeRecord.task };
+      } else if (args.resumeFrom) {
+        if (!taskRegistry) {
+          return { content: "resumeFrom requires sub-agent task management to be configured.", isError: true };
+        }
+        resumeRecord = await taskRegistry.get(args.resumeFrom, ownerSessionId);
+        if (!resumeRecord || !(resumeRecord.status === "completed" || resumeRecord.status === "interrupted")) {
+          return { content: "resumeFrom must reference a completed or interrupted sub-agent task from this session.", isError: true };
+        }
+        if (resumeRecord.status === "completed" && !resumeRecord.messages?.length) {
+          return { content: "This completed sub-agent task has no saved transcript to resume.", isError: true };
+        }
+        args = { ...resumeRecord.args, ...args, task: args.task };
+      }
+      const runInBackground = args.runInBackground ?? Boolean(taskRegistry);
+      if (runInBackground && !taskRegistry) {
+        return { content: "runInBackground requires sub-agent task management to be configured.", isError: true };
+      }
+      const invocationId = workerTaskId ?? resumeRecord?.taskId ?? args.taskId ?? (taskRegistry ? createSubagentTaskId() : randomUUID());
       const depth = currentDepth + 1;
 
       // ── Resolve configuration ───────────────────────────────────
@@ -606,7 +667,7 @@ ${args.sharedContext}
       const effectiveRuntimeContext = parentRuntime?.executionContext ?? runtimeContext;
       const effectiveToolExecutionBroker = parentRuntime?.toolExecutionBroker ?? toolExecutionBroker;
       const effectiveAudit = parentRuntime?.onToolExecutionAudit ?? onToolExecutionAudit;
-      const inheritedParentHistory = args.inheritContextHistory
+      const inheritedParentHistory = !resumeRecord && args.inheritContextHistory
         ? parentRuntime?.history ?? getParentHistory?.()
         : undefined;
       const effectiveThinkingMode: ThinkingMode =
@@ -637,6 +698,12 @@ ${args.sharedContext}
             isError: true,
           };
         }
+      } else if (resumeRecord?.runtime?.model && !profile?.llm && !roleLlmOverride) {
+        try {
+          llm = switchLlmModel(effectiveParentLlm, resumeRecord.runtime.model);
+        } catch {
+          // Keep the current parent model if the saved model is no longer available.
+        }
       }
 
       const effectiveTokenBudget = args.tokenBudget ?? profile?.tokenBudget;
@@ -649,6 +716,12 @@ ${args.sharedContext}
       }
 
       const globalBudgetState = resolveGlobalBudgetState();
+      if (globalBudgetState?.tokenLedger) {
+        globalBudgetState.used = await globalBudgetState.tokenLedger.readTokens();
+      }
+      if (globalBudgetState?.callLedger) {
+        globalBudgetState.callsUsed = await globalBudgetState.callLedger.readCalls();
+      }
       if (globalBudgetState?.limit !== undefined && globalBudgetState.used >= globalBudgetState.limit) {
         return {
           content: `Sub-agent global token budget exhausted (${globalBudgetState.limit}).`,
@@ -657,16 +730,26 @@ ${args.sharedContext}
       }
       // Call budget (Grok Build-style agent_budget): reject the launch when
       // the shared invocation cap is exhausted, otherwise count this launch.
-      if (globalBudgetState?.callsLimit !== undefined) {
+      if (globalBudgetState?.callsLimit !== undefined && !args._callBudgetReserved) {
         const callsUsed = globalBudgetState.callsUsed ?? 0;
-        if (callsUsed >= globalBudgetState.callsLimit) {
+        const reservedCalls = globalBudgetState.callLedger
+          ? await globalBudgetState.callLedger.reserveCalls(1, globalBudgetState.callsLimit)
+          : callsUsed < globalBudgetState.callsLimit ? callsUsed + 1 : undefined;
+        if (reservedCalls === undefined) {
           return {
             content: `Sub-agent call budget exhausted (${callsUsed}/${globalBudgetState.callsLimit}). No further sub-agents will be launched.`,
             isError: true,
           };
         }
-        globalBudgetState.callsUsed = callsUsed + 1;
+        globalBudgetState.callsUsed = reservedCalls;
       }
+
+      const backgroundPermissionTurn = getBackgroundPermissionTurn?.();
+      const childPermissionTurn = backgroundPermissionTurn ?? getPermissionTurn?.() ?? permissionTurn;
+      const childPermissionMode = childPermissionTurn?.mode ?? permissionMode;
+      const childController = new AbortController();
+      const effectiveRunInBackground = runInBackground;
+      let isBackgrounded = effectiveRunInBackground;
 
       // Build runtime info for observability events
       const runtimeInfo = buildRuntimeInfo(
@@ -678,6 +761,11 @@ ${args.sharedContext}
 
       // ── Build child tool set ────────────────────────────────────
       const childTools = buildChildTools(parentTools, allowedTools, false, profile?.readOnly === true);
+      if (taskRegistry) {
+        for (const tool of createSubagentTaskTools(taskRegistry)) {
+          if (!childTools.some((existing) => existing.name === tool.name)) childTools.push(tool);
+        }
+      }
       const childRuntimeRef: AgentRuntimeRef = globalBudgetState
         ? { globalBudgetState }
         : {};
@@ -688,16 +776,19 @@ ${args.sharedContext}
         const nestedSubagentTool = createSubagentTool({
           parentLlm: llm,
           parentTools: childTools,
+          taskRegistry,
+          launchBackgroundTask,
           profiles,
           preprocessors,
-          signal: execSignal ?? signal,
+          signal: childController.signal,
           maxDepth,
           currentDepth: depth,
           onSubagentEvent,
           chat: injectedChat,
-          permissionMode,
-          permissionTurn,
-          getPermissionTurn,
+          permissionMode: childPermissionMode,
+          permissionTurn: childPermissionTurn,
+          getPermissionTurn: () => childPermissionTurn,
+          getBackgroundPermissionTurn,
           getPermissionMode,
           authorizeTool,
           timeout,
@@ -708,9 +799,33 @@ ${args.sharedContext}
           toolExecutionBroker: effectiveToolExecutionBroker,
           onToolExecutionAudit: effectiveAudit,
           globalBudgetState,
+          globalConcurrencyLimit,
           checkGlobalBudget: options.checkGlobalBudget,
         });
         childTools.push(nestedSubagentTool as Tool);
+      }
+
+      if (taskRegistry) {
+        const now = new Date().toISOString();
+        await taskRegistry.start({
+          taskId: invocationId,
+          ...(ownerSessionId ? { ownerSessionId } : {}),
+          task: args.task,
+          ...(args.profile ? { profile: args.profile } : {}),
+          args,
+          status: effectiveRunInBackground && launchBackgroundTask ? "queued" : "running",
+          runInBackground: effectiveRunInBackground,
+          ...(resumeRecord?.workerPid ? { workerPid: resumeRecord.workerPid } : {}),
+          ...(resumeRecord?.workerOptions ? { workerOptions: resumeRecord.workerOptions } : {}),
+          createdAt: resumeRecord?.createdAt ?? now,
+          startedAt: now,
+          ...(resumeRecord?.messages ? { messages: resumeRecord.messages } : {}),
+          runtime: runtimeInfo,
+          killed: false,
+          blockWaited: false,
+          completionConsumed: false,
+          wakeDelivered: false,
+        }, childController);
       }
 
       // ── Emit start event (with runtime info) ────────────────────
@@ -723,8 +838,71 @@ ${args.sharedContext}
         runtime: runtimeInfo,
       });
 
-      // ── Merge abort signals (fix: properly combine ALL signals) ─
-      const signalsToMerge: (AbortSignal | undefined)[] = [execSignal, signal];
+      if (effectiveRunInBackground && launchBackgroundTask) {
+        onSubagentEvent?.({
+          type: "subagent_backgrounded",
+          id: invocationId,
+          task: args.task,
+          depth,
+          ownerSessionId,
+        });
+        try {
+          await launchBackgroundTask({ taskId: invocationId, ownerSessionId, args });
+          await taskRegistry?.detach(invocationId);
+          return { content: `Started sub-agent task ${invocationId} in the background. Use subagent_output or subagent_wait to retrieve its result.` };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          await taskRegistry?.finish(invocationId, {
+            status: "failed",
+            result: message,
+            isError: true,
+            error: `Could not start detached worker: ${message}`,
+            messages: [],
+            runtime: runtimeInfo,
+          });
+          onSubagentEvent?.({
+            type: "subagent_end",
+            id: invocationId,
+            result: message,
+            success: false,
+            depth,
+            turns: 0,
+            totalTokens: 0,
+            runtime: runtimeInfo,
+            errors: [{ message, kind: "api" }],
+            autoDelegationInherited: false,
+          });
+          return { content: `Could not start detached sub-agent worker: ${message}`, isError: true };
+        }
+      }
+
+      // Background children are detached from the parent turn's cancellation.
+      const parentSignals = mergeAbortSignals(execSignal, signal);
+      let resolveDetached!: () => void;
+      const detachedPromise = new Promise<void>((resolve) => { resolveDetached = resolve; });
+      const markBackgrounded = (): boolean => {
+        if (isBackgrounded) return false;
+        isBackgrounded = true;
+        onSubagentEvent?.({
+          type: "subagent_backgrounded",
+          id: invocationId,
+          task: args.task,
+          depth,
+          ownerSessionId,
+        });
+        return true;
+      };
+      const onParentAbort = () => {
+        if (isBackgrounded) return;
+        if (parentSignals.signal.reason === "send_now" && backgroundPermissionTurn) {
+          if (markBackgrounded()) void taskRegistry?.markBackground(invocationId);
+          resolveDetached();
+          return;
+        }
+        if (!childController.signal.aborted) childController.abort(parentSignals.signal.reason);
+      };
+      if (parentSignals.signal.aborted) onParentAbort();
+      else parentSignals.signal.addEventListener("abort", onParentAbort, { once: true });
 
       // ── Timeout support ─────────────────────────────────────────
       let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -732,10 +910,42 @@ ${args.sharedContext}
       if (timeout && timeout > 0) {
         timeoutController = new AbortController();
         timeoutId = setTimeout(() => timeoutController!.abort(new Error("Sub-agent timeout exceeded")), timeout);
-        signalsToMerge.push(timeoutController.signal);
+      }
+      const merged = mergeAbortSignals(childController.signal, timeoutController?.signal);
+
+      let releaseConcurrencySlot = async (): Promise<void> => undefined;
+      if (taskRegistry && globalBudgetState?.scopeId && globalConcurrencyLimit && globalConcurrencyLimit > 0) {
+        try {
+          await taskRegistry.acquireGlobalConcurrencySlot(globalBudgetState.scopeId, invocationId, globalConcurrencyLimit, merged.signal);
+          releaseConcurrencySlot = () => taskRegistry!.releaseGlobalConcurrencySlot(globalBudgetState!.scopeId!, invocationId);
+        } catch (error) {
+          if (timeoutId !== undefined) clearTimeout(timeoutId);
+          merged.cleanup();
+          parentSignals.signal.removeEventListener("abort", onParentAbort);
+          parentSignals.cleanup();
+          backgroundPermissionTurn?.close();
+          const message = error instanceof Error ? error.message : String(error);
+          await taskRegistry.finish(invocationId, {
+            status: childController.signal.aborted ? "cancelled" : "failed",
+            result: message,
+            isError: true,
+            error: message,
+            messages: resumeRecord?.messages ?? [],
+            runtime: runtimeInfo,
+          });
+          return { content: message, isError: true };
+        }
       }
 
-      const merged = mergeAbortSignals(...signalsToMerge);
+      if (effectiveRunInBackground) {
+        onSubagentEvent?.({
+          type: "subagent_backgrounded",
+          id: invocationId,
+          task: args.task,
+          depth,
+          ownerSessionId,
+        });
+      }
 
       // ── Token & cost tracking ────────────────────────────────────
       let accumulatedTokens = 0;
@@ -767,6 +977,7 @@ ${args.sharedContext}
       const emittedWarnings = new Set<80 | 90 | 100>();
 
       // ── Run the nested loop ─────────────────────────────────────
+      const runPromise = (async (): Promise<import("../tools/types.ts").ToolResult> => {
       let finalMessages: AgentMessage[] = [];
       let success = true;
       let hitMaxTurns = false;
@@ -778,9 +989,10 @@ ${args.sharedContext}
           systemPrompt,
           maxTurns,
           signal: merged.signal,
+          ...(taskRegistry ? { getPendingUserMessages: () => taskRegistry.takeInputMessages(invocationId) } : {}),
           preprocessors,
-          permissionMode,
-          permissionTurn: getPermissionTurn?.() ?? permissionTurn,
+          permissionMode: childPermissionMode,
+          permissionTurn: childPermissionTurn,
           authorizeTool,
           ...(injectedChat ? { chat: injectedChat } : {}),
           // ── Pass through thinking mode & escalation ─────────────
@@ -791,6 +1003,15 @@ ${args.sharedContext}
           ...(effectiveRuntimeContext ? { runtimeContext: effectiveRuntimeContext } : {}),
           ...(effectiveToolExecutionBroker ? { toolExecutionBroker: effectiveToolExecutionBroker } : {}),
           ...(effectiveAudit ? { onToolExecutionAudit: effectiveAudit } : {}),
+          ...(resumeRecord?.messages ? { initialMessages: resumeRecord.messages } : {}),
+          ...(resumeRecord?.messages?.length && (
+            workerTaskId || (resumeRecord.status === "interrupted" && resumeRecord.task === args.task)
+          ) ? { isContinuation: true } : {}),
+          ...(taskRegistry ? {
+            onCheckpoint: async (checkpoint: import("../loop.ts").CheckpointContext) => {
+              await taskRegistry.checkpoint(invocationId, checkpoint.messages);
+            },
+          } : {}),
           // ── Pass through explicit skill names, otherwise inherit parent ──
           ...(() => {
             const inheritedSkillNames = args.skillNames?.length
@@ -926,6 +1147,15 @@ ${args.sharedContext}
           const partialResult = isTimeout && partialContent ? `[Partial] ${partialContent}` : partialContent;
 
           const { tokenBreakdown, estimatedCost } = getBreakdownAndCost();
+          if (isBackgrounded) await taskRegistry?.markBackground(invocationId);
+          await taskRegistry?.finish(invocationId, {
+            status: childController.signal.aborted ? "cancelled" : "failed",
+            result: partialContent ?? "",
+            isError: true,
+            error: isTimeout ? timeoutMessage : errorMessage,
+            messages: finalMessages,
+            runtime: runtimeInfo,
+          });
           onSubagentEvent?.({
             type: "subagent_end",
             id: invocationId,
@@ -951,10 +1181,6 @@ ${args.sharedContext}
             isError: true,
           };
         }
-      } finally {
-        // Clean up timeout and signal listeners
-        if (timeoutId !== undefined) clearTimeout(timeoutId);
-        merged.cleanup();
       }
 
       // ── Post-run timeout check ───────────────────────────────────
@@ -969,6 +1195,16 @@ ${args.sharedContext}
         const partialResult = recovered ? `[Partial] ${recovered}` : "";
         const timeoutMessage = `Sub-agent timed out after ${timeout}ms. Consider increasing the timeout or simplifying the task.`;
         const { tokenBreakdown, estimatedCost } = getBreakdownAndCost();
+        if (isBackgrounded) await taskRegistry?.markBackground(invocationId);
+        await taskRegistry?.finish(invocationId, {
+          status: "failed",
+          result: partialResult,
+          isError: true,
+          error: timeoutMessage,
+          partial: Boolean(recovered),
+          messages: finalMessages ?? [],
+          runtime: runtimeInfo,
+        });
         onSubagentEvent?.({
           type: "subagent_end",
           id: invocationId,
@@ -999,6 +1235,15 @@ ${args.sharedContext}
       success = extracted.text.length > 0 && !partial;
 
       const { tokenBreakdown, estimatedCost } = getBreakdownAndCost();
+      await taskRegistry?.finish(invocationId, {
+        status: childController.signal.aborted ? "cancelled" : extracted.text ? "completed" : "failed",
+        result: extracted.text,
+        isError: !extracted.text,
+        partial: partial || undefined,
+        error: extracted.text ? undefined : "Sub-agent completed without a recoverable final answer.",
+        messages: finalMessages ?? [],
+        runtime: runtimeInfo,
+      });
       onSubagentEvent?.({
         type: "subagent_end",
         id: invocationId,
@@ -1031,6 +1276,66 @@ ${args.sharedContext}
           : "";
 
       return { content: prefix + extracted.text, partial: partial || undefined };
+      })().finally(async () => {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+        merged.cleanup();
+        parentSignals.signal.removeEventListener("abort", onParentAbort);
+        parentSignals.cleanup();
+        backgroundPermissionTurn?.close();
+        await releaseConcurrencySlot();
+      });
+
+      const completed = runPromise.then(
+        (result) => ({ kind: "completed" as const, result }),
+        (error: unknown) => ({ kind: "failed" as const, error }),
+      );
+      const reportBackgroundFailure = (completion: Awaited<typeof completed>): void => {
+        if (completion.kind !== "failed") return;
+        const message = completion.error instanceof Error ? completion.error.message : String(completion.error);
+        void taskRegistry?.finish(invocationId, {
+          status: "failed",
+          result: message,
+          isError: true,
+          error: message,
+          messages: childRuntimeRef.history ?? [],
+          runtime: runtimeInfo,
+        });
+        onSubagentEvent?.({
+          type: "subagent_end",
+          id: invocationId,
+          result: message,
+          success: false,
+          depth,
+          turns: 0,
+          totalTokens: accumulatedTokens,
+          runtime: runtimeInfo,
+          errors: [{ message, kind: "api" }],
+          autoDelegationInherited: false,
+        });
+      };
+      if (effectiveRunInBackground) {
+        void completed.then(reportBackgroundFailure);
+        return { content: `Started sub-agent task ${invocationId} in the background. Use subagent_output or subagent_wait to retrieve its result.` };
+      }
+      let awaitBudgetTimer: ReturnType<typeof setTimeout> | undefined;
+      const awaitBudget = taskRegistry && foregroundAwaitBudgetMs > 0
+        ? new Promise<{ kind: "background" }>((resolve) => {
+            awaitBudgetTimer = setTimeout(() => resolve({ kind: "background" }), foregroundAwaitBudgetMs);
+          })
+        : new Promise<never>(() => {});
+      const outcome = await Promise.race([
+        completed,
+        detachedPromise.then(() => ({ kind: "background" as const })),
+        awaitBudget,
+      ]);
+      if (awaitBudgetTimer !== undefined) clearTimeout(awaitBudgetTimer);
+      if (outcome.kind === "background") {
+        if (markBackgrounded()) await taskRegistry?.markBackground(invocationId);
+        void completed.then(reportBackgroundFailure);
+        return { content: `Sub-agent ${invocationId} continues in the background; its result will be sent to the owning session when it finishes.` };
+      }
+      if (outcome.kind === "failed") throw outcome.error;
+      return outcome.result;
     },
   };
 }
@@ -1114,7 +1419,7 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
     ? { ...options, globalBudgetState: configuredGlobalBudgetState }
     : options;
   const singleTool = createSubagentTool(normalizedOptions);
-  const { profiles = [] } = normalizedOptions;
+  const { profiles = [], launchAsyncBatch, batchWorkerJobId } = normalizedOptions;
 
   const profileEnum =
     profiles.length > 0
@@ -1128,7 +1433,7 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
       "Run multiple sub-agents in parallel. Each task spawns an independent sub-agent that executes concurrently.",
       "Use this when you have multiple independent sub-tasks that can be done simultaneously.",
       "Results are collected and returned together once all sub-agents complete.",
-      "Use mode=async to submit a process-local DAG job and return a jobId; then call with action=status, result, or wait and jobId.",
+      "By default, CLI batch jobs run in a detached worker and return a jobId; use action=status, result, or wait with that jobId to manage them.",
       "Tasks may include dependsOn labels; dependent tasks receive successful dependency results as context.",
       "Optionally control concurrency with `maxConcurrency` to avoid overwhelming rate limits.",
     ].join(" "),
@@ -1142,7 +1447,7 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
     parameters: {
       type: "object",
       properties: {
-        mode: { type: "string", enum: ["sync", "async"], description: "Use async to submit a process-local DAG job and return immediately." },
+        mode: { type: "string", enum: ["sync", "async"], description: "Use async to submit a background DAG job and return immediately; sync waits for results." },
         action: { type: "string", enum: ["submit", "status", "result", "wait"], description: "Async job action. Defaults to submit in async mode." },
         jobId: { type: "string", description: "Existing async job identifier for status/result/wait." },
         waitTimeoutMs: { type: "integer", minimum: 0, description: "Maximum time to wait for completion; defaults to 30000ms." },
@@ -1225,41 +1530,77 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
       additionalProperties: false,
     },
 
-    execute: async (args: SubagentBatchArgs, execSignal?: AbortSignal): Promise<import("../tools/types.ts").ToolResult> => {
-      const executeAsyncTask = (task: SubagentBatchTask, dependencyContext: string) => singleTool.execute({
-        task: task.task,
-        profile: task.profile,
-        model: task.model,
-        maxTurns: task.maxTurns,
-        sharedContext: [task.sharedContext, dependencyContext].filter(Boolean).join("\\n\\n"),
-        thinkingMode: task.thinkingMode,
-        maxThinkingEscalations: task.maxThinkingEscalations,
-        contextPolicy: task.contextPolicy,
-        skillNames: task.skillNames,
-        inheritContextHistory: task.inheritContextHistory,
-        tokenBudget: task.tokenBudget,
-      }, execSignal);
+    execute: async (args: SubagentBatchArgs, execSignal?: AbortSignal, execution?: ToolExecutionOptions): Promise<import("../tools/types.ts").ToolResult> => {
+      const ownerSessionId = execution?.sessionId ?? normalizedOptions.parentRuntime?.executionContext?.sessionId;
+      const executeAsyncTask = async (task: SubagentBatchTask, dependencyContext: string, taskId: string) => {
+        const existing = await normalizedOptions.taskRegistry?.get(taskId, ownerSessionId);
+        if (existing?.status === "completed") return { content: existing.result ?? "", isError: existing.isError, partial: existing.partial };
+        if (existing?.status === "failed" || existing?.status === "cancelled") {
+          return { content: existing.error ?? existing.result ?? "Sub-agent task failed.", isError: true, partial: existing.partial };
+        }
+        return singleTool.execute({
+          taskId,
+          ...(existing?.status === "interrupted" ? { resumeFrom: taskId } : {}),
+          ...(task._callBudgetReserved ? { _callBudgetReserved: true } : {}),
+          runInBackground: false,
+          task: task.task,
+          profile: task.profile,
+          model: task.model,
+          maxTurns: task.maxTurns,
+          sharedContext: [task.sharedContext, dependencyContext].filter(Boolean).join("\\n\\n"),
+          thinkingMode: task.thinkingMode,
+          maxThinkingEscalations: task.maxThinkingEscalations,
+          contextPolicy: task.contextPolicy,
+          skillNames: task.skillNames,
+          inheritContextHistory: task.inheritContextHistory,
+          tokenBudget: task.tokenBudget,
+        }, execSignal, execution);
+      };
+      const runBatchJob = async (jobId: string): Promise<void> => {
+        if (batchWorkerJobId === jobId || !launchAsyncBatch) {
+          await resumeAsyncBatches(executeAsyncTask, jobId);
+          return;
+        }
+        if (!await claimAsyncBatchWorker(jobId)) return;
+        try {
+          await launchAsyncBatch({ jobId, ownerSessionId, workerOptions: await getAsyncBatchWorkerOptions(jobId) });
+        } catch (error) {
+          await setAsyncBatchWorkerPid(jobId, undefined).catch(() => undefined);
+          throw error;
+        }
+      };
+      const useAsync = args.mode === "async" || Boolean(args.action)
+        || (args.mode === undefined && Boolean(launchAsyncBatch) && !batchWorkerJobId);
       const sharedGlobalBudgetState = normalizedOptions.parentRuntime?.globalBudgetState
         ?? normalizedOptions.globalBudgetState;
-      if (args.mode === "async" || args.action) {
+      if (sharedGlobalBudgetState?.tokenLedger) {
+        sharedGlobalBudgetState.used = await sharedGlobalBudgetState.tokenLedger.readTokens();
+      }
+      if (sharedGlobalBudgetState?.callLedger) {
+        sharedGlobalBudgetState.callsUsed = await sharedGlobalBudgetState.callLedger.readCalls();
+      }
+      if (useAsync) {
         try {
           const action = args.action ?? "submit";
           if (action !== "submit") {
             if (!args.jobId) return { content: "jobId is required for async job actions.", isError: true };
             if (action === "wait") {
-              await resumeAsyncBatches(executeAsyncTask);
-              return { content: await waitAsyncBatch(args.jobId, args.waitTimeoutMs) };
+              await runBatchJob(args.jobId);
+              return { content: await waitAsyncBatch(args.jobId, args.waitTimeoutMs, ownerSessionId) };
             }
-            if (action === "status" || action === "result") await resumeAsyncBatches(executeAsyncTask);
-            return { content: await readAsyncBatch(args.jobId, action === "result") };
+            if (action === "status" || action === "result") await runBatchJob(args.jobId);
+            return { content: await readAsyncBatch(args.jobId, action === "result", ownerSessionId) };
           }
           if (!args.tasks?.length) return { content: "tasks are required to submit an async job.", isError: true };
-          const allocated = allocateBatchTokenBudgets(args.tasks, args.budgetAllocation, undefined);
+          const remaining = sharedGlobalBudgetState?.limit !== undefined
+            ? Math.max(0, sharedGlobalBudgetState.limit - sharedGlobalBudgetState.used)
+            : undefined;
+          const allocated = allocateBatchTokenBudgets(args.tasks, args.budgetAllocation, args.budgetAllocation ? remaining : undefined);
           // Pre-launch panel check (Grok Build agent_budget style): reject the
           // whole panel when the shared call budget cannot cover it.
           const callState = sharedGlobalBudgetState;
           const callLimit = callState?.callsLimit;
-          const callBudgetCheck = callLimit !== undefined
+          let callBudgetCheck = callLimit !== undefined
             ? (taskCount: number): string | undefined => {
                 const remaining = Math.max(0, callLimit - (callState?.callsUsed ?? 0));
                 if (taskCount > remaining) {
@@ -1268,11 +1609,42 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
                 return undefined;
               }
             : undefined;
-          const jobId = await submitAsyncBatch(args.tasks, async (task, dependencyContext) => {
-            const index = args.tasks!.indexOf(task);
-            const tokenBudget = allocated[index] === undefined ? task.tokenBudget : task.tokenBudget === undefined ? allocated[index] : Math.min(task.tokenBudget, allocated[index]!);
-            return singleTool.execute({ ...task, tokenBudget, sharedContext: [task.sharedContext, dependencyContext].filter(Boolean).join("\\n\\n") }, execSignal);
-          }, args.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY_BATCH, callBudgetCheck);
+          let callBudgetReserved = false;
+          if (callLimit !== undefined && sharedGlobalBudgetState?.callLedger) {
+            const validationError = validateAsyncDag(args.tasks);
+            if (validationError) return { content: validationError, isError: true };
+            const usedBefore = await sharedGlobalBudgetState.callLedger.readCalls();
+            const reserved = await sharedGlobalBudgetState.callLedger.reserveCalls(args.tasks.length, callLimit);
+            if (reserved === undefined) {
+              sharedGlobalBudgetState.callsUsed = usedBefore;
+              return {
+                content: `Sub-agent call budget exhausted: this batch needs ${args.tasks.length} calls but only ${Math.max(0, callLimit - usedBefore)} remain (limit ${callLimit}). Panel rejected before launch.`,
+                isError: true,
+              };
+            }
+            sharedGlobalBudgetState.callsUsed = reserved;
+            callBudgetReserved = true;
+            callBudgetCheck = undefined;
+          }
+          const deferred = Boolean(launchAsyncBatch && !batchWorkerJobId);
+          const preparedTasks = args.tasks.map((task, index) => {
+            const allocatedBudget = allocated[index];
+            return {
+              ...task,
+              ...(callBudgetReserved ? { _callBudgetReserved: true } : {}),
+              ...(allocatedBudget === undefined ? {} : {
+                tokenBudget: task.tokenBudget === undefined ? allocatedBudget : Math.min(task.tokenBudget, allocatedBudget),
+              }),
+            };
+          });
+          const jobId = await submitAsyncBatch(preparedTasks, executeAsyncTask,
+            args.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY_BATCH, callBudgetCheck,
+            {
+              deferExecution: deferred,
+              ownerSessionId,
+              ...(normalizedOptions.batchWorkerOptions ? { workerOptions: normalizedOptions.batchWorkerOptions } : {}),
+            });
+          if (deferred) await runBatchJob(jobId);
           return { content: JSON.stringify({ jobId, status: "running" }) };
         } catch (error) {
           return { content: error instanceof Error ? error.message : String(error), isError: true };
@@ -1306,6 +1678,21 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
           };
         }
       }
+      let callBudgetReserved = false;
+      if (sharedGlobalBudgetState?.callsLimit !== undefined && sharedGlobalBudgetState.callLedger) {
+        const usedBefore = await sharedGlobalBudgetState.callLedger.readCalls();
+        const reserved = await sharedGlobalBudgetState.callLedger.reserveCalls(args.tasks.length, sharedGlobalBudgetState.callsLimit);
+        if (reserved === undefined) {
+          sharedGlobalBudgetState.callsUsed = usedBefore;
+          const callRemaining = Math.max(0, sharedGlobalBudgetState.callsLimit - usedBefore);
+          return {
+            content: `Sub-agent call budget exhausted: this batch needs ${args.tasks.length} calls but only ${callRemaining} remain (limit ${sharedGlobalBudgetState.callsLimit}). Panel rejected before launch.`,
+            isError: true,
+          };
+        }
+        sharedGlobalBudgetState.callsUsed = reserved;
+        callBudgetReserved = true;
+      }
 
       // Run a single batch task, honoring the global concurrency slot and the
       // token budget allocated to that task.
@@ -1324,6 +1711,8 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
           }
           return await singleTool.execute(
             {
+              runInBackground: false,
+              ...(callBudgetReserved ? { _callBudgetReserved: true } : {}),
               task: task.task,
               profile: task.profile,
               model: task.model,
@@ -1337,6 +1726,7 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
               tokenBudget,
             },
             execSignal,
+            execution,
           );
         } finally {
           releaseGlobalSlot();

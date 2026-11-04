@@ -22,6 +22,7 @@ export interface TaskMeta {
   tags?: string[];
   notifyOnCompletion: boolean;
   notifiedAt?: string;
+  ownerSessionId?: string;
   /** Backend and process identity are persisted so another manager can recover the task. */
   backend?: BgBackendKind;
   pid?: number;

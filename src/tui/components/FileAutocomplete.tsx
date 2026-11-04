@@ -5,6 +5,8 @@ import type { PersistedSessionMeta } from "../../session-store.ts";
 import { SESSION_PICKER_HINT } from "../session-serialization.ts";
 import { PICKER_SELECTED_MARKER, PICKER_UNSELECTED_MARKER } from "../claude-style.ts";
 import { formatContextWindow as formatContextWindowShared } from "../status-line.ts";
+import type { ProfileSummary } from "../types.ts";
+import { configuredModelRowText, type ModelPickerSection } from "../model-picker.ts";
 
 // ─── Command palette ─────────────────────────────────────────────────────────
 
@@ -145,6 +147,9 @@ export function FileAutocomplete({ candidates, selectedIndex, prefix, maxVisible
 
 type ModelPickerProps = {
   candidates: string[];
+  configuredModels: ProfileSummary[];
+  section: ModelPickerSection;
+  showSections: boolean;
   contextWindows: Record<string, number>;
   selectedIndex: number;
   query: string;
@@ -163,33 +168,58 @@ export function formatContextWindow(value: number): string {
   return formatContextWindowShared(value);
 }
 
-export function ModelPicker({ candidates, contextWindows, selectedIndex, query, current, maxVisible = pickerMaxVisibleItems("model"), width }: ModelPickerProps): React.ReactElement | null {
-  const { visible, start } = pickerVisibleWindow(candidates, selectedIndex, maxVisible);
+export function ModelPicker({ candidates, configuredModels, section, showSections, contextWindows, selectedIndex, query, current, maxVisible = pickerMaxVisibleItems("model"), width }: ModelPickerProps): React.ReactElement | null {
+  const configured = showSections && section === "configured";
+  const items = configured
+    ? configuredModels.map((profile) => ({
+      key: profile.name,
+      label: configuredModelRowText(profile),
+      detail: "",
+    }))
+    : candidates.map((model) => ({
+      key: model,
+      label: modelNameLabel(model, model === current),
+      detail: `${formatContextWindow(contextWindows[model] ?? 0)} context`,
+    }));
+  const { visible, start } = pickerVisibleWindow(items, selectedIndex, maxVisible);
   // Fixed name column keeps model context sizes aligned.
-  const nameColumn = modelNameColumn(visible);
+  const nameColumn = configured ? 0 : modelNameColumn(visible.map((item) => item.key));
   return (
     <Box flexDirection="column" paddingX={2} width={width} minWidth={0} overflow="hidden">
       <Text dimColor wrap="truncate-end">── {pickerTitleText("model", { query })}</Text>
-      {visible.length === 0 && <Text color={C.running} wrap="truncate-end">No matching models</Text>}
-      {visible.map((model, i) => {
+      {showSections && <Box gap={2} minWidth={0}>
+        <Text color={configured ? C.running : C.muted} bold={configured} wrap="truncate-end">
+          {configured ? "[Configured models]" : "Configured models"} ({configuredModels.length})
+        </Text>
+        <Text color={!configured ? C.running : C.muted} bold={!configured} wrap="truncate-end">
+          {!configured ? "[All models]" : "All models"} ({candidates.length})
+        </Text>
+      </Box>}
+      {visible.length === 0 && <Text color={C.running} wrap="truncate-end">{configured ? "No configured models" : "No matching models"}</Text>}
+      {visible.map((item, i) => {
         const index = start + i;
         const selected = index === selectedIndex;
+        const label = configured
+          ? item.label
+          : item.label.padEnd(Math.max(1, Math.max(nameColumn, item.key.length + 4) - 1));
         return (
-          <Box key={model} gap={1} minWidth={0}>
+          <Box key={item.key} gap={1} minWidth={0}>
             <Text color={selected ? C.running : undefined} bold={selected}>
               {selected ? PICKER_SELECTED_MARKER : PICKER_UNSELECTED_MARKER}
             </Text>
             <Text color={selected ? C.assistant : C.muted} bold={selected} wrap="truncate-end">
-              {modelNameLabel(model, model === current).padEnd(Math.max(1, Math.max(nameColumn, model.length + 4) - 1))}
+              {label}
             </Text>
-            <Text dimColor wrap="truncate-end">{formatContextWindow(contextWindows[model] ?? 0)} context</Text>
+            {!configured && (
+              <Text dimColor wrap="truncate-end">{item.detail}</Text>
+            )}
           </Box>
         );
       })}
-      {candidates.length > visible.length && (
-        <Text dimColor wrap="truncate-end">{pickerRangeText(start, visible.length, candidates.length)}</Text>
+      {items.length > visible.length && (
+        <Text dimColor wrap="truncate-end">{pickerRangeText(start, visible.length, items.length)}</Text>
       )}
-      <Text dimColor wrap="truncate-end">{pickerHintText("model")}</Text>
+      <Text dimColor wrap="truncate-end">{pickerHintText(showSections ? "model-picker" : "model")}</Text>
     </Box>
   );
 }

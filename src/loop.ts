@@ -214,6 +214,8 @@ export type AgentLoopOptions = {
   userContent?: MessageContent;
   /** Optional cancellation signal for the whole turn. */
   signal?: AbortSignal;
+  /** Messages sent to a running background task, consumed between turns. */
+  getPendingUserMessages?: () => Promise<string[]>;
   /** Cooperative pause gate used by background orchestration jobs. */
   pauseGate?: PauseGate;
   /** Shared runtime identity and policy snapshot for tool execution. */
@@ -315,6 +317,17 @@ export type GlobalBudgetState = {
   callsUsed?: number;
   /** Hard cap on total subagent invocations (all depths, all batches). */
   callsLimit?: number;
+  /** Optional cross-process usage ledger used by detached workers. */
+  tokenLedger?: {
+    readTokens(): Promise<number>;
+    consumeTokens(delta: number): Promise<number>;
+  };
+  /** Namespace shared by cross-process budget and concurrency ledgers. */
+  scopeId?: string;
+  callLedger?: {
+    readCalls(): Promise<number>;
+    reserveCalls(count: number, limit: number): Promise<number | undefined>;
+  };
 };
 
 export type AgentRuntimeRef = {
@@ -777,6 +790,7 @@ async function runAgentTurnInternal(
     userContent,
     preprocessors = [],
     signal,
+    getPendingUserMessages,
     pauseGate,
     runtimeContext,
     toolExecutionBroker,
@@ -1011,6 +1025,18 @@ async function runAgentTurnInternal(
   const messages: AgentMessage[] = [...(runPolicy ? history : compactedHistory), ...initialBatch];
   let pendingHistoryCompaction = runPolicy && compactedHistory !== history
     ? [...compactedHistory, ...initialBatch] : undefined;
+  const appendPendingUserMessages = async (turn: number): Promise<boolean> => {
+    const pending = await getPendingUserMessages?.();
+    if (!pending?.length) return false;
+    const injected = await applyPreprocessors(
+      pending.map((content) => ({ role: "user" as const, content })),
+      finalPreprocessors,
+      preprocessContext,
+    );
+    messages.push(...injected);
+    await triggerCheckpoint("user_input", { turn });
+    return injected.length > 0;
+  };
 
   // ── Stall & Action Policy Detector ───────────────────────────────────────
   const sameActionLimit = runPolicy?.stallPolicy?.sameActionLimit ?? 3;
@@ -1094,11 +1120,13 @@ async function runAgentTurnInternal(
     emitAborted(onEvent, messages, permissionTurn);
     await triggerCheckpoint("interrupted");
   };
-  const emitAssistantEvent = (message: AssistantMessage, usage?: StreamChatUsage): void => {
+  const emitAssistantEvent = async (message: AssistantMessage, usage?: StreamChatUsage): Promise<void> => {
     const budget = activeRuntimeRef?.globalBudgetState;
     let exceeded = false;
     if (budget && usage?.totalTokens) {
-      budget.used += usage.totalTokens;
+      budget.used = budget.tokenLedger
+        ? await budget.tokenLedger.consumeTokens(usage.totalTokens)
+        : budget.used + usage.totalTokens;
       exceeded = budget.limit !== undefined && budget.used > budget.limit;
     }
     if (usage?.totalTokens) {
@@ -1239,7 +1267,7 @@ async function runAgentTurnInternal(
     // ── No tool calls ──────────────────────────────────────────────
     if (calls.length === 0) {
       if (assistant.content.trim().length === 0) {
-        emitAssistantEvent(assistant, usage);
+        await emitAssistantEvent(assistant, usage);
         emptyAssistantResponses += 1;
         if (emptyAssistantResponses > MAX_EMPTY_ASSISTANT_RESPONSES) {
           throw new Error(
@@ -1250,7 +1278,7 @@ async function runAgentTurnInternal(
       }
       emptyAssistantResponses = 0;
       messages.push(assistant);
-      emitAssistantEvent(assistant, usage);
+      await emitAssistantEvent(assistant, usage);
       
       // Check if this is a plan generation in planning phase
       if (sessionPhase === "planning" && onPlanEvent) {
@@ -1272,7 +1300,7 @@ async function runAgentTurnInternal(
     // ── Has tool calls ─────────────────────────────────────────────
     emptyAssistantResponses = 0;
     messages.push(assistant);
-    emitAssistantEvent(assistant, usage);
+    await emitAssistantEvent(assistant, usage);
 
     // Checkpoint 2: received full tool calls, before executing tools
     await triggerCheckpoint("before_tool", { turn, toolCall: calls[0] });
@@ -1470,7 +1498,7 @@ async function runAgentTurnInternal(
       const validationCall: ToolCall = { id: `auto_validation_${turn}`, name: "validate_workspace", arguments: {} };
       const validationAssistant: AssistantMessage = { role: "assistant", content: "", toolCalls: [validationCall] };
       messages.push(validationAssistant);
-      emitAssistantEvent(validationAssistant);
+      await emitAssistantEvent(validationAssistant);
       emitToolStart(validationCall);
       const report = await runValidation({ workspace: validationWorkspace, signal: activeSignal });
       const validationResult: ToolResult = { content: formatValidationReport(report), isError: !report.ok };
@@ -1501,12 +1529,14 @@ async function runAgentTurnInternal(
       emitAborted(onEvent, messages, permissionTurn);
       return messages;
     }
+    await appendPendingUserMessages(turn);
     const budgetExhaustedReason = checkPolicyBudgets(turn);
     if (budgetExhaustedReason) {
       const details = `Run budget exhausted (tokens=${tokensUsed}, tools=${toolCallsUsed}, writes=${writeCallsUsed}, elapsedMs=${Date.now() - startTime}); progress was saved.`;
       return stopRun(budgetExhaustedReason, details, turn - 1);
     }
     const loopBudget = activeRuntimeRef?.globalBudgetState;
+    if (loopBudget?.tokenLedger) loopBudget.used = await loopBudget.tokenLedger.readTokens();
     if (loopBudget?.limit !== undefined && loopBudget.used >= loopBudget.limit) {
       throw new Error(`Global agent token budget exhausted (${loopBudget.limit}).`);
     }
@@ -1579,6 +1609,7 @@ async function runAgentTurnInternal(
               ...(supportsProfile ? { profile: decision.profile } : {}),
               ...(autoPolicy.model ? { model: autoPolicy.model } : {}),
               ...(autoPolicy.maxTurns ? { maxTurns: autoPolicy.maxTurns } : {}),
+              runInBackground: false,
             },
           };
           const assistant: AssistantMessage = {
@@ -1587,7 +1618,7 @@ async function runAgentTurnInternal(
             toolCalls: [call],
           };
           messages.push(assistant);
-          emitAssistantEvent(assistant);
+          await emitAssistantEvent(assistant);
           emitToolStart(call);
 
           let result: ToolResult;
@@ -1721,7 +1752,7 @@ async function runAgentTurnInternal(
             if (streamed) {
               assistant = { role: "assistant", content: streamed };
               messages.push(assistant);
-              emitAssistantEvent(assistant);
+              await emitAssistantEvent(assistant);
             }
             emitAborted(onEvent, messages, permissionTurn);
             return messages;
@@ -1733,7 +1764,7 @@ async function runAgentTurnInternal(
             if (streamed) {
               const partial = { role: "assistant" as const, content: streamed };
               messages.push(partial);
-              emitAssistantEvent(partial);
+              await emitAssistantEvent(partial);
             }
             // Attach the accumulated messages so the caller can restore history.
             throw new LlmTimeoutError(
@@ -1894,7 +1925,11 @@ async function runAgentTurnInternal(
       messages: [...messages],
     });
 
-    if (action === "done" || action === "aborted") return messages;
+    if (action === "aborted") return messages;
+    if (action === "done") {
+      if (await appendPendingUserMessages(turn + 1)) continue;
+      return messages;
+    }
   }
 
   if (options.blockTurns !== undefined) return messages;

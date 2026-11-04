@@ -132,6 +132,8 @@ describe("standalone terminal render model", () => {
       commands: [],
       files: [],
       models: [],
+      configuredModels: [],
+      modelPickerSection: "catalog",
       sessions: [{ id: "abc123456789", createdAt: 1, lastActiveAt: 2, messageCount: 3, preview: "inspect the repository" }],
       modelContextWindows: {},
       modelQuery: "",
@@ -152,6 +154,8 @@ describe("standalone terminal render model", () => {
       commands: [],
       files: [],
       models: [],
+      configuredModels: [],
+      modelPickerSection: "catalog",
       sessions: Array.from({ length: 10 }, (_, index) => ({
         id: `session-${String(index + 1).padStart(2, "0")}`,
         createdAt: 1,

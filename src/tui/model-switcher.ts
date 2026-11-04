@@ -1,12 +1,15 @@
 import type { LlmConfig, ModelSwitchOverrides } from "../llm/index.ts";
 import type { ModelRef } from "../models.ts";
 import { findExactModelReferenceMatch, getAllModels, resolveModel } from "../models.ts";
+import { loadProfileStoreSync } from "../profile-store.ts";
 import { hasGatewayOverrides } from "./model-command.ts";
 
 export type ModelSwitcherCallbacks = {
   openModelPicker: (reference?: string, matches?: ModelRef[]) => void;
+  openProfileList: (profileNames?: string[]) => void;
+  activateSavedProfile: (profileName: string) => void;
   commitModelSetup: (setup: { model: ModelRef; baseUrl: string; apiKey: string; field: "apiKey" }, apiKey: string) => Promise<void>;
-  startModelSetup: (model: ModelRef, overrides: ModelSwitchOverrides) => void;
+  startModelSetup: (model: ModelRef, overrides: ModelSwitchOverrides) => void | Promise<void>;
 };
 
 /**
@@ -17,9 +20,32 @@ export function selectModel(
   overrides: ModelSwitchOverrides,
   callbacks: ModelSwitcherCallbacks,
 ): void {
-  const { openModelPicker, commitModelSetup, startModelSetup } = callbacks;
+  const { openModelPicker, openProfileList, activateSavedProfile, commitModelSetup, startModelSetup } = callbacks;
 
   const applyModel = (model: ModelRef) => {
+    const hasOverrides = Boolean(overrides.baseUrl || overrides.apiKey || overrides.protocol);
+    if (!hasOverrides) {
+      const store = loadProfileStoreSync();
+      const reference = `${model.provider}/${model.id}`.toLowerCase();
+      const savedProfiles = Object.entries(store?.profiles ?? {})
+        .filter(([, profile]) => profile.model.toLowerCase() === reference)
+        .map(([name]) => name);
+      const activeProfile = store?.activeProfile;
+
+      if (activeProfile && savedProfiles.includes(activeProfile)) {
+        activateSavedProfile(activeProfile);
+        return;
+      }
+      if (savedProfiles.length === 1) {
+        activateSavedProfile(savedProfiles[0]!);
+        return;
+      }
+      if (savedProfiles.length > 1) {
+        openProfileList(savedProfiles);
+        return;
+      }
+    }
+
     if (hasGatewayOverrides(overrides)) {
       void commitModelSetup(
         {

@@ -1,54 +1,164 @@
-# Mini Agent Runtime
+# Mini Agent Loop
 
-An extensible, production-oriented AI agent runtime for terminal, CLI, and HTTP
-workflows. Mini Agent combines multi-provider model access, tool execution,
-skills, MCP, sessions, subagents, Plan-Act workflows, Git operations, sandbox
-adapters, and vision/document processing behind reusable runtime APIs.
+[![npm version](https://img.shields.io/npm/v/%40krischen99999%2Fmini-agent-loop)](https://www.npmjs.com/package/@krischen99999/mini-agent-loop)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.19-43853d)](https://nodejs.org/)
 
-The project is actively developed as a usable agent product. The loop below is
-the core execution cycle, not the complete product boundary:
+An extensible TypeScript runtime for building and running coding agents. Use
+the same agent core from an interactive terminal, a one-shot CLI, or a local
+Web UI, then extend it with your own models, tools, skills, and workflows.
 
-```text
-user prompt
-  -> LLM (may return tool_calls)
-  -> for each tool_call (sequential):
-       validate args
-       execute tool
-       append tool result message
-  -> LLM again
-  -> stop when assistant has no tool_calls
-```
+## Recent Updates
 
-**Documentation:** [Architecture](docs/architecture.md) ·
-[Security model & permission matrix](docs/security-model.md) ·
-[Codebase analysis](docs/project-analysis.md)
+Recent updates make long tasks easier to manage and recover:
 
-## Requirements
+- Background shell and subagent tasks can be inspected, continued, or stopped.
+- Web and TUI runs checkpoint partial work and support budget-aware continuation.
+- The TUI has richer task controls, alongside a ready-to-select model catalog.
 
-- Node.js 22.19+
-- An OpenAI-compatible API key (for real model runs)
+See [Web UI](#web-ui), [Terminal TUI](#terminal-tui), and
+[Configuration](#configuration) for details.
 
-## Setup
+## What You Get
 
-Install the published CLI globally:
+| Capability | What it does |
+|---|---|
+| Multiple ways to run | Ink terminal UI, resumable CLI, and local Web chat with an HTTP/NDJSON API. |
+| Ready-to-select models | Browse the built-in multi-provider catalog from `/model`; configure a provider credential, then select an adapted model without defining its endpoint yourself. |
+| Coding tools | Read, edit, write, search, and run commands in a workspace, with argument validation and workspace boundary checks. |
+| Extensible workflows | Skills, explicitly configured MCP servers, Git operations, plans, and Plan-Act execution. |
+| Long-running work | Persistent sessions, background tasks, subagents, checkpoints, and resumable runs. |
+| Controlled execution | Plan mode for read-only analysis, explicit execution mode for writes, and configurable sandbox adapters. |
+
+## Quick Start
+
+Requires Node.js 22.19 or newer and an API key for a supported model provider.
+For example, configure an OpenAI-compatible provider and install the CLI:
 
 ```bash
 npm install --global @krischen99999/mini-agent-loop
-mini-agent-loop "用一句话介绍你自己"
+export OPENAI_API_KEY=your-api-key
+mini-agent-loop
 ```
 
-Or run it without a global install:
+To run one task directly instead of opening the interactive terminal:
 
 ```bash
-npx @krischen99999/mini-agent-loop "用一句话介绍你自己"
+mini-agent-loop-run "Summarize the project structure"
 ```
 
-For local development from the repository:
+The interactive terminal starts in `plan` mode. Use `Shift+Tab` to switch to
+`bypass` when you want to allow writes and other permitted actions. Provider
+credentials are still required for live model calls.
+
+For local development:
 
 ```bash
-cd mini-agent
 npm install
+npm run tui
 ```
+
+## How It Works
+
+All front ends use the same agent loop, tool registry, permission manager, and
+session store:
+
+```mermaid
+flowchart TB
+  subgraph Entry["One runtime, three entry points"]
+    direction LR
+    CLI["CLI<br/>One-shot runs and session resume"]
+    TUI["Terminal UI<br/>Interactive coding and task control"]
+    WEB["Web UI and HTTP API<br/>Browser chat and streamed events"]
+  end
+
+  CORE["Shared Agent Core<br/>Model turn | tool validation | permissions | context | events"]
+
+  subgraph Capabilities["Runtime capabilities"]
+    direction LR
+    MODELS["Model providers<br/>Catalog and adapters"]
+    TOOLS["Tools and sandbox<br/>Validate, execute, isolate"]
+    PERMISSIONS["Permissions<br/>Plan and bypass modes"]
+    SESSIONS["Sessions and runs<br/>Resume and checkpoints"]
+    EXTENSIONS["Extensions<br/>Skills, MCP, subagents"]
+  end
+
+  CLI --> CORE
+  TUI --> CORE
+  WEB --> CORE
+  CORE --> MODELS
+  CORE --> TOOLS
+  CORE --> PERMISSIONS
+  CORE --> SESSIONS
+  CORE --> EXTENSIONS
+
+  classDef cli fill:#e4f1ee,stroke:#9fc9bf,color:#165d59
+  classDef tui fill:#e9eff8,stroke:#b0c5e4,color:#315f91
+  classDef web fill:#fff0df,stroke:#e7c29a,color:#a8542d
+  classDef core fill:#17333b,stroke:#17333b,color:#ffffff
+  classDef models fill:#ffffff,stroke:#a9c9c3,color:#165d59
+  classDef tools fill:#ffffff,stroke:#b3c7e1,color:#315f91
+  classDef permissions fill:#ffffff,stroke:#dfc17e,color:#8d6a14
+  classDef sessions fill:#ffffff,stroke:#d9aa92,color:#a8542d
+  classDef extensions fill:#ffffff,stroke:#abc18d,color:#52793d
+
+  class CLI cli
+  class TUI tui
+  class WEB web
+  class CORE core
+  class MODELS models
+  class TOOLS tools
+  class PERMISSIONS permissions
+  class SESSIONS sessions
+  class EXTENSIONS extensions
+```
+
+Tool arguments are validated before execution. Tool failures are returned to
+the model as tool results, and each call receives a result before the next
+model turn.
+
+## Choose an Interface
+
+| Interface | Start it | Best for |
+|---|---|---|
+| Terminal UI | `mini-agent-loop` or `npm run tui` | Interactive coding, model selection, sessions, and task control. |
+| CLI | `mini-agent-loop-run "..."` or `npm start -- "..."` | One-shot jobs, scripting, and resuming sessions. |
+| Web UI | `mini-agent-loop-web` or `npm run web:start` | Browser-based chat, workspace selection, and streamed tool activity. |
+
+The Web UI can also be run in development with `npm run dev` for the API and
+`npm run web:dev` for the frontend. See [Web UI](#web-ui) for build and launch
+options.
+
+## Models and Extensions
+
+The built-in catalog includes adapted models from multiple providers. In the
+TUI, use `/model` to search and select one. You only need to provide that
+provider's API key; private gateways can be added through Web settings or
+`MINI_AGENT_MODELS`. Model selection and custom gateway setup are described in
+[Providers and models](#providers-and-models).
+
+The runtime also supports Skills, explicitly configured MCP servers, local
+tools, Git workflows, external repository analysis, vision preprocessing, and
+document handling. See the [SDK guide](docs/build-agent-guide.md) to build a
+specialized agent on top of the runtime.
+
+## Documentation
+
+- [Architecture](docs/architecture.md) — runtime flow, module map, and HTTP routes.
+- [Security model](docs/security-model.md) — permission modes, sandboxing, and network access.
+- [Web run policy](docs/web-run-policy.md) — budgets, checkpoints, and continue behavior.
+- [Build an agent](docs/build-agent-guide.md) — customize tools, profiles, and delegation.
+- [Project analysis](docs/project-analysis.md) — codebase structure and engineering notes.
+
+**In this README:** [Recent Updates](#recent-updates) · [Quick Start](#quick-start) ·
+[Interfaces](#choose-an-interface) ·
+[Models](#models-and-extensions) · [Configuration](#configuration) · [CLI](#cli) ·
+[Web UI](#web-ui) · [Integrations](#integrations) · [Terminal TUI](#terminal-tui) ·
+[Development](#development)
+
+## Configuration
+
+The environment variable reference and provider-specific setup follow. Most
+settings are optional; a live run needs a credential for the selected provider.
 
 ### Environment
 
@@ -78,10 +188,6 @@ npm install
 | `MINI_AGENT_STREAM_IDLE_TIMEOUT_MS` | no | `60000` after stream starts |
 | `MINI_AGENT_MODELS` | no | — |
 
-Timeouts can also be configured **per model** via the model catalog
-(`MINI_AGENT_MODELS` entries or built-in catalog entries), persisted profiles,
-or `switchLlmModel`. Resolution order: explicit config override → model
-catalog value → env var → default. See [Per-model timeouts](#per-model-timeouts).
 | `VISION_API_KEY` | no\* | — |
 | `VISION_BASE_URL` | no\* | — |
 | `VISION_MODEL` | no\* | — |
@@ -123,18 +229,25 @@ catalog value → env var → default. See [Per-model timeouts](#per-model-timeo
 | `MINI_AGENT_TUI_EMERGENCY_ITERATION_CAP` | no | `2000` (safety fallback) |
 | `MINI_AGENT_GLOBAL_TOKEN_BUDGET` | no | unlimited; shared by parent and nested subagents |
 | `MINI_AGENT_GLOBAL_CONCURRENCY_LIMIT` | no | unlimited; applies across overlapping batches |
+| `MINI_AGENT_GLOBAL_SUBAGENT_CALL_BUDGET` | no | unlimited; shared by parent and nested subagents |
 | `MINI_AGENT_AUTO_SUBAGENT` | no | enabled by default; set `0`/`false`/`off` to disable |
 | `MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE` | no | `2` |
 | `MINI_AGENT_AUTO_SUBAGENT_PROFILE` | no | auto (`researcher`/`coder`/`reviewer`) |
 | `MINI_AGENT_AUTO_SUBAGENT_MODEL` | no | parent model |
 | `MINI_AGENT_AUTO_SUBAGENT_MAX_TURNS` | no | profile/default |
 | `MINI_AGENT_AUTO_SUBAGENT_ALLOW_WRITES` | no | disabled; automatic preflight stays read-only |
+| `MINI_AGENT_SUBAGENT_AWAIT_BUDGET_MS` | no | `600000`; foreground sub-agents continue in background after this wait budget (`0` disables auto-backgrounding) |
 
-\* Real runs need at least one supported provider key.
-`/model` only lists
-models whose declared key is configured.
+\* Configure a key for the provider selected for a live model call. The model
+picker can show catalog entries before their provider key is set. Vision
+variables are optional unless a separate vision model is being configured.
 
-### LLM timeout recovery
+Timeouts can also be configured **per model** via the model catalog
+(`MINI_AGENT_MODELS` entries or built-in catalog entries), persisted profiles,
+or `switchLlmModel`. Resolution order: explicit config override → model
+catalog value → env var → default. See [Per-model timeouts](#per-model-timeouts).
+
+### Request timeout recovery
 
 LLM requests use three deadlines. The first-response deadline covers waiting for
 the provider to start responding. The stream-idle deadline resets whenever a
@@ -147,7 +260,7 @@ and is not replayed automatically. Nested sub-agent timeouts return any
 recovered partial text to the parent as an error result, allowing the parent to
 choose whether to retry or simplify the task.
 
-### Web task execution policy and recovery
+### Web task policy and recovery
 
 Web tasks use `AgentRunPolicy` by default. Token and time budgets, tool and write
 call budgets, context compactions, and stalled-action detection determine when
@@ -255,26 +368,14 @@ When the inner loop stops at a bounded stop (safety cap or run budget), the
 subagent recovers its partial tool progress and returns it to the parent with a
 `[Partial]` marker instead of discarding the work.
 
-To restore pure LLM-only delegation:
+Set `MINI_AGENT_AUTO_SUBAGENT=0` to skip preflight and leave delegation to the
+model:
 
 ```bash
-export MINI_AGENT_AUTO_SUBAGENT=1
-export MINI_AGENT_AUTO_SUBAGENT_PROFILE=researcher  # optional
+export MINI_AGENT_AUTO_SUBAGENT=0
 ```
 
-The loop scores the initial request using explainable signals such as prompt
-length, multi-step language, code/workspace context, and investigation terms.
-When the score reaches `MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE`, it runs one
-subagent preflight before the parent model call, then returns the result to the
-parent context. The option is not propagated into nested subagents, so this
-does not recursively trigger automatic preflights. Leave the flag unset to
-keep the existing LLM-only delegation behavior.
-
-The vision variables are optional. For the generic provider, the three
-`VISION_API_KEY`, `VISION_BASE_URL`, and `VISION_MODEL` values must be set
-together. When configured, images sent to a text-only main model are analyzed
-first by the vision model. Without them, the existing `IMAGE_POLICY`
-degradation applies.
+### Providers and models
 
 #### OpenAI
 
@@ -380,7 +481,7 @@ In the TUI, select one of the registered free routes:
 
 Requests go to `https://api.orcarouter.ai/v1/chat/completions`.
 
-#### Model providers
+#### Built-in catalog and custom providers
 
 The built-in catalog contains the generated multi-provider model definitions.
 Run the TUI, then use `/model` to search all adapted models:
@@ -513,8 +614,13 @@ The same fields may be persisted on a profile in `~/.mini-agent/models.json`
 
 DeepSeek remains the text reasoning model. A separate OpenAI-compatible vision
 model converts images into structured observations before DeepSeek is called.
-The adapter is provider-neutral; for example, a DashScope-compatible Qwen VL
-configuration can be placed in `.env`:
+The adapter is provider-neutral. The vision variables are optional; for the
+generic provider, set
+`VISION_API_KEY`, `VISION_BASE_URL`, and `VISION_MODEL` together. When
+configured, images sent to a text-only main model are analyzed before the main
+model call. Without them, the existing `IMAGE_POLICY` degradation applies.
+For example, a DashScope-compatible Qwen VL configuration can be placed in
+`.env`:
 
 ```bash
 DEEPSEEK_API_KEY=sk-...
@@ -551,33 +657,28 @@ errors are retried once by default. Set `VISION_FALLBACK_MODEL` to try another
 vision model after those retries; fallback is opt-in to avoid unexpected API
 usage.
 
-## Run
+## CLI
 
-**Important:** scripts live in `mini-agent/package.json`. Always `cd` into `mini-agent` first.
-If you run from the parent folder (`agent loop/`), npm reports `Missing script: "start"`.
+Run these commands from the repository root, where `package.json` is located.
 
 ```bash
-cd "/Users/chenjiaxu/Project/agent loop/mini-agent"
-
 # offline unit tests (no key)
 npm test
 npm run typecheck
 
 # live agent (needs API key in .env or export)
-npm start -- "用一句话介绍你自己"
-npm start -- "读取 package.json 并总结项目名"
-npm start -- "描述图片并提取可见文字" --image ./shot.png
-npm start -- "比较两张图片" --image ./a.png --image ./b.png
+npm start -- "Summarize the project structure"
+npm start -- "Describe this image" --image ./shot.png
 
 # resume the most recent session in the current workspace
-npm start -- --continue "继续完成之前的工作"
+npm start -- --continue "Continue the previous task"
 
 # resume a specific session, or list sessions when no id is supplied
-npm start -- --resume <session-id> "继续这个会话"
+npm start -- --resume <session-id> "Continue this session"
 npm start -- --resume
 
 # resume into a new fork without changing the source session
-npm start -- --resume <session-id> --fork-session "从这里开始新的分支"
+npm start -- --resume <session-id> --fork-session "Start a new branch here"
 
 # equivalent without npm script:
 npx tsx src/cli.ts "读取 package.json 并总结项目名"
@@ -587,7 +688,7 @@ Do **not** write `npm start ` with a trailing space in the script name, and keep
 
 Events (`assistant` / `tool_start` / `tool_end` / `done`) log to stderr; final assistant text prints to stdout.
 
-## GUI chat
+## Web UI
 
 The GUI keeps model credentials and file tools in a local Node server. The
 browser receives sanitized text/tool events and never receives API keys or
@@ -646,10 +747,45 @@ immediately return its task ID.
 The resulting task is managed by the same `bg_status`, `bg_logs`, `bg_wait`,
 and `bg_kill` tools. Omitting the flag starts the command in the foreground.
 Foreground Bash commands that exceed the default 15-second wait budget are
-automatically returned as background tasks; `Ctrl+G` promotes the currently
-waiting command immediately in the TUI. Set `MINI_AGENT_BG_FOREGROUND_MS` to
-change the wait budget (`0` waits until the Bash `timeout` value). Background
-completion appears as a TUI notice.
+automatically returned as background tasks. In the TUI, `Ctrl+G` promotes the
+currently waiting command while leaving the current turn running; submitting a
+message with Enter during that wait promotes the command and sends the message
+immediately. Enter also sends immediately while waiting on `bg_wait` or a
+subagent when no earlier message is queued. During other busy phases, Enter
+queues a message; pressing Enter again with an empty input sends the next queued
+message, and `Ctrl+Enter` cancels the current turn and sends the draft. Set
+`MINI_AGENT_BG_FOREGROUND_MS` to change the wait budget (`0` waits until the
+Bash `timeout` value). Background completion displays the final 4 kB of
+output in the TUI and sends an unconsumed completion result to the agent; a
+task already being awaited by a tool does not trigger a duplicate agent turn.
+
+Sub-agent calls in TUI, the CLI, and persistent server sessions start in the background
+by default and return a `sub_...` task ID. CLI tasks run in detached worker
+processes, so they continue after the one-shot parent command exits. Use
+`subagent_tasks` to list tasks, `subagent_output` to read status and output,
+`subagent_wait` to wait for one or more tasks, `subagent_send` to queue an
+additional instruction for the next model turn, and `subagent_kill` to cancel
+running work. In the CLI, `subagent_batch` also runs in a detached worker by
+default and returns a `jobId`; use its `status`, `result`, and `wait` actions to
+manage the persisted DAG. Specify `mode: "sync"` when the caller needs batch
+results in the same tool call. Set
+`runInBackground: false` when a caller needs the result in the same tool call.
+A foreground call that exceeds `MINI_AGENT_SUBAGENT_AWAIT_BUDGET_MS` continues
+in the background instead of blocking its parent indefinitely. Completed
+transcripts are saved under `.subagent-tasks/` and can be continued with
+`resumeFrom` plus a new task prompt. If a worker exits unexpectedly, its task
+is recorded as interrupted and restarted from its saved checkpoint on the next
+CLI invocation for that session. Detached batch jobs are also resumed when
+their owning session is opened again.
+Running `mini-agent-loop-run --continue` or `--resume <session-id>` delivers an
+unconsumed completion as an untrusted system reminder in the next turn.
+
+An unconsumed background sub-agent completion wakes its owning TUI or HTTP
+session once. The server queues a new session job after the current session
+operation releases its execution lease. The wake is suppressed when the result
+was read or waited for, the task was killed, `MINI_AGENT_AUTO_WAKE` is disabled,
+or a Plan-Act execution is active. Set `MINI_AGENT_AUTO_WAKE=0` to disable
+completion wakeups.
 
 The HTTP API accepts `workspaceId` or `sessionId` to select a workspace. Its
 routes are `GET/POST /api/background-tasks`,
@@ -696,6 +832,8 @@ name and requested question are sent to it.
 All tools still use relative paths and reject paths that escape the configured
 workspace or resolve through an outside symlink. `.git` and `node_modules`
 remain protected by the workspace sandbox.
+
+## Integrations
 
 ### Shell execution on Windows
 
@@ -787,7 +925,9 @@ resources as untrusted data. OAuth, sampling, elicitation, and task-required
 tools remain out of scope. The TUI status row shows a compact connection
 summary such as `MCP 2 ready` when servers are configured.
 
-Local API:
+### HTTP API
+
+The local server exposes these session and workflow routes:
 
 ```text
 GET    /api/health
@@ -803,13 +943,18 @@ POST   /api/sessions/:id/messages  multipart(prompt, referencedPaths, images) ->
 POST   /api/sessions/:id/fork     { messageId? | messageIndex? } -> new session
 POST   /api/sessions/:id/rewind   { messageId? | messageIndex } -> truncated session
 GET    /api/sessions/tree         session fork tree
+```
 
 Session detail messages include stable `id` values. `messageId` retains the
 selected message and everything before it; `messageIndex` remains supported
 for clients using the original count-based API. Truncation never leaves a
 partial assistant tool-call block.
 
-# Per-session plan workflow (stored under dataDir/session-plans/:id)
+#### Session plan workflow
+
+Plans are stored under `dataDir/session-plans/:id`.
+
+```text
 GET    /api/sessions/:id/plan
 POST   /api/sessions/:id/plan                 { prompt, plan, autoApprove? }
 POST   /api/sessions/:id/plan/approve         { by? }
@@ -945,7 +1090,9 @@ Profiles may persist an optional `thinkingLevel` plus optional per-model
 timeout overrides (`timeoutMs`, `firstResponseTimeoutMs`,
 `streamIdleTimeoutMs`) applied when that profile is active.
 
-## Test (offline)
+## Development
+
+### Tests
 
 Uses Node’s built-in test runner + a scripted faux model (no API key):
 
@@ -969,7 +1116,7 @@ Coverage includes:
 - vision failure prevents an unsupported model from guessing
 - permission modes (`plan` / `bypass`)
 
-## Layout
+### Project layout
 
 See [`docs/architecture.md`](docs/architecture.md) for the full directory map,
 the front-end/runtime boundary, and the HTTP route-module breakdown.
@@ -992,7 +1139,7 @@ mini-agent-loop/
   docs/                        # architecture, security model, design notes
 ```
 
-## Invariants
+### Runtime invariants
 
 1. Validate tool args before execute
 2. Tool failure is a **message** (`isError`), not a loop crash
@@ -1004,15 +1151,9 @@ mini-agent-loop/
 Policy stops emit `run_stopped` with the stop reason and preserve partial
 history; normal completion is driven by the assistant returning no tool calls.
 
-## Current boundaries
+### Deployment notes
 
-Mini Agent is a product runtime, not a tutorial implementation. The repository
-includes CLI and terminal UIs, an HTTP/NDJSON server, multi-provider LLM
-adapters, workspace tools, MCP and Skills integration, persistent sessions,
-subagents, Plan-Act workflows, Git workflows, sandbox adapters, and
-vision/document support.
-
-Deployment still requires an explicit provider, persistence, observability, and
-security setup. In particular, sandbox availability, live provider behavior,
-network policy, and long-running job recovery must be validated for the target
-environment rather than inferred from offline tests alone.
+Before deploying, configure a provider, persistence, observability, and security
+for the target environment. Validate sandbox availability, network policy, live
+provider behavior, and long-running job recovery; offline tests do not cover
+those deployment-specific conditions.

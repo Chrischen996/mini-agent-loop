@@ -9,8 +9,17 @@ import type { PermissionMode } from "./permissions.ts";
 import type { ModelThinkingLevel } from "./pi-ai/types.ts";
 import type { ThinkingMode } from "./thinking-policy.ts";
 import type { SessionPhase, ExecutionPlan } from "./plan-act/types.ts";
-import type { TodoItem } from "./tools/todo.ts";
+import type { TodoItem, TodoStatus } from "./todo.ts";
 import type { AgentRunPolicy } from "./loop.ts";
+
+export type PersistedTodoItem = {
+  id: string;
+  content: string;
+  activeForm?: string;
+  status: TodoStatus;
+  source?: TodoItem["source"];
+  error?: string;
+};
 
 export type WebRunStatus = "running" | "completed" | "paused" | "interrupted" | "failed";
 export type WebRunReason =
@@ -61,7 +70,7 @@ type SessionCreatedEvent = {
   skillNames?: string[];
   phase?: SessionPhase;
   currentPlan?: ExecutionPlan;
-  todos?: TodoItem[];
+  todos?: PersistedTodoItem[];
   todoVersion?: number;
   parentSessionId?: string;
   forkedFromMessage?: number;
@@ -85,7 +94,7 @@ type SessionSnapshotEvent = {
   phase?: SessionPhase;
   currentPlan?: ExecutionPlan | null;
   messages: AgentMessage[];
-  todos?: TodoItem[];
+  todos?: PersistedTodoItem[];
   todoVersion?: number;
   runState?: WebRunState | null;
   parentSessionId?: string;
@@ -127,7 +136,7 @@ export type PersistedSession = {
   /** Session-bound project cwd, equivalent to Harness SessionHeader.cwd. */
   cwd?: string;
   messages: AgentMessage[];
-  todos?: TodoItem[];
+  todos?: PersistedTodoItem[];
   todoVersion?: number;
   runState?: WebRunState | null;
   parentSessionId?: string;

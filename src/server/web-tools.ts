@@ -26,6 +26,8 @@ import { BgTaskManager, stableBgTaskInstanceId } from "../bg-tasks/manager.js";
 import {
   createSubagentTool,
   createSubagentBatchTool,
+  createSubagentTaskTools,
+  SubagentTaskRegistry,
   type SubagentProfile,
   type SubagentEvent,
   type SubagentToolOptions,
@@ -71,6 +73,7 @@ export type WebSubagentConfig = {
   signal?: AbortSignal;
   chat?: ChatFn;
   permissionTurn?: PermissionTurnContext;
+  getBackgroundPermissionTurn?: () => PermissionTurnContext;
   parentRuntime: AgentRuntimeRef;
   runtimeContext?: RuntimeExecutionContext;
   thinkingMode?: ThinkingMode;
@@ -80,6 +83,7 @@ export type WebSubagentConfig = {
   globalTokenBudget?: number;
   globalConcurrencyLimit?: number;
   onSubagentEvent?: (event: SubagentEvent) => void;
+  taskRegistry?: SubagentTaskRegistry;
   subagentEnabled?: boolean;
 };
 
@@ -176,6 +180,8 @@ export function createWebSubagentToolSet(input: WebSubagentConfig): {
     signal: input.signal,
     chat: input.chat,
     onSubagentEvent: input.onSubagentEvent,
+    getBackgroundPermissionTurn: input.getBackgroundPermissionTurn,
+    taskRegistry: input.taskRegistry,
     permissionTurn: input.permissionTurn,
     thinkingMode:
       input.thinkingMode ??
@@ -201,6 +207,7 @@ export function createWebSubagentToolSet(input: WebSubagentConfig): {
           ...currentBase,
           createSubagentTool(subagentOptions) as Tool,
           createSubagentBatchTool(subagentOptions) as Tool,
+          ...(input.taskRegistry ? createSubagentTaskTools(input.taskRegistry) : []),
         ];
       }
     : input.parentTools;
@@ -236,6 +243,7 @@ export type WebToolSuiteOptions = {
  */
 export class WebToolSuite {
   private readonly sharedToolProviders = new Map<string, ToolProvider>();
+  private readonly subagentTaskRegistries = new Map<string, SubagentTaskRegistry>();
   private readonly bgTaskRuntimes = new Map<
     string,
     {
@@ -308,10 +316,16 @@ export class WebToolSuite {
     llm: LlmConfig;
     signal?: AbortSignal;
     permissionTurn?: PermissionTurnContext;
+    getBackgroundPermissionTurn?: () => PermissionTurnContext;
     parentRuntime: AgentRuntimeRef;
     runtimeContext?: RuntimeExecutionContext;
     onSubagentEvent?: (event: SubagentEvent) => void;
   }): { subagent: Tool; tools: ToolProvider } {
+    let taskRegistry = this.subagentTaskRegistries.get(config.workspaceRoot);
+    if (!taskRegistry) {
+      taskRegistry = new SubagentTaskRegistry(config.workspaceRoot);
+      this.subagentTaskRegistries.set(config.workspaceRoot, taskRegistry);
+    }
     const baseTools = createWebSessionToolProvider({
       sessionId: config.session.id,
       workspace: config.workspaceRoot,
@@ -330,6 +344,7 @@ export class WebToolSuite {
       signal: config.signal,
       chat: this.options.chat,
       permissionTurn: config.permissionTurn,
+      getBackgroundPermissionTurn: config.getBackgroundPermissionTurn,
       parentRuntime: config.parentRuntime,
       runtimeContext: config.runtimeContext,
       thinkingMode: config.session.thinkingMode ?? this.options.thinkingMode,
@@ -339,6 +354,7 @@ export class WebToolSuite {
       globalTokenBudget: this.options.globalTokenBudget,
       globalConcurrencyLimit: this.options.globalConcurrencyLimit,
       onSubagentEvent: config.onSubagentEvent,
+      taskRegistry,
       subagentEnabled: this.options.subagentEnabled,
     });
   }

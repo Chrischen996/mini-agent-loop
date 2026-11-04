@@ -73,11 +73,11 @@ describe("bg-tasks TUI surface", () => {
     assert.match(command!.description, /background task/i);
   });
 
-  it("registers the task dashboard command and lists it in help", () => {
+  it("registers the agent dashboard command and lists it in help", () => {
     const command = SLASH_COMMANDS.find((entry) => entry.name === "dashboard");
     assert.ok(command);
     assert.equal(command!.usage, "/dashboard");
-    assert.match(command!.description, /background task/i);
+    assert.match(command!.description, /agents and subagents/i);
     assert.match(formatHelpNotice(), /\/dashboard/);
   });
 

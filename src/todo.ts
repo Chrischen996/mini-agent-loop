@@ -12,6 +12,13 @@ export function nextTodoRevision(): number {
   return todoRevisionCounter;
 }
 
+/** Keep newly generated revisions newer than the version restored from disk. */
+export function advanceTodoRevisionFloor(revision: number): void {
+  if (Number.isSafeInteger(revision) && revision > todoRevisionCounter) {
+    todoRevisionCounter = revision;
+  }
+}
+
 export function isTodoRevisionNewer(currentRevision: number | undefined, incomingRevision: number): boolean {
   return incomingRevision > (currentRevision ?? 0);
 }

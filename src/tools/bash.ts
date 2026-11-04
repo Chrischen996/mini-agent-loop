@@ -123,6 +123,7 @@ export function createBashTool(
             command: args.command,
             cwd: path.relative(projectRoot, commandCwd) || undefined,
             timeoutSeconds: args.timeout,
+            ownerSessionId: execution?.sessionId,
           });
           return {
             content: `Started background task ${task.taskId} (${task.name}); status: ${task.status}. Use bg_status, bg_logs, bg_wait, or bg_kill to manage it.`,
@@ -143,6 +144,7 @@ export function createBashTool(
             command: args.command,
             cwd: path.relative(projectRoot, commandCwd) || undefined,
             notifyOnCompletion: false,
+            ownerSessionId: execution?.sessionId,
           });
           const budgetMs = foregroundBlockBudgetMs(timeoutSeconds);
           let resolvePromoted!: (value: "background") => void;
@@ -158,12 +160,17 @@ export function createBashTool(
             resolvePromoted("background");
             return true;
           });
+          const waitController = new AbortController();
+          const waitSignal = signal
+            ? AbortSignal.any([signal, waitController.signal])
+            : waitController.signal;
           try {
             const outcome = await Promise.race([
-              backgroundTaskManager.wait([task.taskId], "all", budgetMs / 1000, signal)
+              backgroundTaskManager.wait([task.taskId], "all", budgetMs / 1000, waitSignal, execution?.sessionId)
                 .then((result) => result.timedOut ? "background" as const : "completed" as const),
               promoted,
             ]);
+            if (outcome === "background") waitController.abort();
             if (outcome === "completed") return await completedBackgroundResult(backgroundTaskManager, task.taskId);
 
             await backgroundTaskManager.enableCompletionNotification(task.taskId);
@@ -180,6 +187,7 @@ export function createBashTool(
             }
             throw err;
           } finally {
+            waitController.abort();
             unregisterForegroundWait();
           }
         } catch (err) {

@@ -2,7 +2,7 @@ import { restoreAgentHistory } from "../loop.ts";
 import { contentAsString } from "../content.ts";
 import { switchLlmModel, type LlmConfig } from "../llm/index.ts";
 import { withThinkingLevel } from "../think-intensity.ts";
-import { nextTodoRevision, type TodoItem } from "../todo.ts";
+import { advanceTodoRevisionFloor, nextTodoRevision, type TodoItem } from "../todo.ts";
 import type { AgentMessage } from "../types.ts";
 import type { PersistedSession, PersistedSessionMeta } from "../session-store.ts";
 import {
@@ -154,13 +154,7 @@ export function toPersistedTodos(
 ): PersistedSession["todos"] {
   if (!items) return undefined;
   return items.map((item) => ({
-    id: item.id,
-    content: item.content,
-    activeForm: item.activeForm,
-    // The wire format predates TUI-only failed/skipped states.
-    status: item.status === "completed" || item.status === "in_progress" || item.status === "failed" || item.status === "skipped"
-      ? item.status
-      : "pending" as const,
+    ...item,
   }));
 }
 
@@ -170,11 +164,9 @@ export function fromPersistedTodos(
 ): TodoItem[] | undefined {
   if (!items) return undefined;
   return items.map((item) => ({
-    id: item.id,
-    content: item.content,
+    ...item,
     activeForm: item.activeForm ?? item.content,
-    status: item.status,
-    source: "model" as const,
+    source: item.source ?? "model",
   }));
 }
 
@@ -248,9 +240,11 @@ export function restoreTuiSession(
   restoreHistory: SessionHistoryRestorer = (value, prompt) => restoreAgentHistory(value.messages, prompt),
 ): RestoredTuiSession {
   const todos = fromPersistedTodos(session.todos);
+  const todoRevision = session.todoVersion ?? (todos ? nextTodoRevision() : 0);
+  advanceTodoRevisionFloor(todoRevision);
   return {
     history: restoreHistory(session, systemPrompt),
     todos,
-    todoRevision: session.todoVersion ?? (todos ? nextTodoRevision() : 0),
+    todoRevision,
   };
 }

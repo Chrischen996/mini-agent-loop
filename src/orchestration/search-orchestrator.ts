@@ -19,7 +19,7 @@
  */
 
 import { contentAsString } from "../content.ts";
-import type { Tool, ToolProvider } from "../tools/types.ts";
+import type { Tool, ToolExecutionOptions, ToolProvider } from "../tools/types.ts";
 import { createSubagentTool, defaultProfiles } from "../subagent/index.ts";
 import type { SubagentArgs, SubagentProfile } from "../subagent/types.ts";
 import type { ChatFn, LlmConfig } from "../llm/index.ts";
@@ -419,7 +419,7 @@ export async function runSearchOrchestration(
   });
 
   const invoke = async (args: SubagentArgs): Promise<string> => {
-    const result = await tool.execute(args, options.signal);
+    const result = await tool.execute({ ...args, runInBackground: false }, options.signal);
     const text = contentAsString(result.content);
     if (result.isError) throw new Error(text);
     return text;
@@ -595,7 +595,7 @@ export function createSearchOrchestrationTool(
       required: ["query"],
     },
     annotations: { readOnlyHint: true, openWorldHint: true },
-    async execute(rawArgs, signal) {
+    async execute(rawArgs, signal, execution) {
       const args = (rawArgs ?? {}) as Record<string, unknown>;
       const query = typeof args.query === "string" ? args.query.trim() : "";
       if (!query) {
@@ -604,9 +604,17 @@ export function createSearchOrchestrationTool(
       const maxTasks = typeof args.maxTasks === "number" && Number.isInteger(args.maxTasks)
         ? Math.min(Math.max(args.maxTasks, 1), 12)
         : undefined;
+      const subagent = options.subagent && execution
+        ? {
+            ...options.subagent,
+            execute: (subagentArgs: SubagentArgs, subagentSignal?: AbortSignal, subagentExecution?: ToolExecutionOptions) =>
+              options.subagent!.execute(subagentArgs, subagentSignal, subagentExecution ?? execution),
+          }
+        : options.subagent;
       try {
         const result = await runSearchOrchestration({
           ...options,
+          ...(subagent ? { subagent } : {}),
           query,
           ...(maxTasks !== undefined ? { maxTasks } : {}),
           ...(signal ?? options.signal ? { signal: signal ?? options.signal } : {}),

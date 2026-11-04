@@ -38,3 +38,8 @@ export function compactText(
 export function stripLeadingBlankLines(value: string): string {
   return value.replace(/^([ \t]*\n)+/, "");
 }
+
+/** Prepare the bounded visible tail used by the transcript's live stream row. */
+export function streamingPreviewTail(value: string, maxLines = 10): string {
+  return compactStreamingText(stripLeadingBlankLines(value), maxLines);
+}

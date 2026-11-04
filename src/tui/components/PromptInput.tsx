@@ -40,10 +40,14 @@ export type PromptInputProps = {
   /** Called when an empty single-line prompt has no history entry to navigate. */
   onScrollContext?: (direction: "up" | "down") => void;
   /** Let an owning overlay handle selected control chords before prompt editing. */
-  onControlKey?: (input: string, key: { ctrl?: boolean; meta?: boolean }) => boolean;
+  onControlKey?: (input: string, key: { ctrl?: boolean; meta?: boolean; return?: boolean }) => boolean;
 };
 
 const MAX_VISIBLE_LINES = 10;
+
+function isKittyCtrlEnter(data: string): boolean {
+  return /^\x1b?\[13;5u$/.test(data);
+}
 
 export function estimatePromptInputRows(value: string, width: number, placeholder = ""): number {
   const columns = Math.max(1, Math.floor(width));
@@ -150,9 +154,19 @@ export function PromptInput({
       // handles SGR and X10 mouse reports; keep complete mouse or kitty
       // keyboard-protocol sequences out of the prompt value if Ink forwards
       // them here as text.
-      if (isMouseEvent(input) || isKittyProtocolKey(input)) return;
+      if (isMouseEvent(input)) return;
+      if ((key.ctrl || key.meta) && onControlKey?.(input, key)) return;
       const currentParts = partsRef.current;
       const currentCursor = clampCursor(cursorRef.current, currentParts.length);
+
+      if (isKittyCtrlEnter(input)) {
+        if (!onControlKey?.(input, { ctrl: true, return: true })) {
+          const inserted = insertAt(currentParts, currentCursor, "\n");
+          apply(inserted.next, inserted.cursor);
+        }
+        return;
+      }
+      if (isKittyProtocolKey(input)) return;
 
       if (key.tab && key.shift) {
         // Shift+Tab is handled by the global keyboard handler for permission mode cycling.
@@ -169,8 +183,6 @@ export function PromptInput({
         onTab?.(valueRef.current);
         return;
       }
-
-      if ((key.ctrl || key.meta) && onControlKey?.(input, key)) return;
 
       if (key.return) {
         if (key.meta || key.ctrl) {

@@ -36,6 +36,7 @@ export interface BgTaskSummary {
   attachCommand?: string;
   reason?: string;
   tags?: string[];
+  ownerSessionId?: string;
 }
 
 export interface LogChunk {
@@ -78,6 +79,7 @@ export interface StartTaskInput {
   cpuLimit?: number;
   memoryLimit?: string;
   notifyOnCompletion?: boolean;
+  ownerSessionId?: string;
 }
 
 export interface SnapshotInput {
@@ -101,6 +103,12 @@ export interface WaitResult {
   pending: string[];
   timedOut: boolean;
 }
+
+type CompletionSubscription = {
+  listener: (task: BgTaskSummary) => void;
+  sessionId?: string;
+  isActive: () => boolean;
+};
 
 function isTerminalStatus(status: string): boolean {
   return !["starting", "running", "unknown"].includes(status);
@@ -146,10 +154,13 @@ export class BgTaskManager extends EventEmitter {
   private readonly watchers = new Map<string, FSWatcher>();
   private readonly timeoutTimers = new Map<string, NodeJS.Timeout>();
   private readonly seenCompletions = new Set<string>();
-  private readonly activeWaiters = new Map<string, number>();
+  private readonly activeWaiters = new Map<string, Map<string, number>>();
   private readonly foregroundWaiters = new Map<string, () => Promise<boolean>>();
   private readonly pendingCompletionNotifications = new Map<string, BgTaskSummary>();
+  private readonly completionSubscriptions = new Set<CompletionSubscription>();
   private readonly crashingTasks = new Set<string>();
+  private readonly waitedCompletions = new Map<string, Set<string>>();
+  private readonly backgroundedForegroundTasks = new Set<string>();
   private reconciliationTimer?: NodeJS.Timeout;
   private cleanupHandler?: () => void;
   private healthCheckTimer?: NodeJS.Timeout;
@@ -268,6 +279,7 @@ export class BgTaskManager extends EventEmitter {
       status: "starting",
       createdAt: new Date().toISOString(),
       notifyOnCompletion: input.notifyOnCompletion ?? true,
+      ownerSessionId: input.ownerSessionId,
       backend: this.backend.kind,
       sessionName,
       socketName: this.backend.socketName,
@@ -318,7 +330,7 @@ export class BgTaskManager extends EventEmitter {
       const meta = await this.store.readMeta(paths);
       if (meta?.status === "running" && meta.instanceId !== this.instanceId) {
         if (meta.restartable && (meta.currentRetry ?? 0) < (meta.maxRetries ?? 3)) {
-          await this.start({ command: meta.command, name: meta.name, cwd: meta.cwd });
+          await this.start({ command: meta.command, name: meta.name, cwd: meta.cwd, ownerSessionId: meta.ownerSessionId });
         }
       }
     }
@@ -338,7 +350,7 @@ export class BgTaskManager extends EventEmitter {
       const meta = await this.store.readMeta(paths);
       if (meta?.restartable && (meta.currentRetry ?? 0) < (meta.maxRetries ?? 3)) {
         await this.store.updateMeta(paths, (m) => ({ ...m, currentRetry: (m.currentRetry ?? 0) + 1 }));
-        await this.start({ command: meta.command, name: meta.name, cwd: meta.cwd });
+        await this.start({ command: meta.command, name: meta.name, cwd: meta.cwd, ownerSessionId: meta.ownerSessionId });
       }
     } finally {
       this.crashingTasks.delete(taskId);
@@ -374,10 +386,10 @@ export class BgTaskManager extends EventEmitter {
     return { snapshotPath };
   }
 
-  async replay(input: ReplayInput): Promise<BgTaskSummary> {
+  async replay(input: ReplayInput, ownerSessionId?: string): Promise<BgTaskSummary> {
     const raw = await readFile(input.snapshot, "utf8");
     const snapshot = JSON.parse(raw);
-    return this.start({ command: snapshot.command, name: snapshot.name, cwd: snapshot.cwd, tags: snapshot.tags });
+    return this.start({ command: snapshot.command, name: snapshot.name, cwd: snapshot.cwd, tags: snapshot.tags, ownerSessionId });
   }
 
   async expandTemplate(template: string): Promise<string> {
@@ -476,6 +488,7 @@ export class BgTaskManager extends EventEmitter {
       attachCommand: finalResult || taskBackend.kind !== "tmux" ? undefined : (taskBackend as BgTmuxBackend).attachCommand(sessionName),
       reason: finalResult?.reason,
       tags: meta.tags,
+      ownerSessionId: meta.ownerSessionId,
     };
   }
 
@@ -593,15 +606,21 @@ export class BgTaskManager extends EventEmitter {
     return (await this.get(taskId)) ?? current;
   }
 
-  async wait(taskIds: string[], mode: "any" | "all" = "all", timeoutSeconds?: number, signal?: AbortSignal): Promise<WaitResult> {
+  async wait(taskIds: string[], mode: "any" | "all" = "all", timeoutSeconds?: number, signal?: AbortSignal, sessionId?: string): Promise<WaitResult> {
     const unique = [...new Set(taskIds)];
     if (unique.length === 0) throw new Error("taskIds must not be empty");
+    const waiterKey = sessionId ?? "\0";
     for (const taskId of unique) {
-      const summary = await this.get(taskId);
-      if (!summary) throw new Error(`Task not found: ${taskId}`);
-      this.activeWaiters.set(taskId, (this.activeWaiters.get(taskId) ?? 0) + 1);
+      this.backgroundedForegroundTasks.delete(taskId);
+      const waiters = this.activeWaiters.get(taskId) ?? new Map<string, number>();
+      waiters.set(waiterKey, (waiters.get(waiterKey) ?? 0) + 1);
+      this.activeWaiters.set(taskId, waiters);
     }
     try {
+      const initialSummaries = await Promise.all(unique.map((taskId) => this.get(taskId)));
+      for (const [index, task] of initialSummaries.entries()) {
+        if (!task) throw new Error(`Task not found: ${unique[index]}`);
+      }
       const deadline = timeoutSeconds === undefined ? undefined : Date.now() + timeoutSeconds * 1000;
       while (true) {
         if (signal?.aborted) throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
@@ -610,9 +629,11 @@ export class BgTaskManager extends EventEmitter {
         const completed = valid.filter((task) => isTerminalStatus(task.status));
         const satisfied = mode === "all" ? completed.length === unique.length : completed.length > 0;
         if (satisfied) {
+          this.markWaitedCompletions(completed, waiterKey);
           return { mode, completed, pending: valid.filter((t) => !isTerminalStatus(t.status)).map((t) => t.taskId), timedOut: false };
         }
         if (deadline !== undefined && Date.now() >= deadline) {
+          this.markWaitedCompletions(completed, waiterKey);
           return { mode, completed, pending: valid.filter((t) => !isTerminalStatus(t.status)).map((t) => t.taskId), timedOut: true };
         }
         const waitMs = deadline === undefined ? 1000 : Math.max(1, Math.min(1000, deadline - Date.now()));
@@ -620,29 +641,69 @@ export class BgTaskManager extends EventEmitter {
       }
     } finally {
       for (const taskId of unique) {
-        const count = (this.activeWaiters.get(taskId) ?? 1) - 1;
-        if (count <= 0) this.activeWaiters.delete(taskId);
-        else this.activeWaiters.set(taskId, count);
+        const waiters = this.activeWaiters.get(taskId);
+        const count = (waiters?.get(waiterKey) ?? 1) - 1;
+        if (count <= 0) waiters?.delete(waiterKey);
+        else waiters?.set(waiterKey, count);
+        if (waiters?.size === 0) this.activeWaiters.delete(taskId);
       }
     }
   }
 
-  isActivelyWaited(taskId: string): boolean {
-    return (this.activeWaiters.get(taskId) ?? 0) > 0;
+  isActivelyWaited(taskId: string, sessionId?: string): boolean {
+    if (this.backgroundedForegroundTasks.has(taskId)) return false;
+    const waiters = this.activeWaiters.get(taskId);
+    if (sessionId === undefined) return Boolean(waiters?.size);
+    return (waiters?.get(sessionId) ?? 0) > 0 || (waiters?.get("\0") ?? 0) > 0;
+  }
+
+  wasWaitedToCompletion(taskId: string, sessionId?: string): boolean {
+    if (this.backgroundedForegroundTasks.has(taskId)) return false;
+    const sessions = this.waitedCompletions.get(taskId);
+    if (!sessions) return false;
+    if (sessionId === undefined) {
+      this.waitedCompletions.delete(taskId);
+      return sessions.size > 0;
+    }
+    const waited = sessions.delete(sessionId);
+    const anonymousWaited = sessions.delete("\0");
+    if (sessions.size === 0) this.waitedCompletions.delete(taskId);
+    return waited || anonymousWaited;
+  }
+
+  private markWaitedCompletions(tasks: BgTaskSummary[], sessionId: string): void {
+    for (const task of tasks) {
+      if (this.seenCompletions.has(task.taskId) && !this.pendingCompletionNotifications.has(task.taskId)) continue;
+      const sessions = this.waitedCompletions.get(task.taskId) ?? new Set<string>();
+      sessions.add(sessionId);
+      this.waitedCompletions.set(task.taskId, sessions);
+    }
   }
 
   registerForegroundWait(taskId: string, promote: () => Promise<boolean>): () => void {
     this.foregroundWaiters.set(taskId, promote);
+    this.emit("foreground-wait-changed", this.isForegroundWaiting());
     return () => {
-      if (this.foregroundWaiters.get(taskId) === promote) this.foregroundWaiters.delete(taskId);
+      if (this.foregroundWaiters.get(taskId) !== promote) return;
+      this.foregroundWaiters.delete(taskId);
+      this.emit("foreground-wait-changed", this.isForegroundWaiting());
     };
+  }
+
+  isForegroundWaiting(): boolean {
+    return this.foregroundWaiters.size > 0;
   }
 
   async backgroundForegroundTask(): Promise<string | undefined> {
     const entries = [...this.foregroundWaiters.entries()].reverse();
     for (const [taskId, promote] of entries) {
+      this.backgroundedForegroundTasks.add(taskId);
       const promoted = await promote().catch(() => false);
-      this.foregroundWaiters.delete(taskId);
+      if (!promoted) this.backgroundedForegroundTasks.delete(taskId);
+      if (this.foregroundWaiters.get(taskId) === promote) {
+        this.foregroundWaiters.delete(taskId);
+        this.emit("foreground-wait-changed", this.isForegroundWaiting());
+      }
       if (promoted) return taskId;
     }
     return undefined;
@@ -663,13 +724,40 @@ export class BgTaskManager extends EventEmitter {
     }
   }
 
-  onCompletion(listener: (task: BgTaskSummary) => void): () => void {
-    this.on("completion", listener);
+  onCompletion(listener: (task: BgTaskSummary) => void, sessionId?: string, isActive: () => boolean = () => true): () => void {
+    const subscription = { listener, sessionId, isActive };
+    this.completionSubscriptions.add(subscription);
     for (const [taskId, task] of this.pendingCompletionNotifications) {
+      if (!this.matchesCompletionSubscription(task, subscription)) continue;
       this.pendingCompletionNotifications.delete(taskId);
       listener(task);
+      this.waitedCompletions.delete(taskId);
+      this.backgroundedForegroundTasks.delete(taskId);
     }
-    return () => this.off("completion", listener);
+    return () => this.completionSubscriptions.delete(subscription);
+  }
+
+  private matchesCompletionSubscription(task: BgTaskSummary, subscription: CompletionSubscription): boolean {
+    if (subscription.sessionId === undefined) return true;
+    if (task.ownerSessionId !== undefined) return task.ownerSessionId === subscription.sessionId;
+    return subscription.isActive();
+  }
+
+  private dispatchCompletion(task: BgTaskSummary): boolean {
+    const subscriptions = [...this.completionSubscriptions].filter((subscription) =>
+      this.matchesCompletionSubscription(task, subscription));
+    const hasEventListeners = this.listenerCount("completion") > 0;
+    if (hasEventListeners) this.emit("completion", task);
+    for (const subscription of subscriptions) subscription.listener(task);
+    if (subscriptions.length > 0) {
+      this.waitedCompletions.delete(task.taskId);
+      this.backgroundedForegroundTasks.delete(task.taskId);
+    }
+    if (subscriptions.length === 0 && !hasEventListeners) {
+      this.pendingCompletionNotifications.set(task.taskId, task);
+      return true;
+    }
+    return subscriptions.length > 0;
   }
 
   dispose(): void {
@@ -687,6 +775,9 @@ export class BgTaskManager extends EventEmitter {
     this.watchers.clear();
     this.timeoutTimers.clear();
     this.pendingCompletionNotifications.clear();
+    this.completionSubscriptions.clear();
+    this.waitedCompletions.clear();
+    this.backgroundedForegroundTasks.clear();
     this.backend.dispose();
     this.removeAllListeners();
   }
@@ -736,8 +827,13 @@ export class BgTaskManager extends EventEmitter {
       });
       this.emit("settled", summary);
       if (shouldNotify) {
-        if (this.listenerCount("completion") > 0) this.emit("completion", summary);
-        else this.pendingCompletionNotifications.set(taskId, summary);
+        if (!this.dispatchCompletion(summary)) {
+          this.waitedCompletions.delete(taskId);
+          this.backgroundedForegroundTasks.delete(taskId);
+        }
+      } else {
+        this.waitedCompletions.delete(taskId);
+        this.backgroundedForegroundTasks.delete(taskId);
       }
       this.emit("changed", summary);
     }

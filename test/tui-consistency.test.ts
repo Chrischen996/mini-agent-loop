@@ -251,6 +251,28 @@ describe("shared TUI presentation", () => {
     assert.equal(rows.at(-1)?.text, pickerHintText("model"));
   });
 
+  it("keeps configured profiles in their own model-picker section", () => {
+    const rows = autocompleteRenderLines({
+      mode: "model-picker",
+      index: 0,
+      commands: [],
+      files: [],
+      models: ["openai/gpt-4o-mini"],
+      configuredModels: [{ name: "spark-grok", model: "xai/grok-4", baseUrl: "https://gateway.example/v1", active: true }],
+      modelPickerSection: "configured",
+      sessions: [],
+      modelContextWindows: { "openai/gpt-4o-mini": 128_000 },
+      modelQuery: "",
+      fileFragment: "",
+      sessionLoading: false,
+    } as never);
+
+    assert.match(rows[1]?.text ?? "", /Configured models\] \(1\).*All models \(1\)/);
+    assert.match(rows[2]?.text ?? "", /spark-grok \(xai\/grok-4\).*gateway\.example/);
+    assert.equal(rows.some((row) => row.text.includes("sk-")), false);
+    assert.match(rows.at(-1)?.text ?? "", /←\/→ switch section/);
+  });
+
   it("gives every palette row its own spelling", () => {
     const usages = SLASH_COMMANDS.map((command) => command.usage);
     assert.equal(new Set(usages).size, usages.length, "two commands advertise identical usage text");
@@ -381,8 +403,8 @@ describe("shared TUI presentation", () => {
     assert.ok(short.length <= 24, `frame overflows: ${short.length} rows`);
     assert.ok(short.some((line) => line.startsWith("╭")), "welcome panel lost its top border");
     assert.ok(short.some((line) => line.startsWith("╰")), "welcome panel lost its bottom border");
-    assert.equal(short.filter((line) => line.includes("context")).length, 4);
-    assert.ok(short.includes("Showing 1-4 / 40"));
+    assert.equal(short.filter((line) => line.includes("context")).length, 3);
+    assert.ok(short.includes("Showing 2-4 / 40"));
     assert.ok(short.some((line) => line.startsWith("❯ /model")), "prompt disappeared");
 
     // A tall terminal still gets the shared cap, and a very short one drops the

@@ -3,7 +3,12 @@ import { listCandidates } from "./file-completion.ts";
 import { modelChoices } from "./model-command.ts";
 import type { ModelRef } from "../models.ts";
 import type { PersistedSessionMeta } from "../session-store.ts";
-import type { ModelSetupState, PendingProfileSetup, ProfileListState, RoleSetupState } from "./types.ts";
+import type { ModelSetupState, PendingProfileSetup, ProfileListState, RoleSetupState, ProfileSummary } from "./types.ts";
+import {
+  filterConfiguredModelProfiles,
+  loadConfiguredModelProfiles,
+  type ModelPickerSection,
+} from "./model-picker.ts";
 import type { ResumeMessageCandidate } from "./session-serialization.ts";
 import { type AcMode, type FileAcTrigger } from "./input-utils.ts";
 import {
@@ -20,6 +25,8 @@ export type TerminalAutocompleteState = {
   commands: CommandDef[];
   files: string[];
   models: string[];
+  configuredModels: ProfileSummary[];
+  modelPickerSection: ModelPickerSection;
   sessions: PersistedSessionMeta[];
   resumeMessages?: ResumeMessageCandidate[];
   modelContextWindows: Record<string, number>;
@@ -52,6 +59,8 @@ const EMPTY_STATE: TerminalAutocompleteState = {
   commands: [],
   files: [],
   models: [],
+  configuredModels: [],
+  modelPickerSection: "catalog",
   sessions: [],
   resumeMessages: [],
   modelContextWindows: {},
@@ -74,6 +83,9 @@ export class TerminalAutocompleteController {
   private requestId = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private readonly options: TerminalAutocompleteOptions;
+  private configuredModels: ProfileSummary[] = [];
+  private modelPickerLoadId = 0;
+  private modelPickerSectionPinned = false;
 
   constructor(options: TerminalAutocompleteOptions) {
     this.options = options;
@@ -168,7 +180,12 @@ export class TerminalAutocompleteController {
     if (resolution.kind === "sticky") return;
     if (resolution.kind === "model-picker") {
       const choices = modelChoices(resolution.query);
-      this.setState({ ...EMPTY_STATE, mode: "model-picker", modelQuery: resolution.query, models: choices.references, modelContextWindows: choices.contextWindows });
+      const configuredModels = filterConfiguredModelProfiles(this.configuredModels, resolution.query);
+      const modelPickerSection: ModelPickerSection = this.modelPickerSectionPinned
+        ? this.state.modelPickerSection
+        : configuredModels.length > 0 ? "configured" : "catalog";
+      const activeCount = modelPickerSection === "configured" ? configuredModels.length : choices.references.length;
+      this.setState({ ...EMPTY_STATE, mode: "model-picker", modelQuery: resolution.query, models: choices.references, configuredModels, modelPickerSection, modelContextWindows: choices.contextWindows, index: Math.min(this.state.index, Math.max(0, activeCount - 1)) });
       return;
     }
     if (resolution.kind === "command") {
@@ -200,6 +217,9 @@ export class TerminalAutocompleteController {
     if (this.timer) clearTimeout(this.timer);
     this.requestId += 1;
     this.fileTrigger = null;
+    this.modelPickerLoadId += 1;
+    this.configuredModels = [];
+    this.modelPickerSectionPinned = false;
     this.setState({ ...EMPTY_STATE });
   }
 
@@ -209,10 +229,25 @@ export class TerminalAutocompleteController {
 
   openModelPicker(query = "", models?: ModelRef[]): void {
     const choices = modelChoices(query, models);
+    const requestId = ++this.modelPickerLoadId;
+    this.modelPickerSectionPinned = false;
     // Match Ink's openModelPicker: keep a bare query so empty input displays
     // the `Search models` placeholder rather than `/model `.
     this.options.setInput(query);
     this.setState({ ...EMPTY_STATE, mode: "model-picker", modelQuery: query, models: choices.references, modelContextWindows: choices.contextWindows });
+    void loadConfiguredModelProfiles().then((profiles) => {
+      if (requestId !== this.modelPickerLoadId || this.state.mode !== "model-picker") return;
+      this.configuredModels = profiles;
+      const configuredModels = filterConfiguredModelProfiles(profiles, this.state.modelQuery);
+      this.setState({
+        ...this.state,
+        configuredModels,
+        modelPickerSection: this.modelPickerSectionPinned
+          ? this.state.modelPickerSection
+          : configuredModels.length > 0 ? "configured" : "catalog",
+        index: 0,
+      });
+    });
   }
 
   openModelSetup(setup: ModelSetupState): void {
@@ -291,7 +326,11 @@ export class TerminalAutocompleteController {
     const action = resolveAutocompleteNav(state.mode, key, navIndex, {
       commands: state.argumentCandidates?.length ?? state.commands.length,
       files: state.files.length,
-      models: state.models.length,
+      models: state.mode === "model-picker" && state.modelPickerSection === "configured"
+        ? state.configuredModels.length
+        : state.models.length,
+      configuredModels: this.configuredModels.length,
+      modelPickerSection: state.modelPickerSection,
       profiles: state.profileListState?.profiles.length ?? 0,
       sessions: state.mode === "resume-messages" ? (state.resumeMessages?.length ?? 0) : state.sessions.length,
     });
@@ -326,11 +365,21 @@ export class TerminalAutocompleteController {
         return true;
       }
       case "accept-model": {
+        if (state.mode === "model-picker" && state.modelPickerSection === "configured") {
+          const profile = state.configuredModels[state.index];
+          if (profile) this.options.setInput(`/model ${profile.model}`);
+          this.clear();
+          return true;
+        }
         const chosen = state.models[state.index];
         if (chosen) this.options.setInput(`/model ${chosen}`);
         this.clear();
         return true;
       }
+      case "toggle-model-section":
+        this.modelPickerSectionPinned = true;
+        this.setState({ ...state, modelPickerSection: action.section, index: 0 });
+        return true;
       case "accept-session": {
         const session = state.sessions[state.index];
         if (session) this.options.setInput(`/resume ${session.id}`);

@@ -55,6 +55,7 @@ export function pickerRequestedItems(mode: string | undefined, count = Number.PO
 
 /** Chrome rows around the candidate list: title, optional range row, hint. */
 export function pickerChromeRows(mode: string | undefined): number {
+  if (mode === "model-picker") return 4;
   return mode && PICKER_RANGE_ROW_MODES.has(mode) ? 3 : 2;
 }
 
@@ -138,8 +139,9 @@ export function pickerHintText(mode: string, options?: { argumentPalette?: boole
     case "file":
       return "Tab/→ complete  ↑↓ navigate  Esc close";
     case "model":
-    case "model-picker":
       return "Enter select  ↑↓ navigate  Esc cancel";
+    case "model-picker":
+      return "Enter select  ←/→ switch section  ↑↓ navigate  Esc cancel";
     case "resume-messages":
       return "Enter rewind here  ↑↓ navigate  Esc back";
     case "profile-list":

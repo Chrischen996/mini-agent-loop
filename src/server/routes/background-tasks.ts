@@ -26,7 +26,7 @@ export type BackgroundTaskManagerLike = {
   screen(taskId: string, lines?: number): Promise<LogChunk>;
   send(taskId: string, input: SendTaskInput): Promise<BgTaskSummary>;
   terminate(taskId: string, force?: boolean): Promise<BgTaskSummary>;
-  wait(taskIds: string[], mode?: "any" | "all", timeoutSeconds?: number): Promise<WaitResult>;
+  wait(taskIds: string[], mode?: "any" | "all", timeoutSeconds?: number, signal?: AbortSignal, sessionId?: string): Promise<WaitResult>;
 };
 
 export type BackgroundTaskSession = {
@@ -43,7 +43,7 @@ export type BackgroundTaskRoutesContext = {
   authorize?: (request: Request, toolName: "bg_start" | "bg_send" | "bg_kill", args: Record<string, unknown>) => Promise<void>;
 };
 
-type SelectedWorkspace = { root: string; workspaceId?: string };
+type SelectedWorkspace = { root: string; workspaceId?: string; sessionId?: string };
 type SelectionError = { status: number; error: string };
 
 function stringValue(value: unknown): string | undefined {
@@ -75,7 +75,7 @@ function selectWorkspace(
     return { status: 404, error: "Session workspace not found" };
   }
   const root = session?.cwd ?? sessionWorkspace?.path ?? selected?.path ?? context.workspace;
-  return { root, workspaceId: sessionWorkspace?.id ?? selected?.id };
+  return { root, workspaceId: sessionWorkspace?.id ?? selected?.id, ...(sessionId ? { sessionId } : {}) };
 }
 
 function sendSelectionError(response: Response, selection: SelectionError): false {
@@ -193,6 +193,7 @@ export function registerBackgroundTaskRoutes(
       })) return;
       const taskInput: StartTaskInput = {
         command,
+        ownerSessionId: selected.workspace.sessionId,
         ...(stringValue(request.body?.name)?.trim() ? { name: stringValue(request.body.name)!.trim() } : {}),
         ...(await boundedCwd(selected.workspace.root, request.body?.cwd)
           .then((cwd) => cwd ? { cwd } : {})),
@@ -215,7 +216,7 @@ export function registerBackgroundTaskRoutes(
       if (taskIds.length === 0) throw new Error("taskIds must contain between 1 and 50 task IDs");
       const mode = request.body?.mode === "any" ? "any" : "all";
       const timeoutSeconds = parsePositiveInteger(request.body?.timeoutSeconds, "timeoutSeconds", 86_400);
-      const result = await selected.runtime.manager.wait(taskIds, mode, timeoutSeconds);
+      const result = await selected.runtime.manager.wait(taskIds, mode, timeoutSeconds, undefined, selected.workspace.sessionId);
       response.json({ result });
     } catch (error) {
       sendJsonError(response, 400, error);

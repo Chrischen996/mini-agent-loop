@@ -17,6 +17,7 @@ import type { PermissionMode, PermissionTurnContext } from "../permissions.ts";
 import type { Tool } from "../tools/types.ts";
 import type { ThinkingMode } from "../thinking-policy.ts";
 import type { AgentMessage } from "../types.ts";
+import type { SubagentTaskRegistry } from "./task-registry.ts";
 
 // ─── Subagent configuration ─────────────────────────────────────────────────
 
@@ -123,6 +124,24 @@ export type SubagentToolOptions = {
   globalConcurrencyLimit?: number;
   /** Full tool set available to the parent; subagent picks a subset. */
   parentTools: ToolProvider;
+  /** Shared task registry for background lifecycle and transcript recovery. */
+  taskRegistry?: SubagentTaskRegistry;
+  /** Start a detached worker for background tasks when the client supports it. */
+  launchBackgroundTask?: (input: {
+    taskId: string;
+    ownerSessionId?: string;
+    args: SubagentArgs;
+  }) => Promise<void>;
+  /** Start a detached worker that owns a persisted asynchronous batch job. */
+  launchAsyncBatch?: (input: { jobId: string; ownerSessionId?: string; workerOptions?: Record<string, unknown> }) => Promise<void>;
+  /** Job ID being executed by the current detached batch worker. */
+  batchWorkerJobId?: string;
+  /** CLI options persisted with async jobs for restart fidelity. */
+  batchWorkerOptions?: Record<string, unknown>;
+  /** Internal task ID executed by a detached worker process. */
+  workerTaskId?: string;
+  /** Max time a foreground subagent may block before continuing in the background. */
+  subagentAwaitBudgetMs?: number;
   /** Pre-defined subagent profiles. */
   profiles?: SubagentProfile[];
   /** Preprocessors inherited by the subagent. */
@@ -146,6 +165,8 @@ export type SubagentToolOptions = {
   permissionTurn?: PermissionTurnContext;
   /** Resolve the current parent turn while the tool is reused across turns. */
   getPermissionTurn?: () => PermissionTurnContext | undefined;
+  /** Create a same-policy permission turn that can outlive the parent turn. */
+  getBackgroundPermissionTurn?: () => PermissionTurnContext;
   /** Mutable parent runtime updated by the shared agent loop. */
   parentRuntime?: AgentRuntimeRef;
   /** Runtime identity and policy propagated to child tool execution. */
@@ -172,8 +193,16 @@ export type SubagentToolOptions = {
 // ─── Tool call arguments (what the LLM sends) ───────────────────────────────
 
 export type SubagentArgs = {
+  /** Internal stable task ID supplied by a persisted batch job. */
+  taskId?: string;
+  /** Internal marker for a batch whose call slots were reserved atomically. */
+  _callBudgetReserved?: boolean;
   /** The task / prompt to send to the subagent. */
   task: string;
+  /** Return immediately with a task ID. Defaults to true when a registry is configured. */
+  runInBackground?: boolean;
+  /** Continue a completed subagent transcript under the same task ID. */
+  resumeFrom?: string;
   /**
    * Name of a pre-defined profile to use.
    * When omitted, `systemPrompt` / `tools` / `maxTurns` can be set ad-hoc.
@@ -235,6 +264,8 @@ export type SubagentArgs = {
  * A single task within a parallel batch.
  */
 export type SubagentBatchTask = {
+  /** Internal marker for a batch whose call slots were reserved atomically. */
+  _callBudgetReserved?: boolean;
   /** Unique label for this task within the batch. */
   label: string;
   /** Labels that must complete successfully before this task starts. */
@@ -370,6 +401,13 @@ export type SubagentEvent =
       limit: number;
       percentage: 80 | 90 | 100;
       depth: number;
+    }
+  | {
+      type: "subagent_backgrounded";
+      id: string;
+      task: string;
+      depth: number;
+      ownerSessionId?: string;
     }
   | {
       type: "subagent_end";

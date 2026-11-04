@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { compactStreamingText, compactText } from "../src/tui/text-utils.ts";
+import { compactStreamingText, compactText, streamingPreviewTail } from "../src/tui/text-utils.ts";
 
 describe("compactStreamingText", () => {
   it("keeps the live stream bounded while preserving the newest lines", () => {
@@ -10,6 +10,12 @@ describe("compactStreamingText", () => {
 
   it("does not alter short streams", () => {
     assert.equal(compactStreamingText("one\ntwo", 3), "one\ntwo");
+  });
+});
+
+describe("streamingPreviewTail", () => {
+  it("strips leading blank rows and keeps a bounded live tail", () => {
+    assert.equal(streamingPreviewTail("\n \nfirst\nsecond\nthird", 2), "… 1 earlier lines\nsecond\nthird");
   });
 });
 

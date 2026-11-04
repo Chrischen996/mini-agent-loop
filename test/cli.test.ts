@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseCliArgs } from "../src/cli.ts";
+import { parseCliArgs, parseCliWorkerArgs } from "../src/cli.ts";
 
 describe("parseCliArgs", () => {
   it("makes --fork-session resume the latest session when used alone", () => {
@@ -231,6 +231,24 @@ describe("parseCliArgs", () => {
   it("parses all init flags together", () => {
     const result = parseCliArgs(["init", "--init-force", "--init-print"]);
     assert.deepEqual(result.init, { force: true, print: true });
+  });
+});
+
+describe("parseCliWorkerArgs", () => {
+  it("resumes the owning session for detached batch workers without requiring a prompt", () => {
+    const result = parseCliWorkerArgs([], {
+      batchJobId: "job-1",
+      ownerSessionId: "session-a",
+      mode: "bypass",
+    });
+
+    assert.equal(result.resumeSessionId, "session-a");
+    assert.equal(result.mode, "bypass");
+    assert.equal(result.prompt, "");
+  });
+
+  it("requires a session owner for detached workers", () => {
+    assert.throws(() => parseCliWorkerArgs([], { batchJobId: "job-1" }), /owning session ID/);
   });
 });
 

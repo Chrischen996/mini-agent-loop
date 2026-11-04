@@ -141,7 +141,7 @@ export type TuiState = {
   todoItems?: TodoItem[];
   todoRevision: number;
   todoViewMode: TodoViewMode;
-  /** Spinner tip shown below the todo panel while no tools are active. Cleared on tool start. */
+  /** Active Todo label for the activity row; hidden there when TodoPanel already shows it. */
   spinnerMessage?: string;
   /** Pending permission request shown to the user while execution waits. */
   pendingPermission?: PendingPermissionState;
@@ -252,6 +252,7 @@ function updateExecutionTodo(
     todos: next,
     todoItems: next,
     todoRevision: nextTodoRevision(),
+    spinnerMessage: todoSpinnerMessage(next),
   };
 }
 
@@ -487,6 +488,11 @@ function taskDuration(startedAt?: number): number | undefined {
   return startedAt === undefined ? undefined : Math.max(0, Date.now() - startedAt);
 }
 
+function todoSpinnerMessage(todos: readonly TodoItem[]): string | undefined {
+  const activeTodo = todos.find((todo) => todo.status === "in_progress");
+  return activeTodo ? `▶ ${activeTodo.activeForm}` : undefined;
+}
+
 const MAX_SUBAGENT_INNER_EVENTS = 100;
 
 function messageIndices(messages: readonly ChatMessage[]): {
@@ -598,6 +604,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         streamingReasoningParts: [],
         turnStartedAt: Date.now(),
         lastStreamAt: undefined,
+        spinnerMessage: undefined,
         autoContinueCount: 0,
         // New user turns always re-pin the feed to the latest content.
         scrollOffset: 0,
@@ -653,6 +660,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         todos: [],
         todoItems: undefined,
         todoRevision: nextTodoRevision(),
+        spinnerMessage: undefined,
       };
 
     case "SET_TODO_ITEMS":
@@ -662,6 +670,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         todos: action.todos,
         todoItems: action.todos,
         todoRevision: action.revision,
+        spinnerMessage: todoSpinnerMessage(action.todos),
       };
 
     case "CLEAR_TODO_ITEMS":
@@ -670,6 +679,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         todos: [],
         todoItems: undefined,
         todoRevision: nextTodoRevision(),
+        spinnerMessage: undefined,
       };
 
     case "SET_TODO_VIEW_MODE":
@@ -688,6 +698,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         todos: action.todos,
         todoItems: action.todos.length > 0 ? action.todos : undefined,
         todoRevision: nextTodoRevision(),
+        spinnerMessage: todoSpinnerMessage(action.todos),
       };
 
     case "CANCEL_GENERATION":
@@ -700,6 +711,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         streamingReasoningParts: [],
         turnStartedAt: undefined,
         lastStreamAt: undefined,
+        spinnerMessage: undefined,
         status: "Generation cancelled (ESC)",
         taskStatus: "cancelled",
         taskDurationMs: taskDuration(state.taskStartedAt),
@@ -837,14 +849,13 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       switch (event.type) {
         case "todo_updated":
           if (!isTodoRevisionNewer(state.todoRevision, event.revision)) return state;
-          const nextTodoTask = event.todos.find(t => t.status !== "completed");
           return {
             ...state,
             todos: event.todos,
             todoItems: event.todos,
             todoRevision: event.revision,
             status: "Todos updated",
-            spinnerMessage: nextTodoTask ? `▶ ${nextTodoTask.activeForm}` : undefined,
+            spinnerMessage: todoSpinnerMessage(event.todos),
           };
 
         case "assistant_delta": {
@@ -939,6 +950,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
+            spinnerMessage: undefined,
             status: isTruncated ? "Output truncated" : "Request failed",
             taskStatus: "failed",
             taskDurationMs: taskDuration(state.taskStartedAt),
@@ -1055,7 +1067,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
 
         case "tool_start": {
           if (event.call.name === TODO_WRITE_TOOL_NAME) {
-            return { ...state, status: "Updating todos…" };
+            return { ...state, status: "Updating todos…", spinnerMessage: undefined };
           }
           const rawArgs = (event.call.arguments ?? {}) as Record<string, unknown>;
           const args = compactText(JSON.stringify(rawArgs), 120, "…");
@@ -1174,6 +1186,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
+            spinnerMessage: undefined,
             status: "Aborted",
             taskStatus: "cancelled",
             taskDurationMs: taskDuration(state.taskStartedAt),
@@ -1190,6 +1203,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
+            spinnerMessage: undefined,
             status: "Ready",
             taskStatus: state.taskStatus === "failed" || state.taskStatus === "cancelled" ? state.taskStatus : "completed",
             taskDurationMs: taskDuration(state.taskStartedAt),
@@ -1213,6 +1227,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             todos: executionPlanToTodoItems(event.plan),
             todoItems: executionPlanToTodoItems(event.plan),
             todoRevision: nextTodoRevision(),
+            spinnerMessage: todoSpinnerMessage(executionPlanToTodoItems(event.plan)),
             status: "Plan ready for review (A approve / R reject)",
           };
         case "plan_approved":
@@ -1267,6 +1282,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             todos: (state.todoItems ?? state.todos).map((item) => ({ ...item, status: "completed" as const })),
             todoItems: (state.todoItems ?? state.todos).map((item) => ({ ...item, status: "completed" as const })),
             todoRevision: nextTodoRevision(),
+            spinnerMessage: undefined,
             status: "Plan execution completed",
           };
         case "execution_failed":
@@ -1279,6 +1295,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             todos: (state.todoItems ?? state.todos).map((item) => item.status === "completed" ? item : { ...item, status: "failed" as const }),
             todoItems: (state.todoItems ?? state.todos).map((item) => item.status === "completed" ? item : { ...item, status: "failed" as const }),
             todoRevision: nextTodoRevision(),
+            spinnerMessage: undefined,
             status: "Execution failed",
           };
         default:

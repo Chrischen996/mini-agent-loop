@@ -31,6 +31,19 @@ export type CommandDef = {
   alias?: boolean;
 };
 
+export type BackgroundTaskCommand = {
+  kind: "send";
+  reference: string;
+  text: string;
+};
+
+/** Parse `/bg-tasks <id-or-prefix> send <input>` without truncating the input. */
+export function parseBackgroundTaskCommand(input: string): BackgroundTaskCommand | undefined {
+  const match = input.trim().match(/^\/bg-tasks\s+(\S+)\s+send\s+([\s\S]+)$/i);
+  if (!match || !match[2]!.trim()) return undefined;
+  return { kind: "send", reference: match[1]!, text: match[2]! };
+}
+
 /**
  * The single command catalog.
  *

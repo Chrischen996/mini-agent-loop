@@ -24,7 +24,7 @@ export function createBgTaskTools(manager: BgTaskManager): Tool[] {
         required: [],
         additionalProperties: false,
       } as JsonSchema,
-      execute: async (args, signal) => {
+      execute: async (args, signal, execution) => {
         if (signal?.aborted) throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
         if (!args.command && !args.template) throw new Error("Either command or template is required");
         const task = await manager.start({
@@ -37,6 +37,7 @@ export function createBgTaskTools(manager: BgTaskManager): Tool[] {
           depends_on: args.dependsOn !== undefined ? (args.dependsOn as unknown[]).map((x) => String(x)) : undefined,
           strategy: args.strategy === "any" ? "any" : "all",
           priority: args.priority !== undefined ? String(args.priority) as "high" | "normal" | "low" : undefined,
+          ownerSessionId: execution?.sessionId,
         });
         return { content: `Started ${task.taskId} (${task.name}); status: ${task.status}.` };
       },
@@ -144,12 +145,12 @@ export function createBgTaskTools(manager: BgTaskManager): Tool[] {
         required: ["taskIds"],
         additionalProperties: false,
       } as JsonSchema,
-      execute: async (args, signal) => {
+      execute: async (args, signal, execution) => {
         if (signal?.aborted) throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
         const ids = (args.taskIds as unknown[]).map((id) => String(id));
         const mode = args.mode === "any" ? "any" : "all";
         const timeoutSeconds = args.timeoutSeconds !== undefined ? Number(args.timeoutSeconds) : undefined;
-        const result = await manager.wait(ids, mode, timeoutSeconds, signal);
+        const result = await manager.wait(ids, mode, timeoutSeconds, signal, execution?.sessionId);
         const lines = result.completed.map((task) => {
           const exit =
             task.exitCode === 0 || task.exitCode === null || task.exitCode === undefined
@@ -215,9 +216,9 @@ export function createBgTaskTools(manager: BgTaskManager): Tool[] {
         required: ["snapshot"],
         additionalProperties: false,
       } as JsonSchema,
-      execute: async (args, signal) => {
+      execute: async (args, signal, execution) => {
         if (signal?.aborted) throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
-        const task = await manager.replay({ snapshot: String(args.snapshot) });
+        const task = await manager.replay({ snapshot: String(args.snapshot) }, execution?.sessionId);
         return { content: `Replayed as ${task.taskId} (${task.name}); status: ${task.status}.` };
       },
     },

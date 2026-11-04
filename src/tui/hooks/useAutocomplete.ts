@@ -7,7 +7,12 @@ import { type AcMode, type FileAcTrigger } from "../input-utils.ts";
 import type { ModelRef } from "../../models.ts";
 import type { PersistedSessionMeta } from "../../session-store.ts";
 import type { ResumeMessageCandidate } from "../session-serialization.ts";
-import type { ModelSetupState, PendingProfileSetup, ProfileListState } from "../types.ts";
+import type { ModelSetupState, PendingProfileSetup, ProfileListState, ProfileSummary } from "../types.ts";
+import {
+  filterConfiguredModelProfiles,
+  loadConfiguredModelProfiles,
+  type ModelPickerSection,
+} from "../model-picker.ts";
 import {
   currentAutocompleteNavIndex,
   isOverlayAcMode,
@@ -39,6 +44,8 @@ export function useAutocomplete({
   const [cmdCandidates, setCmdCandidates] = useState<CommandDef[]>([]);
   const [fileCandidates, setFileCandidates] = useState<string[]>([]);
   const [modelCandidates, setModelCandidates] = useState<string[]>([]);
+  const [configuredModelCandidates, setConfiguredModelCandidates] = useState<ProfileSummary[]>([]);
+  const [modelPickerSection, setModelPickerSection] = useState<ModelPickerSection>("catalog");
   const [sessionCandidates, setSessionCandidates] = useState<PersistedSessionMeta[]>([]);
   const [sessionCommand, setSessionCommand] = useState<"resume" | "sessions" | undefined>();
   const [sessionLoading, setSessionLoading] = useState(false);
@@ -53,6 +60,10 @@ export function useAutocomplete({
   const acDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const acRequestRef = useRef(0);
   const sessionListRequestRef = useRef<"resume" | "sessions" | null>(null);
+  const configuredModelsRef = useRef<ProfileSummary[]>([]);
+  const modelPickerLoadRef = useRef(0);
+  const modelQueryRef = useRef("");
+  const modelPickerSectionPinnedRef = useRef(false);
 
   const clearAc = useCallback(() => {
     acRequestRef.current += 1;
@@ -60,12 +71,18 @@ export function useAutocomplete({
     setCmdCandidates([]);
     setFileCandidates([]);
     setModelCandidates([]);
+    setConfiguredModelCandidates([]);
+    setModelPickerSection("catalog");
     setSessionCandidates([]);
     setSessionCommand(undefined);
     setSessionLoading(false);
     setResumeMessageCandidates([]);
     setModelContextWindows({});
     setModelQuery("");
+    modelQueryRef.current = "";
+    modelPickerLoadRef.current += 1;
+    configuredModelsRef.current = [];
+    modelPickerSectionPinnedRef.current = false;
     setModelSetup(undefined);
     setFileFragment("");
     fileTriggerRef.current = null;
@@ -129,10 +146,20 @@ export function useAutocomplete({
 
     if (resolution.kind === "model-picker") {
       const choices = modelChoices(resolution.query);
+      const configuredModels = filterConfiguredModelProfiles(configuredModelsRef.current, resolution.query);
       setModelQuery(resolution.query);
+      modelQueryRef.current = resolution.query;
       setModelCandidates(choices.references);
+      setConfiguredModelCandidates(configuredModels);
       setModelContextWindows(choices.contextWindows);
-      setAcIndex((index) => Math.min(index, Math.max(0, choices.references.length - 1)));
+      const nextSection = modelPickerSectionPinnedRef.current
+        ? modelPickerSection
+        : configuredModels.length > 0 ? "configured" : "catalog";
+      setModelPickerSection(nextSection);
+      const activeCandidateCount = nextSection === "configured"
+        ? configuredModels.length
+        : choices.references.length;
+      setAcIndex((index) => Math.min(index, Math.max(0, activeCandidateCount - 1)));
       return;
     }
 
@@ -208,7 +235,7 @@ export function useAutocomplete({
       acRequestRef.current += 1;
       if (acDebounceRef.current) clearTimeout(acDebounceRef.current);
     };
-  }, [input, cwd, clearAc, acMode, listSessions]);
+  }, [input, cwd, clearAc, acMode, listSessions, modelPickerSection]);
 
   const acceptCommand = useCallback(
     (idx: number) => {
@@ -242,6 +269,9 @@ export function useAutocomplete({
 
   const acceptModel = useCallback(
     (idx: number) => {
+      if (acMode === "model-picker" && modelPickerSection === "configured") {
+        return false;
+      }
       const chosen = modelCandidates[idx];
       if (!chosen) return false;
       setInput(`/model ${chosen}`);
@@ -249,7 +279,7 @@ export function useAutocomplete({
       clearAc();
       return true;
     },
-    [modelCandidates, clearAc, resetInputCursorToEnd, setInput],
+    [acMode, modelPickerSection, modelCandidates, clearAc, resetInputCursorToEnd, setInput],
   );
 
   const handleTabAt = useCallback(
@@ -282,11 +312,24 @@ export function useAutocomplete({
     (query = "", models?: ModelRef[]) => {
       const choices = modelChoices(query, models);
       setModelQuery(query);
+      modelQueryRef.current = query;
       setModelCandidates(choices.references);
       setModelContextWindows(choices.contextWindows);
+      setConfiguredModelCandidates([]);
+      setModelPickerSection("catalog");
+      modelPickerSectionPinnedRef.current = false;
       setAcIndex(0);
       setInput(query);
       setAcMode("model-picker");
+      const requestId = ++modelPickerLoadRef.current;
+      void loadConfiguredModelProfiles().then((profiles) => {
+        if (requestId !== modelPickerLoadRef.current) return;
+        configuredModelsRef.current = profiles;
+        const filtered = filterConfiguredModelProfiles(profiles, modelQueryRef.current);
+        setConfiguredModelCandidates(filtered);
+        if (!modelPickerSectionPinnedRef.current) setModelPickerSection(filtered.length > 0 ? "configured" : "catalog");
+        setAcIndex(0);
+      });
     },
     [setInput],
   );
@@ -301,7 +344,11 @@ export function useAutocomplete({
       const action = resolveAutocompleteNav(acMode, key, navIndex, {
         commands: cmdCandidates.length,
         files: fileCandidates.length,
-        models: modelCandidates.length,
+        models: acMode === "model-picker" && modelPickerSection === "configured"
+          ? configuredModelCandidates.length
+          : modelCandidates.length,
+        configuredModels: configuredModelsRef.current.length,
+        modelPickerSection,
         profiles: profileListState?.profiles.length ?? 0,
         sessions: acMode === "resume-messages" ? resumeMessageCandidates.length : sessionCandidates.length,
       });
@@ -329,6 +376,11 @@ export function useAutocomplete({
         case "accept-model":
           acceptModel(acIndex);
           return true;
+        case "toggle-model-section":
+          modelPickerSectionPinnedRef.current = true;
+          setModelPickerSection(action.section);
+          setAcIndex(0);
+          return true;
         case "accept-session": {
           const selected = sessionCandidates[acIndex];
           if (selected) {
@@ -350,6 +402,8 @@ export function useAutocomplete({
       cmdCandidates.length,
       fileCandidates.length,
       modelCandidates.length,
+      configuredModelCandidates.length,
+      modelPickerSection,
       sessionCandidates,
       resumeMessageCandidates,
       profileListState,
@@ -370,6 +424,8 @@ export function useAutocomplete({
     cmdCandidates,
     fileCandidates,
     modelCandidates,
+    configuredModelCandidates,
+    modelPickerSection,
     sessionCandidates,
     resumeMessageCandidates,
     sessionCommand,

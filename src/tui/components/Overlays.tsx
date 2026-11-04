@@ -11,7 +11,8 @@ import {
   pickerVisibleWindow,
   profileRowText,
 } from "../picker-window.ts";
-import type { ModelSetupState, PendingProfileSetup, ProfileListState } from "../types.ts";
+import type { ModelSetupState, PendingProfileSetup, ProfileListState, ProfileSummary } from "../types.ts";
+import type { ModelPickerSection } from "../model-picker.ts";
 import type { CommandDef } from "./FileAutocomplete.tsx";
 import type { AcMode } from "../input-utils.ts";
 import { TodoEditor } from "./TodoEditor.tsx";
@@ -27,6 +28,8 @@ export type OverlaysProps = {
   fileCandidates: string[];
   fileFragment: string;
   modelCandidates: string[];
+  configuredModelCandidates: ProfileSummary[];
+  modelPickerSection: ModelPickerSection;
   modelContextWindows: Record<string, number>;
   modelQuery: string;
   sessionCandidates: PersistedSessionMeta[];
@@ -53,6 +56,8 @@ export function Overlays({
   fileCandidates,
   fileFragment,
   modelCandidates,
+  configuredModelCandidates,
+  modelPickerSection,
   modelContextWindows,
   modelQuery,
   sessionCandidates,
@@ -147,6 +152,9 @@ export function Overlays({
     return (
       <ModelPicker
         candidates={modelCandidates}
+        configuredModels={configuredModelCandidates}
+        section={modelPickerSection}
+        showSections={acMode === "model-picker"}
         contextWindows={modelContextWindows}
         selectedIndex={acIndex}
         query={modelQuery}

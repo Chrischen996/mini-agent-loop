@@ -1345,6 +1345,53 @@ describe("createSubagentTool", () => {
   // ── Signal merge (both execSignal and constructor signal) ───────────────────
 
   describe("signal merge", () => {
+    it("keeps a subagent running after send-now and reports its eventual result", async () => {
+      const manager = new PermissionManager("plan");
+      const parentController = new AbortController();
+      const events: SubagentEvent[] = [];
+      let backgroundTurn: ReturnType<PermissionManager["beginTurn"]> | undefined;
+      let markChatStarted!: () => void;
+      const chatStarted = new Promise<void>((resolve) => { markChatStarted = resolve; });
+      let finishChat!: (message: AssistantMessage) => void;
+      const chatResult = new Promise<AssistantMessage>((resolve) => { finishChat = resolve; });
+      let markCompleted!: (event: SubagentEvent) => void;
+      const completed = new Promise<SubagentEvent>((resolve) => { markCompleted = resolve; });
+
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        getBackgroundPermissionTurn: () => {
+          backgroundTurn = manager.beginTurn("session", () => undefined);
+          return backgroundTurn;
+        },
+        onSubagentEvent: (event) => {
+          events.push(event);
+          if (event.type === "subagent_end") markCompleted(event);
+        },
+        chat: async () => {
+          markChatStarted();
+          return chatResult;
+        },
+      });
+
+      const parentResult = tool.execute({ task: "finish after parent send-now" }, parentController.signal);
+      await chatStarted;
+      parentController.abort("send_now");
+
+      const detachedResult = await parentResult;
+      assert.equal(detachedResult.isError, undefined);
+      assert.ok(contentAsString(detachedResult.content).includes("continues in the background"));
+      assert.ok(events.some((event) => event.type === "subagent_backgrounded"));
+      assert.equal(backgroundTurn?.signal.aborted, false);
+      assert.equal(events.some((event) => event.type === "subagent_end"), false);
+
+      finishChat({ role: "assistant", content: "background result" });
+      const end = await completed;
+      assert.equal(end.type, "subagent_end");
+      if (end.type === "subagent_end") assert.equal(end.result, "background result");
+      assert.equal(backgroundTurn?.signal.aborted, false);
+    });
+
     it("aborts when constructor signal is pre-aborted even if execSignal is not aborted", async () => {
       const constructorController = new AbortController();
       constructorController.abort(); // pre-abort constructor signal
@@ -1523,6 +1570,33 @@ describe("createSubagentTool", () => {
       const res = await tool.execute({ task: "over profile budget task", profile: "limited" });
       assert.equal(res.isError, true);
       assert.match(String(res.content), /token budget exceeded/i);
+    });
+  });
+
+  describe("cross-process call budget", () => {
+    it("reserves one shared call slot before launching a sub-agent", async () => {
+      let calls = 0;
+      const runtime: import("../src/loop.ts").AgentRuntimeRef = {
+        globalBudgetState: {
+          used: 0,
+          callsUsed: 0,
+          callsLimit: 1,
+          callLedger: {
+            readCalls: async () => calls,
+            reserveCalls: async (count, limit) => {
+              if (calls + count > limit) return undefined;
+              calls += count;
+              return calls;
+            },
+          },
+        },
+      };
+      const tool = createSubagentTool({ parentLlm: dummyLlm, parentTools: [], parentRuntime: runtime, chat: createImmediateChat("done") });
+      const first = await tool.execute({ task: "first" });
+      const second = await tool.execute({ task: "second" });
+      assert.equal(first.isError, undefined);
+      assert.equal(second.isError, true);
+      assert.equal(calls, 1);
     });
   });
 
@@ -1823,6 +1897,30 @@ describe("createSubagentTool", () => {
       const result = await tool.execute({ mode: "async", action: "result", jobId });
       assert.match(String(result.content), /first result/);
       assert.match(await readAsyncBatch(jobId), /second/);
+    });
+
+    it("persists deferred batch jobs for a detached worker and keeps stable task IDs", async () => {
+      const { readAsyncBatch, resumeAsyncBatches, submitAsyncBatch } = await import("../src/subagent/async-batch.ts");
+      const executed: string[] = [];
+      const jobId = await submitAsyncBatch([
+        { label: "one", task: "task one" },
+        { label: "two", task: "task two", dependsOn: ["one"] },
+      ], async (task, dependencyResults, taskId) => {
+        executed.push(`${task.label}:${taskId}:${dependencyResults}`);
+        return { content: `${task.label} result` };
+      }, 2, undefined, { deferExecution: true, ownerSessionId: "batch-session" });
+
+      assert.equal(executed.length, 0);
+      assert.match(await readAsyncBatch(jobId, false, "batch-session"), /"status": "running"/);
+      await resumeAsyncBatches(async (task, dependencyResults, taskId) => {
+        executed.push(`${task.label}:${taskId}:${dependencyResults}`);
+        return { content: `${task.label} result` };
+      }, jobId);
+
+      assert.equal(executed.length, 2);
+      assert.match(executed[0]!, /^one:sub_[a-f0-9-]{36}:/);
+      assert.match(executed[1]!, /^two:sub_[a-f0-9-]{36}:Dependency one result:\none result$/);
+      assert.match(await readAsyncBatch(jobId, false, "batch-session"), /"status": "completed"/);
     });
 
     it("rejects cyclic async DAGs", async () => {

@@ -134,6 +134,54 @@ describe("runAgentLoop", () => {
     assert.equal(runtimeRef.globalBudgetState?.used, 5);
   });
 
+  it("charges assistant usage to a cross-process token ledger", async () => {
+    let used = 3;
+    const runtimeRef: import("../src/loop.ts").AgentRuntimeRef = {
+      globalBudgetState: {
+        used,
+        limit: 20,
+        tokenLedger: {
+          readTokens: async () => used,
+          consumeTokens: async (delta) => (used += delta),
+        },
+      },
+    };
+    await runAgentLoop("shared budget usage", {
+      llm: dummyLlm,
+      tools: [],
+      globalTokenBudget: 20,
+      runtimeRef,
+      chat: async () => ({
+        role: "assistant",
+        content: "done",
+        usage: { promptTokens: 4, inputTokens: 4, completionTokens: 1, totalTokens: 5 },
+      } as import("../src/types.ts").AssistantMessage & { usage: { promptTokens: number; inputTokens: number; completionTokens: number; totalTokens: number } }),
+    });
+    assert.equal(used, 8);
+    assert.equal(runtimeRef.globalBudgetState?.used, 8);
+  });
+
+  it("injects messages sent to a running task before its next model turn", async () => {
+    let pollCount = 0;
+    let sawFollowUp = false;
+    const messages = await runAgentLoop("initial task", {
+      llm: dummyLlm,
+      tools: [],
+      getPendingUserMessages: async () => {
+        pollCount += 1;
+        return pollCount === 2 ? ["also inspect the edge case"] : [];
+      },
+      chat: async (_config, conversation) => {
+        sawFollowUp = conversation.some((message) => message.role === "user" && message.content === "also inspect the edge case");
+        return { role: "assistant", content: sawFollowUp ? "included the edge case" : "initial result" };
+      },
+    });
+
+    assert.equal(sawFollowUp, true);
+    assert.equal(messages.at(-1)?.role, "assistant");
+    assert.equal(messages.at(-1)?.content, "included the edge case");
+  });
+
   it("retries a transient network failure before failing the turn", async () => {
     let calls = 0;
     const events: import("../src/loop.ts").LoopEvent[] = [];

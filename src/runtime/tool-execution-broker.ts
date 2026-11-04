@@ -213,5 +213,8 @@ export class ToolExecutionBroker {
 }
 
 function toolExecutionOptions(execution: ToolExecutionContext): ToolExecutionOptions {
-  return execution.cwd === undefined ? {} : { cwd: execution.cwd };
+  return {
+    ...(execution.cwd !== undefined ? { cwd: execution.cwd } : {}),
+    ...(execution.sessionId !== undefined ? { sessionId: execution.sessionId } : {}),
+  };
 }

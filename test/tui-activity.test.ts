@@ -17,14 +17,26 @@ import { createInitialState } from "../src/tui/state.ts";
 describe("TUI activity presentation", () => {
   it("distinguishes first-response wait, reasoning, and answer streaming", () => {
     const state = { ...createInitialState("test-model"), busy: true, turnStartedAt: 1_000 };
-    assert.equal(activityPresentation(state, { now: 2_500 })?.label, "Waiting for model…");
+    assert.equal(activityPresentation(state, { now: 2_500 })?.label, "Waiting for the first response…");
+    assert.equal(
+      activityPresentation(state, { now: 1_000 + STREAM_STALL_NOTICE_MS })?.label,
+      "The model is taking longer than usual…",
+    );
 
     state.streamingReasoning = "inspect context";
     state.lastStreamAt = 2_000;
     assert.equal(activityPresentation(state, { now: 2_500 })?.label, "Thinking…");
+    assert.equal(
+      activityPresentation(state, { now: 2_000 + STREAM_STALL_NOTICE_MS })?.label,
+      "Reasoning paused; waiting for more tokens…",
+    );
 
     state.streamingText = "final answer";
     assert.equal(activityPresentation(state, { now: 2_500 })?.label, "Responding…");
+    assert.equal(
+      activityPresentation({ ...state, lastStreamAt: 2_000 }, { now: 2_000 + STREAM_STALL_NOTICE_MS })?.label,
+      "Response paused; waiting for more tokens…",
+    );
   });
 
   it("prioritizes retry, permission, and running tool stages", () => {
@@ -48,7 +60,7 @@ describe("TUI activity presentation", () => {
       lastStreamAt: 2_000,
     };
     const waiting = activityPresentation(state, { now: 2_000 + STREAM_STALL_NOTICE_MS, queuedCount: 2 });
-    assert.match(formatActivity(waiting!), /Waiting for response tokens.*6s.*tokens.*2 queued/);
+    assert.match(formatActivity(waiting!), /Response paused; waiting for more tokens.*6s.*tokens.*2 queued/);
     assert.equal(waiting?.stalled, false);
     assert.equal(activityPresentation(state, { now: 2_000 + STREAM_STALL_WARNING_MS })?.stalled, true);
   });

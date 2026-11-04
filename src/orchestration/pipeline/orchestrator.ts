@@ -664,6 +664,7 @@ export class PipelineOrchestrator {
     try {
       const toolResult = await this.subagentTool.execute(
         {
+          runInBackground: false,
           task: buildWorkerPrompt(spec),
           sharedContext: spec.context,
           profile: "coder",
@@ -1241,6 +1242,7 @@ export class PipelineOrchestrator {
     try {
       const toolResult = await this.subagentTool.execute(
         {
+          runInBackground: false,
           task: buildReviewerPrompt(spec, result),
           sharedContext: spec.context,
           profile: "reviewer",

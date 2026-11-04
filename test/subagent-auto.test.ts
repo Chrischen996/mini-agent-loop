@@ -186,6 +186,7 @@ describe("automatic subagent preflight", () => {
     assert.match(String(calls[0]?.task), /User request:/);
     assert.match(String(calls[0]?.task), /compare the relevant modules/);
     assert.equal(calls[0]?.profile, "researcher");
+    assert.equal(calls[0]?.runInBackground, false);
     assert.deepEqual(messages.map((message) => message.role), ["system", "user", "assistant", "tool", "assistant"]);
     assert.ok(events.some((event) => event.type === "tool_start" && event.call.name === "subagent"));
     assert.ok(events.some((event) => event.type === "tool_end" && event.call.name === "subagent"));

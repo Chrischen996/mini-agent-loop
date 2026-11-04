@@ -19,6 +19,8 @@ export type ToolExecutionOptions = {
   signal?: AbortSignal;
   /** Session project cwd. Relative filesystem paths resolve from this directory. */
   cwd?: string;
+  /** Stable conversation identity for session-owned background work. */
+  sessionId?: string;
 };
 
 export type FileArtifact = {

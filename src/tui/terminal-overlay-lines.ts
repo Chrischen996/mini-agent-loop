@@ -22,6 +22,7 @@ import {
   sessionRowContent,
 } from "./picker-window.ts";
 import { formatContextWindow } from "./status-line.ts";
+import { configuredModelRowText } from "./model-picker.ts";
 
 type PanelTone = RenderLine["tone"];
 
@@ -301,10 +302,52 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState, conte
 
   const argumentPalette = Boolean(state.argumentCandidates && state.argumentPrefix);
   // The headless command palette uses Ink's `usage  description` column layout.
+  const modelRows = state.mode === "model";
+  if (state.mode === "model-picker") {
+    const configuredModels = state.configuredModels ?? [];
+    const configured = state.modelPickerSection === "configured";
+    const items = configured
+      ? configuredModels.map((profile) => ({ key: profile.name, label: configuredModelRowText(profile), detail: "" }))
+      : state.models.map((model) => ({
+        key: model,
+        label: modelNameLabel(model, model === context?.currentModel),
+        detail: `${formatContextWindow(state.modelContextWindows[model] ?? 0)} context`,
+      }));
+    const { visible, start } = pickerVisibleWindow(items, state.index, pickerPageItems(state.mode, items.length, maxItems));
+    const rows: RenderLine[] = [
+      { key: "autocomplete-title", text: pickerTitleText(state.mode, { query: state.modelQuery }), prefix: "⌘ ", style: "muted", bold: true },
+      {
+        key: "autocomplete-model-sections",
+        text: `${configured ? "[Configured models]" : "Configured models"} (${configuredModels.length})    ${!configured ? "[All models]" : "All models"} (${state.models.length})`,
+        style: "muted",
+        tone: "running",
+      },
+    ];
+    if (visible.length === 0) {
+      rows.push({ key: "autocomplete-empty", text: configured ? "No configured models" : "No matching models", style: "muted", tone: "running", dim: true });
+    }
+    for (const [offset, item] of visible.entries()) {
+      const index = start + offset;
+      const text = configured || !item.detail
+        ? item.label
+        : `${item.label.padEnd(Math.max(4, modelNameColumn(visible.map((row) => row.key))))}${item.detail}`;
+      rows.push({
+        key: `autocomplete-${index}-${item.key}`,
+        text: `${index === state.index ? PICKER_SELECTED_MARKER : PICKER_UNSELECTED_MARKER} ${text}`,
+        style: index === state.index ? "assistant" : "muted",
+        tone: index === state.index ? "running" : "default",
+      });
+    }
+    if (items.length > visible.length) {
+      rows.push({ key: "autocomplete-more", text: pickerRangeText(start, visible.length, items.length), style: "muted", dim: true });
+    }
+    rows.push({ key: "autocomplete-hint", text: pickerHintText(state.mode), style: "muted", dim: true });
+    return rows;
+  }
   const values = argumentPalette
     ? state.argumentCandidates!
     : state.mode === "command" ? state.commands.map((item) => item.usage)
-    : state.mode === "file" ? state.files
+      : state.mode === "file" ? state.files
       : state.models;
   // Second column: command descriptions and model context sizes, matching the
   // Ink FileAutocomplete/ModelPicker overlays.
@@ -312,8 +355,8 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState, conte
     ? []
     : state.mode === "command"
       ? state.commands.map((item) => item.description)
-      : state.mode === "model" || state.mode === "model-picker"
-        ? values.map((model) => `${formatContextWindow(state.modelContextWindows[model] ?? 0)} context`)
+      : modelRows
+        ? (values as string[]).map((model) => `${formatContextWindow(state.modelContextWindows[model] ?? 0)} context`)
         : [];
   if (state.mode === "role-setup" && state.roleSetup) {
     const rs = state.roleSetup;
@@ -393,11 +436,10 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState, conte
   // Same page size, window, and clipped-list footer as the Ink overlays. The
   // ANSI palette used to hardcode twelve rows without scrolling, so arrowing
   // past row twelve moved the marker off screen.
-  const modelRows = state.mode === "model" || state.mode === "model-picker";
   const { visible: visibleValues, start } = pickerVisibleWindow(values, state.index, pickerPageItems(state.mode, values.length, maxItems));
   const visibleDetails = details.slice(start, start + visibleValues.length);
   const labels = modelRows
-    ? visibleValues.map((model) => modelNameLabel(model, model === context?.currentModel))
+    ? (visibleValues as string[]).map((model) => modelNameLabel(model, model === context?.currentModel))
     : visibleValues;
   const detailColumn = visibleDetails.length === 0
     ? 0

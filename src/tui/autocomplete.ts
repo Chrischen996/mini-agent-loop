@@ -1,9 +1,20 @@
 import { SLASH_COMMANDS, type CommandDef } from "./slash-commands.ts";
 import { extractFileAcTrigger, type AcMode, type FileAcTrigger } from "./input-utils.ts";
 import { modelSearchQuery, parseModelCommand } from "./model-command.ts";
+import type { ModelPickerSection } from "./model-picker.ts";
 
 export const STICKY_AC_MODES = new Set<AcMode>(["model-setup", "profile-name", "profile-list", "role-setup"]);
-export const PICKER_AC_MODES = new Set<AcMode>(["file", "command", "model", "model-picker", "session-list", "resume-messages"]);
+export const PICKER_AC_MODES = new Set<AcMode>([
+  "file",
+  "command",
+  "model",
+  "model-picker",
+  "session-list",
+  "resume-messages",
+  "background-task-list",
+  "background-task-actions",
+  "workspace-diff-files",
+]);
 
 export function isStickyAcMode(mode: AcMode): boolean {
   return STICKY_AC_MODES.has(mode);
@@ -143,6 +154,7 @@ export type AutocompleteNavAction =
   | { type: "accept-command" }
   | { type: "accept-file" }
   | { type: "accept-model" }
+  | { type: "toggle-model-section"; section: ModelPickerSection }
   | { type: "accept-session" }
   | { type: "cancel"; clearInput?: boolean };
 
@@ -154,7 +166,16 @@ export function resolveAutocompleteNav(
   acMode: AcMode,
   key: AutocompleteNavKey,
   acIndex: number,
-  lengths: { commands: number; files: number; models: number; profiles: number; sessions?: number },
+  lengths: {
+    commands: number;
+    files: number;
+    models: number;
+    profiles: number;
+    configuredModels?: number;
+    modelPickerSection?: ModelPickerSection;
+    sessions?: number;
+    tasks?: number;
+  },
 ): AutocompleteNavAction {
   if (acMode === "profile-name" || acMode === "model-setup") {
     if (key.escape) return { type: "cancel", clearInput: true };
@@ -185,9 +206,18 @@ export function resolveAutocompleteNav(
   }
 
   if (acMode === "model" || acMode === "model-picker") {
+    if (acMode === "model-picker" && (key.leftArrow || key.rightArrow)) {
+      return {
+        type: "toggle-model-section",
+        section: key.rightArrow ? "catalog" : "configured",
+      };
+    }
     if (key.upArrow) return { type: "move", index: nextWrappedIndex(acIndex, -1, lengths.models) };
     if (key.downArrow) return { type: "move", index: nextWrappedIndex(acIndex, 1, lengths.models) };
-    if (key.tab && !key.shift) return { type: "accept-model" };
+    if (key.tab && !key.shift) {
+      if (acMode === "model-picker" && lengths.modelPickerSection === "configured") return { type: "ignore" };
+      return { type: "accept-model" };
+    }
     if (key.escape) return { type: "cancel", clearInput: true };
     return { type: "none" };
   }
@@ -203,6 +233,25 @@ export function resolveAutocompleteNav(
     if (key.upArrow) return { type: "move", index: nextWrappedIndex(acIndex, -1, lengths.sessions ?? 0) };
     if (key.downArrow) return { type: "move", index: nextWrappedIndex(acIndex, 1, lengths.sessions ?? 0) };
     if (key.tab && !key.shift) return { type: "accept-session" };
+    if (key.escape) return { type: "cancel" };
+    return { type: "ignore" };
+  }
+
+  if (acMode === "background-task-list") {
+    if (key.upArrow) return { type: "move", index: nextClampedIndex(acIndex, -1, lengths.tasks ?? 0) };
+    if (key.downArrow) return { type: "move", index: nextClampedIndex(acIndex, 1, lengths.tasks ?? 0) };
+    if (key.escape) return { type: "cancel" };
+    return { type: "ignore" };
+  }
+
+  if (acMode === "workspace-diff-files") {
+    if (key.upArrow) return { type: "move", index: nextClampedIndex(acIndex, -1, lengths.files) };
+    if (key.downArrow) return { type: "move", index: nextClampedIndex(acIndex, 1, lengths.files) };
+    if (key.escape) return { type: "cancel" };
+    return { type: "ignore" };
+  }
+
+  if (acMode === "background-task-actions") {
     if (key.escape) return { type: "cancel" };
     return { type: "ignore" };
   }
