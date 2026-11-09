@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
+import React from "react";
 import { describe, it } from "node:test";
 import { getTodoPanelRows, planToTodoItems, todoProgressMeter } from "../src/tui/todo-format.ts";
 import { todoPanelRenderLines } from "../src/tui/todo-lines.ts";
 import { createInitialState, tuiReducer } from "../src/tui/state.ts";
 import { getMessageFeedHeight, getPickerLayout } from "../src/tui/layout.ts";
 import type { TodoItem } from "../src/todo.ts";
+import { TodoEditor } from "../src/tui/components/TodoEditor.tsx";
+import { TodoPanelStatic } from "../src/tui/components/TodoPanel.tsx";
+import { todoEditorRenderLines } from "../src/tui/terminal-overlay-lines.ts";
+import { TUI_COLORS as C } from "../src/tui/theme.ts";
+import { CLAUDE_SPINNER_FRAMES } from "../src/tui/loading.ts";
+import { terminalStringWidth } from "../src/tui/terminal-width.ts";
 import { confirmTodoEditor, createTodoEditorState, reduceTodoEditor } from "../src/tui/todo-editor.ts";
 
 describe("TUI todo state", () => {
@@ -12,6 +19,34 @@ describe("TUI todo state", () => {
     { id: "a", content: "First", activeForm: "First", status: "pending", source: "model" },
     { id: "b", content: "Running", activeForm: "Running", status: "in_progress", source: "model" },
   ];
+
+  it("highlights the selected Todo across the full editor row", () => {
+    const state = createTodoEditorState(editableTodos);
+    const editor = TodoEditor({ state, onCancel: () => {}, onStateChange: () => {}, onConfirm: () => {}, width: 40 });
+    const children = React.Children.toArray(editor.props.children).filter(React.isValidElement<{ children?: React.ReactNode; backgroundColor?: string; color?: string }>);
+    const selected = children.find((child) => {
+      const text = React.Children.toArray(child.props.children).filter((part): part is string => typeof part === "string").join("");
+      return text.includes("First");
+    });
+    const unselected = children.find((child) => {
+      const text = React.Children.toArray(child.props.children).filter((part): part is string => typeof part === "string").join("");
+      return text.includes("Running");
+    });
+    const selectedText = selected
+      ? React.Children.toArray(selected.props.children).filter((part): part is string => typeof part === "string").join("")
+      : "";
+
+    assert.ok(selected);
+    assert.equal(selected.props.backgroundColor, C.selection);
+    assert.equal(selected.props.color, C.assistant);
+    assert.equal(terminalStringWidth(selectedText), 34);
+    assert.ok(unselected);
+    assert.equal(unselected.props.backgroundColor, undefined);
+
+    const renderedLine = todoEditorRenderLines(state, 40).find((line) => line.key === "todo-editor-item-a");
+    assert.ok(renderedLine);
+    assert.equal(renderedLine.background, "selection");
+  });
 
   it("cycles status exclusively and clamps selection after delete", () => {
     let editor = createTodoEditorState(editableTodos);
@@ -187,6 +222,27 @@ describe("TUI todo state", () => {
 });
 
 describe("TodoPanel formatting", () => {
+  it("uses the shared loading icon for an in-progress Todo", () => {
+    const panel = TodoPanelStatic({ todos: [
+      { id: "active", content: "Run tests", activeForm: "Running tests", status: "in_progress", source: "model" },
+    ], now: 0 });
+    const renderedText = (node: React.ReactNode): string => React.Children.toArray(node).map((child) => {
+      if (typeof child === "string" || typeof child === "number") return String(child);
+      if (!React.isValidElement<{ children?: React.ReactNode }>(child)) return "";
+      if (typeof child.type === "function") {
+        const renderComponent = child.type as (props: Record<string, unknown>) => React.ReactNode;
+        const rendered = renderComponent(child.props);
+        return React.isValidElement<{ children?: React.ReactNode }>(rendered)
+          ? renderedText(rendered.props.children)
+          : "";
+      }
+      return renderedText(child.props.children);
+    }).join("");
+
+    assert.ok(panel);
+    assert.ok(renderedText(panel).includes(CLAUDE_SPINNER_FRAMES[0]));
+  });
+
   it("shows a compact progress meter without adding a panel row", () => {
     assert.equal(todoProgressMeter(2, 4), "▰▰▰▱▱▱");
     assert.equal(todoProgressMeter(0, 0), "······");

@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   extractFileAcTrigger,
   parseAtRefs,
+  promptPlaceholder,
   sanitizeInput,
   shouldAcceptAutocompleteOnEnter,
 } from "../src/tui/input-utils.ts";
@@ -49,6 +50,14 @@ function createTerminal() {
 }
 
 describe("TUI input utils", () => {
+  it("shows English placeholders for interactive prompt modes", () => {
+    assert.equal(promptPlaceholder({ acMode: "multi-agent-model" }), "Enter a model ID (e.g. deepseek/deepseek-v4-flash), or press Enter to use the current model");
+    assert.equal(promptPlaceholder({ acMode: "multi-agent-mode" }), "Choose a mode: 1) planner_worker_reviewer  2) agent_turn — enter a number and press Enter");
+    assert.equal(promptPlaceholder({ acMode: "multi-agent-roles" }), "Choose a model for each role (0=inherit main model, 1..n=existing profiles, n+1=create new)");
+    assert.equal(promptPlaceholder({ acMode: "multi-agent-role-new" }), "New model profile: enter modelId → baseUrl → apiKey");
+    assert.equal(promptPlaceholder({ acMode: "multi-agent-task" }), "Describe the task and press Enter to start the multi-agent workflow");
+  });
+
   it("navigates submitted prompts and restores the draft", () => {
     const history = new TerminalInputHistory();
     history.add("first prompt");

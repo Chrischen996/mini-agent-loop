@@ -13,6 +13,7 @@ import { disableMouseTracking, enableMouseTracking } from "./mouse-tracking.ts";
 import { openInspectorFromArgs } from "./inspect.ts";
 import { getStartupSessionRequest } from "./session-serialization.ts";
 import { loadTuiSystemPromptContext } from "./system-prompt.ts";
+import { RELAUNCH_EXIT_CODE } from "./relaunch-constants.ts";
 
 const cwd = process.cwd();
 
@@ -26,16 +27,11 @@ const MAIN_SCREEN = "\x1b[?1049l";
 const args = process.argv.slice(2);
 const startupSessionRequest = getStartupSessionRequest(args);
 
-if (!process.stdin.isTTY || !process.stdout.isTTY) {
-  process.stderr.write("mini-agent TUI requires an interactive terminal\n");
-  process.exit(1);
-}
-
-async function main(): Promise<void> {
-  // Start Node.js inspector if requested
-  const inspectOptions = await openInspectorFromArgs(args);
-  if (inspectOptions) {
-    console.error(`[inspector] started on port ${inspectOptions.port}`);
+async function runMain(): Promise<void> {
+  // Guard: only the interactive terminal entry may run main().
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    process.stderr.write("mini-agent TUI requires an interactive terminal\n");
+    process.exit(1);
   }
 
   const codebaseRuntime = createCodebaseRuntimeFromEnv();
@@ -143,7 +139,27 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
-});
+/**
+ * Run the TUI entry point. Exported so the process supervisor can invoke it
+ * directly when running as the child process (MINI_AGENT_CHILD=1).
+ */
+export async function main(): Promise<void> {
+  await runMain();
+}
+
+export { RELAUNCH_EXIT_CODE };
+
+export default main;
+
+// Run the TUI when invoked directly as a script (node / tsx / bundle entry).
+// When imported by the process supervisor, process.argv[1] is the supervisor
+// path, so this guard does not fire — the supervisor calls main() explicitly.
+if (
+  process.argv[1] &&
+  (process.argv[1].endsWith("ink-main.tsx") || process.argv[1].endsWith("tui.js"))
+) {
+  main().catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
+  });
+}

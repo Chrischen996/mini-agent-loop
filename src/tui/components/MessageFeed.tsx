@@ -466,10 +466,16 @@ export function MessageFeed({
               keeping the replacement seamless;
             - subagent tool rows and protocol text render nothing. */}
         if (item.kind === "history_hint") {
-          // Keep viewport accounting intact, but do not replace transcript
-          // rows with a numeric history hint. Claude Code leaves the clipped
-          // conversation unobstructed and exposes navigation through keys.
-          return null;
+          // Show a thin 1-row hint so the user knows more content is available
+          // above/below without obstructing the transcript.
+          const label = item.direction === "above"
+            ? `⌃ ${item.hiddenRows} lines above (PgUp to scroll)`
+            : `⌄ ${item.hiddenRows} lines below (PgDn to scroll)`;
+          return (
+            <ViewportSlice key={`history-hint-${item.direction}`} clipTop={0} visibleHeight={1}>
+              <Text color={C.muted} dimColor wrap="truncate-end">{label}</Text>
+            </ViewportSlice>
+          );
         }
         if (item.kind === "streaming_reasoning") {
           return (

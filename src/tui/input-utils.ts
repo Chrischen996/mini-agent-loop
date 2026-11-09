@@ -113,15 +113,15 @@ export function promptPlaceholder(context: PromptPlaceholderContext = {}): strin
     case "profile-list":
       return "↑↓ select profile, Enter activate";
     case "multi-agent-model":
-      return "输入模型 ID (如 deepseek/deepseek-v4-flash) 或直接 Enter 使用当前模型";
+      return "Enter a model ID (e.g. deepseek/deepseek-v4-flash), or press Enter to use the current model";
     case "multi-agent-mode":
-      return "选择模式: 1) planner_worker_reviewer  2) agent_turn — 输入编号后按 Enter";
+      return "Choose a mode: 1) planner_worker_reviewer  2) agent_turn — enter a number and press Enter";
     case "multi-agent-roles":
-      return "为每个子角色选择模型（0=继承主模型，1..n=已有 profile，n+1=新建）";
+      return "Choose a model for each role (0=inherit main model, 1..n=existing profiles, n+1=create new)";
     case "multi-agent-role-new":
-      return "新建模型配置：输入 modelId → baseUrl → apiKey";
+      return "New model profile: enter modelId → baseUrl → apiKey";
     case "multi-agent-task":
-      return "描述你的任务，Enter 启动多智能体";
+      return "Describe the task and press Enter to start the multi-agent workflow";
     default:
       return "Message, /command, or @file reference";
   }

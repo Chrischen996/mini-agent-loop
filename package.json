@@ -5,8 +5,9 @@
   "license": "MIT",
   "description": "Extensible AI agent runtime for terminal, CLI, and HTTP workflows",
   "bin": {
-    "mini-agent-loop": "dist/tui.js",
-    "mini-agent-loop-tui": "dist/tui.js",
+    "mini-agent-loop": "dist/tui-supervisor.js",
+    "mini-agent-loop-tui": "dist/tui-supervisor.js",
+    "mini-agent-loop-tui-legacy": "dist/tui.js",
     "mini-agent-loop-run": "dist/cli.js",
     "mini-agent-loop-web": "dist/web-launcher.js"
   },
@@ -32,7 +33,7 @@
   },
   "scripts": {
     "start": "tsx src/cli.ts",
-    "tui": "node --import tsx src/tui/ink-main.tsx",
+    "tui": "node --import tsx src/tui/process-supervisor.ts",
     "web:start": "tsx src/web-launcher.ts",
     "dev": "tsx watch src/server.ts",
     "dev:server": "tsx watch src/server.ts",

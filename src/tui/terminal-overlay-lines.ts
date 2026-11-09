@@ -52,7 +52,7 @@ export function panelContentLine(
   key: string,
   text: string,
   style: RenderLine["style"],
-  options: { width?: number; tone?: PanelTone; dim?: boolean; bold?: boolean; strikethrough?: boolean } = {},
+  options: { width?: number; tone?: PanelTone; dim?: boolean; bold?: boolean; strikethrough?: boolean; background?: RenderLine["background"] } = {},
 ): RenderLine {
   if (options.width === undefined) {
     return {
@@ -64,6 +64,7 @@ export function panelContentLine(
       dim: options.dim,
       bold: options.bold,
       strikethrough: options.strikethrough,
+      background: options.background,
     };
   }
   const safeWidth = Math.max(12, options.width);
@@ -79,6 +80,7 @@ export function panelContentLine(
     dim: options.dim,
     bold: options.bold,
     strikethrough: options.strikethrough,
+    background: options.background,
   };
 }
 
@@ -172,6 +174,7 @@ export function todoEditorRenderLines(state?: TodoEditorState, width?: number): 
           bold: selected,
           dim: !selected && todo.status === "completed",
           strikethrough: todo.status === "completed",
+          background: selected ? "selection" : undefined,
         },
       ));
     }

@@ -11,16 +11,9 @@ import {
   TODO_PANEL_MAX_VISIBLE_ITEMS,
   TODO_PLAN_STATUS_LABELS,
 } from "../todo-format.ts";
-import { LOADING_FRAME_MS } from "../activity.ts";
+import { LOADING_FRAME_MS, loadingGlyph, loadingMarkerBright } from "../activity.ts";
 
-// ─── Spinner frames for in_progress items ─────────────────────────────────
-
-const TODO_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
-
-function getSpinnerChar(now: number): string {
-  const idx = Math.floor(now / LOADING_FRAME_MS) % TODO_SPINNER_FRAMES.length;
-  return TODO_SPINNER_FRAMES[idx] ?? "⠋";
-}
+// ─── Single shared loading marker for in-progress items ────────────────────
 
 // ─── Single todo row (pure, no hooks) ─────────────────────────────────────
 
@@ -42,7 +35,7 @@ function TodoRow({ item, index, showIndex, now }: TodoRowProps): React.ReactElem
   if (item.status === "in_progress") {
     return (
       <Box gap={1} minWidth={0}>
-        <Text color={C.running} bold>{getSpinnerChar(now)}</Text>
+        <Text color={C.running} dimColor={!loadingMarkerBright(now, 0)} bold>{loadingGlyph(now, 0)}</Text>
         <Text color={C.running} wrap="truncate-end">{label}</Text>
       </Box>
     );
@@ -151,7 +144,7 @@ export function TodoPanelStatic({
         {active ? (
           <>
             <Text color={C.muted}>{headerText}  ▸  ·  </Text>
-            <Text color={C.running}>{getSpinnerChar(now)} </Text>
+            <Text color={C.running} dimColor={!loadingMarkerBright(now, 0)}>{loadingGlyph(now, 0)} </Text>
             <Text color={C.running} wrap="truncate-end">{todoText(activeLabel, labelBudget)}</Text>
           </>
         ) : (

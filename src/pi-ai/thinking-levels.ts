@@ -106,12 +106,12 @@ export function modelSupportsMappedLevel(
 
 /** The human-readable label list shared by UI surfaces. */
 export const THINKING_LEVEL_DISPLAY_LABELS: Readonly<Record<ModelThinkingLevel, string>> = {
-	off: "关闭",
-	minimal: "最小",
-	low: "低",
-	medium: "中",
-	high: "高",
-	xhigh: "极高",
-	max: "最大",
-	ultra: "超限",
+	off: "Off",
+	minimal: "Minimal",
+	low: "Low",
+	medium: "Medium",
+	high: "High",
+	xhigh: "X-High",
+	max: "Max",
+	ultra: "Ultra",
 };

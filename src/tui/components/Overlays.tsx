@@ -76,7 +76,7 @@ export function Overlays({
   onTodoConfirm,
 }: OverlaysProps): React.ReactElement | null {
   if (todoEditorState && onTodoCancel && onTodoInput && onTodoConfirm) {
-    return <TodoEditor state={todoEditorState} onCancel={onTodoCancel} onStateChange={onTodoInput} onConfirm={onTodoConfirm} />;
+    return <TodoEditor state={todoEditorState} onCancel={onTodoCancel} onStateChange={onTodoInput} onConfirm={onTodoConfirm} width={width} />;
   }
   if (!acMode) return null;
   // A very short terminal may have no spare picker rows. Keep the prompt and

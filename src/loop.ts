@@ -738,6 +738,55 @@ function inheritHistoryWithPrompt(history: AgentMessage[], childPrompt: string):
   return [{ role: "system", content: childPrompt }, ...inherited];
 }
 
+/**
+ * Maximum number of non-system messages to retain when compacting history.
+ * When the LLM history (historyRef) exceeds this, older messages are
+ * dropped (except the leading system message and the most recent user
+ * message) to prevent unbounded growth between compaction events.
+ */
+const MAX_HISTORY_MESSAGES = 200;
+
+/**
+ * Aggressively trim the agent history to keep it bounded. Used at the
+ * start of each runAgentTurn to prevent unbounded memory growth when
+ * compaction events are infrequent.
+ *
+ * Rules:
+ * - Always keep the leading system message.
+ * - Always keep the most recent MAX_HISTORY_MESSAGES non-system messages.
+ * - If the first user message (goal prompt) would be dropped, preserve it
+ *   (inserted right after system) — mirroring the TUI transcript behavior.
+ * - Walk back from the split boundary so tool messages are not orphaned
+ *   from the assistant turn that issued their calls.
+ */
+export function capHistory(history: AgentMessage[]): AgentMessage[] {
+  const hasSystem = history[0]?.role === "system";
+  const nonSystemStart = hasSystem ? 1 : 0;
+  const nonSystem = history.slice(nonSystemStart);
+  if (nonSystem.length <= MAX_HISTORY_MESSAGES) return history;
+
+  let splitAt = nonSystem.length - MAX_HISTORY_MESSAGES;
+  // Walk back so we don't leave a tool message whose issuing assistant
+  // turn was cut off the front of the kept window.
+  while (splitAt > 0) {
+    const current = nonSystem[splitAt];
+    const previous = nonSystem[splitAt - 1];
+    if (current?.role === "tool" || (previous?.role === "assistant" && previous.toolCalls?.length)) {
+      splitAt -= 1;
+      continue;
+    }
+    break;
+  }
+
+  const firstUserIdx = nonSystem.findIndex((m) => m.role === "user");
+  const kept: AgentMessage[] = [];
+  if (firstUserIdx >= 0 && firstUserIdx < splitAt) {
+    kept.push(nonSystem[firstUserIdx]!);
+  }
+  kept.push(...nonSystem.slice(splitAt));
+  return hasSystem ? [history[0]!, ...kept] : kept;
+}
+
 export async function runAgentTurn(
   history: AgentMessage[],
   userText: string,
@@ -1022,9 +1071,14 @@ async function runAgentTurnInternal(
         preprocessContext,
       );
   const compactedHistory = compactHistory(history, currentContext);
-  const messages: AgentMessage[] = [...(runPolicy ? history : compactedHistory), ...initialBatch];
-  let pendingHistoryCompaction = runPolicy && compactedHistory !== history
-    ? [...compactedHistory, ...initialBatch] : undefined;
+  const cappedHistory = capHistory(compactedHistory);
+  let messages: AgentMessage[] = [
+    ...(runPolicy ? cappedHistory : compactedHistory),
+    ...initialBatch,
+  ];
+  // Only policy mode mirrors the cap to the TUI; non-policy mode relies on
+  // compactHistory's token-based compaction which already handles long runs.
+  let pendingHistoryCapEvent = Boolean(runPolicy) && cappedHistory !== compactedHistory;
   const appendPendingUserMessages = async (turn: number): Promise<boolean> => {
     const pending = await getPendingUserMessages?.();
     if (!pending?.length) return false;
@@ -1072,6 +1126,18 @@ async function runAgentTurnInternal(
     messages.splice(0, messages.length, ...compacted);
     await triggerCheckpoint("context_compacted", { turn: turn - 1 });
     onEvent?.({ type: "context_compacted", beforeTokens, afterTokens: estimateContextTokens(messages, tools), reason });
+  };
+
+  const emitHistoryCapCompaction = async (turn: number, tools: Tool[], capped: AgentMessage[]): Promise<void> => {
+    const beforeMessages = messages;
+    messages.splice(0, messages.length, ...capped);
+    await triggerCheckpoint("context_compacted", { turn: turn - 1 });
+    onEvent?.({
+      type: "context_compacted",
+      beforeTokens: estimateContextTokens(beforeMessages, tools),
+      afterTokens: estimateContextTokens(messages, tools),
+      reason: "history cap",
+    });
   };
 
   const writeToolNames = new Set(["write", "edit", "delete", "mkdir", "copy", "move", "patch", "document_edit"]);
@@ -1560,10 +1626,9 @@ async function runAgentTurnInternal(
 
     const baseTools = resolveToolProvider(tools);
     const turnTools = [...baseTools, ...skillTools];
-    if (pendingHistoryCompaction) {
-      const compacted = pendingHistoryCompaction;
-      pendingHistoryCompaction = undefined;
-      await applyCompaction(compacted, turn, turnTools, "context threshold");
+    if (pendingHistoryCapEvent) {
+      pendingHistoryCapEvent = false;
+      await emitHistoryCapCompaction(turn, turnTools, cappedHistory);
     }
 
     // Optional deterministic preflight + coordinator activation. This happens

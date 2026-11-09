@@ -8,6 +8,7 @@ import {
   getDefaultIntensity,
   getDefaultThinkingLevel,
   getThinkingLevelChoices,
+  intensityToDisplay,
   intensityToModelThinkingLevel,
   parseThinkingIntensityCommand,
   parseThinkingCommandMode,
@@ -129,8 +130,16 @@ describe("thinking intensity model levels", () => {
     assert.equal(cycleThinkingLevel({ ...config, thinkingLevel: "max" }, "increase"), "minimal");
     assert.equal(cycleThinkingLevel({ ...config, thinkingLevel: "ultra" }, "increase"), "minimal");
     assert.equal(cycleThinkingLevel({ ...config, thinkingLevel: "minimal" }, "decrease"), "minimal");
-    assert.equal(thinkingLevelToDisplay("xhigh"), "极高");
-    assert.equal(thinkingLevelToDisplay("ultra"), "超限");
+    assert.equal(thinkingLevelToDisplay("off"), "Off");
+    assert.equal(thinkingLevelToDisplay("minimal"), "Minimal");
+    assert.equal(thinkingLevelToDisplay("low"), "Low");
+    assert.equal(thinkingLevelToDisplay("medium"), "Medium");
+    assert.equal(thinkingLevelToDisplay("high"), "High");
+    assert.equal(thinkingLevelToDisplay("xhigh"), "X-High");
+    assert.equal(thinkingLevelToDisplay("max"), "Max");
+    assert.equal(thinkingLevelToDisplay("ultra"), "Ultra");
+    assert.equal(intensityToDisplay("xhigh"), "X-High");
+    assert.equal(intensityToDisplay("ultra"), "Ultra");
   });
 
   it("supports a one-key wrapped cycle for quick switching", () => {
@@ -245,6 +254,6 @@ describe("thinking intensity model levels", () => {
   });
 
   it("labels ultra consistently for the status bar", () => {
-    assert.equal(thinkingLevelToDisplay("ultra"), "超限");
+    assert.equal(thinkingLevelToDisplay("ultra"), "Ultra");
   });
 });

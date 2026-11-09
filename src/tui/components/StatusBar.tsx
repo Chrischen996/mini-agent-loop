@@ -23,8 +23,9 @@ type StatusBarProps = {
   promptTokens?: number;  // Total prompt tokens for accurate cache percentage
 };
 
-export function StatusBar({ modelName, tokenEstimate, contextWindow, busy, status = "就绪", queuedCount = 0, bgTaskCount, mcpStatus, permissionMode, thinkingLevel, cacheReadTokens, promptTokens }: StatusBarProps): React.ReactElement {
-  const modeLabel = permissionMode === "plan" ? "计划" : "绕过";
+export function StatusBar({ modelName, tokenEstimate, contextWindow, busy, status = "Ready", queuedCount = 0, bgTaskCount, mcpStatus, permissionMode, thinkingLevel, cacheReadTokens, promptTokens }: StatusBarProps): React.ReactElement {
+  const modeLabel = permissionMode === "plan" ? "Plan" : "Bypass";
+  const isThinkingLevelStatus = /^(?:thinking level|思考强度)\s*[:：]/i.test(status.trim());
 
   return (
     <Box
@@ -34,17 +35,17 @@ export function StatusBar({ modelName, tokenEstimate, contextWindow, busy, statu
       flexDirection="column"
     >
       <Box gap={2}>
-        <Text color={busy ? C.running : C.success}>{busy ? "⟳ 运行中" : "● 就绪"}</Text>
-        {(busy || status !== "就绪") && (
+        <Text color={busy ? C.running : C.success}>{busy ? "⟳ Working" : "● Ready"}</Text>
+        {(busy || status !== "Ready") && !isThinkingLevelStatus && (
           <Text color={busy ? C.running : C.success} wrap="truncate-end">{status}</Text>
         )}
-        {queuedCount > 0 && <Text color={C.running}>队列: {queuedCount}</Text>}
+        {queuedCount > 0 && <Text color={C.running}>Queue: {queuedCount}</Text>}
         {bgTaskCount !== undefined && bgTaskCount > 0 && (
           <Text color={C.running}>{bgTaskCount} bg task{bgTaskCount === 1 ? "" : "s"}</Text>
         )}
         {mcpStatus && <Text color={C.muted} wrap="truncate-end">{mcpStatus}</Text>}
         <Text color={C.info} wrap="truncate-end">{modelName}</Text>
-        <Text color={C.thinking} wrap="truncate-end">思考: {thinkingLevelToDisplay(thinkingLevel)}</Text>
+        <Text color={C.thinking} wrap="truncate-end">Thinking: {thinkingLevelToDisplay(thinkingLevel)}</Text>
         <Text dimColor>{tokenEstimate} / {formatContextWindow(contextWindow)}</Text>
         <Text color={C.thinking} wrap="truncate-end">{modeLabel}</Text>
         {cacheReadTokens !== undefined && cacheReadTokens > 0 && promptTokens !== undefined && promptTokens > 0 && (
@@ -59,7 +60,7 @@ export function StatusBar({ modelName, tokenEstimate, contextWindow, busy, statu
         )}
       </Box>
       <Box gap={2}>
-        <Text dimColor wrap="truncate-end">[PgUp/PgDn] 滚动  [Ctrl+Y/Ctrl+Shift+C] 复制  [Ctrl+V] 粘贴图片  [Ctrl+R] 思考  [Shift+Tab] 模式  [/copy] 原文  [Ctrl+C] 退出</Text>
+        <Text dimColor wrap="truncate-end">[PgUp/PgDn] scroll  [Ctrl+Y/Ctrl+Shift+C] copy  [Ctrl+V] paste image  [Ctrl+R] thinking  [Shift+Tab] mode  [/copy] transcript  [Ctrl+C] quit</Text>
       </Box>
     </Box>
   );

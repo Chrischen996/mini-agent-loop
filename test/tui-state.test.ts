@@ -337,12 +337,17 @@ describe("TUI sidebar state", () => {
     // plan -> bypass
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "bypass");
-    assert.equal(state.status, "Permission mode: Bypass permissions");
+    assert.equal(state.status, "Ready");
 
     // bypass -> plan
     state = tuiReducer(state, { type: "TOGGLE_PERMISSION_MODE" });
     assert.equal(state.permissionMode, "plan");
-    assert.equal(state.status, "Permission mode: Plan mode");
+    assert.equal(state.status, "Ready");
+
+    state = tuiReducer(state, { type: "SET_STATUS", status: "Permission mode: Bypass permissions" });
+    state = tuiReducer(state, { type: "SET_PERMISSION_MODE", mode: "bypass" });
+    assert.equal(state.permissionMode, "bypass");
+    assert.equal(state.status, "Ready");
   });
 
   it("preserves permission mode on RESET", () => {

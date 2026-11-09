@@ -560,8 +560,10 @@ export function buildTerminalRenderLines(
 | `←` / `→` | 光标移动 |
 | `Ctrl+←` / `Ctrl+→` | 词级导航 |
 | `Home` / `End` | 跳转行首/行尾 |
-| `Enter` | 提交 |
-| `Ctrl+Enter` / `Ctrl+J` | 换行 |
+| `Enter` | 空闲时提交；忙碌时排队，等待任务结果时可立即发送 |
+| 忙碌时再次按空 `Enter` | 立即发送队首消息并取消当前轮次 |
+| `Ctrl+Enter` | 忙碌时立即发送当前输入并取消当前轮次；空闲时换行 |
+| `Ctrl+J` | 换行 |
 | `Backspace` | 删除前字符 |
 | `Delete` | 删除后字符 |
 | `Tab` | 触发自补全 |

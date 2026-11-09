@@ -46,6 +46,7 @@ async function buildEntry(
 
 // Keep the existing CLI/TUI entries and add the Web server/launcher entries.
 await buildEntry("src/cli.ts", "cli.js", true);
+await buildEntry("src/tui/process-supervisor.ts", "tui-supervisor.js", false);
 await buildEntry("src/tui/ink-main.tsx", "tui.js", false);
 await buildEntry("src/bg-tasks/runner.ts", "runner.js", false);
 await buildEntry("src/server.ts", "server.js", false);

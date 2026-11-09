@@ -72,7 +72,7 @@ export async function writeClipboardText(
   text: string,
   io: ClipboardIo = {},
 ): Promise<ClipboardWriteResult> {
-  if (!text) return { ok: false, method: "none", error: "没有可复制的内容" };
+  if (!text) return { ok: false, method: "none", error: "There is no content to copy" };
 
   const platform = io.platform ?? process.platform;
   const env = io.env ?? process.env;
@@ -111,7 +111,7 @@ export async function writeClipboardText(
   return {
     ok: false,
     method: "none",
-    error: "所有复制方式均失败",
+    error: "All clipboard methods failed",
   };
 }
 

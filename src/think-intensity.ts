@@ -196,12 +196,12 @@ export function withThinkingLevel(base: LlmConfig, level: ModelThinkingLevel): T
 
 export function intensityToDisplay(intensity: ThinkingIntensity): string {
   const map: Record<ThinkingIntensity, string> = {
-    off: "关闭",
-    low: "轻量 (Low)",
-    med: "平衡 (Med)",
-    high: "深度 (High)",
-    xhigh: "极致 (X-High)",
-    ultra: "超限 (Ultra)",
+    off: "Off",
+    low: "Low",
+    med: "Medium",
+    high: "High",
+    xhigh: "X-High",
+    ultra: "Ultra",
   };
   return map[intensity];
 }

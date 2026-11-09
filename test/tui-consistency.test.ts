@@ -159,7 +159,7 @@ describe("shared TUI presentation", () => {
       assert.ok(help.includes(command.usage), `help omits ${command.usage}`);
       assert.ok(help.includes(command.description), `help omits ${command.description}`);
     }
-    assert.match(help, /Shift\+Tab permission mode/);
+    assert.doesNotMatch(help, /Shift\+Tab/);
     assert.match(help, /Ctrl\+R reasoning level/);
 
     // No command may be listed twice, and every row keeps its two columns
@@ -195,7 +195,7 @@ describe("shared TUI presentation", () => {
           `${command.name} disappeared from /help at width ${width}`,
         );
       }
-      assert.match(rows.join("\n"), /Shift\+Tab permission mode/);
+      assert.doesNotMatch(rows.join("\n"), /Shift\+Tab/);
     }
   });
 

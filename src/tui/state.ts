@@ -9,7 +9,7 @@ import type { SessionPhase, ExecutionPlan, PlanActEvent } from "../plan-act/type
 import type { PlanDocument } from "../plan/document.ts";
 import { isTodoRevisionNewer, nextTodoRevision, TODO_WRITE_TOOL_NAME, type TodoItem, type TodoViewMode } from "../todo.ts";
 import { executionPlanToTodoItems } from "./todo-format.ts";
-import { permissionModeLabel, toolArgumentSummary } from "./claude-style.ts";
+import { toolArgumentSummary } from "./claude-style.ts";
 import { toolVisualName } from "./tool-lines.ts";
 import { subagentRenderLineCount } from "./subagent-lines.ts";
 import { compactText } from "./text-utils.ts";
@@ -476,6 +476,7 @@ function resultPreviewForChat(content: MessageContent): string {
 }
 
 const MAX_STREAMING_PREVIEW_CHARS = 16_000;
+const MAX_STREAMING_PARTS = 512; // cap chunk array length to avoid unbounded growth during long streams
 
 function appendStreamingPreview(previous: string, chunk: string): string {
   if (!chunk) return previous;
@@ -484,8 +485,101 @@ function appendStreamingPreview(previous: string, chunk: string): string {
   return `… ${combined.slice(-(MAX_STREAMING_PREVIEW_CHARS - 2))}`;
 }
 
+/** Append a chunk to the parts array, capping total length to prevent memory bloat. */
+function appendStreamingParts(previous: string[], chunk: string | undefined): string[] {
+  if (!chunk) return previous;
+  const next = [...previous, chunk];
+  if (next.length > MAX_STREAMING_PARTS) {
+    // Drop the oldest half; the newest parts are most useful for the .join() fallback
+    return next.slice(next.length - MAX_STREAMING_PARTS / 2);
+  }
+  return next;
+}
+
 function taskDuration(startedAt?: number): number | undefined {
   return startedAt === undefined ? undefined : Math.max(0, Date.now() - startedAt);
+}
+
+/**
+ * Maximum transcript messages retained between compactions.
+ * Prevents unbounded growth of state.messages when compaction events are
+ * infrequent. Kept in sync with the context_compacted truncation threshold.
+ */
+const MAX_TRANSCRIPT_MESSAGES = 500;
+
+/**
+ * Maximum entries kept in the tool/subagent lookup dictionaries.
+ * Stale entries (no longer referenced by state.messages) are pruned first;
+ * if still over the cap, the oldest entries are dropped.
+ */
+const MAX_DICT_ENTRIES = 500;
+
+/** Keep only the most recent compaction records; older ones are presentation-only. */
+const MAX_CONTEXT_COMPACTIONS = 50;
+
+/**
+ * Trim the transcript to the most recent MAX_TRANSCRIPT_MESSAGES entries,
+ * always preserving the first user message (goal prompt) when it falls
+ * outside the retained window.
+ */
+function trimTranscript(messages: readonly ChatMessage[]): ChatMessage[] {
+  if (messages.length <= MAX_TRANSCRIPT_MESSAGES) return messages as ChatMessage[];
+  const keepFrom = messages.length - MAX_TRANSCRIPT_MESSAGES;
+  const firstUserIdx = messages.findIndex((m) => m.kind === "user");
+  const trimmed: ChatMessage[] = [];
+  // Only include the first user message if it is BEFORE the retained window;
+  // otherwise slice(keepFrom) already contains it and pushing again would
+  // duplicate the entry.
+  if (firstUserIdx >= 0 && firstUserIdx < keepFrom) {
+    trimmed.push(messages[firstUserIdx]!);
+  }
+  trimmed.push(...messages.slice(keepFrom));
+  return trimmed;
+}
+/**
+ * Truncate state.messages to the most recent MAX_TRANSCRIPT_MESSAGES,
+ * always preserving the first user message (goal prompt) when it falls
+ * outside the retained window. Also prunes stale tool/subagent dictionary
+ * entries that no longer reference a transcript message.
+ */
+function pruneTranscriptAndDictionaries(state: TuiState): TuiState {
+  let messages = state.messages;
+  if (messages.length > MAX_TRANSCRIPT_MESSAGES) {
+    messages = trimTranscript(messages);
+  }
+  const { subagent, tools } = messageIndices(messages);
+  const subagentById = Object.fromEntries(
+    Object.entries(state.subagentById).filter(([id]) => id in subagent),
+  );
+  const toolById = Object.fromEntries(
+    Object.entries(state.toolById).filter(([id]) => id in tools),
+  );
+  const subagentIndexById = subagent;
+  const toolIndexById = tools;
+
+  // Cap dictionary size by dropping oldest entries if still over the limit.
+  const capDict = <T extends Record<string, unknown>>(dict: T): T => {
+    const keys = Object.keys(dict);
+    if (keys.length <= MAX_DICT_ENTRIES) return dict;
+    const keep = keys.slice(keys.length - MAX_DICT_ENTRIES);
+    return Object.fromEntries(keep.map((k) => [k, dict[k]])) as T;
+  };
+
+  return {
+    ...state,
+    messages,
+    subagentById: capDict(subagentById),
+    toolById: capDict(toolById),
+    subagentIndexById,
+    toolIndexById,
+    // steps and toolCards are keyed by tool id; drop entries no longer in messages
+    steps: state.steps.filter((step) => step.id in tools),
+    toolCards: state.toolCards.filter((card) => card.id in tools),
+    // Cap the compaction log to prevent unbounded growth on very long sessions.
+    contextCompactions: state.contextCompactions.length > MAX_CONTEXT_COMPACTIONS
+      ? state.contextCompactions.slice(-MAX_CONTEXT_COMPACTIONS)
+      : state.contextCompactions,
+  };
 }
 
 function todoSpinnerMessage(todos: readonly TodoItem[]): string | undefined {
@@ -543,12 +637,16 @@ function updateSubagentMessage(
   // replaced, so the large transcript array is never copied on this hot path.
   Object.assign(base, next);
   const revision = state.subagentRevision + 1;
-  return {
+  const updated: TuiState = {
     ...state,
     subagentById: { ...state.subagentById, [id]: next },
     subagentRevision: revision,
     subagentChange: { id, index: position, revision },
   };
+  // Hot-path lifecycle updates never copy the transcript array: the overlay
+  // maps hold the normalized state, and pruning is deferred to the append
+  // sites (USER_MESSAGE, tool_start, done, AUTO_CONTINUE).
+  return updated;
 }
 
 function updateToolMessage(
@@ -581,15 +679,16 @@ function isHighFrequencySubagentEvent(type: string): boolean {
 
 export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
   switch (action.type) {
-    case "USER_MESSAGE":
-      return {
+    case "USER_MESSAGE": {
+      const appendedMsg: ChatMessage = {
+        kind: "user",
+        text: action.text,
+        ...(action.displayText !== undefined ? { displayText: action.displayText } : {}),
+        ...(action.images?.length ? { images: action.images } : {}),
+      };
+      const baseNext: TuiState = {
         ...state,
-        messages: [...state.messages, {
-          kind: "user",
-          text: action.text,
-          ...(action.displayText !== undefined ? { displayText: action.displayText } : {}),
-          ...(action.images?.length ? { images: action.images } : {}),
-        }],
+        messages: [...state.messages, appendedMsg],
         goal: state.goal || action.text,
         taskTitle: action.text,
         taskStatus: "running",
@@ -609,6 +708,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         // New user turns always re-pin the feed to the latest content.
         scrollOffset: 0,
       };
+      return pruneTranscriptAndDictionaries(baseNext);
+    }
 
     case "RESTORE_SESSION": {
       const messages = chatMessagesFromAgentHistory(action.history);
@@ -737,8 +838,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         scrollOffset: 0,
       };
 
-    case "AUTO_CONTINUE":
-      return {
+    case "AUTO_CONTINUE": {
+      const baseNext: TuiState = {
         ...state,
         busy: true,
         streamingText: "",
@@ -749,6 +850,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         autoContinueCount: action.count,
         status: `Continuing… (${action.count}/${action.max})`,
       };
+      return pruneTranscriptAndDictionaries(baseNext);
+    }
 
     case "CLEAR_PENDING_PERMISSION":
       return {
@@ -790,21 +893,19 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     case "TOGGLE_PERMISSION_MODE": {
       const current = PERMISSION_MODES.indexOf(state.permissionMode);
       const next = PERMISSION_MODES[(current + 1) % PERMISSION_MODES.length] ?? "plan";
-      const modeLabel = permissionModeLabel(next);
       return {
         ...state,
         permissionMode: next,
-        status: `Permission mode: ${modeLabel}`,
+        status: state.status.startsWith("Permission mode:") ? "Ready" : state.status,
       };
     }
 
     case "SET_PERMISSION_MODE": {
-      const modeLabel = permissionModeLabel(action.mode);
       return {
         ...state,
         permissionMode: action.mode,
         pendingPermission: undefined,
-        status: `Permission mode: ${modeLabel}`,
+        status: state.status.startsWith("Permission mode:") ? "Ready" : state.status,
       };
     }
 
@@ -865,8 +966,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             streamingText: appendStreamingPreview(state.streamingText, answer),
             streamingReasoning: appendStreamingPreview(state.streamingReasoning, reasoning),
-            streamingTextParts: answer ? [...state.streamingTextParts, answer] : state.streamingTextParts,
-            streamingReasoningParts: reasoning ? [...state.streamingReasoningParts, reasoning] : state.streamingReasoningParts,
+            streamingTextParts: appendStreamingParts(state.streamingTextParts, answer || undefined),
+            streamingReasoningParts: appendStreamingParts(state.streamingReasoningParts, reasoning || undefined),
             lastStreamAt: Date.now(),
             status: "Responding…",
           };
@@ -882,8 +983,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ...state,
             streamingText: appendStreamingPreview(state.streamingText, answer),
             streamingReasoning: appendStreamingPreview(state.streamingReasoning, reasoning),
-            streamingTextParts: answer ? [...state.streamingTextParts, answer] : state.streamingTextParts,
-            streamingReasoningParts: reasoning ? [...state.streamingReasoningParts, reasoning] : state.streamingReasoningParts,
+            streamingTextParts: appendStreamingParts(state.streamingTextParts, answer || undefined),
+            streamingReasoningParts: appendStreamingParts(state.streamingReasoningParts, reasoning || undefined),
             lastStreamAt: Date.now(),
             status: "Responding…",
           };
@@ -1028,8 +1129,17 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             // a stable ordinal until that event contract gains one.
             turn: state.contextCompactions.length + 1,
           };
+          // Trim the transcript in place to mirror the LLM history compaction.
+          // Drop the oldest non-user, non-notice messages (tool cards, old
+          // assistant messages) until the array is back to a reasonable size;
+          // always keep the first user prompt and the most recent context.
+          let messages = state.messages;
+          if (messages.length > MAX_TRANSCRIPT_MESSAGES) {
+            messages = trimTranscript(messages);
+          }
           return {
             ...state,
+            messages,
             contextTokens: event.afterTokens,
             contextCompactions: [...state.contextCompactions, compaction],
             status: `Context compacted ${event.beforeTokens} → ${event.afterTokens} tokens`,
@@ -1096,7 +1206,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           };
           const newMessages: ChatMessage[] = [...state.messages, card];
           const toolRevision = state.toolRevision + 1;
-          return {
+          const baseNext: TuiState = {
             ...state,
             messages: newMessages,
             toolById: { ...state.toolById, [event.call.id]: card },
@@ -1114,6 +1224,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               estimateNewMessageRows(state.messages, newMessages),
             ),
           };
+          return pruneTranscriptAndDictionaries(baseNext);
         }
 
         case "tool_end": {
@@ -1192,8 +1303,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             taskDurationMs: taskDuration(state.taskStartedAt),
           };
 
-        case "done":
-          return {
+        case "done": {
+          const baseNext: TuiState = {
             ...state,
             busy: false,
             streamingText: "",
@@ -1208,6 +1319,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             taskStatus: state.taskStatus === "failed" || state.taskStatus === "cancelled" ? state.taskStatus : "completed",
             taskDurationMs: taskDuration(state.taskStartedAt),
           };
+          return pruneTranscriptAndDictionaries(baseNext);
+        }
 
         default:
           return state;

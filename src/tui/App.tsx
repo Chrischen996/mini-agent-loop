@@ -76,7 +76,7 @@ import {
 } from "../permissions.ts";
 import { TurnEventBuffer } from "./stream-buffer.ts";
 import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./layout.ts";
-import { estimateViewportContentHeight } from "./message-viewport.ts";
+import { estimateViewportContentHeight, MessageHeightCache } from "./message-viewport.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
@@ -176,7 +176,7 @@ type AgentSessionAppProps = AppProps & {
 function escapePromptMarkup(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
-const DEFAULT_IMAGE_PROMPT = "请分析附件中的图片";
+const DEFAULT_IMAGE_PROMPT = "Analyze the attached image";
 const COMPLETION_OUTPUT_LIMIT_BYTES = 4_000;
 const SEND_NOW_WAIT_TOOLS = new Set(["bg_wait", "subagent_wait", "subagent", "subagent_batch", "search_orchestrate"]);
 
@@ -581,6 +581,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     getMaxOffset: () => stateRef.current.maxScrollOffset,
     scrollTo: (offset) => dispatchRef.current({ type: "SCROLL_TO", offset }),
   }));
+  const heightCacheRef = useLazyRef(() => new MessageHeightCache());
   const scrollBy = useCallback((delta: number) => {
     smoothScrollRef.current.scrollBy(delta);
   }, [smoothScrollRef]);
@@ -785,9 +786,23 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     };
   }, [cwd, getPermissionManager]);
 
+  /** Cap persisted message count to keep session files bounded on very long sessions. */
+  const MAX_PERSISTED_MESSAGES = 2_000;
+  /** In-memory history cap: keep the conversation productive without letting the
+   *  raw AgentMessage array grow past what two context windows would hold. */
+  const MAX_IN_MEMORY_MESSAGES = 2_500;
+
   const persistSessionSnapshot = useCallback(async (messages: AgentMessage[]) => {
     try {
-      await getSessionManager().save({ ...sessionSnapshotFields(), messages: [...messages] });
+      // Trim in-memory history to bound peak allocation between compaction cycles.
+      const inMemory = messages.length > MAX_IN_MEMORY_MESSAGES
+        ? messages.slice(-MAX_IN_MEMORY_MESSAGES)
+        : messages;
+      // Write a bounded snapshot to disk.
+      const trimmed = inMemory.length > MAX_PERSISTED_MESSAGES
+        ? inMemory.slice(-MAX_PERSISTED_MESSAGES)
+        : inMemory;
+      await getSessionManager().save({ ...sessionSnapshotFields(), messages: trimmed });
     } catch (error) {
       dispatch({
         type: "ADD_NOTICE",
@@ -927,7 +942,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     const next = withThinkingLevel(current, nextLevel);
     llmRef.current = next;
     setLlm(next);
-    dispatch({ type: "SET_STATUS", status: `思考强度: ${thinkingLevelToDisplay(nextLevel)}` });
+    dispatch({ type: "SET_STATUS", status: `Thinking level: ${thinkingLevelToDisplay(nextLevel)}` });
   }, [state.busy, state.pendingPermission]);
 
   const requestedPickerItems =
@@ -940,14 +955,14 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     : state.busy && (foregroundCommandWaiting || sendableWaitWaiting) ? "Waiting; Enter sends now · Ctrl+Enter interrupts"
     : state.busy ? "Working; Enter queues · Ctrl+Enter sends now"
     : acMode === "model-picker" ? "Search models"
-      : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "输入 Base URL"
-        : acMode === "model-setup" ? "输入 API Key，可留空使用环境变量"
-          : acMode === "profile-name" ? "输入配置文件名称（例如 coding-fast）"
-            : acMode === "profile-list" ? "↑↓ 选择配置文件，Enter 激活"
-              : "输入消息，/ 命令，或 @文件 引用";
+      : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "Enter Base URL"
+        : acMode === "model-setup" ? "Enter API key (or leave blank to use an environment variable)"
+          : acMode === "profile-name" ? "Enter a profile name (for example coding-fast)"
+            : acMode === "profile-list" ? "↑↓ select profile, Enter activate"
+              : "Message, /command, or @file reference";
   const promptWidth = Math.max(
     1,
-    termWidth - 4 - (state.busy && queuedCount > 0 ? terminalStringWidth(`队列 ${queuedCount}`) : 0),
+    termWidth - 4 - (state.busy && queuedCount > 0 ? terminalStringWidth(`Queue ${queuedCount}`) : 0),
   );
   const promptRows = estimatePromptInputRows(input, promptWidth, promptPlaceholder);
   const todoRows = getTodoPanelRows(
@@ -988,16 +1003,16 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       target,
     });
     if (!selection) {
-      dispatch({ type: "ADD_NOTICE", title: "复制", text: "没有可复制的原文。可用 /copy last、/copy tool 或先聚焦一条消息。" });
+      dispatch({ type: "ADD_NOTICE", title: "Clipboard", text: "There is no transcript to copy. Use /copy last, /copy tool, or focus a message first." });
       return;
     }
     const result = await writeClipboardText(selection.text);
     dispatch({
       type: "ADD_NOTICE",
-      title: result.ok ? "已复制到剪贴板" : "复制失败",
+      title: result.ok ? "Copied to clipboard" : "Copy failed",
       text: result.ok
         ? formatCopyResultNotice(selection, result.method)
-        : (result.error ?? "无法写入系统剪贴板"),
+        : (result.error ?? "Unable to write to the system clipboard"),
     });
   }, [input, state.focusedMessageIndex, state.messages, state.streamingReasoning, state.streamingText]);
 
@@ -1320,18 +1335,18 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       const ctxWindow = modelContextWindows[state.modelName] ?? llm.contextWindow ?? 128000;
       const pct = ctxWindow > 0 ? Math.round(tokenEst / ctxWindow * 100) : 0;
       const lines = [
-        `上下文统计: ${tokenEst} / ${ctxWindow} tokens (${pct}%)`,
+        `Context usage: ${tokenEst} / ${ctxWindow} tokens (${pct}%)`,
         '',
       ];
       if (compactions.length === 0) {
-        lines.push('尚无压缩记录（上下文未超过阈值）');
+        lines.push('No compaction history (context is below the threshold)');
       } else {
-        lines.push(`已压缩 ${compactions.length} 次:`);
+        lines.push(`Compacted ${compactions.length} times:`);
         for (const c of compactions.slice(-5)) {
           lines.push(`  turn${c.turn}: ${c.before} → ${c.after} (${c.reason})`);
         }
       }
-      dispatch({ type: "ADD_NOTICE", title: "上下文统计", text: lines.join("\n") });
+      dispatch({ type: "ADD_NOTICE", title: "Context usage", text: lines.join("\n") });
       setInput("");
       return;
     }
@@ -1370,7 +1385,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         addPendingImageRef(await loadImageAttachment(imagePath, cwd));
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        dispatch({ type: "ATTACHMENT_ERROR", message: `无法添加图片: ${detail}` });
+        dispatch({ type: "ATTACHMENT_ERROR", message: `Unable to attach image: ${detail}` });
       }
       setInput("");
       return;
@@ -1385,7 +1400,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     if (trimmed === "/help" || trimmed === "/?") {
       dispatch({
         type: "ADD_NOTICE",
-        title: "可用命令",
+        title: "Available commands",
         text: SLASH_COMMANDS.map((command) => `${command.usage.padEnd(28)} ${command.description}`).join("\n"),
       });
       setInput("");
@@ -1491,7 +1506,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       imageParts = await Promise.all(pendingImgs.map(imageAttachmentToPart));
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      dispatch({ type: "ATTACHMENT_ERROR", message: `无法读取待发送图片: ${detail}` });
+      dispatch({ type: "ATTACHMENT_ERROR", message: `Unable to read image for sending: ${detail}` });
       return;
     }
 
@@ -1522,7 +1537,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     const displayText = planTurnOverride
       ? planTurnOverride.displayText
       : isMultiLine
-        ? `[已折叠 ${lineCount} 行 / ${charCount} 字]`
+        ? `[Collapsed ${lineCount} lines / ${charCount} characters]`
         : undefined;
     dispatch({
       type: "USER_MESSAGE",
@@ -1563,17 +1578,17 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         activeTodosRef.current = event.todos;
       } else if (event.type === "auto_subagent") {
         const status = event.executed
-          ? `自动子 agent 已启动 (${event.profile}, score=${event.score})`
+          ? `Auto subagent started (${event.profile}, score=${event.score})`
           : event.shouldDelegate
-            ? `建议委托子 agent (${event.profile}, score=${event.score})`
-            : `不自动委托 (score=${event.score})`;
+            ? `Subagent delegation suggested (${event.profile}, score=${event.score})`
+            : `Automatic delegation skipped (score=${event.score})`;
         dispatch({ type: "SET_STATUS", status });
       } else if (event.type === "coordinator_mode") {
         dispatch({
           type: "SET_STATUS",
           status: event.active
-            ? `编排模式: ${event.profile} (探索 ${event.directExplorationUsed}/${event.maxDirectExploration})`
-            : "编排模式已关闭",
+            ? `Orchestration: ${event.profile} (exploration ${event.directExplorationUsed}/${event.maxDirectExploration})`
+            : "Orchestration disabled",
         });
       } else if (event.type === "tool_start" && event.call.name.startsWith("bg_")) {
         // A bg_* call from the agent starts the badge without requiring the
@@ -1650,7 +1665,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
               streamBuffer.finish(runId);
               turnErrorMessage = permissionTurn.signal.aborted
                 ? "aborted"
-                : `已达到自动续跑上限 (${MAX_AUTO_CONTINUES} 次)`;
+                : `Reached the auto-continue limit (${MAX_AUTO_CONTINUES} runs)`;
               if (permissionTurn.signal.aborted) {
                 const reason = permissionTurn.signal.reason;
                 dispatch({
@@ -1670,7 +1685,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
               }
               break;
             }
-            currentUserText = "继续完成之前的工作";
+            currentUserText = "Continue the previous work";
             currentUserContent = currentUserText;
             dispatch({ type: "AUTO_CONTINUE", count: autoContinueCount, max: MAX_AUTO_CONTINUES });
             continue;
@@ -1738,6 +1753,12 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         dispatch,
       });
       await persistSessionSnapshot(historyRef.current);
+      // Write back the trimmed in-memory history so the next turn starts from a
+      // bounded array instead of the pre-trim reference, capping peak allocation
+      // between LLM compaction cycles.
+      if (historyRef.current.length > MAX_IN_MEMORY_MESSAGES) {
+        historyRef.current = historyRef.current.slice(-MAX_IN_MEMORY_MESSAGES);
+      }
     }
   }, [state, llm, vision, exit, runDirectToolRef, resolveAtRefsRef, clearAc, commitModelSetup, openProfileListRef, getPermissionManager, addPendingImageRef, handlePasteImageRef, conversationId, cwd, projectCwd, copyResolvedText, globalTokenBudget, globalConcurrencyLimit, getBgManager, refreshBgTaskCount, resumeSession, sessionSnapshotFields, getSessionManager, persistSessionSnapshot, mcpStatuses, mcpTools, jumpToBottom, onOpenDashboard, foregroundCommandWaiting, sendableWaitWaiting, sendNowWhileBusy]);
 
@@ -1893,6 +1914,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     expandedThinking: state.expandedThinking,
     width: termWidth,
     maxMessages: 200,
+    cache: heightCacheRef.current,
   });
   const handleScrollContext = useCallback((direction: "up" | "down") => {
     scrollBy(direction === "up" ? 3 : -3);
@@ -1964,11 +1986,18 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           lastStreamAt={state.lastStreamAt}
           spinnerMessage={state.spinnerMessage}
           todoPanelVisible={todoRows > 0}
+          subagentById={state.subagentById}
+          subagentRevision={state.subagentRevision}
+          subagentChange={state.subagentChange}
           toolById={state.toolById}
+          toolRevision={state.toolRevision}
+          toolChange={state.toolChange}
           activeToolId={state.activeToolId}
           availableHeight={feedHeight}
           width={termWidth}
           scrollOffset={state.scrollOffset}
+          showHistoryHints
+          heightCache={heightCacheRef.current}
         />
         <Overlays
           acMode={acMode}
@@ -1990,6 +2019,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           pendingProfileSetup={pendingProfileSetup}
           profileListState={profileListState}
           pickerItemRows={pickerLayout.itemRows}
+          width={termWidth}
         />
       </Box>
 
@@ -2081,7 +2111,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
               }}
               placeholder={promptPlaceholder}
             />
-            {state.busy && queuedCount > 0 && <Text color={C.running}>队列 {queuedCount}</Text>}
+            {state.busy && queuedCount > 0 && <Text color={C.running}>Queue {queuedCount}</Text>}
           </Box>
         </Box>
         <StatusBar

@@ -88,7 +88,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "skill", usage: "/skill [on|off|list|clear] [name]", description: "Alias of /skills", alias: true },
   { name: "skills", usage: "/skills [on|off|list|clear] [name]", description: "Manage session skills" },
   { name: "init", usage: "/init [--force] [--print]", description: "Agent turn: LLM surveys the repo and writes AGENT.MD; --force may overwrite; --print previews the template without the model" },
-  { name: "multi-agent", usage: "/multi-agent [task]", description: "启动多智能体任务向导 (planner → worker → reviewer)" },
+  { name: "multi-agent", usage: "/multi-agent [task]", description: "Start a multi-agent workflow (planner → worker → reviewer)" },
   { name: "web-ui", usage: "/web-ui [--no-open] [--port N]", description: "Start local Web workbench (DeepSeek Harness-style)" },
   { name: "help", usage: "/help", description: "Show help" },
   { name: "exit", usage: "/exit", description: "Alias of /quit", alias: true },
@@ -179,7 +179,6 @@ export const HELP_KEYBIND_HINTS: readonly string[] = [
   "Tab/↑↓ pick a command",
   "Enter run",
   "Esc close",
-  "Shift+Tab permission mode",
   "Ctrl+R reasoning level",
   "Alt+T expand reasoning",
   "Alt+↑/↓ focus message",
@@ -233,7 +232,7 @@ export function formatHelpNotice(commands: readonly CommandDef[] = SLASH_COMMAND
   });
   const hints = width === undefined
     ? [
-      "Tab/↑↓ pick a command  ·  Enter run  ·  Esc close  ·  Shift+Tab permission mode",
+      "Tab/↑↓ pick a command  ·  Enter run  ·  Esc close",
       "Ctrl+R reasoning level  ·  Alt+T expand reasoning  ·  Alt+↑/↓ focus message",
       "Ctrl+Shift+T todo editor  ·  Ctrl+G jump to bottom  ·  PageUp/PageDown scroll",
     ]
