@@ -6,6 +6,11 @@ import {
   type ContextManagerOptions,
 } from "./context.ts";
 import {
+  runAutocompact,
+  applyToolResultBudget,
+  type AutocompactResult,
+} from "./compaction/index.ts";
+import {
   PermissionModeChangedError,
   type PermissionMode,
   type PermissionRequest,
@@ -470,6 +475,22 @@ async function applyPreprocessors(
   return current;
 }
 
+/**
+ * Context compaction matching Claude Code's pipeline:
+ *
+ *  1. {@link runAutocompact} — clears oversized tool results (keeps message
+ *     structure) and summarizes older messages once the conversation nears
+ *     the model's context window, with a predictive check so the next turn
+ *     never overflows.
+ *  2. Legacy destructive {@link compactHistory} as the last resort, only when
+ *     the provider reports a hard context overflow. Destructive because there
+ *     is no other way to fit the conversation.
+ *
+ * The full transcript is preserved in the caller's history; only what the
+ * model sees is bounded. We intentionally do NOT project a collapsed view
+ * onto the sole transcript array (as Claude Code does onto a separate store)
+ * — that would silently destroy what the user can inspect.
+ */
 function compactForModel(
   messages: AgentMessage[],
   llm: LlmConfig,
@@ -482,18 +503,46 @@ function compactForModel(
   const reserveTokens = Math.max(1, Math.min(context?.reserveTokens ?? llm.maxTokens, llm.contextWindow - 1));
   const budget = Math.max(1, llm.contextWindow - reserveTokens);
   const beforeTokens = estimateContextTokens(messages, tools);
-  if (!force && beforeTokens <= budget) return messages;
 
+  // ── Layer 1: tool-result budget + token-threshold compaction ────────────
+  const autocompact = runAutocompact(messages, tools, {
+    contextWindow: llm.contextWindow,
+    maxOutputTokens: llm.maxTokens,
+    budgetTokens: budget,
+    keepRecentMessages: context?.keepRecentMessages,
+  });
+  if (!force && autocompact.compacted && autocompact.messages !== messages) {
+    onEvent?.({
+      type: "context_compacted",
+      beforeTokens: autocompact.beforeTokens,
+      afterTokens: autocompact.afterTokens,
+      reason: autocompact.clearedToolCallIds.length > 0
+        ? `tool result budget (${autocompact.tokensFreed} tokens freed)`
+        : reason,
+    });
+    return autocompact.messages;
+  }
+
+  const currentTokens = estimateContextTokens(autocompact.messages, tools);
+  if (!force && currentTokens <= budget) return autocompact.messages;
+
+  // ── Layer 2: destructive compaction (last resort / forced) ────────────────
+  // `force` is set when the provider already rejected the request for overflow;
+  // there is no choice but to summarize, regardless of budget headroom.
   const toolTokens = estimateContextTokens([], tools);
-  const compacted = compactHistory(messages, {
+  const compacted = compactHistory(autocompact.messages, {
     ...context,
     force,
     maxTokens: Math.max(1, budget - toolTokens),
     keepRecentMessages: force ? 2 : context?.keepRecentMessages,
   });
-  const afterTokens = estimateContextTokens(compacted, tools);
-  if (compacted !== messages) {
-    onEvent?.({ type: "context_compacted", beforeTokens, afterTokens, reason });
+  if (compacted !== autocompact.messages) {
+    onEvent?.({
+      type: "context_compacted",
+      beforeTokens: currentTokens,
+      afterTokens: estimateContextTokens(compacted, tools),
+      reason,
+    });
   }
   return compacted;
 }
@@ -824,7 +873,11 @@ async function runAgentTurnInternal(
     finalPreprocessors,
     preprocessContext,
   );
-  const messages: AgentMessage[] = [...compactHistory(history, currentContext), ...initialBatch];
+  // Incoming history (e.g. a resumed session) starts bounded: clear any
+  // oversized tool results so a restored session does not immediately overflow.
+  const incomingHistory = compactHistory(history, currentContext);
+  const incomingBounded = applyToolResultBudget(incomingHistory).messages;
+  const messages: AgentMessage[] = [...incomingBounded, ...initialBatch];
 
   const syncRuntimeRef = (): void => {
     if (!activeRuntimeRef) return;
