@@ -3,6 +3,7 @@ import { Box, Text, useInput } from "ink";
 import { compactText } from "../text-utils.ts";
 import { TUI_COLORS as C } from "../theme.ts";
 import { PromptInput } from "./PromptInput.tsx";
+import { agentStatusColor, agentStatusGlyph } from "../bg-task-status-color.ts";
 
 export type DashboardAgent = {
   id: string;
@@ -32,9 +33,8 @@ export type AgentDashboardProps = {
 
 function rowColor(row: DashboardAgent): string {
   if (row.failed) return C.error;
-  if (row.active || row.status === "Needs input") return C.running;
-  if (row.status === "Completed") return C.success;
-  return C.muted;
+  if (row.active) return C.running;
+  return agentStatusColor(row.status);
 }
 
 export function AgentDashboard({ agents, activeAgentId, width, height, onClose, onDispatch, onOpenAgent, worktreeIsolation, onToggleWorktreeIsolation }: AgentDashboardProps): React.ReactElement {
@@ -112,7 +112,7 @@ export function AgentDashboard({ agents, activeAgentId, width, height, onClose, 
       <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
         {visibleRows.map((row) => (
           <Text key={row.id} backgroundColor={row.id === selected?.id ? C.selection : undefined} color={rowColor(row)} bold={row.id === selected?.id} wrap="truncate-end">
-            {row.id === selected?.id ? "▶" : " "} {row.status.padEnd(10)} {row.name}: {compactText(row.setupError ?? row.task, Math.max(12, width - 28), "…", { maxIncludesEllipsis: true })}
+            {row.id === selected?.id ? "▶" : " "} {agentStatusGlyph(row.status)} {row.status.padEnd(10)} {row.name}: {compactText(row.setupError ?? row.task, Math.max(12, width - 28), "…", { maxIncludesEllipsis: true })}
           </Text>
         ))}
       </Box>

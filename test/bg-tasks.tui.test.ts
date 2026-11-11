@@ -7,6 +7,7 @@ import * as slashCommands from "../src/tui/slash-commands.ts";
 import { SLASH_COMMANDS, formatHelpNotice } from "../src/tui/slash-commands.ts";
 import { buildStatusSegments } from "../src/tui/status-line.ts";
 import { BgTaskLivePanel } from "../src/tui/components/BgTaskLivePanel.tsx";
+import { agentStatusColor, agentStatusGlyph, bgTaskStatusColor, bgTaskStatusGlyph, isBgTaskActive, isBgTaskError, isBgTaskSuccess } from "../src/tui/bg-task-status-color.ts";
 import type { BgTaskSummary } from "../src/bg-tasks/manager.ts";
 
 const waitForRender = () => new Promise<void>((resolve) => setTimeout(resolve, 80));
@@ -97,6 +98,29 @@ describe("bg-tasks TUI surface", () => {
   });
 
   describe("BgTaskLivePanel", () => {
+    it("renders failed/crashed tasks with the error color and a completed task with success glyphs", async () => {
+      const { manager } = fakeManager(
+        [
+          { ...summary("bg_aaaa1111", "build"), status: "failed" },
+          { ...summary("bg_bbbb2222", "lint"), status: "crashed" },
+          { ...summary("bg_cccc3333", "test"), status: "completed" },
+        ],
+        {},
+      );
+      const view = render(React.createElement(BgTaskLivePanel, { manager, width: 70 }), { columns: 100, rows: 40 });
+      try {
+        await waitForRender();
+        const frame = view.lastFrame() ?? "";
+        assert.match(frame, /✗ failed/);
+        assert.match(frame, /✗ crashed/);
+        assert.match(frame, /✓ completed/);
+        // failed + crashed + completed = 3 terminal (finished)
+        assert.match(frame, /3 finished/);
+      } finally {
+        view.cleanup();
+      }
+    });
+
     it("summarizes multiple tasks and stops the selected running task with x", async () => {
       const { manager, terminated } = fakeManager(
         [summary("bg_aaaa1111", "build"), { ...summary("bg_bbbb2222", "lint"), status: "completed" }],
@@ -156,5 +180,57 @@ describe("bg-tasks TUI surface", () => {
         view.cleanup();
       }
     });
+  });
+});
+
+describe("bg-task status color resolver", () => {
+  it("colors active tasks as running (amber)", () => {
+    for (const status of ["starting", "running", "unknown"]) {
+      assert.equal(isBgTaskActive(status), true);
+      assert.equal(bgTaskStatusColor(status), "#ffc107");
+    }
+  });
+  it("colors failed/crashed/interrupted/cancelled/timed_out as error (red)", () => {
+    for (const status of ["failed", "crashed", "interrupted", "cancelled", "timed_out"]) {
+      assert.equal(isBgTaskError(status), true);
+      assert.equal(bgTaskStatusColor(status), "#ff6b80");
+      assert.equal(bgTaskStatusGlyph(status), "✗");
+    }
+  });
+  it("colors completed/done as success (green)", () => {
+    for (const status of ["completed", "done"]) {
+      assert.equal(isBgTaskSuccess(status), true);
+      assert.equal(bgTaskStatusColor(status), "#4eba65");
+      assert.equal(bgTaskStatusGlyph(status), "✓");
+    }
+  });
+  it("falls back to muted for unknown status strings", () => {
+    assert.equal(bgTaskStatusColor("weird"), "#999999");
+    assert.equal(bgTaskStatusGlyph("weird"), "☐");
+  });
+});
+
+describe("agent dashboard status color resolver", () => {
+  it("colors working/needs-input agents as running (amber)", () => {
+    for (const status of ["Working", "Needs input", "Preparing", "Launching"]) {
+      assert.equal(agentStatusColor(status), "#ffc107");
+      assert.equal(agentStatusGlyph(status), "⟳");
+    }
+  });
+  it("colors completed agents as success (green)", () => {
+    assert.equal(agentStatusColor("Completed"), "#4eba65");
+    assert.equal(agentStatusGlyph("Completed"), "✓");
+  });
+  it("colors failed/cancelled agents as error (red)", () => {
+    for (const status of ["Failed", "Cancelled"]) {
+      assert.equal(agentStatusColor(status), "#ff6b80");
+      assert.equal(agentStatusGlyph(status), "✗");
+    }
+  });
+  it("keeps idle and paused agents muted", () => {
+    assert.equal(agentStatusColor("Idle"), "#999999");
+    assert.equal(agentStatusGlyph("Idle"), "☐");
+    assert.equal(agentStatusColor("Paused"), "#999999");
+    assert.equal(agentStatusGlyph("Paused"), "☐");
   });
 });

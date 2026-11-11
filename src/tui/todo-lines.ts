@@ -59,7 +59,7 @@ export function todoPanelRenderLines(options: { plan?: PlanDocument; todos?: rea
     const addGroup = (group: TodoItem[]) => {
       if (group.length === 0) return;
       if (added > 0) {
-        lines.push({ key: `todo-sep-${sepIndex++}`, text: "─────", style: "muted", dim: true });
+    lines.push({ key: `todo-sep-${sepIndex++}`, text: "", style: "muted", dim: true });
       }
       for (const item of group) {
         const originalIndex = items.indexOf(item);

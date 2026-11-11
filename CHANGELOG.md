@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Persistent thread goals (Codex-style), opt-in via `MINI_AGENT_GOALS=1`
+  across CLI, TUI, and Web server:
+  - One goal per session: objective, status (`active`, `paused`, `blocked`,
+    `usage_limited`, `budget_limited`, `complete`), optional token budget,
+    and accumulated token/time usage, persisted under
+    `AGENT_DATA_DIR/goals/<session-id>.json`.
+  - Model tools `get_goal`, `create_goal`, `update_goal`; the model may only
+    move a goal to `complete`, `blocked`, or (at the user's explicit
+    request) `paused`.
+  - Automatic goal continuations: while the goal stays active the loop
+    re-enters with bounded continuation turns and injects continuation
+    steering (objective, budgets, completion and blocked audits). Objectives
+    are always treated as untrusted user data.
+  - Budget accounting: token usage is charged per assistant response; a
+    budgeted goal flips to `budget_limited` at the budget and receives a
+    wrap-up steering message instead of new substantive work.
+  - TUI: `/goal` inspect/create/edit and `clear` / `pause` / `resume` /
+    `complete` actions, a compact goal segment on the status bar, and
+    `goal_updated` loop events streamed to the UI.
+  - HTTP: `GET/PUT/DELETE /api/sessions/:id/goal` and a `goals` capability
+    flag on `/api/config`; `goal_updated` events stream in NDJSON.
+  - CLI: `--goal <objective> [--goal-token-budget N]`, `--goal clear`,
+    `--goal pause|resume|complete`, and `--goal-status`.
+
 ## [0.3.0] - 2026-08-20
 
 ### Changed

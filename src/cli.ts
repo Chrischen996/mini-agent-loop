@@ -75,6 +75,13 @@ import {
 import type { SubagentTaskRecord } from "./subagent/task-registry.ts";
 import { launchDetachedSubagentBatchWorker, launchDetachedSubagentWorker, waitForDetachedWorkerStart } from "./subagent/worker-host.ts";
 import { resolveToolProvider, type Tool } from "./tools/types.ts";
+import {
+  createGoalSession,
+  goalNotice,
+  goalSnapshot,
+  resolveGoalConfig,
+  type GoalSessionContext,
+} from "./goal/index.ts";
 import type { ContentPart, MessageContent } from "./types.ts";
 import { buildIntenseLlm, parseThinkingCommandMode, parseThinkingIntensityPrompt, withThinkingLevel } from "./think-intensity.ts";
 import { loadThinkingModeFromEnv } from "./thinking-policy.ts";
@@ -201,6 +208,11 @@ function logEvent(event: LoopEvent): void {
       break;
     case "max_turns":
       break;
+    case "goal_updated":
+      console.error(
+        `[goal_updated] ${event.goal ? `status=${event.goal.status} objective=${JSON.stringify(event.goal.objective.slice(0, 80))} tokens=${event.goal.tokensUsed}${event.goal.tokenBudget !== undefined ? `/${event.goal.tokenBudget}` : ""}` : "cleared"} (${event.reason})`,
+      );
+      break;
     case "run_stopped":
       console.error(`[run_stopped] ${event.stopReason}; partial history preserved`);
       break;
@@ -268,6 +280,8 @@ export type ParsedCliArgs = {
   planHistory: boolean;
   planArchive: boolean;
   sandboxEnabled: boolean;
+  /** Explicit goal intent for this CLI invocation. */
+  goal?: { objective?: string; clear?: boolean; status?: "pause" | "resume" | "complete"; tokenBudget?: number };
   /** Resume the most recent session (Claude Code `--continue`). */
   continueSession: boolean;
   /** Resume a specific session id, or list sessions when no id is given. */
@@ -307,6 +321,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let forkSession = false;
   let sandboxEnabled = process.env.MINI_AGENT_SANDBOX !== "0";
   let init: ParsedCliArgs["init"] | undefined;
+  let goal: ParsedCliArgs["goal"];
   const validTools = new Set<ToolName>([
     "read", "bash", "edit", "write", "grep", "find", "ls",
     "bg_start", "bg_status", "bg_logs", "bg_send", "bg_wait", "bg_kill",
@@ -326,6 +341,28 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
+    if (arg === "--goal" || arg.startsWith("--goal=")) {
+      const raw = arg.startsWith("--goal=") ? arg.slice("--goal=".length) : (argv[i + 1] ?? "");
+      if (!arg.startsWith("--goal=")) i += 1;
+      const value = raw.trim();
+      if (value.toLowerCase() === "clear") goal = { clear: true };
+      else if (value.toLowerCase() === "pause" || value.toLowerCase() === "resume" || value.toLowerCase() === "complete") {
+        goal = { status: value.toLowerCase() as "pause" | "resume" | "complete" };
+      } else if (value) goal = { objective: value };
+      else goal = {};
+      continue;
+    }
+    if (arg === "--goal-status") {
+      goal = {};
+      continue;
+    }
+    if (arg === "--goal-token-budget") {
+      const value = Number(argv[i + 1]);
+      if (!Number.isSafeInteger(value) || value <= 0) throw new Error("--goal-token-budget must be a positive integer");
+      goal = { ...(goal ?? {}), tokenBudget: value };
+      i += 1;
+      continue;
+    }
     if (arg === "--image") {
       const next = argv[i + 1];
       if (!next || next.startsWith("--")) {
@@ -537,6 +574,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     foreignResume,
     forkSession,
     init,
+    goal,
   };
 }
 
@@ -837,6 +875,8 @@ async function main(): Promise<void> {
     workspaceId: cwd,
     sessionId: process.env.MINI_AGENT_SESSION_ID?.trim() || undefined,
   });
+  const goalConfig = resolveGoalConfig();
+  const goalIntent = parsed.goal;
   let resumedSessionId: string | undefined;
   let resumedMessages: AgentMessage[] | undefined;
   let restoredSession: PersistedSession | undefined;
@@ -1004,6 +1044,40 @@ async function main(): Promise<void> {
     workspaceId: cwd,
   };
   const persistenceSessionId = resumedSessionId ?? sessionManager.sessionId;
+  let goalSession: GoalSessionContext | undefined;
+  if (goalConfig.enabled) {
+    goalSession = createGoalSession({
+      ...goalConfig,
+      sessionId: persistenceSessionId,
+      onEvent: (event) => {
+        console.error(`[goal] ${event.reason} ${event.goal ? `status=${event.goal.status} tokens=${event.goal.tokensUsed}` : "cleared"}`);
+      },
+    });
+    await goalSession.manager.initialize();
+    if (goalIntent) {
+      const status = goalIntent.status === "pause" ? "paused"
+        : goalIntent.status === "resume" ? "active"
+          : goalIntent.status === "complete" ? "complete"
+            : undefined;
+      const isQuery = !goalIntent.clear && goalIntent.objective === undefined && !status && goalIntent.tokenBudget === undefined;
+      if (isQuery) {
+        const current = await goalSession.manager.get();
+        console.error(goalNotice(current?.raw));
+        return;
+      }
+      const updated = await goalSession.manager.setFromUser({
+        ...(goalIntent.clear ? { clear: true } : {}),
+        ...(goalIntent.objective !== undefined ? { objective: goalIntent.objective } : {}),
+        ...(status ? { status } : {}),
+        ...(goalIntent.tokenBudget !== undefined ? { tokenBudget: goalIntent.tokenBudget } : {}),
+      });
+      console.error(goalNotice(updated));
+      if (!goalIntent.objective && !parsedPrompt) return;
+    }
+  } else if (goalIntent) {
+    console.error("Goals are disabled. Set MINI_AGENT_GOALS=1 to enable them.");
+    return;
+  }
   const globalTokenBudget = loadGlobalTokenBudgetFromEnv();
   const globalConcurrencyLimit = loadGlobalConcurrencyLimitFromEnv();
   const globalSubagentCallBudget = loadGlobalSubagentCallBudgetFromEnv();
@@ -1085,6 +1159,7 @@ async function main(): Promise<void> {
         }),
         ...bgTools,
         ...(taskRegistry ? createSubagentTaskTools(taskRegistry) : []),
+        ...(goalSession?.tools ?? []),
       ];
     };
     tools();
@@ -1245,7 +1320,7 @@ async function main(): Promise<void> {
       parentRuntime,
     });
     const enrichedTools = [...baseTools, cliSubagentTool as Tool, cliSubagentBatchTool as Tool];
-    tools = () => enrichedTools;
+    tools = () => [...enrichedTools, ...(goalSession?.tools ?? [])];
   }
 
   sessionManager.setSessionId(persistenceSessionId);
@@ -1374,6 +1449,7 @@ async function main(): Promise<void> {
     }
 
     const turnSaved = await persistTurnStart();
+    goalSession?.runtime.beginTurn();
     if (turnSaved && taskRegistry) {
       for (const record of completionWakeRecords) {
         await taskRegistry.markAutoWakeDelivered(record.taskId, persistenceSessionId);
@@ -1386,6 +1462,7 @@ async function main(): Promise<void> {
     messages = await runAgentLoop(turnPrompt, {
       llm: { ...requestLlm, sessionId: persistenceSessionId },
       tools,
+      ...(goalSession ? { goalRuntime: goalSession.runtime } : {}),
       autoSubagent: loadAutoSubagentOptionsFromEnv(),
       userContent: turnUserContent,
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],

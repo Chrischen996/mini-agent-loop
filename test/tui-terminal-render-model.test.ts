@@ -293,8 +293,8 @@ describe("standalone terminal render model", () => {
     assert.equal(root?.prefix, "✻ ");
     assert.match(root?.text ?? "", /审查工具执行与沙箱安全/);
     assert.match(root?.text ?? "", /1\.2k tokens/);
-    assert.equal(lines.find((line) => line.key === "panel-task-summary-item-done")?.prefix, "  ├─ ✓ ");
-    assert.equal(lines.find((line) => line.key === "panel-task-summary-item-pending")?.prefix, "  └─ ■ ");
+    assert.equal(lines.find((line) => line.key === "panel-task-summary-item-done")?.prefix, "  ⎿ ✓ ");
+    assert.equal(lines.find((line) => line.key === "panel-task-summary-item-pending")?.prefix, "  ⎿ ☐ ");
     const rootIndex = lines.findIndex((line) => line.key === "panel-task-summary-root");
     const answerIndex = lines.findIndex((line) => line.text === "finished");
     assert.ok(rootIndex > answerIndex);
@@ -426,7 +426,7 @@ describe("standalone terminal render model", () => {
       header: { title: "Claude Code", cwd: "/workspace" },
       thinkingLevel: "high",
     });
-    assert.match(lines.find((line) => line.key === "status")?.text ?? "", /Plan mode · high/);
+    assert.match(lines.find((line) => line.key === "status")?.text ?? "", /Plan mode · High/);
   });
 
   it("keeps only the text title in the compact identity row", () => {
@@ -446,7 +446,7 @@ describe("standalone terminal render model", () => {
     const tool = lines.find((line) => line.key.endsWith("-tool"));
     assert.match(tool?.text ?? "", /Read\(src\/app\.tsx\)/);
     assert.equal(tool?.prefix, "✓ ");
-    assert.equal(lines.find((line) => line.key.endsWith("-result-0"))?.prefix, "  ├─ ");
+    assert.equal(lines.find((line) => line.key.endsWith("-result-0"))?.prefix, "  ⎿ ");
   });
 
   it("keeps standalone errors readable instead of painting the full row red", () => {
@@ -470,8 +470,8 @@ describe("standalone terminal render model", () => {
     // the ANSI projection matches the Ink tool row at any terminal width.
     assert.equal(rows[0]?.prefix, "✓ ");
     assert.match(rows[0]?.text ?? "", /^Read\(src\/app\.tsx\)/);
-    assert.equal(rows[1]?.prefix, "  ├─ ");
-    assert.equal(rows[2]?.prefix, "  └─ ");
+    assert.equal(rows[1]?.prefix, "  ⎿ ");
+    assert.equal(rows[2]?.prefix, "  ⎿ ");
     assert.equal(rows.some((line) => /[╭╰]/.test(line.text)), false);
     for (const line of rows) assert.ok(terminalStringWidth(`${line.prefix ?? ""}${line.text}`) <= width);
   });
@@ -743,8 +743,8 @@ describe("standalone terminal render model", () => {
     };
     const rows = subagentRenderLines(message, "x");
     assert.match(rows[0]?.text ?? "", /3\.2k tokens/);
-    assert.equal(rows[1]?.prefix, "  ├─ ");
-    assert.equal(rows[2]?.prefix, "  └─ ");
+    assert.equal(rows[1]?.prefix, "  ⎿ ");
+    assert.equal(rows[2]?.prefix, "  ⎿ ");
 
     const completedRows = subagentRenderLines({ ...message, expanded: false, result: "review complete" }, "done");
     assert.match(completedRows[1]?.text ?? "", /Done \(1 tool use · 3\.2k tokens · 1\.3s\)/);

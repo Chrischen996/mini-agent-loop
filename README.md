@@ -237,6 +237,9 @@ settings are optional; a live run needs a credential for the selected provider.
 | `MINI_AGENT_AUTO_SUBAGENT_MAX_TURNS` | no | profile/default |
 | `MINI_AGENT_AUTO_SUBAGENT_ALLOW_WRITES` | no | disabled; automatic preflight stays read-only |
 | `MINI_AGENT_SUBAGENT_AWAIT_BUDGET_MS` | no | `600000`; foreground sub-agents continue in background after this wait budget (`0` disables auto-backgrounding) |
+| `MINI_AGENT_GOALS` | no | `0`; set `1` to enable the persistent thread goal (`get_goal` / `create_goal` / `update_goal` tools) |
+| `MINI_AGENT_GOAL_MAX_TOKEN_BUDGET` | no | unlimited ceiling for goal token budgets |
+| `MINI_AGENT_GOAL_MAX_CONTINUATIONS` | no | `50` automatic goal continuations per user submission |
 
 \* Configure a key for the provider selected for a live model call. The model
 picker can show catalog entries before their provider key is set. Vision
@@ -259,6 +262,37 @@ once. A timeout after partial answer text is preserved in conversation history
 and is not replayed automatically. Nested sub-agent timeouts return any
 recovered partial text to the parent as an error result, allowing the parent to
 choose whether to retry or simplify the task.
+
+### Persistent thread goals
+
+Set `MINI_AGENT_GOALS=1` to enable the opt-in goal feature across the CLI,
+TUI, and Web server. Each session carries at most one goal: a concrete
+objective, a status (`active`, `paused`, `blocked`, `usage_limited`,
+`budget_limited`, `complete`), an optional token budget, and accumulated
+token/time usage. Goals persist in the shared `AGENT_DATA_DIR` under
+`goals/<session-id>.json` and are restored when the session resumes.
+
+- **Model tools**: `get_goal` reads status and remaining budget;
+  `create_goal` starts a goal (failing while an unfinished goal exists);
+  `update_goal` may only move the goal to `complete`, `blocked`, or
+  `paused` at the user's explicit request.
+- **Automatic continuation**: while the goal stays active and the loop would
+  otherwise stop, the runtime re-enters the agent loop with a bounded number
+  of goal-continuation turns. Each continuation injects a continuation
+  steering message (objective, budget, completion and blocked audits) into
+  the model context.
+- **Token budget**: when a budgeted goal's accumulated usage reaches the
+  budget it is marked `budget_limited` and a wrap-up steering message is
+  injected instead of starting new substantive work.
+- **TUI**: `/goal` inspects the goal; `/goal <objective> [--token-budget N]`
+  creates or edits it; `clear`, `pause`, `resume`, `complete` control its
+  status. The status bar shows a compact goal segment, and goal state
+  changes stream as `goal_updated` loop events.
+- **HTTP**: `GET/PUT/DELETE /api/sessions/:id/goal` mirror the TUI actions;
+  `/api/config` reports `goals.enabled`.
+
+Goal objectives are always treated as untrusted user data, never as
+instructions to the model.
 
 ### Web task policy and recovery
 
@@ -680,6 +714,12 @@ npm start -- --resume
 # resume into a new fork without changing the source session
 npm start -- --resume <session-id> --fork-session "Start a new branch here"
 
+# persistent thread goal (requires MINI_AGENT_GOALS=1)
+npm start -- --goal "finish the migration" "then run the tests"
+npm start -- --goal "finish the migration" --goal-token-budget 50000 "then run the tests"
+npm start -- --goal clear "inspect current state"
+npm start -- --goal-status "Show the current goal"
+
 # equivalent without npm script:
 npx tsx src/cli.ts "读取 package.json 并总结项目名"
 ```
@@ -943,6 +983,9 @@ POST   /api/sessions/:id/messages  multipart(prompt, referencedPaths, images) ->
 POST   /api/sessions/:id/fork     { messageId? | messageIndex? } -> new session
 POST   /api/sessions/:id/rewind   { messageId? | messageIndex } -> truncated session
 GET    /api/sessions/tree         session fork tree
+GET    /api/sessions/:id/goal     { goal } (403 when goals are disabled)
+PUT    /api/sessions/:id/goal     { objective?, status?, tokenBudget?, clear? }
+DELETE /api/sessions/:id/goal     { ok: true }
 ```
 
 Session detail messages include stable `id` values. `messageId` retains the
@@ -1011,6 +1054,9 @@ overrides. Sessions are persisted under the shared `AGENT_DATA_DIR` root and
 restore history, tool results, Todo/Plan state, permission mode, and model
 settings on the next start. The Ink interface follows the Claude Code-style
 conversation layout.
+The fullscreen transcript retains and scrolls to the most recent 500 messages;
+`PgUp`/`PgDn`, `Ctrl+↑/↓`, mouse wheel, or empty-prompt `↑/↓` moves the view, and
+`Ctrl+G` returns to the latest message.
 TUI runs use `AgentRunPolicy` by default. Token, time, tool and write budgets,
 context compaction, repeated-action detection, and no-progress detection can
 pause a run while preserving its partial history. The task summary reports the

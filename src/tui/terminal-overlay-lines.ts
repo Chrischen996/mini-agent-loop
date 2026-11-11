@@ -1,6 +1,7 @@
 import type { ExecutionPlan } from "../plan-act/types.ts";
 import type { PendingPermissionState } from "./state.ts";
 import type { RenderLine } from "./render-lines.ts";
+import { PICKER_HEADING_PREFIX } from "./render-lines.ts";
 import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
 import type { TodoEditorState } from "./todo-editor.ts";
 import { PICKER_SELECTED_MARKER, PICKER_UNSELECTED_MARKER, TODO_EDITOR_DRAFT_HINT, TODO_EDITOR_SELECT_HINT, permissionRiskLabel, toolArgumentSummary } from "./claude-style.ts";
@@ -230,7 +231,7 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState, conte
       pickerPageItems("resume-messages", candidates.length, maxItems),
     );
     const rows: RenderLine[] = [
-      { key: "autocomplete-resume-title", text: pickerTitleText("resume-messages"), prefix: "⌘ ", style: "muted", bold: true },
+      { key: "autocomplete-resume-title", text: pickerTitleText("resume-messages"), prefix: PICKER_HEADING_PREFIX, style: "muted", bold: true },
     ];
     if (candidates.length === 0) {
       rows.push({ key: "autocomplete-resume-empty", text: "No selectable messages", style: "muted", tone: "running", dim: true });
@@ -261,7 +262,7 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState, conte
       {
         key: "autocomplete-session-title",
         text: state.sessionCommand === "resume" ? "Resume sessions" : "Saved sessions",
-        prefix: "⌘ ",
+        prefix: PICKER_HEADING_PREFIX,
         style: "muted",
         bold: true,
       },
@@ -318,7 +319,7 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState, conte
       }));
     const { visible, start } = pickerVisibleWindow(items, state.index, pickerPageItems(state.mode, items.length, maxItems));
     const rows: RenderLine[] = [
-      { key: "autocomplete-title", text: pickerTitleText(state.mode, { query: state.modelQuery }), prefix: "⌘ ", style: "muted", bold: true },
+      { key: "autocomplete-title", text: pickerTitleText(state.mode, { query: state.modelQuery }), prefix: PICKER_HEADING_PREFIX, style: "muted", bold: true },
       {
         key: "autocomplete-model-sections",
         text: `${configured ? "[Configured models]" : "Configured models"} (${configuredModels.length})    ${!configured ? "[All models]" : "All models"} (${state.models.length})`,
@@ -457,7 +458,7 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState, conte
   });
 
   const rows: RenderLine[] = [
-    { key: "autocomplete-title", text: title, prefix: "⌘ ", style: "muted", bold: true },
+    { key: "autocomplete-title", text: title, prefix: PICKER_HEADING_PREFIX, style: "muted", bold: true },
   ];
   if (visibleValues.length === 0) {
     rows.push({

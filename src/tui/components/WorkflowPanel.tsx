@@ -2,6 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import type { TuiState } from "../state.ts";
 import { TUI_COLORS as C } from "../theme.ts";
+import { STATUS_DONE, STATUS_ERROR, STATUS_PENDING, STATUS_RUNNING } from "../render-lines.ts";
 import { toolVisualName } from "../tool-lines.ts";
 
 export function getWorkflowPanelRows(state: Pick<TuiState, "goal" | "steps" | "touchedFiles" | "toolCards">): number {
@@ -22,13 +23,13 @@ export function WorkflowPanel({ state }: { state: Pick<TuiState, "goal" | "steps
   if (!getWorkflowPanelRows(state)) return null;
 
   return (
-    <Box flexDirection="column" paddingX={1} flexShrink={0} borderStyle="single" borderColor={C.border}>
+    <Box flexDirection="column" paddingX={1} flexShrink={0} borderStyle="round" borderColor={C.border}>
       <Text color={C.running} bold>Workspace activity</Text>
       {state.goal.trim() && <Text color={C.muted} dimColor wrap="truncate-end">Task: {state.goal.trim().replace(/\s+/g, " ").slice(0, 100)}</Text>}
       {steps.length > 0 && <>
         <Text color={C.info} bold>Steps</Text>
         {steps.map((step) => <Text key={step.id} color={step.status === "error" ? C.error : step.status === "running" ? C.running : step.status === "done" ? C.success : C.muted} dimColor={step.status === "done"} wrap="truncate-end">
-          {step.status === "done" ? "✓" : step.status === "error" ? "✗" : step.status === "running" ? "›" : "·"} {step.label}
+          {step.status === "done" ? STATUS_DONE : step.status === "error" ? STATUS_ERROR : step.status === "running" ? STATUS_RUNNING : STATUS_PENDING} {step.label}
         </Text>)}
       </>}
       {files.length > 0 && <>
@@ -38,7 +39,7 @@ export function WorkflowPanel({ state }: { state: Pick<TuiState, "goal" | "steps
       {tools.length > 0 && <>
         <Text color={C.info} bold>Recent tools</Text>
         {tools.map((tool) => <Text key={tool.id} color={tool.status === "error" ? C.error : tool.status === "running" ? C.running : C.success} wrap="truncate-end">
-          {tool.status === "done" ? "✓" : tool.status === "error" ? "✗" : "⟳"} {toolVisualName(tool.name)}{tool.durationMs !== undefined ? ` · ${(tool.durationMs / 1000).toFixed(1)}s` : ""}
+          {tool.status === "done" ? STATUS_DONE : tool.status === "error" ? STATUS_ERROR : STATUS_RUNNING} {toolVisualName(tool.name)}{tool.durationMs !== undefined ? ` · ${(tool.durationMs / 1000).toFixed(1)}s` : ""}
         </Text>)}
       </>}
     </Box>

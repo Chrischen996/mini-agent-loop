@@ -157,11 +157,11 @@ App.tsx
 
 **工作**：
 
-- 增加 `TUI_CLAUDE_STYLE_INPUT=1` 功能开关，默认关闭。
+- 增加 `TUI_CLAUDE_STYLE_INPUT` 功能开关，默认开启（`=0` 关闭）。
 - 确定边框只改变 Ink 界面，还是同时改变 headless 渲染模型。
 - 为目标终端准备手工测试清单：Terminal.app、iTerm2、VS Code Terminal、常见 xterm 兼容终端，以及支持 kitty keyboard protocol 的终端。
 
-**完成状态（2026-09-28）**：已完成。`TUI_CLAUDE_STYLE_INPUT=1` 同时启用 Ink 输入容器与新增的词级/当前行编辑；关闭时新增按键序列安全无动作，保留既有渲染、按键和快照行为。手工终端矩阵仍待执行。
+**完成状态（2026-09-28）**：已完成。`TUI_CLAUDE_STYLE_INPUT` 默认开启，同时启用 Ink 输入容器与新增的词级/当前行编辑；设置 `=0` 时新增按键序列安全无动作，保留既有渲染、按键和快照行为。手工终端矩阵仍待执行。
 
 ### 阶段 1：抽取并测试纯编辑 helper
 
@@ -292,10 +292,10 @@ npx tsx --test test/tui-ink-app.test.ts
 回退方式：
 
 ```ts
-const useClaudeStyleInput = process.env.TUI_CLAUDE_STYLE_INPUT === "1";
+const useClaudeStyleInput = process.env.TUI_CLAUDE_STYLE_INPUT !== "0";
 ```
 
-该开关覆盖视觉容器和新增词级/当前行编辑行为；默认值为关闭。出现输入阻塞、协议误解析或布局异常时，可不发布新代码而通过环境变量关闭功能。
+该开关覆盖视觉容器和新增词级/当前行编辑行为；默认值为开启。出现输入阻塞、协议误解析或布局异常时，可不发布新代码而通过设置 `TUI_CLAUDE_STYLE_INPUT=0` 关闭功能。
 
 ## 8. 文件影响清单
 
@@ -331,10 +331,35 @@ const useClaudeStyleInput = process.env.TUI_CLAUDE_STYLE_INPUT === "1";
 
 ---
 
-**文档版本**：v1.2
+## 附录 A：后台任务与 Agent 面板状态样式统一
 
-**最后更新**：2026-09-28
+后台任务（bg-tasks）和 Agent 面板存在两套状态词表与两套着色逻辑，导致同一状态在不同面板呈现不一致：后台任务面板此前完全忽略任务真实状态，`failed` / `crashed` 任务以灰色（`C.muted`）渲染，失败不可见。
 
-**更新说明**：记录实现后的 feature flag 回退、Ink-only 渲染决策、Ink 测试依赖加载策略、尺寸与多行输入覆盖、断联恢复增强和发布前终端矩阵。
+统一方案由 `src/tui/bg-task-status-color.ts` 集中承载：
+
+| 语义 | 状态串 | 颜色 | 字形 |
+|---|---|---|---|
+| 进行中 | `starting`、`running`、`unknown` | `C.running`（琥珀） | `⟳` |
+| 成功结束 | `completed`、`done` | `C.success`（绿） | `✓` |
+| 异常结束 | `failed`、`crashed`、`interrupted`、`cancelled`、`timed_out` | `C.error`（红） | `✗` |
+| 其它 | 未知状态串 | `C.muted`（灰） | `☐` |
+
+Agent 面板使用同一套语义（`agentStatusColor` / `agentStatusGlyph`），词表为 `Working` / `Needs input` / `Preparing` / `Launching`（进行中）、`Completed`（成功）、`Failed` / `Cancelled`（异常）、`Idle` / `Paused`（灰）。
+
+接入点：
+
+- `src/tui/components/BgTaskLivePanel.tsx`：任务行按真实状态着色并前置状态字形。
+- `src/tui/components/AgentDashboard.tsx`：行着色改为复用共享 helper，并前置状态字形。
+- `src/tui/App.tsx`：`/bg-tasks` 列表输出补齐状态字形，与实时面板一致。
+
+约束：所有状态文案保持英文；状态字形复用 `src/tui/render-lines.ts` 中的 `STATUS_*` 语义（`✓` / `⟳` / `✗` / `☐`），避免新增独立字形。
+
+---
+
+**文档版本**：v1.3
+
+**最后更新**：2026-11-11
+
+**更新说明**：记录实现后的 feature flag 回退、Ink-only 渲染决策、Ink 测试依赖加载策略、尺寸与多行输入覆盖、断联恢复增强、发布前终端矩阵，以及后台任务与 Agent 面板状态样式统一。
 
 **代码状态**：输入迁移与 LLM 断联恢复增强已实现，当前工作区改动尚未提交。

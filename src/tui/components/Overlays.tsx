@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import { CommandPalette, FileAutocomplete, ModelPicker, SessionPalette } from "./FileAutocomplete.tsx";
 import { TUI_COLORS as C } from "../theme.ts";
 import { PICKER_SELECTED_MARKER, PICKER_UNSELECTED_MARKER } from "../claude-style.ts";
+import { PICKER_HEADING_PREFIX } from "../render-lines.ts";
 import {
   pickerHintText,
   pickerIsListMode,
@@ -102,7 +103,7 @@ export function Overlays({
     const { visible, start } = pickerVisibleWindow(resumeMessageCandidates, acIndex, pickerItemRows);
     return (
       <Box flexDirection="column" paddingX={2} width={width} minWidth={0} overflow="hidden">
-        <Text dimColor wrap="truncate-end">── {pickerTitleText("resume-messages")}</Text>
+        <Text dimColor wrap="truncate-end">{PICKER_HEADING_PREFIX}{pickerTitleText("resume-messages")}</Text>
         {resumeMessageCandidates.length === 0 && <Text color={C.running}>No selectable messages</Text>}
         {visible.map((candidate, visibleIndex) => {
           const index = start + visibleIndex;

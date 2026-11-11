@@ -1,4 +1,5 @@
 import type { ChatMessage, ToolState } from "./state.ts";
+import { STATUS_ERROR } from "./render-lines.ts";
 
 export type MessageVisualKind = "user" | "assistant" | "tool" | "notice" | "subagent" | "error";
 
@@ -24,7 +25,7 @@ export function toMessageRenderModel(message: ChatMessage): MessageRenderModel {
     case "subagent_call":
       return { kind: "subagent", marker: "⎿", label: message.profile ?? "subagent", state: message.status, text: message.result ?? message.task };
     case "error":
-      return { kind: "error", marker: "✗", text: message.text };
+      return { kind: "error", marker: STATUS_ERROR, text: message.text };
   }
 }
 

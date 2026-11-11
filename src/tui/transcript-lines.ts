@@ -3,9 +3,8 @@ import { markdownRowText, parseMarkdownLines } from "./markdown-lines.ts";
 import { noticeText, noticeTitle, toolArgumentSummary } from "./claude-style.ts";
 import { isSubagentProtocolText, isSubagentToolName } from "./subagent-lines.ts";
 import { toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
+import { buildToolResultRows, TOOL_RESULT_MAX_LINES, toolResultRowText } from "./tool-result-lines.ts";
 import { streamingPreviewTail } from "./text-utils.ts";
-
-const TOOL_PREVIEW_LINES = 15;
 
 /** One already-wrapped transcript row. Ink paints these without measuring markdown. */
 export type TranscriptRow = {
@@ -44,11 +43,11 @@ function messageRows(message: ChatMessage, width: number, focused: boolean): str
     if (isSubagentToolName(message.name)) return [];
     const argument = toolArgumentSummary(message.name, message.rawArgs, message.args).replace(/^\$\s*/, "");
     const head = `${toolVisualStatusIcon(message.status)} ${toolVisualName(message.name)}${argument ? `(${argument})` : ""}`;
-    const preview = message.result?.split("\n").slice(0, TOOL_PREVIEW_LINES) ?? [];
-    return ["", ...rowsFor([head, ...preview.map((line) => `  ⎿ ${line}`)].join("\n"), width)];
+    const preview = message.result ? buildToolResultRows(message.result, TOOL_RESULT_MAX_LINES).map(toolResultRowText) : [];
+    return ["", ...rowsFor([head, ...preview].join("\n"), width)];
   }
   if (message.kind === "notice") {
-    const title = message.title ? `────── ${noticeTitle(message.title)} ──────` : "";
+    const title = message.title ? noticeTitle(message.title) : "";
     return ["", ...rowsFor([title, noticeText(message.text)].filter(Boolean).join("\n"), width)];
   }
   if (message.kind === "error") return ["", ...rowsFor(`✗ ${message.text}`, width)];

@@ -16,6 +16,13 @@ import { adaptHistoryForModel, mergeConsecutiveSameRole } from "./message-adapte
 import { loadInstructionBundle } from "./agents-md.ts";
 import { DocumentStore } from "./documents.ts";
 import type { PersistedSession } from "./session-store.ts";
+import {
+  createGoalSession,
+  goalSnapshot,
+  isGoalStatus,
+  resolveGoalConfig,
+  type GoalSessionContext,
+} from "./goal/index.ts";
 import { SessionManager } from "./session-manager.ts";
 import { sanitizeResumableMessages } from "./session-history.ts";
 import { isAbortError, loadLlmConfigFromEnv, switchLlmModel, type ChatFn, type LlmConfig } from "./llm/index.ts";
@@ -473,6 +480,12 @@ function safeEvent(event: LoopEvent): Record<string, unknown> {
         delayMs: event.delayMs,
         errorMessage: event.errorMessage.slice(0, 200),
       };
+    case "goal_updated":
+      return {
+        type: "goal_updated",
+        goal: event.goal,
+        reason: event.reason,
+      };
     case "subagent_start":
       return {
         type: "subagent_start",
@@ -806,6 +819,18 @@ export function createAgentServer(options: AgentServerOptions): Express {
       ?? workspaceRegistry.findByPath(session.workspaceId ?? "")?.id
       ?? defaultWorkspace().id;
   const sessions = new Map<string, Session>();
+  const goalConfig = resolveGoalConfig();
+  const goalSessions = new Map<string, GoalSessionContext>();
+  const goalSessionFor = (sessionId: string): GoalSessionContext | undefined => {
+    if (!goalConfig.enabled) return undefined;
+    let context = goalSessions.get(sessionId);
+    if (!context) {
+      context = createGoalSession({ ...goalConfig, dataDir: dataRoot, sessionId });
+      goalSessions.set(sessionId, context);
+      void context.manager.initialize();
+    }
+    return context;
+  };
   const subagentTaskRegistries = new Map<string, SubagentTaskRegistry>();
   const subagentTaskRegistryForSession = (sessionId: string): SubagentTaskRegistry => {
     const owner = sessions.get(sessionId);
@@ -981,6 +1006,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
       toolExecutionBroker: options.toolExecutionBroker,
       onToolExecutionAudit: options.onToolExecutionAudit,
       globalTokenBudget,
+      ...(goalConfig.enabled && goalSessionFor(input.session.id)
+        ? { goalRuntime: goalSessionFor(input.session.id)!.runtime }
+        : {}),
       skillNames: resolveSessionSkillNames(input.session),
       skillRegistry,
       onEvent: input.onEvent,
@@ -1571,6 +1599,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       maxImages: MAX_IMAGES,
       maxImageBytes: MAX_IMAGE_BYTES,
       maxAttachments: MAX_ATTACHMENTS,
+      goals: { enabled: goalConfig.enabled, ...(goalConfig.maxGoalTokenBudget !== undefined ? { maxGoalTokenBudget: goalConfig.maxGoalTokenBudget } : {}) },
       externalCodebase: {
         enabled: codebaseEnabled,
         allowedHosts: codebaseEnabled ? ["github.com"] : [],
@@ -1592,6 +1621,48 @@ export function createAgentServer(options: AgentServerOptions): Express {
         active: activateSkillNames(defaultSkillNames, skillRegistry).activeNames,
       },
     });
+  });
+
+  /** Persistent thread goal, opt-in via MINI_AGENT_GOALS=1. */
+  app.get("/api/sessions/:id/goal", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) { response.status(404).json({ error: "Session not found" }); return; }
+    if (!goalConfig.enabled) { response.status(403).json({ error: "Goals are disabled" }); return; }
+    const current = await goalSessionFor(session.id)!.manager.get();
+    response.json({ goal: current ? goalSnapshot(current.raw) : null });
+  });
+
+  app.put("/api/sessions/:id/goal", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) { response.status(404).json({ error: "Session not found" }); return; }
+    if (!goalConfig.enabled) { response.status(403).json({ error: "Goals are disabled" }); return; }
+    const body = request.body as Record<string, unknown> | undefined;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      response.status(400).json({ error: "Expected a goal object" }); return;
+    }
+    if (body.status !== undefined && !isGoalStatus(body.status)) {
+      response.status(400).json({ error: "Invalid goal status" }); return;
+    }
+    try {
+      const updated = await goalSessionFor(session.id)!.manager.setFromUser({
+        ...(body.clear === true ? { clear: true } : {}),
+        ...(typeof body.objective === "string" ? { objective: body.objective } : {}),
+        ...(isGoalStatus(body.status) ? { status: body.status } : {}),
+        ...(body.tokenBudget === null || typeof body.tokenBudget === "number"
+          ? { tokenBudget: body.tokenBudget as number | null } : {}),
+      });
+      response.json({ goal: updated ? goalSnapshot(updated) : null });
+    } catch (error) {
+      response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.delete("/api/sessions/:id/goal", async (request, response) => {
+    const session = sessions.get(request.params.id);
+    if (!session) { response.status(404).json({ error: "Session not found" }); return; }
+    if (!goalConfig.enabled) { response.status(403).json({ error: "Goals are disabled" }); return; }
+    await goalSessionFor(session.id)!.manager.setFromUser({ clear: true });
+    response.json({ ok: true });
   });
 
   registerGitRoutes(app, {
@@ -2520,6 +2591,9 @@ export function createAgentServer(options: AgentServerOptions): Express {
           thinkingMode: input.thinkingMode ?? session.thinkingMode,
           onSubagentEvent: (subEvent) => send(safeEvent(subEvent)),
         });
+        const goalSession = goalSessionFor(session.id);
+        const goalTools = goalSession?.tools ?? [];
+        goalSession?.runtime.beginTurn();
         await persistTurnStart(session, userContent ?? input.modelPrompt);
         session.messages = await runSessionTurn(
           session,
@@ -2527,7 +2601,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
           createSessionLoopOptions({
             session,
             llm: effectiveLlm,
-            tools: sessionTools,
+            tools: () => [...resolveToolProvider(sessionTools), ...goalTools],
             userContent,
             signal: abortController.signal,
             permissionTurn,

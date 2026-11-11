@@ -2,6 +2,7 @@ import type { TodoItem, TodoStatus, TodoViewMode } from "../todo.ts";
 import { formatTokenCount } from "./status-line.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { todoText } from "./todo-format.ts";
+import { RESULT_GUTTER, STATUS_DONE, STATUS_ERROR, STATUS_PENDING, STATUS_RUNNING, STATUS_SKIPPED } from "./render-lines.ts";
 import type { RenderLine } from "./render-lines.ts";
 
 export type TaskSummaryStatus = "running" | "completed" | "failed" | "cancelled" | "paused";
@@ -43,12 +44,11 @@ export function taskSummaryRenderLines(input: TaskSummaryInput): RenderLine[] {
   }];
 
   const visible = input.todos.slice(0, maxVisibleItems);
-  visible.forEach((todo, index) => {
-    const last = index === visible.length - 1 && input.todos.length <= visible.length;
+  visible.forEach((todo) => {
     lines.push({
       key: `task-summary-item-${todo.id}`,
       text: todoText(todo.content),
-      prefix: `  ${last ? "└─" : "├─"} ${todoStatusIcon(todo.status)} `,
+      prefix: `${RESULT_GUTTER}${todoStatusIcon(todo.status)} `,
       prefixTone: todoStatusTone(todo.status),
       style: todo.status === "failed" ? "error" : "muted",
       tone: todo.status === "failed" ? "error" : undefined,
@@ -60,8 +60,8 @@ export function taskSummaryRenderLines(input: TaskSummaryInput): RenderLine[] {
   if (input.todos.length > visible.length) {
     lines.push({
       key: "task-summary-more",
-      text: `… ${input.todos.length - visible.length} more`,
-      prefix: "     ",
+    text: `… ${input.todos.length - visible.length} more`,
+    prefix: "  ",
       style: "muted",
       dim: true,
     });
@@ -80,9 +80,11 @@ export function taskSummaryViewMode(status: TaskSummaryStatus, viewMode: TodoVie
 
 function todoStatusIcon(status: TodoStatus): string {
   switch (status) {
-    case "completed": return "✓";
-    case "skipped": return "-";
-    default: return "■";
+    case "completed": return STATUS_DONE;
+    case "skipped": return STATUS_SKIPPED;
+    case "failed": return STATUS_ERROR;
+    case "in_progress": return STATUS_RUNNING;
+    default: return STATUS_PENDING;
   }
 }
 

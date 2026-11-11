@@ -162,22 +162,14 @@ describe("the single Ink terminal", () => {
       const view = open({ columns, rows: 24 });
       try {
         const frame = view.lastFrame() ?? "";
-        assert.match(frame, /╭/);
-        assert.match(frame, /❯/);
+        // The prompt row carries the border; the status bar below it has its
+        // own frame, so the two must be told apart.
+        const promptRow = frame.split("\n").find((line) => line.includes("❯"));
+        assert.ok(promptRow, "the prompt row is missing");
+        assert.match(promptRow, /^[╭│]/, "the prompt row is not inside a border");
       } finally {
         view.cleanup();
       }
-    }
-  });
-
-  it("falls back to the unbordered prompt below the minimum input width", () => {
-    const view = open({ columns: 19, rows: 24 });
-    try {
-      const frame = view.lastFrame() ?? "";
-      assert.doesNotMatch(frame, /╭/);
-      assert.match(frame, /❯/);
-    } finally {
-      view.cleanup();
     }
   });
 
@@ -682,8 +674,11 @@ describe("the single Ink terminal", () => {
       const resizedFrame = view.lastFrame() ?? "";
       const resizedRows = resizedFrame.split("\n").length;
       assert.ok(resizedRows < initialRows, `expected viewport to shrink from ${initialRows} rows, got ${resizedRows}`);
-      assert.match(resizedFrame, /^ >/m);
-      assert.match(resizedFrame, /Ready/);
+      assert.match(resizedFrame, /❯/);
+      // The status chrome must survive the resize: the StatusBar's model
+      // segment renders on every idle frame (the idle "Ready" tail is
+      // intentionally suppressed by the shared status-line builder).
+      assert.match(resizedFrame, /gpt-4o/);
     } finally {
       view.cleanup();
     }
@@ -702,7 +697,7 @@ describe("the single Ink terminal", () => {
       await waitForRender();
       const conversation = view.lastFrame() ?? "";
       assert.doesNotMatch(conversation, /Agent dashboard/);
-      assert.match(conversation, />/);
+      assert.match(conversation, /❯/);
     } finally {
       view.cleanup();
     }

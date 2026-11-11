@@ -5,6 +5,7 @@ dist/
 .env
 .DS_Store
 .history/
+.subagent-tasks/
 coverage/
 *.tgz
 package-lock.json

@@ -39,9 +39,9 @@ describe("TUI shared render lines", () => {
     ];
     const lines = todoPanelRenderLines({ todos });
     assert.match(lines[0]!.text, /1\/2 completed/);
-    assert.equal(lines[1]!.text, "◐ Running tests");
-    assert.equal(lines[2]!.text, "─────");
-    assert.equal(lines[3]!.text, "☒ Read files");
+    assert.equal(lines[1]!.text, "⟳ Running tests");
+    assert.equal(lines[2]!.text, "");
+    assert.equal(lines[3]!.text, "✓ Read files");
     assert.equal(lines[3]!.strikethrough, true);
 
     const planLines = todoPanelRenderLines({ plan: {

@@ -12,6 +12,7 @@ import { executionPlanToTodoItems } from "./todo-format.ts";
 import { toolArgumentSummary } from "./claude-style.ts";
 import { toolVisualName } from "./tool-lines.ts";
 import { subagentRenderLineCount } from "./subagent-lines.ts";
+import { STATUS_DONE, STATUS_ERROR } from "./render-lines.ts";
 import { compactText } from "./text-utils.ts";
 
 export type { PermissionMode } from "../permissions.ts";
@@ -505,7 +506,7 @@ function taskDuration(startedAt?: number): number | undefined {
  * Prevents unbounded growth of state.messages when compaction events are
  * infrequent. Kept in sync with the context_compacted truncation threshold.
  */
-const MAX_TRANSCRIPT_MESSAGES = 500;
+export const MAX_TRANSCRIPT_MESSAGES = 500;
 
 /**
  * Maximum entries kept in the tool/subagent lookup dictionaries.
@@ -1015,7 +1016,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           const usedTokens = event.usage?.totalTokens ?? state.usedTokens;
           const contextTokens = event.usage?.promptTokens ?? state.contextTokens;
           const cacheReadTokens = event.usage?.cacheReadTokens ?? state.cacheReadTokens;
-          return {
+          const baseNext: TuiState = {
             ...state,
             messages: newMessages,
             streamingText: "",
@@ -1032,6 +1033,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               estimateNewMessageRows(state.messages, newMessages),
             ),
           };
+          return pruneTranscriptAndDictionaries(baseNext);
         }
 
         case "error": {
@@ -1040,7 +1042,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             ? `${event.message}\n\n💡 Tip: Use /continue to resume the response, or switch to a model with higher max_tokens.`
             : event.message;
           const newMessages: ChatMessage[] = [...state.messages, { kind: "error", text: errorText }];
-          return {
+          const baseNext: TuiState = {
             ...state,
             busy: false,
             messages: newMessages,
@@ -1060,6 +1062,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               estimateNewMessageRows(state.messages, newMessages),
             ),
           };
+          return pruneTranscriptAndDictionaries(baseNext);
         }
 
         case "attempt_reset":
@@ -1101,7 +1104,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             kind: "notice", title: "Run paused",
             text: `${details}${consumption}\nUse /continue to resume with a new run budget, or submit new instructions.`,
           }];
-          return {
+          const baseNext: TuiState = {
             ...state,
             messages: newMessages,
             busy: false,
@@ -1118,6 +1121,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             status: "Paused · /continue to resume",
             scrollOffset: preserveScrollOnAppend(state.scrollOffset, estimateNewMessageRows(state.messages, newMessages)),
           };
+          return pruneTranscriptAndDictionaries(baseNext);
         }
 
         case "context_compacted": {
@@ -1456,7 +1460,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           };
           const newMessages: ChatMessage[] = [...state.messages, card];
           const revision = state.subagentRevision + 1;
-          return {
+          const baseNext: TuiState = {
             ...state,
             messages: newMessages,
             subagentById: { ...state.subagentById, [evt.id]: card },
@@ -1469,6 +1473,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               estimateNewMessageRows(state.messages, newMessages),
             ),
           };
+          return pruneTranscriptAndDictionaries(baseNext);
         }
         case "subagent_event": {
           const inner = evt.inner;
@@ -1478,9 +1483,9 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           if (isHighFrequencySubagentEvent(inner.type)) return state;
           const label =
             inner.type === "tool_start" ? `▶ ${inner.call.name}`
-            : inner.type === "tool_end" ? `${inner.result.isError ? "✗" : "✓"} ${inner.call.name}`
+            : inner.type === "tool_end" ? `${inner.result.isError ? STATUS_ERROR : STATUS_DONE} ${inner.call.name}`
             : inner.type === "assistant" ? "💬 assistant"
-            : inner.type === "error" ? `✗ ${inner.message}`
+            : inner.type === "error" ? `${STATUS_ERROR} ${inner.message}`
             : inner.type;
           const detail =
             inner.type === "tool_start" ? compactText(JSON.stringify(inner.call.arguments), 80, "…")
@@ -1553,7 +1558,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
 
     case "ATTACHMENT_ERROR": {
       const newMessages: ChatMessage[] = [...state.messages, { kind: "error", text: action.message }];
-      return {
+      const baseNext: TuiState = {
         ...state,
         messages: newMessages,
         status: "Unable to attach image",
@@ -1562,14 +1567,21 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
               estimateNewMessageRows(state.messages, newMessages),
             ),
       };
+      return pruneTranscriptAndDictionaries(baseNext);
     }
 
     case "ADD_NOTICE": {
-      const messages: ChatMessage[] = [
-        ...state.messages,
-        { kind: "notice", text: action.text, ...(action.title ? { title: action.title } : {}) },
-      ];
-      return { ...state, messages, status: state.busy ? state.status : "Ready", scrollOffset: 0 };
+      const baseNext: TuiState = {
+        ...state,
+        messages: [...state.messages, {
+          kind: "notice",
+          text: action.text,
+          ...(action.title ? { title: action.title } : {}),
+        }],
+        status: state.busy ? state.status : "Ready",
+        scrollOffset: 0,
+      };
+      return pruneTranscriptAndDictionaries(baseNext);
     }
 
     case "SCROLL_BY": {

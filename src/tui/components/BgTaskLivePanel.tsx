@@ -6,6 +6,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Box, Text, useInput } from "ink";
 import type { BgTaskSummary, LogChunk } from "../../bg-tasks/manager.js";
 import { TUI_COLORS as C } from "../theme.ts";
+import { bgTaskStatusColor, bgTaskStatusGlyph, isBgTaskActive } from "../bg-task-status-color.ts";
 
 export type BgTaskLivePanelProps = {
   manager: {
@@ -27,7 +28,7 @@ const MAX_LOG_BUFFER_CHARS = 32 * 1024;
 const TASK_ACTIONS = ["View recent logs", "Capture screen", "Send input", "Wait for completion", "Terminate task"] as const;
 
 function isTaskActive(task: BgTaskSummary): boolean {
-  return task.status === "starting" || task.status === "running" || task.status === "unknown";
+  return isBgTaskActive(task.status);
 }
 
 type TaskState = Pick<BgTaskSummary, "taskId" | "status" | "exitCode" | "durationMs" | "name">;
@@ -285,11 +286,15 @@ export function BgTaskLivePanel({ manager, width = 80, maxLogLines = 8, onClose 
       {refreshError && <Text color={C.error}>⚠ Refresh failed: {refreshError}</Text>}
       {actionStatus && <Text color={C.muted}>{actionStatus}</Text>}
       {tasks.length === 0 && <Text dimColor>No background tasks.</Text>}
-      {tasks.map((t, i) => (
-        <Text key={t.taskId} color={i === selectedIndex ? C.running : C.muted} bold={i === selectedIndex}>
-          {i === selectedIndex ? "▶" : " "} {t.status.padEnd(10)} {t.taskId.slice(0, 8)}  {t.name}{stoppingTaskId === t.taskId ? " · stopping" : ""}
-        </Text>
-      ))}
+      {tasks.map((t, i) => {
+        const selected = i === selectedIndex;
+        const rowColor = selected ? C.running : bgTaskStatusColor(t.status);
+        return (
+          <Text key={t.taskId} color={rowColor} bold={selected}>
+            {selected ? "▶" : " "} {bgTaskStatusGlyph(t.status)} {t.status.padEnd(10)} {t.taskId.slice(0, 8)}  {t.name}{stoppingTaskId === t.taskId ? " · stopping" : ""}
+          </Text>
+        );
+      })}
       {selectedTask && (
         <>
           <Text dimColor>── log tail ({selectedTask.taskId.slice(0, 8)}) ──</Text>

@@ -6,6 +6,10 @@ import {
   type ContextManagerOptions,
 } from "./context.ts";
 import {
+  runAutocompact,
+  applyToolResultBudget,
+} from "./compaction/index.ts";
+import {
   PermissionModeChangedError,
   type PermissionMode,
   type PermissionRequest,
@@ -80,6 +84,7 @@ import {
 } from "./runtime/tool-execution-broker.ts";
 import type { RuntimeExecutionContext } from "./runtime/policy-types.ts";
 import type { PauseGate } from "./orchestration/pause-gate.ts";
+import type { GoalRuntimeController } from "./goal/runtime.ts";
 
 export type NextTurnUpdate = {
   llm?: LlmConfig;
@@ -300,6 +305,11 @@ export type AgentLoopOptions = {
   blockTurns?: number;
   /** Usage already charged to this allocation when resuming its remaining budget. */
   initialBudgetUsage?: AgentBudgetUsage;
+  /**
+   * Optional goal runtime. When provided, goal steering is injected before
+   * each model call and per-response token usage is charged to the goal.
+   */
+  goalRuntime?: GoalRuntimeController;
 };
 
 /**
@@ -371,6 +381,7 @@ export type LoopEvent =
   | { type: "tool_start"; call: ToolCall }
   | { type: "tool_end"; call: ToolCall; result: ToolResult }
   | { type: "todo_updated"; todos: TodoItem[]; revision: number }
+  | { type: "goal_updated"; goal: import("./goal/types.ts").GoalSnapshot | null; reason: string }
   | {
       type: "auto_subagent";
       shouldDelegate: boolean;
@@ -636,15 +647,32 @@ function compactForModel(
   llm: LlmConfig,
   tools: Tool[],
   context: ContextManagerOptions | undefined,
+  autocompactState: { consecutiveFailures?: number },
   force = false,
 ): AgentMessage[] {
   const reserveTokens = Math.max(1, Math.min(context?.reserveTokens ?? llm.maxTokens, llm.contextWindow - 1));
   const budget = Math.max(1, llm.contextWindow - reserveTokens);
-  const beforeTokens = estimateContextTokens(messages, tools);
-  if (!force && beforeTokens <= budget) return messages;
 
+  // ── Layer 1: tool-result budget + token-threshold compaction ────────────
+  const autocompact = runAutocompact(messages, tools, {
+    contextWindow: llm.contextWindow,
+    maxOutputTokens: llm.maxTokens,
+    budgetTokens: budget,
+    keepRecentMessages: context?.keepRecentMessages,
+  }, autocompactState);
+  autocompactState.consecutiveFailures = autocompact.consecutiveFailures;
+  if (!force && autocompact.compacted && autocompact.messages !== messages) {
+    return autocompact.messages;
+  }
+
+  const currentTokens = estimateContextTokens(autocompact.messages, tools);
+  if (!force && currentTokens <= budget) return autocompact.messages;
+
+  // ── Layer 2: destructive compaction (last resort / forced) ────────────────
+  // `force` is set when the provider already rejected the request for overflow;
+  // there is no choice but to summarize, regardless of budget headroom.
   const toolTokens = estimateContextTokens([], tools);
-  const compacted = compactHistory(messages, {
+  const compacted = compactHistory(autocompact.messages, {
     ...context,
     force,
     maxTokens: Math.max(1, budget - toolTokens),
@@ -794,10 +822,27 @@ export async function runAgentTurn(
 ): Promise<AgentMessage[]> {
   const merged = mergeLoopSignals(options.permissionTurn?.signal, options.signal);
   try {
-    return await runAgentTurnInternal(history, userText, {
+    const result = await runAgentTurnInternal(history, userText, {
       ...options,
       signal: merged.signal,
     });
+    const runtime = options.goalRuntime;
+    if (!runtime) return result;
+    await runtime.finish();
+    let current = result;
+    while (true) {
+      const continuation = await runtime.shouldContinue();
+      if (!continuation) return current;
+      // Goal continuations reuse the same history and do not append a duplicate
+      // user prompt; steering is injected by the runtime before the model call.
+      current = await runAgentTurnInternal(current, userText, {
+        ...options,
+        signal: merged.signal,
+        isContinuation: true,
+        initialBudgetUsage: undefined,
+      });
+      await runtime.finish();
+    }
   } catch (error) {
     if (options.onCheckpoint && !(error instanceof MaxTurnsExceededError) && !(error instanceof RunStoppedError)) {
       try {
@@ -863,7 +908,11 @@ async function runAgentTurnInternal(
     onCheckpoint,
     isContinuation = false,
     runPolicy,
+    goalRuntime,
   } = options;
+  if (goalRuntime && onEvent) {
+    goalRuntime.onGoalEvent = (event) => onEvent(event);
+  }
 
   const activeRuntimeRef = runtimeRef ?? (globalTokenBudget !== undefined ? {} : undefined);
   if (activeRuntimeRef && globalTokenBudget !== undefined && !activeRuntimeRef.globalBudgetState) {
@@ -1070,15 +1119,19 @@ async function runAgentTurnInternal(
         finalPreprocessors,
         preprocessContext,
       );
+  // Incoming history (e.g. a resumed session) starts bounded: clear any
+  // oversized tool results so a restored session does not immediately overflow.
   const compactedHistory = compactHistory(history, currentContext);
-  const cappedHistory = capHistory(compactedHistory);
+  const boundedHistory = applyToolResultBudget(compactedHistory).messages;
+  const cappedHistory = capHistory(boundedHistory);
   let messages: AgentMessage[] = [
-    ...(runPolicy ? cappedHistory : compactedHistory),
+    ...(runPolicy ? cappedHistory : boundedHistory),
     ...initialBatch,
   ];
   // Only policy mode mirrors the cap to the TUI; non-policy mode relies on
   // compactHistory's token-based compaction which already handles long runs.
-  let pendingHistoryCapEvent = Boolean(runPolicy) && cappedHistory !== compactedHistory;
+  let pendingHistoryCapEvent = Boolean(runPolicy) && cappedHistory !== boundedHistory;
+  const autocompactState: { consecutiveFailures?: number } = {};
   const appendPendingUserMessages = async (turn: number): Promise<boolean> => {
     const pending = await getPendingUserMessages?.();
     if (!pending?.length) return false;
@@ -1199,6 +1252,12 @@ async function runAgentTurnInternal(
       tokensUsed += usage.totalTokens;
     }
     onEvent?.({ type: "assistant", message, ...(usage ? { usage } : {}) });
+    if (goalRuntime) {
+      const budgetReached = await goalRuntime.chargeTokens(usage);
+      if (budgetReached) {
+        await goalRuntime.chargeElapsed();
+      }
+    }
     if (exceeded) throw new Error(`Global agent token budget exceeded (${budget?.limit}).`);
   };
 
@@ -1773,15 +1832,18 @@ async function runAgentTurnInternal(
     if (preflightStopReason) {
       return stopRun(preflightStopReason, "Run budget exhausted after preflight; progress was saved.", turn - 1);
     }
-    const preparedMessages = compactForModel(messages, currentLlm, turnTools, currentContext);
+    const preparedMessages = compactForModel(messages, currentLlm, turnTools, currentContext, autocompactState);
     if (preparedMessages !== messages) await applyCompaction(preparedMessages, turn, turnTools, "token budget");
+    const modelMessages = goalRuntime
+      ? await goalRuntime.prepareMessages(messages)
+      : messages;
     let assistant: AssistantMessage;
     let lastUsage: StreamChatUsage | undefined;
     try {
       if (useInjectedChat) {
         // Injected chat (tests) stays non-streaming for deterministic offline coverage.
         permissionTurn?.assertCurrent();
-        assistant = await completeChat!(currentLlm, messages, turnTools);
+        assistant = await completeChat!(currentLlm, modelMessages, turnTools);
         lastUsage = (assistant as any).usage;
         permissionTurn?.assertCurrent();
       } else {
@@ -1792,7 +1854,7 @@ async function runAgentTurnInternal(
         let sawFinal = false;
         let streamed = "";
         try {
-          for await (const event of streamLlmEvents(currentLlm, messages, turnTools, activeSignal)) {
+        for await (const event of streamLlmEvents(currentLlm, modelMessages, turnTools, activeSignal)) {
             if (event.type === "answer_delta") {
               streamed += event.text;
               onEvent?.({ type: "assistant_delta", text: event.text, kind: "answer" });
@@ -1921,6 +1983,7 @@ async function runAgentTurnInternal(
           currentLlm,
           turnTools,
           currentContext,
+          autocompactState,
           true,
         );
         if (compacted === messages) {

@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { TUI_COLORS as C } from "../theme.ts";
+import { STATUS_DONE, STATUS_ERROR, STATUS_PENDING, STATUS_SKIPPED } from "../render-lines.ts";
 import type { PlanDocument } from "../../plan/document.ts";
 import type { TodoItem, TodoViewMode } from "../../todo.ts";
 import { todoSummary } from "../../todo.ts";
@@ -44,7 +45,7 @@ function TodoRow({ item, index, showIndex, now }: TodoRowProps): React.ReactElem
   if (item.status === "completed") {
     return (
       <Box gap={1} minWidth={0}>
-        <Text color={C.success} dimColor>{"✓"}</Text>
+        <Text color={C.success} dimColor>{STATUS_DONE}</Text>
         <Text color={C.success} dimColor strikethrough wrap="truncate-end">{label}</Text>
       </Box>
     );
@@ -53,7 +54,7 @@ function TodoRow({ item, index, showIndex, now }: TodoRowProps): React.ReactElem
   if (item.status === "failed") {
     return (
       <Box gap={1} minWidth={0}>
-        <Text color={C.error}>{"✗"}</Text>
+        <Text color={C.error}>{STATUS_ERROR}</Text>
         <Text color={C.error} wrap="truncate-end">{label}</Text>
       </Box>
     );
@@ -62,7 +63,7 @@ function TodoRow({ item, index, showIndex, now }: TodoRowProps): React.ReactElem
   if (item.status === "skipped") {
     return (
       <Box gap={1} minWidth={0}>
-        <Text color={C.muted} dimColor>{"-"}</Text>
+        <Text color={C.muted} dimColor>{STATUS_SKIPPED}</Text>
         <Text color={C.muted} dimColor wrap="truncate-end">{label}</Text>
       </Box>
     );
@@ -71,7 +72,7 @@ function TodoRow({ item, index, showIndex, now }: TodoRowProps): React.ReactElem
   // pending
   return (
     <Box gap={1} minWidth={0}>
-      <Text color={C.muted}>{"☐"}</Text>
+      <Text color={C.muted}>{STATUS_PENDING}</Text>
       <Text color={C.muted} wrap="truncate-end">{label}</Text>
     </Box>
   );
@@ -80,11 +81,7 @@ function TodoRow({ item, index, showIndex, now }: TodoRowProps): React.ReactElem
 // ─── Separator row ─────────────────────────────────────────────────────────
 
 function SeparatorRow(): React.ReactElement {
-  return (
-    <Box paddingLeft={2} minWidth={0}>
-      <Text color={C.muted} dimColor>{"─────"}</Text>
-    </Box>
-  );
+  return <></>;
 }
 
 // ─── Pure render body (no hooks — safe to call in tests) ──────────────────

@@ -6,7 +6,9 @@ import { TUI_COLORS as C } from "../theme.ts";
 import { selectMessageViewport, type ViewportItem, MessageHeightCache } from "../message-viewport.ts";
 import { MarkdownText } from "./MarkdownText.tsx";
 import { toMessageRenderModel } from "../render-model.ts";
-import { toolResultPrefix, toolVisualName, toolVisualStatusIcon } from "../tool-lines.ts";
+import { toolVisualName, toolVisualStatusIcon } from "../tool-lines.ts";
+import { buildToolResultRows } from "../tool-result-lines.ts";
+import { RESULT_GUTTER, STATUS_ERROR } from "../render-lines.ts";
 import { thinkingRenderLines, thinkingVisibleLines } from "../thinking-lines.ts";
 import { compactStreamingText, stripLeadingBlankLines } from "../text-utils.ts";
 import { noticeText, noticeTitle, statusLabel, toolArgumentSummary } from "../claude-style.ts";
@@ -15,13 +17,6 @@ import { activityPresentation, formatActivity, loadingGlyph, loadingMarkerBright
 import { stripInlineMarkdown } from "../markdown-lines.ts";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
-
-function previewLines(text: string, max = 10): string[] {
-  const lines = text.split("\n");
-  const visible = lines.slice(0, max);
-  if (lines.length > max) visible.push(`… (${lines.length - max} more lines)`);
-  return visible;
-}
 
 // ─── ThinkingBlock ───────────────────────────────────────────────────────────
 
@@ -104,7 +99,7 @@ function ToolCallRow({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }>
   const isRunning = msg.status === "running";
   const isError = msg.status === "error";
   const argument = toolArgumentSummary(msg.name, msg.rawArgs, msg.args).replace(/^\$\s*/, "");
-  const resultLines = msg.result ? previewLines(msg.result, 15) : [];
+  const resultRows = msg.result ? buildToolResultRows(msg.result) : [];
   // Keep the activity marker expressive while the tool label stays readable;
   // Claude Code does not turn an entire command row amber just because it is
   // still running.
@@ -119,16 +114,21 @@ function ToolCallRow({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }>
         <Text color={isError ? C.error : C.info} bold>{toolVisualName(msg.name)}</Text>
         {argument ? <Text color={C.assistant}>({argument})</Text> : null}
       </Box>
-      {resultLines.length > 0 ? (
+      {resultRows.length > 0 ? (
         <Box flexDirection="column">
-          {resultLines.map((line, index) => (
-            <Text key={index} color={isError ? C.error : C.muted} dimColor wrap="truncate-end">
-              {toolResultPrefix(index, resultLines.length)}{line}
+          {resultRows.map((row, index) => (
+            <Text
+              key={index}
+              color={row.tone === "error" ? C.error : row.tone === "success" ? C.success : isError ? C.error : C.muted}
+              dimColor={row.dim}
+              wrap="truncate-end"
+            >
+              {RESULT_GUTTER}{row.text}
             </Text>
           ))}
         </Box>
       ) : isRunning ? (
-        <Text color={C.muted} dimColor>{toolResultPrefix(0, 1)}Working…</Text>
+        <Text color={C.muted} dimColor>{RESULT_GUTTER}Working…</Text>
       ) : null}
     </Box>
   );
@@ -369,11 +369,7 @@ const HistoryMessageContent = React.memo(function HistoryMessageContent({
   if (msg.kind === "notice") {
     return (
       <Box flexDirection="column" paddingX={1} marginTop={1}>
-        {msg.title && (
-          <Text color={C.info} dimColor>
-            {"─".repeat(6)} {noticeTitle(msg.title)} {"─".repeat(6)}
-          </Text>
-        )}
+        {msg.title && <Text color={C.info} dimColor>{noticeTitle(msg.title)}</Text>}
         <Text color={C.assistant}>{noticeText(msg.text)}</Text>
       </Box>
     );
@@ -384,7 +380,7 @@ const HistoryMessageContent = React.memo(function HistoryMessageContent({
   if (msg.kind === "error") {
     return (
       <Box flexDirection="row" minWidth={0} marginTop={1}>
-        <Text color={C.error} bold>✗ </Text>
+        <Text color={C.error} bold>{STATUS_ERROR} </Text>
         <Text color={C.assistant} wrap="wrap">{msg.text}</Text>
       </Box>
     );

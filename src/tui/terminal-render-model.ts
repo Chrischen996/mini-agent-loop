@@ -6,9 +6,11 @@ import { thinkingRenderLines } from "./thinking-lines.ts";
 import { resolveTodoItems } from "./todo-format.ts";
 import { todoPanelRenderLines } from "./todo-lines.ts";
 import { taskSummaryRenderLines, taskSummaryViewMode } from "./task-summary.ts";
-import { toolResultPrefix, toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
+import { toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
+import { RESULT_GUTTER } from "./render-lines.ts";
+import { buildToolResultRows } from "./tool-result-lines.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
-import { autocompleteRenderLines, panelBottomLine, panelContentLine, panelTopLine, permissionPanelRenderLines, planApprovalRenderLines, todoEditorRenderLines } from "./terminal-overlay-lines.ts";
+import { autocompleteRenderLines, permissionPanelRenderLines, planApprovalRenderLines, todoEditorRenderLines } from "./terminal-overlay-lines.ts";
 import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
 import { pickerChromeRows } from "./picker-window.ts";
 import { promptPlaceholder } from "./input-utils.ts";
@@ -187,7 +189,7 @@ export function buildTerminalRenderLines(
     }
     if (message.kind === "notice") {
       const title = noticeTitle(message.title);
-      if (title) lines.push({ key: `message-${index}-title`, text: `── ${title} ──`, style: "border", bold: true });
+      if (title) lines.push({ key: `message-${index}-title`, text: title, style: "border", bold: true });
       lines.push(...plainPreviewLines(noticeText(message.text), `message-${index}-notice`).map((line) => ({ ...line, prefix: "  " })));
       continue;
     }
@@ -366,7 +368,6 @@ function markEphemeral(line: RenderLine): RenderLine {
 function toolCardRenderLines(
   message: Extract<ChatMessage, { kind: "tool_call" }>,
   index: number,
-  width?: number,
 ): RenderLine[] {
   // Claude Code renders the shell command itself inside the tool title rather
   // than adding a second `$` prompt inside the parentheses.
@@ -374,40 +375,29 @@ function toolCardRenderLines(
   const tone = message.status === "error" ? "error" : undefined;
   const prefixTone = message.status === "error" ? "error" : message.status === "running" ? "running" : "success";
   const label = `${toolVisualName(message.name)}${summary ? `(${summary})` : ""}`;
-  const title = `${toolVisualStatusIcon(message.status)} ${label}`;
-  if (width === undefined) {
-    const marker = `${toolVisualStatusIcon(message.status)} `;
-    const rows: RenderLine[] = [{
-      key: `message-${index}-tool`,
-      text: label,
-      prefix: marker,
-      style: "tool",
-      tone,
-      prefixTone,
-      bold: true,
-    }];
-    if (message.result) {
-      const resultRows = plainPreviewLines(message.result, `message-${index}-result`);
-      rows.push(...resultRows.map((line, lineIndex) => ({
-        ...line,
-        // Claude Code's MessageResponse uses one nested result marker and
-        // plain continuation indentation instead of a box-drawing column.
-        prefix: toolResultPrefix(lineIndex, resultRows.length),
-      })));
-    } else if (message.status === "running") {
-      rows.push({ key: `message-${index}-result-running`, text: "Working…", prefix: "  ⎿ ", style: "muted", tone: "running", dim: true });
-    }
-    return rows;
-  }
-  const rows: RenderLine[] = [panelTopLine(`message-${index}-tool`, title, width, tone)];
+  const marker = `${toolVisualStatusIcon(message.status)} `;
+  const rows: RenderLine[] = [{
+    key: `message-${index}-tool`,
+    text: label,
+    prefix: marker,
+    style: "tool",
+    tone,
+    prefixTone,
+    bold: true,
+  }];
   if (message.result) {
-    rows.push(...plainPreviewLines(message.result, `message-${index}-result`).map((line) => panelContentLine(line.key, line.text, "muted", { width, dim: true })));
+    const resultRows = buildToolResultRows(message.result);
+    rows.push(...resultRows.map((line, lineIndex) => ({
+      key: `message-${index}-result-${lineIndex}`,
+      text: line.text,
+      prefix: RESULT_GUTTER,
+      style: "muted" as const,
+      tone: line.tone,
+      dim: line.dim,
+    })));
   } else if (message.status === "running") {
-    rows.push(panelContentLine(`message-${index}-result-running`, "Working…", "tool", { width, tone: "running", dim: true }));
-  } else {
-    rows.push(panelContentLine(`message-${index}-result-empty`, "No output", "muted", { width, dim: true }));
+    rows.push({ key: `message-${index}-result-running`, text: "Working…", prefix: RESULT_GUTTER, style: "muted", tone: "running", dim: true });
   }
-  rows.push(panelBottomLine(`message-${index}-tool-bottom`, width));
   return rows;
 }
 

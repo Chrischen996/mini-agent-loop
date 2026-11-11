@@ -2,6 +2,18 @@ export type RenderLineStyle = "assistant" | "thinking" | "muted" | "tool" | "tod
 export type RenderLineTone = "default" | "success" | "running" | "error";
 export type RenderLineBackground = "user" | "selection" | "badge";
 
+/** Shared presentation constants used by every transcript renderer. */
+export const RESULT_GUTTER = "  ⎿ ";
+export const STATUS_DONE = "✓";
+export const STATUS_RUNNING = "⟳";
+export const STATUS_PARTIAL = "~";
+export const STATUS_ERROR = "✗";
+export const STATUS_PENDING = "☐";
+export const STATUS_SKIPPED = "-";
+
+/** Shared heading marker for picker overlays in Ink and ANSI projections. */
+export const PICKER_HEADING_PREFIX = "── ";
+
 /**
  * One independently colored run inside a row.
  *

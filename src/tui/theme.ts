@@ -12,6 +12,7 @@ export const TUI_COLORS = {
   assistant: "#ffffff",    // white for readable response text
   muted: "#999999",        // neutral gray for metadata and hints
   border: "#505050",       // quiet neutral panel borders
+  inputBorder: "#6b7280",  // input container border; readable on dark and light terminals
   selection: "#264f78",    // classic dark-mode selection blue
   thinking: "#af87ff",     // electric violet for reasoning
   running: "#ffc107",      // amber for in-progress work
@@ -20,4 +21,5 @@ export const TUI_COLORS = {
   badgeText: "#000000",    // readable text on status badges
   userBg: "#373737",       // gray user message background (Claude Code style)
   gutter: "#505050",       // dim gray for message gutter (⎿ marker)
+  inlineCodeBg: "#3a4149", // background for inline code spans in Markdown text
 } as const;

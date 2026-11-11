@@ -1,5 +1,12 @@
 import type { ExecutionPlan, ExecutionStep } from "../plan-act/types.ts";
 import type { PlanDocument, PlanStepStatus } from "../plan/document.ts";
+import {
+  STATUS_DONE,
+  STATUS_ERROR,
+  STATUS_PENDING,
+  STATUS_RUNNING,
+  STATUS_SKIPPED,
+} from "./render-lines.ts";
 import { normalizeTodoText, type TodoItem, type TodoStatus, type TodoViewMode } from "../todo.ts";
 
 export const TODO_PANEL_MAX_VISIBLE_ITEMS = 8;
@@ -71,11 +78,11 @@ export function resolveTodoItems(source: TodoSource): TodoItem[] {
 
 export function todoIcon(status: TodoStatus): string {
   switch (status) {
-    case "completed": return "☒";
-    case "in_progress": return "◐";
-    case "failed": return "✗";
-    case "skipped": return "-";
-    default: return "☐";
+    case "completed": return STATUS_DONE;
+    case "in_progress": return STATUS_RUNNING;
+    case "failed": return STATUS_ERROR;
+    case "skipped": return STATUS_SKIPPED;
+    default: return STATUS_PENDING;
   }
 }
 

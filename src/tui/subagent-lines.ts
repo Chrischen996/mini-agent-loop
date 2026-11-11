@@ -1,5 +1,5 @@
 import type { ChatMessage, SubagentInnerEvent } from "./state.ts";
-import type { RenderLine } from "./render-lines.ts";
+import { RESULT_GUTTER, type RenderLine } from "./render-lines.ts";
 import { toolArgumentSummary } from "./claude-style.ts";
 import { toolVisualName } from "./tool-lines.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
@@ -210,12 +210,10 @@ export function subagentRenderLines(
     const visibleEvents = events.filter((event) => event.type !== "assistant");
     const visible = visibleEvents.slice(-Math.max(maxProgress, visibleEvents.length));
     visible.forEach((event, eventIndex) => {
-      const isLast = eventIndex === visible.length - 1;
       lines.push({
         key: `message-${key}-subagent-event-${eventIndex}`,
         text: toolEventText(event),
-        // One tree marker per row: the previous `└─ ⎿ ` stacked two gutters.
-        prefix: `  ${isLast ? "└─" : "├─"} `,
+        prefix: RESULT_GUTTER,
         style: event.type === "error" ? "error" : "muted",
         tone: event.type === "error" ? "error" : undefined,
         dim: event.type !== "error",
@@ -227,7 +225,7 @@ export function subagentRenderLines(
     lines.push({
       key: `message-${key}-subagent-status`,
       text: latestActivity(message),
-      prefix: "  ⎿ ",
+      prefix: RESULT_GUTTER,
       style: "muted",
       prefixTone: "running",
       dim: true,
@@ -237,7 +235,7 @@ export function subagentRenderLines(
     lines.push({
       key: `message-${key}-subagent-status`,
       text: completion,
-      prefix: "  ⎿ ",
+      prefix: RESULT_GUTTER,
       style: isError ? "error" : "muted",
       tone: isError ? "error" : "success",
       dim: !isError,
@@ -257,7 +255,7 @@ export function subagentRenderLines(
     lines.push({
       key: `message-${key}-subagent-status`,
       text: isError ? "Failed" : isRunning ? latestActivity(message) : "Done",
-      prefix: "  ⎿ ",
+      prefix: RESULT_GUTTER,
       style: isError ? "error" : "muted",
       tone: isError ? "error" : "success",
       prefixTone: isRunning ? "running" : undefined,

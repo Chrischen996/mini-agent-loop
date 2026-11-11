@@ -2,6 +2,18 @@ import type { RenderLine } from "./render-lines.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { TUI_COLORS as C } from "./theme.ts";
 
+/** Resolve a row's foreground color. Shared by Ink and ANSI renderers. */
+export function renderLineColor(line: Pick<RenderLine, "style" | "tone">): string {
+  return line.tone === "success" ? C.success
+    : line.tone === "running" ? C.running
+      : line.tone === "error" || line.style === "error" ? C.error
+        : line.style === "thinking" ? C.thinking
+          : line.style === "tool" || line.style === "todo" ? C.info
+            : line.style === "user" ? C.user
+              : line.style === "border" || line.style === "muted" ? C.muted
+                : C.assistant;
+}
+
 /** Convert one shared render row into terminal ANSI without moving the cursor. */
 export function formatRenderLine(line: RenderLine): string {
   const indent = " ".repeat(Math.max(0, line.indent ?? 0));
@@ -59,18 +71,6 @@ export function formatRenderLine(line: RenderLine): string {
 function backgroundCodes(background: NonNullable<RenderLine["background"]>): number[] {
   const value = background === "user" ? "48;5;236" : background === "selection" ? "48;5;24" : "48;5;178";
   return value.split(";").map(Number);
-}
-
-function renderLineColor(line: Pick<RenderLine, "style" | "tone">): string {
-  return line.tone === "success" ? C.success
-    : line.tone === "running" ? C.running
-      : line.tone === "error" || line.style === "error" ? C.error
-        : line.style === "thinking" ? C.thinking
-          : line.style === "tool" ? C.info
-            : line.style === "todo" ? C.info
-              : line.style === "user" ? C.user
-                : line.style === "border" || line.style === "muted" ? C.muted
-                  : C.assistant;
 }
 
 function hexToAnsi(hex: string): string {

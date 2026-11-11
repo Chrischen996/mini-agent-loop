@@ -1,9 +1,10 @@
 import type { ToolState } from "./state.ts";
+import { STATUS_DONE, STATUS_ERROR, STATUS_PARTIAL, STATUS_RUNNING } from "./render-lines.ts";
 
 export function toolStatusIcon(status: ToolState): string {
-  if (status === "running") return "…";
-  if (status === "partial") return "~";
-  return status === "error" ? "✗" : "✓";
+  if (status === "running") return STATUS_RUNNING;
+  if (status === "partial") return STATUS_PARTIAL;
+  return status === "error" ? STATUS_ERROR : STATUS_DONE;
 }
 
 export function toolDisplayName(name: string): string {
@@ -31,24 +32,16 @@ export function toolVisualName(name: string): string {
     bg_send: "BgSend",
     bg_wait: "BgWait",
     bg_kill: "BgKill",
+    git_diff: "GitDiff",
   };
   return labels[normalized.toLowerCase()] ?? normalized;
 }
 
 export function toolVisualStatusIcon(status: ToolState): string {
-  if (status === "running") return "⟳";
-  if (status === "partial") return "~";
-  return status === "error" ? "✗" : "✓";
+  return toolStatusIcon(status);
 }
 
 /** Keep multi-line tool results on one fixed tree gutter column. */
-export function toolResultPrefix(index: number, total: number): string {
-  if (total <= 1) return "  └─ ";
-  if (index <= 0) return "  ├─ ";
-  if (index >= total - 1) return "  └─ ";
-  return "  │  ";
-}
-
 export function toolSummary(name: string, status: ToolState, durationMs?: number): string {
   const duration = durationMs === undefined ? "" : ` (${durationMs}ms)`;
   return `${toolStatusIcon(status)} ${toolDisplayName(name)}${duration}`;

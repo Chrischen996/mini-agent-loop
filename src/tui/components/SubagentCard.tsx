@@ -1,22 +1,10 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { ChatMessage } from "../state.ts";
-import type { RenderLine } from "../render-lines.ts";
 import { subagentRenderLines } from "../subagent-lines.ts";
-import { TUI_COLORS as C } from "../theme.ts";
+import { renderLineColor } from "../render-line-format.ts";
 
 type SubagentCallMessage = Extract<ChatMessage, { kind: "subagent_call" }>;
-
-function lineColor(line: RenderLine): string {
-  if (line.tone === "error") return C.error;
-  if (line.tone === "running") return C.running;
-  if (line.tone === "success") return C.success;
-  if (line.style === "tool") return C.info;
-  if (line.style === "thinking") return C.thinking;
-  if (line.style === "user") return C.user;
-  if (line.style === "error") return C.error;
-  return C.assistant;
-}
 
 /**
  * SubagentCard renders a subagent invocation in the TUI message feed.
@@ -32,7 +20,7 @@ export function SubagentCard({ msg, width }: { msg: SubagentCallMessage; width?:
       {rows.map((line) => (
         <Text
           key={line.key}
-          color={lineColor(line)}
+          color={renderLineColor(line)}
           dimColor={line.dim}
           bold={line.bold}
           italic={line.italic}

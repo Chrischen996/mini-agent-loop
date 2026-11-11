@@ -3,6 +3,7 @@ import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import type { LlmConfig } from "../llm/config.ts";
 import { getThinkingLevelChoices } from "../think-intensity.ts";
 import { permissionModeLabel, statusLabel, thinkingLevelLabel } from "./claude-style.ts";
+import { thinkingLevelToDisplay } from "../think-intensity.ts";
 import { TUI_COLORS as C } from "./theme.ts";
 import { terminalStringWidth, truncateTerminalPath } from "./terminal-width.ts";
 
@@ -24,6 +25,7 @@ export type StatusSegmentRole =
   | "status"
   | "mcp"
   | "queued"
+  | "goal"
   | "cache";
 
 export type StatusSegment = {
@@ -46,6 +48,8 @@ export type StatusLineInput = {
   queuedCount?: number;
   /** Compact MCP connection summary, for example `MCP 2 ready`. */
   mcpStatus?: string;
+  /** Compact goal status segment, for example `Goal 12K/50K`. */
+  goalStatus?: string;
   cacheReadTokens?: number;
   promptTokens?: number;
   /** Total row budget. Optional segments are dropped when the row would not fit. */
@@ -87,6 +91,11 @@ export function formatTokenCount(value: number): string {
 
 export function permissionModeColor(mode: PermissionMode): string {
   return mode === "plan" ? C.planMode : mode === "bypass" ? C.error : C.info;
+}
+
+function displayThinkingLevel(value: string): string {
+  const canonical = thinkingLevelLabel(value);
+  return thinkingLevelToDisplay(canonical as ModelThinkingLevel) ?? canonical;
 }
 
 /** Labels that describe live work and must not be echoed on an idle prompt. */
@@ -189,7 +198,7 @@ export function buildStatusSegments(input: StatusLineInput): StatusSegment[] {
   const modeLabel = permissionModeLabel(input.permissionMode);
   const mode: ContentSegment = { role: "mode", text: modeLabel, color: permissionModeColor(input.permissionMode), dim: true };
 
-  const thinking = input.thinkingLevel === undefined ? undefined : thinkingLevelLabel(String(input.thinkingLevel));
+  const thinking = input.thinkingLevel === undefined ? undefined : displayThinkingLevel(String(input.thinkingLevel));
   const showThinking = Boolean(thinking) && (input.width === undefined || input.width >= STATUS_THINKING_MIN_WIDTH);
   const thinkingSegment: ContentSegment | undefined = showThinking && thinking
     ? { role: "thinking", text: thinking, color: C.thinking }
@@ -211,12 +220,18 @@ export function buildStatusSegments(input: StatusLineInput): StatusSegment[] {
     : undefined;
   const showCache = Boolean(cacheLabel) && (input.width === undefined || input.width >= STATUS_CACHE_MIN_WIDTH);
 
-  const tailLabel = idleStatusTail(input.status, input.busy, [modeLabel, ...(thinking ? [thinking] : [])]);
+  const normalizedThinking = thinkingLevelLabel(String(input.thinkingLevel ?? ""));
+  const tailLabel = idleStatusTail(input.status, input.busy, [
+    modeLabel,
+    ...(showThinking && normalizedThinking ? [normalizedThinking] : []),
+    ...(showThinking && thinking ? [thinking] : []),
+  ]);
 
   // Ordered from most to least important; the fitter drops from the end.
   const optional: ContentSegment[] = [
     ...(tailLabel ? [{ role: "status", text: tailLabel, color: C.muted, dim: true } satisfies ContentSegment] : []),
     ...(input.mcpStatus ? [{ role: "mcp", text: input.mcpStatus, color: input.mcpStatus.includes("error") ? C.error : C.muted, dim: true } satisfies ContentSegment] : []),
+    ...(input.goalStatus ? [{ role: "goal", text: input.goalStatus, color: C.running, dim: true } satisfies ContentSegment] : []),
     ...((input.queuedCount ?? 0) > 0 ? [{ role: "queued", text: `${input.queuedCount} queued`, color: C.running, dim: true } satisfies ContentSegment] : []),
     ...(showCache && cacheLabel ? [{ role: "cache", text: cacheLabel, color: C.info, dim: true } satisfies ContentSegment] : []),
   ];

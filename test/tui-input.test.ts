@@ -20,10 +20,30 @@ import {
   moveWordRight,
   splitGraphemes,
 } from "../src/tui/input-editing.ts";
-import { inputContainerBorderColor, useClaudeStyleInput } from "../src/tui/input-container.ts";
+import {
+  inputContainerBorderColor,
+  MIN_INPUT_BORDER_WIDTH,
+  useClaudeStyleInput,
+  usesInputBorder,
+} from "../src/tui/input-container.ts";
 import { TUI_COLORS as C } from "../src/tui/theme.ts";
 
 const nextFrame = () => new Promise((resolve) => setTimeout(resolve, 25));
+
+function relativeLuminance(hex: string): number {
+  const value = hex.replace("#", "");
+  const channels = [0, 2, 4].map((index) => {
+    const channel = parseInt(value.slice(index, index + 2), 16) / 255;
+    return channel <= 0.04045 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * channels[0]! + 0.7152 * channels[1]! + 0.0722 * channels[2]!;
+}
+
+function contrastRatio(foreground: string, background: string): number {
+  const lighter = Math.max(relativeLuminance(foreground), relativeLuminance(background));
+  const darker = Math.min(relativeLuminance(foreground), relativeLuminance(background));
+  return (lighter + 0.05) / (darker + 0.05);
+}
 
 // ── Pure utility stubs (extracted from deleted Ink components/hooks) ────────
 function isPasteShortcut(input: string, key?: { ctrl?: boolean; meta?: boolean }): boolean {
@@ -109,17 +129,32 @@ describe("TUI input utils", () => {
     assert.equal(moveWordLeft(parts, 5), 0);
   });
 
-  it("enables the Claude-style input only for an explicit feature flag", () => {
+  it("enables the Claude-style input by default unless explicitly disabled", () => {
+    assert.equal(useClaudeStyleInput({}), true);
     assert.equal(useClaudeStyleInput({ TUI_CLAUDE_STYLE_INPUT: "1" }), true);
-    assert.equal(useClaudeStyleInput({ TUI_CLAUDE_STYLE_INPUT: "true" }), false);
-    assert.equal(useClaudeStyleInput({}), false);
+    assert.equal(useClaudeStyleInput({ TUI_CLAUDE_STYLE_INPUT: "true" }), true);
+    assert.equal(useClaudeStyleInput({ TUI_CLAUDE_STYLE_INPUT: "0" }), false);
   });
 
   it("uses semantic input border colors with urgent states first", () => {
     assert.equal(inputContainerBorderColor({ permissionMode: "plan", busy: false, pendingPermission: false }), C.planMode);
     assert.equal(inputContainerBorderColor({ permissionMode: "bypass", busy: true, pendingPermission: false }), C.running);
     assert.equal(inputContainerBorderColor({ permissionMode: "plan", busy: true, pendingPermission: true }), C.error);
-    assert.equal(inputContainerBorderColor({ permissionMode: "bypass", busy: false, pendingPermission: false }), C.border);
+    assert.equal(inputContainerBorderColor({ permissionMode: "bypass", busy: false, pendingPermission: false }), C.inputBorder);
+  });
+
+  it("keeps the input border readable against a dark terminal background", () => {
+    // The idle border must stay clearly visible; `C.border` was too dim.
+    assert.notEqual(C.inputBorder, C.border);
+    assert.ok(relativeLuminance(C.inputBorder) > relativeLuminance(C.border));
+    assert.ok(contrastRatio(C.inputBorder, "#000000") >= 3);
+  });
+
+  it("drops the input border below the supported minimum width", () => {
+    const env = {};
+    assert.equal(usesInputBorder(MIN_INPUT_BORDER_WIDTH, env), true);
+    assert.equal(usesInputBorder(MIN_INPUT_BORDER_WIDTH - 1, env), false);
+    assert.equal(usesInputBorder(80, { TUI_CLAUDE_STYLE_INPUT: "0" }), false);
   });
 
   it("normalizes carriage returns to newlines", () => {

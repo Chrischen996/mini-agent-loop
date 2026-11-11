@@ -75,6 +75,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   // palette list `/tasks […]` twice, once described as "Alias of /tasks".
   { name: "todo", usage: TODO_COMMAND_USAGE.replace("/tasks", "/todo"), description: "Alias of /tasks", alias: true },
   { name: "context", usage: "/context", description: "Show context and token usage" },
+  { name: "goal", usage: "/goal [<objective> | status | clear | pause | resume | complete]", description: "Set, inspect, or control a persistent thread goal" },
   { name: "mcp", usage: "/mcp [server]", description: "Show MCP server status and tools" },
   { name: "plan", usage: "/plan [task]", description: "Generate an execution plan (plan mode)" },
   { name: "plan-show", usage: "/plan-show", description: "Show the current plan" },

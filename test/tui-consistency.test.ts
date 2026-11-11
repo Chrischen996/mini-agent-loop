@@ -40,6 +40,7 @@ import { promptPlaceholder } from "../src/tui/input-utils.ts";
 import { modelCommandFromPickerInput } from "../src/tui/model-command.ts";
 import { formatRenderLine } from "../src/tui/render-line-format.ts";
 import { statusLabel } from "../src/tui/claude-style.ts";
+import { PICKER_HEADING_PREFIX } from "../src/tui/render-lines.ts";
 
 /**
  * Regressions for the shared terminal presentation layer.
@@ -212,6 +213,7 @@ describe("shared TUI presentation", () => {
     // to drop the filter, so the same keystrokes produced different headings.
     assert.equal(rows[0]?.text, pickerTitleText("command", { filter: "mo" }));
     assert.equal(rows[0]?.text, "Commands /mo");
+    assert.equal(rows[0]?.prefix, PICKER_HEADING_PREFIX);
 
     // Every description starts in the shared usage column, so the ANSI overlay
     // and the Ink CommandPalette line up row for row.
@@ -642,9 +644,9 @@ describe("shared TUI presentation", () => {
     );
     assert.equal(rows[0]?.prefix, "✓ ");
     assert.match(rows[0]?.text ?? "", /^Bash\(seq 1 16\)/);
-    assert.equal(rows[1]?.prefix, "  ├─ ");
-    assert.equal(rows[2]?.prefix, "  │  ");
-    assert.equal(rows.at(-1)?.prefix, "  └─ ");
+    assert.equal(rows[1]?.prefix, "  ⎿ ");
+    assert.equal(rows[2]?.prefix, "  ⎿ ");
+    assert.equal(rows.at(-1)?.prefix, "  ⎿ ");
     assert.equal(rows.some((row) => /[╭╰]/.test(row.text)), false);
     assert.match(rows.at(-1)?.text ?? "", /1 more line$/);
   });

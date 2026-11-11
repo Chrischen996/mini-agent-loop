@@ -97,6 +97,7 @@ for request validation, stop reasons and counter semantics.
 | `src/subagent/` | Subagent tool, profiles, auto-delegation, cost accounting |
 | `src/plan-act/` | In-memory plan lifecycle and phase state machine |
 | `src/plan/` | On-disk plan-document kernel (create/approve/archive/history) |
+| `src/goal/` | Persistent thread goal: state store, manager, model tools, steering, runtime controller |
 | `src/orchestration/` | Background jobs, pause gate, session gate, memory store |
 | `src/session-*.ts` | Session persistence, history sanitization, workspace scoping |
 | `src/sandbox/` | Docker/Podman/Node sandbox runners and detection |

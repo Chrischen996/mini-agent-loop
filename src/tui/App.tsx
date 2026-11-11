@@ -11,6 +11,7 @@ import { getTodoPanelRows } from "./todo-format.ts";
 import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
 import { parseBackgroundTaskCommand, parseSlashCommand } from "./slash-commands.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
+import { MAX_TRANSCRIPT_MESSAGES } from "./state.ts";
 
 /** Human-readable message for an LlmTimeoutError, with partial-response preview. */
 function formatLlmTimeoutMessage(err: InstanceType<typeof LlmTimeoutError>): string {
@@ -76,6 +77,7 @@ import {
 } from "../permissions.ts";
 import { TurnEventBuffer } from "./stream-buffer.ts";
 import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./layout.ts";
+import { inputContainerBorderColor, usesInputBorder } from "./input-container.ts";
 import { estimateViewportContentHeight, MessageHeightCache } from "./message-viewport.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
@@ -103,6 +105,7 @@ import { TerminalInputHistory } from "./terminal-input-history.ts";
 import { buildTuiSystemPrompt, createTuiAgentHistory, type TuiSystemPromptContext } from "./system-prompt.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
+import { bgTaskStatusGlyph } from "./bg-task-status-color.ts";
 import { estimatePromptInputRows, PromptInput } from "./components/PromptInput.tsx";
 import {
   sanitizeInput,
@@ -135,6 +138,15 @@ import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
 import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
 import { isTuiFeatureEnabled } from "./execution-policy.ts";
 import type { StartupSessionRequest } from "./session-serialization.ts";
+import {
+  createGoalSession,
+  goalNotice,
+  goalStatusSegment,
+  parseGoalCommand,
+  resolveGoalConfig,
+  type GoalSessionContext,
+  type GoalSnapshot,
+} from "../goal/index.ts";
 
 type AppProps = {
   cwd: string;
@@ -267,12 +279,19 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     };
   }, [stdout]);
   const termWidth = terminalSize.columns;
+  // The Claude-style input container wraps the prompt in a two-row border.
+  // Below 20 columns the border eats the text area, so fall back to the
+  // borderless prompt row.
+  const useClaudeStyleInputBorder = usesInputBorder(termWidth);
   // Leave one terminal row unused so Ink never enters its full-screen clear
   // path (`outputHeight >= rows`) while streamed reasoning is growing.
   const termHeight = getTuiViewportHeight(terminalSize.rows);
   const [llm, setLlm] = useState<LlmConfig>(() => loadLlmConfigFromEnv());
   const llmRef = useRef(llm);
   llmRef.current = llm;
+  const goalConfig = useMemo(() => resolveGoalConfig(), []);
+  const goalSessionRef = useRef<GoalSessionContext | null>(null);
+  const [goalState, setGoalState] = useState<GoalSnapshot | null>(null);
   const vision = useMemo(() => loadVisionConfigFromEnv(), []);
   const autoSubagent = useMemo(() => loadAutoSubagentOptionsFromEnv(), []);
   const globalTokenBudget = useMemo(() => loadGlobalTokenBudgetFromEnv(), []);
@@ -575,6 +594,12 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   dispatchRef.current = dispatch;
   conversationIdRef.current = conversationId;
   setInputRef.current = setInput;
+  useEffect(() => {
+    if (!goalConfig.enabled) return;
+    void getGoalSession()?.manager.get().then((current) => {
+      setGoalState(current ? current.snapshot : null);
+    });
+  }, [conversationId, goalConfig.enabled]);
 
   const smoothScrollRef = useLazyRef(() => new SmoothScrollController({
     getOffset: () => stateRef.current.scrollOffset,
@@ -633,6 +658,23 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     return sessionManagerRef.current;
   }, [projectCwd]);
   const listSessions = useCallback(() => getSessionManager().list(), [getSessionManager]);
+  const getGoalSession = useCallback((): GoalSessionContext | null => {
+    if (!goalConfig.enabled) return null;
+    if (goalSessionRef.current && goalSessionRef.current.sessionId === conversationIdRef.current) {
+      return goalSessionRef.current;
+    }
+    const session = createGoalSession({
+      ...goalConfig,
+      sessionId: conversationIdRef.current,
+      onEvent: (event) => setGoalState(event.goal),
+      steering: {
+        onGoalSnapshot: (snapshot) => setGoalState(snapshot),
+      },
+    });
+    goalSessionRef.current = session;
+    void session.manager.initialize();
+    return session;
+  }, [goalConfig]);
 
   const resumeSession = useCallback(async (prefix: string, fork = false): Promise<boolean> => {
     const manager = getSessionManager();
@@ -962,7 +1004,8 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
               : "Message, /command, or @file reference";
   const promptWidth = Math.max(
     1,
-    termWidth - 4 - (state.busy && queuedCount > 0 ? terminalStringWidth(`Queue ${queuedCount}`) : 0),
+    termWidth - 4 - (useClaudeStyleInputBorder ? 2 : 0)
+      - (state.busy && queuedCount > 0 ? terminalStringWidth(`Queue ${queuedCount}`) : 0),
   );
   const promptRows = estimatePromptInputRows(input, promptWidth, promptPlaceholder);
   const todoRows = getTodoPanelRows(
@@ -982,6 +1025,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     extraRows: acMode === "model-picker" ? 4 : acMode === "model" || acMode === "file" ? 3 : 2,
     permissionRows,
     planApprovalRows,
+    hasInputBorder: useClaudeStyleInputBorder,
   });
   const feedHeight = getMessageFeedHeight({
     termRows: terminalSize.rows,
@@ -991,6 +1035,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     pickerRows: pickerLayout.totalRows,
     permissionRows,
     planApprovalRows,
+    hasInputBorder: useClaudeStyleInputBorder,
   });
 
   const copyResolvedText = useCallback(async (target: import("./copy-text.ts").CopyTarget = "auto") => {
@@ -1112,6 +1157,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
 
   const handleSubmit = useCallback(async (text: string) => {
     const trimmed = text.trim();
+    const goalCommand = parseGoalCommand(trimmed);
     const allowEmptyApiKey = acMode === "model-setup" && modelSetup?.field === "apiKey";
     const hasPendingImages = pendingImagesRef.current.length > 0;
     if (state.busy && !trimmed && promptQueueRef.current.length > 0) {
@@ -1124,6 +1170,38 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       onOpenDashboard();
       setAcMode(null);
       setInput("");
+      return;
+    }
+    if (goalCommand) {
+      setInput("");
+      if (!goalConfig.enabled) {
+        dispatch({ type: "ADD_NOTICE", title: "Goals", text: "Goals are disabled. Set MINI_AGENT_GOALS=1 to enable them." });
+        return;
+      }
+      const goalSession = getGoalSession();
+      if (!goalSession) return;
+      if (goalCommand.kind === "invalid") {
+        dispatch({ type: "ADD_NOTICE", title: "Goal", text: goalCommand.message });
+        return;
+      }
+      try {
+        if (goalCommand.kind === "status") {
+          const current = await goalSession.manager.get();
+          dispatch({ type: "ADD_NOTICE", title: "Goal", text: goalNotice(current?.raw) });
+          return;
+        }
+        const updated = goalCommand.kind === "clear"
+          ? await goalSession.manager.setFromUser({ clear: true })
+          : goalCommand.kind === "set"
+            ? await goalSession.manager.setFromUser({
+                objective: goalCommand.objective,
+                ...(goalCommand.tokenBudget !== undefined ? { tokenBudget: goalCommand.tokenBudget } : {}),
+              })
+            : await goalSession.manager.setFromUser({ status: goalCommand.status });
+        dispatch({ type: "ADD_NOTICE", title: "Goal", text: goalNotice(updated) });
+      } catch (error) {
+        dispatch({ type: "ADD_NOTICE", title: "Goal", text: error instanceof Error ? error.message : String(error) });
+      }
       return;
     }
     if (state.busy) {
@@ -1273,7 +1351,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           const lines = tasks.map((task) => {
             const duration = task.durationMs !== undefined ? ` · ${Math.round(task.durationMs / 1000)}s` : "";
             const exit = task.exitCode !== null && task.exitCode !== undefined ? ` · exit ${task.exitCode}` : "";
-            return `${task.status.padEnd(11)} ${task.taskId.slice(0, 8)}  ${task.name}${duration}${exit}`;
+            return `${bgTaskStatusGlyph(task.status)} ${task.status.padEnd(10)} ${task.taskId.slice(0, 8)}  ${task.name}${duration}${exit}`;
           });
           dispatch({
             type: "ADD_NOTICE",
@@ -1516,6 +1594,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     sendNowWaitToolIdsRef.current.clear();
     setSendableWaitWaiting(false);
     abortRef.current = new AbortController();
+    if (goalConfig.enabled) getGoalSession()?.runtime.beginTurn();
     const permissionManager = getPermissionManager();
     if (planTurnOverride?.forceMode && permissionManager.getMode() !== planTurnOverride.forceMode) {
       permissionManager.setMode(planTurnOverride.forceMode);
@@ -1628,7 +1707,12 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         try {
           historyRef.current = await runAgentTurn(historyRef.current, currentUserText, {
             llm: { ...turnLlm, sessionId: conversationId },
-            tools: () => [...resolveToolProvider(agentToolsRef.current), ...getSubagentTools(turnLlm)],
+            tools: () => [
+              ...resolveToolProvider(agentToolsRef.current),
+              ...getSubagentTools(turnLlm),
+              ...(goalConfig.enabled ? getGoalSession()?.tools ?? [] : []),
+            ],
+            ...(goalConfig.enabled && getGoalSession() ? { goalRuntime: getGoalSession()!.runtime } : {}),
             autoSubagent,
             preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
             signal: abortRef.current.signal,
@@ -1913,7 +1997,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     thinkingMode: state.thinkingMode,
     expandedThinking: state.expandedThinking,
     width: termWidth,
-    maxMessages: 200,
+    maxMessages: MAX_TRANSCRIPT_MESSAGES,
     cache: heightCacheRef.current,
   });
   const handleScrollContext = useCallback((direction: "up" | "down") => {
@@ -2043,14 +2127,28 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
             ))}
           </Box>
         )}
-        <Box paddingX={1} gap={1} flexShrink={0}>
-          <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : ">"}</Text>
+        <Box
+          borderStyle={useClaudeStyleInputBorder ? "round" : undefined}
+          borderColor={useClaudeStyleInputBorder
+            ? inputContainerBorderColor({
+              permissionMode: state.permissionMode,
+              busy: state.busy,
+              pendingPermission: Boolean(state.pendingPermission),
+            })
+            : undefined}
+          paddingX={1}
+          gap={1}
+          flexShrink={0}
+          width={termWidth}
+        >
+          <Text color={state.busy ? C.running : C.user} bold>{state.busy ? "⟳" : "❯"}</Text>
           <Box flexGrow={1} minWidth={0}>
             <PromptInput
               key={inputEpoch}
               value={input}
               inputHistory={inputHistoryRef.current}
               disableArrowNavigation={Boolean(acMode)}
+              enhancedEditingEnabled={useClaudeStyleInputBorder}
               onChange={setInputSafe}
               onPasteImage={handlePasteImageRef}
               onTab={handleTabAt}
@@ -2123,6 +2221,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           queuedCount={queuedCount}
           bgTaskCount={bgTaskCount}
           mcpStatus={mcpStatus}
+          goalStatus={goalState && goalConfig.enabled ? goalStatusSegment(goalState) : undefined}
           permissionMode={state.permissionMode}
           thinkingLevel={llm.thinkingLevel ?? (llm.reasoning ? "medium" : "off")}
           cacheReadTokens={state.cacheReadTokens}

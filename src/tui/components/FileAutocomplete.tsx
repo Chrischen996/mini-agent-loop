@@ -4,6 +4,7 @@ import { TUI_COLORS as C } from "../theme.ts";
 import type { PersistedSessionMeta } from "../../session-store.ts";
 import { SESSION_PICKER_HINT } from "../session-serialization.ts";
 import { PICKER_SELECTED_MARKER, PICKER_UNSELECTED_MARKER } from "../claude-style.ts";
+import { PICKER_HEADING_PREFIX } from "../render-lines.ts";
 import { formatContextWindow as formatContextWindowShared } from "../status-line.ts";
 import type { ProfileSummary } from "../types.ts";
 import { configuredModelRowText, type ModelPickerSection } from "../model-picker.ts";
@@ -40,7 +41,7 @@ export function CommandPalette({ filter, selectedIndex, candidates, maxVisible =
 
   return (
     <Box flexDirection="column" paddingX={2} width={width} minWidth={0} overflow="hidden">
-      <Text dimColor wrap="truncate-end">── {pickerTitleText("command", { filter })}</Text>
+      <Text dimColor wrap="truncate-end">{PICKER_HEADING_PREFIX}{pickerTitleText("command", { filter })}</Text>
       {candidates.length === 0 && <Text color={C.running} wrap="truncate-end">No matching commands</Text>}
       {visible.map((cmd, i) => {
         const index = start + i;
@@ -77,7 +78,7 @@ export function SessionPalette({ sessions, selectedIndex, command, loading, maxV
   const { visible, start } = pickerVisibleWindow(sessions, selectedIndex, maxVisible);
   return (
     <Box flexDirection="column" paddingX={2} width={width} minWidth={0} overflow="hidden">
-      <Text dimColor wrap="truncate-end">── {command === "resume" ? "Resume sessions" : "Saved sessions"}</Text>
+      <Text dimColor wrap="truncate-end">{PICKER_HEADING_PREFIX}{command === "resume" ? "Resume sessions" : "Saved sessions"}</Text>
       {loading && <Text dimColor wrap="truncate-end">Loading saved sessions…</Text>}
       {!loading && sessions.length === 0 && <Text color={C.running} wrap="truncate-end">No saved sessions</Text>}
       {!loading && visible.map((session, index) => {
@@ -120,7 +121,7 @@ export function FileAutocomplete({ candidates, selectedIndex, prefix, maxVisible
 
   return (
     <Box flexDirection="column" paddingX={2} width={width} minWidth={0} overflow="hidden">
-      <Text dimColor wrap="truncate-end">── {pickerTitleText("file", { fragment: prefix })}</Text>
+      <Text dimColor wrap="truncate-end">{PICKER_HEADING_PREFIX}{pickerTitleText("file", { fragment: prefix })}</Text>
       {candidates.length === 0 && <Text color={C.running} wrap="truncate-end">No matching files</Text>}
       {visible.map((candidate, i) => {
         const index = start + i;
@@ -186,7 +187,7 @@ export function ModelPicker({ candidates, configuredModels, section, showSection
   const nameColumn = configured ? 0 : modelNameColumn(visible.map((item) => item.key));
   return (
     <Box flexDirection="column" paddingX={2} width={width} minWidth={0} overflow="hidden">
-      <Text dimColor wrap="truncate-end">── {pickerTitleText("model", { query })}</Text>
+      <Text dimColor wrap="truncate-end">{PICKER_HEADING_PREFIX}{pickerTitleText("model", { query })}</Text>
       {showSections && <Box gap={2} minWidth={0}>
         <Text color={configured ? C.running : C.muted} bold={configured} wrap="truncate-end">
           {configured ? "[Configured models]" : "Configured models"} ({configuredModels.length})

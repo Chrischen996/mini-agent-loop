@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   createInitialState,
+  MAX_TRANSCRIPT_MESSAGES,
   preserveScrollOnAppend,
   tuiReducer,
 } from "../src/tui/state.ts";
@@ -421,7 +422,7 @@ describe("TUI sidebar state", () => {
     assert.equal(state.taskStatus, "paused");
     const notice = state.messages.at(-1);
     assert.equal(notice?.kind, "notice");
-    assert.match(notice?.kind === "notice" ? notice.text : "", /Turn limit reached \(30\).*\n.*\/continue/);
+    assert.match(notice?.kind === "notice" ? notice.text : "", /Run stopped by its safety cap\..*\n.*\/continue/);
 
     state = tuiReducer(state, { type: "CONTINUE_TURN" });
     assert.equal(state.taskTitle, "Continue the task");
@@ -586,6 +587,21 @@ describe("TUI sidebar state", () => {
       text: "/help show help",
     });
     assert.deepEqual(state.messages.at(-1), { kind: "notice", title: "Help", text: "/help show help" });
+  });
+
+  it("keeps the reducer transcript aligned with the fullscreen scroll window", () => {
+    let state = createInitialState("test-model");
+    for (let index = 0; index < MAX_TRANSCRIPT_MESSAGES; index += 1) {
+      state = tuiReducer(state, { type: "ADD_NOTICE", text: `history-${index}` });
+    }
+
+    assert.equal(state.messages.length, MAX_TRANSCRIPT_MESSAGES);
+    const first = state.messages[0];
+    assert.equal(first?.kind, "notice");
+    if (first?.kind === "notice") assert.equal(first.text, "history-0");
+    const last = state.messages.at(-1);
+    assert.equal(last?.kind, "notice");
+    if (last?.kind === "notice") assert.equal(last.text, "history-499");
   });
 
   it("keeps the active run status when a notice arrives", () => {

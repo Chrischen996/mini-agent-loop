@@ -31,7 +31,7 @@ function renderInline(text: string, keyPrefix: string, baseColor?: string): Reac
       nodes.push(<Text key={`${keyPrefix}-b${seq}`} color={baseColor} bold>{match[1]}</Text>);
     } else if (match[2] !== undefined) {
       nodes.push(
-        <Text key={`${keyPrefix}-c${seq}`} backgroundColor="#3a4149" color={C.info}>{match[2]}</Text>,
+        <Text key={`${keyPrefix}-c${seq}`} backgroundColor={C.inlineCodeBg} color={C.info}>{match[2]}</Text>,
       );
     }
     cursor = match.index + match[0].length;
