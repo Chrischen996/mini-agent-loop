@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import type { GoalStore } from "./store.ts";
 import {
   goalSnapshot,
-  isTerminalStatus,
   isUnfinished,
   validateObjective,
   validateTokenBudget,
@@ -41,7 +40,6 @@ export class GoalManager {
   private readonly maxGoalTokenBudget?: number;
   private readonly onEvent?: (event: GoalEvent) => void;
   private pendingGoalCreated = false;
-  private pendingObjectiveEdit = false;
   /** True when a goal objective was edited in place during this turn. */
   private objectiveEditedDuringTurn = false;
 
@@ -120,6 +118,7 @@ export class GoalManager {
           updatedAt: now,
         };
         if (objectiveEdited) this.objectiveEditedDuringTurn = true;
+        else this.pendingGoalCreated = true;
         return next;
       }
       if (!current) throw new Error("no goal exists for this thread");
@@ -143,6 +142,7 @@ export class GoalManager {
   takeSteeringIntent(): "created" | "edited" | undefined {
     if (this.pendingGoalCreated) {
       this.pendingGoalCreated = false;
+      this.objectiveEditedDuringTurn = false;
       return "created";
     }
     if (this.objectiveEditedDuringTurn) {
@@ -167,20 +167,6 @@ export class GoalManager {
     if (!updated) return { rejected: true, message: "cannot update goal because this thread has no goal" };
     this.emit(updated, "status_changed");
     return { goal: updated, rejected: false, message: `Goal status: ${updated.status}` };
-  }
-
-  /** System-controlled status transitions. */
-  async markSystemStatus(status: Extract<GoalStatus, "usage_limited" | "budget_limited">): Promise<GoalState | undefined> {
-    let updated: GoalState | undefined;
-    await this.store.update(this.sessionId, (current) => {
-      if (!current || isTerminalStatus(current.status)) return undefined;
-      updated = { ...current, status, updatedAt: Date.now() };
-      return updated;
-    });
-    if (updated !== undefined) {
-      this.emit(updated, status === "budget_limited" ? "budget_limited" : "usage_limited");
-    }
-    return updated;
   }
 
   /** Add token and elapsed-time usage to the current active goal. */

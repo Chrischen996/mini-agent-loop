@@ -13,6 +13,7 @@ export type GoalFeatureConfig = {
 
 export type GoalSessionContext = {
   sessionId: string;
+  store: GoalStore;
   manager: GoalManager;
   runtime: GoalRuntimeController;
   tools: Tool[];
@@ -60,6 +61,7 @@ export function createGoalSession(options: CreateGoalSessionOptions): GoalSessio
   });
   return {
     sessionId: options.sessionId,
+    store,
     manager,
     runtime,
     tools: createGoalTools(manager),

@@ -2475,6 +2475,8 @@ export function createAgentServer(options: AgentServerOptions): Express {
     }
     try {
       sessions.delete(request.params.id);
+      await goalSessions.get(request.params.id)?.store.clear(request.params.id);
+      goalSessions.delete(request.params.id);
       await sessionManagerForSession(session).remove(request.params.id);
       await sessionPresentation.remove(request.params.id);
       void documentStore.removeSession(request.params.id);

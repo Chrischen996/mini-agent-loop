@@ -198,6 +198,22 @@ describe("goal runtime steering", () => {
     });
   });
 
+  it("distinguishes created from edited objective steering", async () => {
+    await withTempStore(async (store) => {
+      const session = createGoalSession({ enabled: true, sessionId: "s1", store });
+      await session.manager.setFromUser({ objective: "original" });
+      const runtime = session.runtime;
+      runtime.beginTurn();
+      const first = await runtime.prepareMessages([{ role: "user", content: "hi" }]);
+      assert.match(first.at(-1)!.content as string, /A goal was created for this thread/);
+
+      runtime.beginTurn();
+      await session.manager.setFromUser({ objective: "revised" });
+      const second = await runtime.prepareMessages([{ role: "user", content: "hi" }]);
+      assert.match(second.at(-1)!.content as string, /objective was edited by the user/);
+    });
+  });
+
   it("caps automatic continuations", async () => {
     await withTempStore(async (store) => {
       const session = createGoalSession({ enabled: true, sessionId: "s1", maxContinuations: 2, store });

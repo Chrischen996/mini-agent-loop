@@ -108,6 +108,15 @@ export type AgentBudgetUsage = {
   elapsedMs: number;
 };
 
+/** Recover allocation usage from the final assistant message after a turn. */
+function budgetUsageFrom(messages: AgentMessage[], previous?: AgentBudgetUsage): AgentBudgetUsage | undefined {
+  const last = [...messages].reverse().find((message) => message.role === "assistant");
+  const usage = last && (last as { usage?: { totalTokens?: number } }).usage;
+  const tokensUsed = (previous?.tokensUsed ?? 0) + Math.max(0, Math.floor(usage?.totalTokens ?? 0));
+  if (!previous && !usage?.totalTokens) return undefined;
+  return { tokensUsed, toolCallsUsed: previous?.toolCallsUsed ?? 0, writeCallsUsed: previous?.writeCallsUsed ?? 0, elapsedMs: previous?.elapsedMs ?? 0 };
+}
+
 export type AgentRunPolicy = {
   deadlineMs?: number;
   tokenBudget?: number;
@@ -829,7 +838,11 @@ export async function runAgentTurn(
     const runtime = options.goalRuntime;
     if (!runtime) return result;
     await runtime.finish();
+    // Continuations keep the caller's allocation usage so policy budgets
+    // (token/time/tool caps) stay authoritative across the whole submission.
+    const initialBudgetUsage = options.initialBudgetUsage;
     let current = result;
+    let continuationUsage = budgetUsageFrom(result, initialBudgetUsage);
     while (true) {
       const continuation = await runtime.shouldContinue();
       if (!continuation) return current;
@@ -839,8 +852,9 @@ export async function runAgentTurn(
         ...options,
         signal: merged.signal,
         isContinuation: true,
-        initialBudgetUsage: undefined,
+        initialBudgetUsage: continuationUsage,
       });
+      continuationUsage = budgetUsageFrom(current, continuationUsage);
       await runtime.finish();
     }
   } catch (error) {
