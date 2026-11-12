@@ -6,6 +6,8 @@ import type { ModelSetupState } from "./types.ts";
 import { activateProfile, saveProfile, listProfiles, loadProfileStore } from "../profile-store.ts";
 import { switchLlmModel, loadLlmConfigFromEnv } from "../llm/index.ts";
 import { adaptHistoryForModel } from "../message-adapter.ts";
+import { withThinkingLevel } from "../think-intensity.ts";
+import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import type { AgentMessage } from "../types.ts";
 
 export type ProfileManagerDeps = {
@@ -70,17 +72,22 @@ export async function commitModelSetup(
   setup: ModelSetupState,
   apiKey: string,
   deps: ProfileManagerDeps,
-  options: { persistProfile?: boolean } = {},
+  options: { persistProfile?: boolean; thinkingLevel?: ModelThinkingLevel } = {},
 ): Promise<void> {
   const { llm, setLlm, setModelSetup, setAcMode, setInput, dispatch, historyRef } = deps;
 
   try {
     const effectiveApiKey = apiKey.trim() || setup.apiKey.trim();
-    const newLlmConfig = switchLlmModel(llm, setup.model, {
+    const switched = switchLlmModel(llm, setup.model, {
       baseUrl: setup.baseUrl,
       apiKey: effectiveApiKey,
       ...(setup.protocol ? { protocol: setup.protocol } : {}),
     });
+    // When the setup flow ends with an Effort-slider pick, bake the chosen
+    // reasoning level into the freshly switched config (and the saved profile).
+    const newLlmConfig = options.thinkingLevel !== undefined
+      ? withThinkingLevel(switched, options.thinkingLevel)
+      : switched;
     setLlm(newLlmConfig);
     dispatch({ type: "MODEL_CHANGED", modelName: setup.model.id });
 

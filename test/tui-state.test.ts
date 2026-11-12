@@ -2,8 +2,6 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   createInitialState,
-  MAX_TRANSCRIPT_MESSAGES,
-  preserveScrollOnAppend,
   tuiReducer,
 } from "../src/tui/state.ts";
 import { createPlanDocument } from "../src/plan/document.ts";
@@ -526,14 +524,7 @@ describe("TUI sidebar state", () => {
     assert.equal(state.scrollOffset, 0);
   });
 
-  it("preserveScrollOnAppend keeps history stable while scrolled up", () => {
-    assert.equal(preserveScrollOnAppend(0, 2), 0); // pinned to bottom
-    assert.equal(preserveScrollOnAppend(2, 2), 4); // 2 + 2 added rows
-    assert.equal(preserveScrollOnAppend(2, 0), 2); // no new rows
-    assert.equal(preserveScrollOnAppend(5, 0), 5); // no new rows
-  });
-
-  it("preserves upward scroll when assistant and tool messages append", () => {
+  it("leaves append anchoring to the measured viewport in the App layer", () => {
     let state = createInitialState("test-model");
     for (let i = 0; i < 3; i++) {
       state = tuiReducer(state, { type: "USER_MESSAGE", text: `turn ${i}` });
@@ -548,7 +539,9 @@ describe("TUI sidebar state", () => {
     state = tuiReducer(state, { type: "SCROLL_BY", delta: 2 });
     assert.equal(state.scrollOffset, 2);
 
-    // Assistant finalizes a new message ("reply" = 1 margin + 1 text line = 2 rows).
+    // The reducer must not add guessed row counts: App.tsx measures the full
+    // transcript height and adds the exact delta once after render. Guessing
+    // here as well would double the compensation for every appended message.
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
       event: {
@@ -557,10 +550,8 @@ describe("TUI sidebar state", () => {
       },
     });
     assert.equal(state.messages.length, 4);
-    assert.equal(state.scrollOffset, 4); // 2 + 2 rows (margin + text)
+    assert.equal(state.scrollOffset, 2);
 
-    // Tool cards also append into history and must preserve viewport.
-    // tool_call has no text field so estimateNewMessageRows gives 1+1=2.
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
       event: {
@@ -569,15 +560,14 @@ describe("TUI sidebar state", () => {
       },
     });
     assert.equal(state.messages.length, 5);
-    assert.equal(state.scrollOffset, 6); // 4 + 2 rows
+    assert.equal(state.scrollOffset, 2);
 
-    // Errors append too ("boom" = 1 margin + 1 text line = 2 rows).
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
       event: { type: "error", message: "boom" },
     });
     assert.equal(state.messages.length, 6);
-    assert.equal(state.scrollOffset, 8); // 6 + 2 rows
+    assert.equal(state.scrollOffset, 2);
   });
 
   it("adds help and other notices as renderable messages", () => {
@@ -589,19 +579,49 @@ describe("TUI sidebar state", () => {
     assert.deepEqual(state.messages.at(-1), { kind: "notice", title: "Help", text: "/help show help" });
   });
 
-  it("keeps the reducer transcript aligned with the fullscreen scroll window", () => {
+  it("retains the full transcript without a fixed message cap", () => {
     let state = createInitialState("test-model");
-    for (let index = 0; index < MAX_TRANSCRIPT_MESSAGES; index += 1) {
+    for (let index = 0; index < 500; index += 1) {
       state = tuiReducer(state, { type: "ADD_NOTICE", text: `history-${index}` });
     }
 
-    assert.equal(state.messages.length, MAX_TRANSCRIPT_MESSAGES);
+    // The UI transcript is not truncated at a fixed message count; the earliest
+    // message is still present so the user can scroll all the way back.
+    assert.equal(state.messages.length, 500);
     const first = state.messages[0];
     assert.equal(first?.kind, "notice");
     if (first?.kind === "notice") assert.equal(first.text, "history-0");
     const last = state.messages.at(-1);
     assert.equal(last?.kind, "notice");
     if (last?.kind === "notice") assert.equal(last.text, "history-499");
+  });
+
+  it("keeps the earliest user message reachable in a very long session", () => {
+    let state = createInitialState("test-model");
+    // Simulate a long session: many user/assistant turn pairs. The offload
+    // threshold (TRANSCRIPT_OFFLOAD_THRESHOLD, default 0) drops oldest
+    // entries from memory but always preserves the first user prompt, so the
+    // conversation origin stays scroll-reachable — matching Antigravity-style
+    // history instead of the old hard 500-message truncation.
+    for (let turn = 0; turn < 1500; turn += 1) {
+      state = tuiReducer(state, { type: "USER_MESSAGE", text: `user-${turn}` });
+      state = tuiReducer(state, {
+        type: "LOOP_EVENT",
+        event: { type: "assistant", message: { role: "assistant", content: `assistant-${turn}` } },
+      });
+    }
+
+    // Offload is disabled by default (threshold 0), so the entire 1500-turn
+    // transcript (3000 messages + the initial state) stays resident — scrolling
+    // is physically continuous like Antigravity with no reconstruction gap.
+    assert.ok(state.messages.length >= 3000, `transcript retained in memory, got ${state.messages.length}`);
+    const firstUser = state.messages.find((m) => m.kind === "user");
+    assert.ok(firstUser !== undefined, "earliest user prompt preserved");
+    if (firstUser && firstUser.kind === "user") assert.equal(firstUser.text, "user-0");
+    // The most recent turn is always present (bottom-anchored scroll).
+    const last = state.messages.at(-1);
+    assert.ok(last !== undefined);
+    if (last && last.kind === "assistant") assert.equal(last.text, "assistant-1499");
   });
 
   it("keeps the active run status when a notice arrives", () => {

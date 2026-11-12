@@ -5,7 +5,7 @@ export type ModelSetupState = {
   model: ModelRef;
   baseUrl: string;
   apiKey: string;
-  field: "baseUrl" | "apiKey";
+  field: "baseUrl" | "apiKey" | "effort";
   /** Preserve `/model --protocol` across the Base URL / API key overlay. */
   protocol?: LlmGatewayProtocol;
   error?: string;

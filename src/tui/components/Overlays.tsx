@@ -20,6 +20,8 @@ import { TodoEditor } from "./TodoEditor.tsx";
 import type { TodoEditorState } from "../todo-editor.ts";
 import type { PersistedSessionMeta } from "../../session-store.ts";
 import type { ResumeMessageCandidate } from "../session-serialization.ts";
+import { EffortPicker, effortPickerWidth } from "./EffortPicker.tsx";
+import type { ModelThinkingLevel } from "../../pi-ai/types.ts";
 
 export type OverlaysProps = {
   acMode: AcMode;
@@ -47,6 +49,14 @@ export type OverlaysProps = {
   onTodoCancel?: () => void;
   onTodoInput?: (value: string) => void;
   onTodoConfirm?: () => void;
+  /** Antigravity-style Effort slider state (acMode === "effort-picker"). */
+  effortLevels?: readonly ModelThinkingLevel[];
+  effortLabels?: Readonly<Record<ModelThinkingLevel, string>>;
+  effortSelectedIndex?: number;
+  termWidth?: number;
+  onEffortPreview?: (level: ModelThinkingLevel) => void;
+  onEffortConfirm?: (level: ModelThinkingLevel) => void;
+  onEffortCancel?: () => void;
 };
 
 export function Overlays({
@@ -75,7 +85,27 @@ export function Overlays({
   onTodoCancel,
   onTodoInput,
   onTodoConfirm,
+  effortLevels,
+  effortLabels,
+  effortSelectedIndex = 0,
+  termWidth,
+  onEffortPreview,
+  onEffortConfirm,
+  onEffortCancel,
 }: OverlaysProps): React.ReactElement | null {
+  if (acMode === "effort-picker" && effortLevels && effortLabels && onEffortConfirm && onEffortCancel) {
+    return (
+      <EffortPicker
+        levels={effortLevels}
+        labels={effortLabels}
+        selectedIndex={effortSelectedIndex}
+        width={effortPickerWidth(termWidth ?? 80)}
+        onConfirm={onEffortConfirm}
+        onCancel={onEffortCancel}
+        onPreview={onEffortPreview}
+      />
+    );
+  }
   if (todoEditorState && onTodoCancel && onTodoInput && onTodoConfirm) {
     return <TodoEditor state={todoEditorState} onCancel={onTodoCancel} onStateChange={onTodoInput} onConfirm={onTodoConfirm} width={width} />;
   }

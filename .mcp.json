@@ -5,6 +5,12 @@
       "args": ["--from", "browser-use[cli]", "browser-use", "--mcp"],
       "timeoutMs": 60000,
       "required": false
+    },
+    "excalidraw": {
+      "command": "/Users/chenjiaxu/.nvm/versions/node/v24.15.0/bin/excalidraw-mcp-server",
+      "args": [],
+      "timeoutMs": 30000,
+      "required": false
     }
   }
 }

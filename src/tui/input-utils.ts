@@ -74,6 +74,7 @@ export type AcMode =
   | "resume-messages"
   | "background-task-list"
   | "background-task-actions"
+  | "effort-picker"
   | "workspace-diff-files"
   | "model-setup"
   | "profile-name"

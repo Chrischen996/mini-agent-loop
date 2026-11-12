@@ -53,6 +53,7 @@ export function parseBackgroundTaskCommand(input: string): BackgroundTaskCommand
  */
 export const SLASH_COMMANDS: CommandDef[] = [
   { name: "model", usage: "/model [ref] [url] [key] [--protocol]", description: "Switch model and gateway" },
+  { name: "effort", usage: "/effort [off|minimal|low|med|high|xhigh|max|ultra]", description: "Open the Effort slider or set a thinking level directly" },
   { name: "profiles", usage: "/profiles", description: "List and activate model profiles" },
   { name: "image", usage: "/image <path>", description: "Attach a local image" },
   { name: "paste-image", usage: "/paste-image", description: "Attach an image from the clipboard" },
@@ -184,8 +185,9 @@ export const HELP_KEYBIND_HINTS: readonly string[] = [
   "Alt+T expand reasoning",
   "Alt+↑/↓ focus message",
   "Ctrl+Shift+T todo editor",
+  "Ctrl+P/N prompt history",
   "Ctrl+G jump to bottom",
-  "PageUp/PageDown scroll",
+  "PageUp/PageDown · Ctrl+↑/↓ · ↑/↓ scroll",
 ];
 
 const HELP_HINT_SEPARATOR = "  ·  ";
@@ -235,7 +237,8 @@ export function formatHelpNotice(commands: readonly CommandDef[] = SLASH_COMMAND
     ? [
       "Tab/↑↓ pick a command  ·  Enter run  ·  Esc close",
       "Ctrl+R reasoning level  ·  Alt+T expand reasoning  ·  Alt+↑/↓ focus message",
-      "Ctrl+Shift+T todo editor  ·  Ctrl+G jump to bottom  ·  PageUp/PageDown scroll",
+      "Ctrl+Shift+T todo editor  ·  Ctrl+P/N prompt history  ·  Ctrl+G jump to bottom",
+      "PageUp/PageDown  ·  Ctrl+↑/↓  ·  ↑/↓ scroll the transcript",
     ]
     : packHints(HELP_KEYBIND_HINTS, Math.max(24, width - 2));
   return [...rows, "", ...hints].join("\n");

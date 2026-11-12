@@ -88,13 +88,16 @@ describe("terminal input controller", () => {
     assert.equal(controller.getCursor(), 7);
   });
 
-  it("does not use Ctrl+Up or Ctrl+Down as transcript scrolling shortcuts", () => {
+  it("maps Ctrl+Up and Ctrl+Down to single-line transcript scrolling", () => {
     const actions: TerminalInputAction[] = [];
     const controller = new TerminalInputController({ onAction: (action) => actions.push(action) });
 
     controller.handle("\x1b[1;5A\x1b[1;5B");
 
-    assert.deepEqual(actions, []);
+    assert.deepEqual(actions, [
+      { type: "scroll", delta: 1 },
+      { type: "scroll", delta: -1 },
+    ]);
     assert.equal(controller.getValue(), "");
   });
 

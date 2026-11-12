@@ -863,6 +863,7 @@ export const OPENCODE_MODELS = {
 		baseUrl: "https://opencode.ai/zen/v1",
 		compat: {"supportsStore":false,"supportsDeveloperRole":false,"maxTokensField":"max_tokens"},
 		reasoning: true,
+		thinkingLevelMap: {"off":null,"low":"low","medium":"medium","high":"high","ultra":"ultra"},
 		input: ["text"],
 		cost: {
 			input: 0,

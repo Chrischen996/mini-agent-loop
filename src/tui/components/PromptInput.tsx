@@ -20,6 +20,16 @@ export function isPasteShortcut(input: string, key?: { ctrl?: boolean; meta?: bo
 
 export const isImagePasteShortcut = isPasteShortcut;
 
+function promptHistoryDirection(
+  input: string,
+  key: { ctrl?: boolean; meta?: boolean },
+): -1 | 1 | undefined {
+  if (!key.ctrl && !key.meta) return undefined;
+  if (input === "p" || input === "P" || input === "\u0010") return -1;
+  if (input === "n" || input === "N" || input === "\u000e") return 1;
+  return undefined;
+}
+
 export type PromptInputProps = {
   value: string;
   onChange: (value: string) => void;
@@ -31,13 +41,13 @@ export type PromptInputProps = {
   mask?: string;
   placeholder?: string;
   attachments?: string[];
-  /** Optional history instance for ↑/↓ history navigation in single-line mode */
+  /** Optional history instance for Ctrl/Cmd+P (older) and Ctrl/Cmd+N (newer) recall */
   inputHistory?: TerminalInputHistory;
   /** Prevent prompt editing from consuming arrows owned by an overlay. */
   disableArrowNavigation?: boolean;
   /** Enable the migration's new word/Home/End editing behavior. */
   enhancedEditingEnabled?: boolean;
-  /** Called when an empty single-line prompt has no history entry to navigate. */
+  /** Called when the prompt forwards a transcript scroll request to the app. */
   onScrollContext?: (direction: "up" | "down") => void;
   /** Let an owning overlay handle selected control chords before prompt editing. */
   onControlKey?: (input: string, key: { ctrl?: boolean; meta?: boolean; return?: boolean }) => boolean;
@@ -210,6 +220,23 @@ export function PromptInput({
         return;
       }
 
+      const historyDirection = promptHistoryDirection(input, key);
+      if (historyDirection !== undefined) {
+        // Antigravity-style input-history navigation on Ctrl/Cmd+P (older) and
+        // Ctrl/Cmd+N (newer), decoupled from transcript scrolling so the arrow
+        // keys never fight over vertical navigation. Ink may deliver these
+        // chords as "p"/"n" or as their C0 control characters.
+        if (inputHistory) {
+          const next = inputHistory.navigate(historyDirection, valueRef.current);
+          if (next !== undefined) {
+            onChange(next);
+            setCursor(splitGraphemes(next).length);
+            return;
+          }
+        }
+        return;
+      }
+
       // Leave other Ctrl/Meta chords to the app (thinking, scroll, exit).
       if (key.ctrl || key.meta) return;
 
@@ -232,33 +259,21 @@ export function PromptInput({
       }
 
       if (key.upArrow || key.downArrow) {
-        // Modifier shortcuts and active overlays own vertical navigation.
-        // Do not let prompt history or multiline editing consume arrows.
+        // Antigravity-style: arrow keys always scroll the transcript. Input
+        // history now lives on Ctrl/Cmd+P / Ctrl/Cmd+N, so arrows are dedicated
+        // to conversation navigation and never gated on an empty prompt.
         if (disableArrowNavigation || key.shift) return;
         const isMultiLine = valueRef.current.includes("\n");
         if (isMultiLine) {
-          // In multi-line mode: only use history navigation when cursor is
-          // already at the very first character (can't go up further in text).
+          // Multi-line: move between text rows first; spill to transcript
+          // scrolling at the first/last row so the conversation stays reachable.
           const moved = moveVertical(currentParts, currentCursor, key.upArrow ? -1 : 1);
           if (moved.cursor !== currentCursor) {
             setCursor(moved.cursor);
             return;
           }
         }
-        if (inputHistory) {
-          const next = inputHistory.navigate(key.upArrow ? -1 : 1, valueRef.current);
-          if (next !== undefined) {
-            onChange(next);
-            // Move cursor to end of the restored text
-            setCursor(splitGraphemes(next).length);
-            return;
-          }
-        }
-        // An empty single-line prompt has no editing action left to consume.
-        // Let the parent use the arrow for transcript/context navigation.
-        if (!isMultiLine && valueRef.current === "") {
-          onScrollContext?.(key.upArrow ? "up" : "down");
-        }
+        onScrollContext?.(key.upArrow ? "up" : "down");
         return;
       }
 

@@ -208,9 +208,10 @@ export class TerminalInputController {
     else if (final === "A" && params === "1;2") this.emit({ type: "shortcut", name: "thinking-level", direction: "increase" });
     else if (final === "B" && params === "1;2") this.emit({ type: "shortcut", name: "thinking-level", direction: "decrease" });
     else if ((final === "A" || final === "B") && params === "1;5") {
-      // Ctrl+Up/Down are intentionally not transcript navigation. Mouse
-      // wheel is the primary history interaction; PageUp/PageDown remain the
-      // explicit keyboard fallback.
+      // Keep the headless controller aligned with the Ink client: Ctrl+Up/Down
+      // scroll the transcript by one row. Plain Up/Down keep their existing
+      // controller behavior.
+      this.emit({ type: "scroll", delta: final === "A" ? 1 : -1 });
     }
     else if (final === "A") {
       if (this.hasNewline()) this.emit({ type: "cursor", direction: "up" });

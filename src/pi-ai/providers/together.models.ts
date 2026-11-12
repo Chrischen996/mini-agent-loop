@@ -273,7 +273,7 @@ export const TOGETHER_MODELS = {
 		baseUrl: "https://api.together.ai/v1",
 		compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","thinkingFormat":"together","supportsStrictMode":false,"supportsLongCacheRetention":false},
 		reasoning: true,
-		thinkingLevelMap: {"minimal":null,"low":null,"medium":null},
+		thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","ultra":"ultra"},
 		input: ["text"],
 		cost: {
 			input: 0.6,

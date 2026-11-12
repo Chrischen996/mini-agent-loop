@@ -532,6 +532,21 @@ export function buildTerminalRenderLines(
 }
 ```
 
+### 7.3 布局模式与静态分流（inline / alternate）
+
+终端布局由环境变量 `MINI_AGENT_TUI_LAYOUT` 在启动时选择（`src/tui/layout-mode.ts`）：
+
+- **`alternate`（默认）**：整 UI 运行在备用屏幕缓冲（`ESC[?1049h`），退出后不污染 shell 滚屏历史；鼠标跟踪开启，滚轮/PageUp 在应用内滚动历史。
+- **`inline`**：UI 运行在主屏幕缓冲。已“定型”的会话前缀（user / assistant / notice / error / 已完成的 tool_call；subagent 卡片永远保持动态）通过渲染器的 `emitStaticBurst()` 直接写入终端**原生 scrollback**——滚轮/搜索/复制走终端原生能力，退出后历史保留。鼠标跟踪关闭以让滚轮自然滚动 scrollback。
+
+关键机制：
+
+- 渲染器（`IncrementalTerminalRenderer`）在 inline 模式下维护只向下移动的帧锚点 `frameTopRow`：静态突发写在锚点处并推进锚点，动态帧从锚点向下重绘；帧超出屏幕底部时先在底行发出差额滚动（deficit scroll），把先前内容推入 scrollback 再重绘。
+- 静态突发由 App 在 layout effect 中发射（`writeStaticBurst` prop → `emitStaticBurst`），绕过 Ink 的写入管线——Ink 的 log-update 给每个动态帧追加尾随换行，使得按写入形状分类静态/动态不可靠。发射位置按会话代际（transcript generation）追踪：数组追加式增长沿用，RESET / 恢复会话 / 回滚则从头重发。
+- 定型行的视口排除由 `selectMessageViewport({ historyStartIndex })` 完成：滚动核算、history hint 与渲染都只覆盖未定型尾部，行级缓存在定型/动态两侧共享，滚动簿记不再计入已进入 scrollback 的行。
+- 慢帧/闪烁监控（`src/tui/perf-monitor.ts`）：渲染器逐帧上报耗时与重绘行；`MINI_AGENT_SLOW_FRAME_MS`（默认 200）定义慢帧阈值，同一物理行 1 秒内重绘 ≥12 次记为闪烁嫌疑；`MINI_AGENT_RENDER_STATS=1` 在进程退出时向 stderr 打印汇总。
+- 字符串宽度缓存（`terminal-width.ts`）：grapheme 级与整行级双层记忆化，CJK/emoji 场景每帧宽度计算从 O(字符) 降为查表；缓存有界（超限整体清空），`clearTerminalWidthCaches()` 供测试使用。
+
 ---
 
 ## 8. 快捷键系统
@@ -548,7 +563,9 @@ export function buildTerminalRenderLines(
 | `Ctrl+T` | 切换思考模式 |
 | `Alt+T` | 切换消息思考 |
 | `Alt+↑/↓` | 在思考消息间导航 |
-| `PageUp` / `PageDown` | 滚动消息 |
+| `↑` / `↓` | 向上/向下滚动 transcript（多行输入时先移动光标） |
+| `PageUp` / `PageDown` | 按页滚动 transcript |
+| `Ctrl+↑` / `Ctrl+↓` | 按单行滚动 transcript |
 | `Ctrl+G` | 滚动到底部 |
 | `Ctrl+Shift+T` | 打开 Todo 编辑器 |
 
@@ -556,7 +573,8 @@ export function buildTerminalRenderLines(
 
 | 快捷键 | 功能 |
 |--------|------|
-| `↑` / `↓` | 历史记录导航 |
+| `Ctrl+P` / `Ctrl+N`（或 `Cmd+P` / `Cmd+N`） | 召回上一条/下一条已提交的 prompt，并保留当前草稿 |
+| `↑` / `↓` | 滚动 transcript；多行输入时先移动文本光标 |
 | `←` / `→` | 光标移动 |
 | `Ctrl+←` / `Ctrl+→` | 词级导航 |
 | `Home` / `End` | 跳转行首/行尾 |

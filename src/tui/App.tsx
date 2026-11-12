@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { Box, Text, useApp, useStdout, useInput } from "ink";
-import { MessageFeed } from "./components/MessageFeed.tsx";
+import { MessageFeed, formatSealedRowsText } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { TodoPanel } from "./components/TodoPanel.tsx";
@@ -11,7 +11,6 @@ import { getTodoPanelRows } from "./todo-format.ts";
 import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
 import { parseBackgroundTaskCommand, parseSlashCommand } from "./slash-commands.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
-import { MAX_TRANSCRIPT_MESSAGES } from "./state.ts";
 
 /** Human-readable message for an LlmTimeoutError, with partial-response preview. */
 function formatLlmTimeoutMessage(err: InstanceType<typeof LlmTimeoutError>): string {
@@ -41,11 +40,15 @@ import { loadLlmConfigFromEnv, type LlmConfig, type ModelSwitchOverrides } from 
 import {
   buildIntenseLlm,
   cycleThinkingLevel,
+  getThinkingLevelChoices,
+  getThinkingLevelChoicesForModel,
   parseThinkingCommandMode,
   parseThinkingIntensityPrompt,
   thinkingLevelToDisplay,
   withThinkingLevel,
 } from "../think-intensity.ts";
+import { THINKING_LEVEL_DISPLAY_LABELS } from "../pi-ai/thinking-levels.ts";
+import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import { loadThinkingModeFromEnv } from "../thinking-policy.ts";
 import { adaptHistoryForModel } from "../message-adapter.ts";
 import { findExactModelReferenceMatch, getAllModels } from "../models.ts";
@@ -78,7 +81,8 @@ import {
 import { TurnEventBuffer } from "./stream-buffer.ts";
 import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./layout.ts";
 import { inputContainerBorderColor, usesInputBorder } from "./input-container.ts";
-import { estimateViewportContentHeight, MessageHeightCache } from "./message-viewport.ts";
+import { estimateViewportContentHeight, buildSealedStaticItems, MessageHeightCache } from "./message-viewport.ts";
+import { resolveTuiLayoutMode, type TuiLayoutMode } from "./layout-mode.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
@@ -164,6 +168,19 @@ type AppProps = {
   mcpStatuses?: () => readonly McpServerStatus[];
   /** Current MCP tool catalog, used by `/mcp <server>` details. */
   mcpTools?: () => readonly Tool[];
+  /**
+   * Terminal layout mode. `inline` renders sealed transcript history into the
+   * terminal's native scrollback (no alternate screen); `alternate` keeps the
+   * whole UI in the alternate screen buffer. Resolved from
+   * `MINI_AGENT_TUI_LAYOUT` when omitted.
+   */
+  layoutMode?: TuiLayoutMode;
+  /**
+   * Inline layout only: direct channel to the incremental renderer's static
+   * burst emitter. Sealed transcript blocks are written to the terminal's
+   * native scrollback through it, bypassing Ink's frame pipeline.
+   */
+  writeStaticBurst?: (text: string) => void;
 };
 type ManagedAgent = DashboardAgent & {
   initialSessionId: string;
@@ -254,7 +271,8 @@ async function startupSessionCwd(projectCwd: string, request: StartupSessionRequ
   return resolveSessionWorkspaceCwd(projectCwd, session?.cwd);
 }
 
-function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSessionRequest, agentTools, allTools, agentToolsForCwd, allToolsForCwd, bgManagerForCwd, mcpStatuses, mcpTools, agentId, initialSessionId, initialPrompt, active, dashboardOpen, onOpenDashboard, onCloseDashboard, onSnapshot, onWorkspaceChange }: AgentSessionAppProps): React.ReactElement | null {
+function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSessionRequest, agentTools, allTools, agentToolsForCwd, allToolsForCwd, bgManagerForCwd, mcpStatuses, mcpTools, layoutMode, writeStaticBurst, agentId, initialSessionId, initialPrompt, active, dashboardOpen, onOpenDashboard, onCloseDashboard, onSnapshot, onWorkspaceChange }: AgentSessionAppProps): React.ReactElement | null {
+  const effectiveLayoutMode = layoutMode ?? resolveTuiLayoutMode();
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [terminalSize, setTerminalSize] = useState(() => ({
@@ -987,6 +1005,68 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     dispatch({ type: "SET_STATUS", status: `Thinking level: ${thinkingLevelToDisplay(nextLevel)}` });
   }, [state.busy, state.pendingPermission]);
 
+  // ── Antigravity-style Effort slider (/effort) ────────────────────────────
+  // Levels reflect the model being configured during /model setup; otherwise
+  // the active model. An empty choices list falls back to ["medium"] upstream.
+  const effortLevels = useMemo(() => {
+    if (acMode === "effort-picker" && modelSetup?.field === "effort") {
+      return getThinkingLevelChoicesForModel(modelSetup.model);
+    }
+    return getThinkingLevelChoices(llmRef.current);
+  }, [acMode, modelSetup]);
+  const [effortPreviewLevel, setEffortPreviewLevel] = useState<ModelThinkingLevel | undefined>(undefined);
+  const effortSelectedIndex = useMemo(() => {
+    const levels = effortLevels;
+    const current = llmRef.current.thinkingLevel ?? (llmRef.current.reasoning ? "medium" : "off");
+    const idx = levels.indexOf(current);
+    return idx >= 0 ? idx : Math.max(0, levels.length - 1);
+  }, [effortLevels, acMode, llm]);
+  const openEffortPicker = useCallback(() => {
+    setEffortPreviewLevel(undefined);
+    clearAc();
+    setAcMode("effort-picker");
+  }, [clearAc, setAcMode]);
+  const closeEffortPicker = useCallback(() => {
+    setEffortPreviewLevel(undefined);
+    setAcMode(null);
+  }, [setAcMode]);
+  const handleEffortPreview = useCallback((level: ModelThinkingLevel) => {
+    setEffortPreviewLevel(level);
+  }, []);
+  const handleEffortConfirm = useCallback((level: ModelThinkingLevel) => {
+    // Inside the /model setup flow: apply the chosen level, then finish the
+    // pending Base URL / API key setup with that level baked into the profile.
+    if (modelSetup?.field === "effort") {
+      setEffortPreviewLevel(undefined);
+      setAcMode("model-setup");
+      void commitModelSetup(modelSetup, modelSetup.apiKey, {
+        llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
+      }, { thinkingLevel: level });
+      return;
+    }
+    const current = llmRef.current;
+    const next = withThinkingLevel(current, level);
+    llmRef.current = next;
+    setLlm(next);
+    dispatch({ type: "SET_STATUS", status: `Thinking level: ${thinkingLevelToDisplay(level)}` });
+    setEffortPreviewLevel(undefined);
+    setAcMode(null);
+  }, [dispatch, setLlm, setAcMode, llm, setAcIndex, setProfileListState, setModelSetup, setInput, historyRef, modelSetup]);
+  const handleEffortCancel = useCallback(() => {
+    // Inside the /model setup flow: Esc skips level selection and finishes the
+    // setup unchanged (model default thinking level applies).
+    if (modelSetup?.field === "effort") {
+      setEffortPreviewLevel(undefined);
+      setAcMode("model-setup");
+      void commitModelSetup(modelSetup, modelSetup.apiKey, {
+        llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
+      });
+      return;
+    }
+    setEffortPreviewLevel(undefined);
+    setAcMode(null);
+  }, [setAcMode, llm, setAcIndex, setProfileListState, setModelSetup, setInput, historyRef, modelSetup]);
+
   const requestedPickerItems =
     acMode === "command" ? Math.min(6, cmdCandidates.length)
       : acMode === "file" ? Math.min(8, fileCandidates.length)
@@ -1265,9 +1345,12 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         setModelSetup({ ...modelSetup, baseUrl, field: "apiKey", error: undefined });
         setInput(modelSetup.apiKey);
       } else {
-        void commitModelSetup(modelSetup, trimmed, {
-          llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
-        });
+        // API key captured: move to the Antigravity-style Effort step so the
+        // user picks the reasoning level before the model activates. Enter on
+        // the slider commits with the chosen level; Esc commits unchanged.
+        setModelSetup({ ...modelSetup, apiKey: trimmed, field: "effort", error: undefined });
+        setInput("");
+        setAcMode("effort-picker");
       }
       return;
     }
@@ -1540,6 +1623,30 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         if (match?.ambiguous) openModelPicker(parsed.reference);
         else selectModelRef(parsed.reference, parsed.overrides);
       }
+      return;
+    }
+
+    // /effort: Antigravity-style Effort slider over the levels the active
+    // model actually supports; an explicit level argument applies directly.
+    if (/^\/effort(?:\s+(?:off|minimal|low|med|medium|high|xhigh|max|ultra))?$/i.test(trimmed)) {
+      setInput("");
+      const arg = trimmed.replace(/^\/effort\s*/i, "").trim().toLowerCase();
+      if (arg) {
+        const normalized = arg === "med" ? "medium" : arg;
+        const levels = getThinkingLevelChoices(llmRef.current);
+        const requested = (levels as string[]).includes(normalized) ? normalized as ModelThinkingLevel : undefined;
+        if (requested) {
+          handleEffortConfirm(requested);
+        } else {
+          dispatch({
+            type: "ADD_NOTICE",
+            title: "Effort",
+            text: `Level "${arg}" is not supported by ${llm.provider}/${llm.model}. Supported: ${levels.join(", ")}`,
+          });
+        }
+        return;
+      }
+      openEffortPicker();
       return;
     }
 
@@ -1989,6 +2096,75 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
 
   // ── render ────────────────────────────────────────────────────────────────
 
+  // Inline layout: transcript messages that reached their final form are
+  // emitted once into the terminal's native scrollback through the renderer's
+  // static-burst channel; the dynamic frame only renders the unsealed tail
+  // (running tools, subagent cards, streaming text) plus chrome. The build is
+  // a cached O(1) hit on the streaming hot path (same array reference,
+  // unchanged seal boundary).
+  //
+  // The emission position is tracked per transcript GENERATION: append-only
+  // growth of `state.messages` keeps it, any other array swap (RESET, session
+  // restore, rewind) resets it so the swapped transcript re-emits from
+  // scratch while ordinary appends never re-emit sealed rows.
+  const sealedGenerationRef = useRef({ array: state.messages, generation: 0 });
+  if (sealedGenerationRef.current.array !== state.messages) {
+    const previous = sealedGenerationRef.current.array;
+    const appendOnly = previous.length > 0 &&
+      state.messages.length >= previous.length &&
+      state.messages[0] === previous[0] &&
+      state.messages[previous.length - 1] === previous[previous.length - 1];
+    sealedGenerationRef.current = {
+      array: state.messages,
+      generation: appendOnly ? sealedGenerationRef.current.generation : sealedGenerationRef.current.generation + 1,
+    };
+  }
+
+  const sealedStatic = useMemo(() => {
+    if (effectiveLayoutMode !== "inline") return { sealedCount: 0, items: [] };
+    return buildSealedStaticItems({
+      messages: state.messages,
+      width: termWidth,
+      thinkingMode: state.thinkingMode,
+      expandedThinking: state.expandedThinking,
+      subagentById: state.subagentById,
+      toolById: state.toolById,
+      subagentRevision: state.subagentRevision,
+      toolRevision: state.toolRevision,
+      cache: heightCacheRef.current,
+    });
+  }, [
+    effectiveLayoutMode,
+    state.messages,
+    termWidth,
+    state.thinkingMode,
+    state.expandedThinking,
+    state.subagentById,
+    state.toolById,
+    state.subagentRevision,
+    state.toolRevision,
+  ]);
+
+  // Emit newly sealed transcript rows into the native scrollback. Layout
+  // effects run synchronously after the commit but before Ink's throttled
+  // frame render, so the burst lands above the frame that follows it.
+  const emittedStaticRef = useRef({ generation: -1, count: 0 });
+  useLayoutEffect(() => {
+    if (effectiveLayoutMode !== "inline" || !writeStaticBurst) return;
+    const tracked = emittedStaticRef.current;
+    const generation = sealedGenerationRef.current.generation;
+    if (tracked.generation !== generation) {
+      tracked.generation = generation;
+      tracked.count = 0;
+    }
+    if (sealedStatic.items.length <= tracked.count) return;
+    const burst = formatSealedRowsText(
+      sealedStatic.items.slice(tracked.count).flatMap((item) => item.rows),
+    );
+    if (burst) writeStaticBurst(burst);
+    tracked.count = sealedStatic.items.length;
+  }, [effectiveLayoutMode, writeStaticBurst, sealedStatic]);
+
   const viewportContentHeight = estimateViewportContentHeight({
     messages: state.messages,
     streamingText: state.streamingText,
@@ -1997,27 +2173,36 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     thinkingMode: state.thinkingMode,
     expandedThinking: state.expandedThinking,
     width: termWidth,
-    maxMessages: MAX_TRANSCRIPT_MESSAGES,
+    // Sealed rows live in the terminal's native scrollback (inline mode);
+    // scroll accounting covers only the dynamic frame's transcript.
+    historyStartIndex: sealedStatic.sealedCount,
+    // Estimate against the FULL canonical transcript (no 500 cap) so the scroll
+    // offset/scrollback math covers the entire history the user can page back
+    // through, matching Antigravity-style scrolling.
+    maxMessages: Number.MAX_SAFE_INTEGER,
     cache: heightCacheRef.current,
   });
   const handleScrollContext = useCallback((direction: "up" | "down") => {
+    // PageUp/PageDown are owned by useKeyboardHandler so one keypress moves
+    // exactly one viewport; this path only handles arrow-key line scrolling.
     scrollBy(direction === "up" ? 3 : -3);
   }, [scrollBy]);
-  const previousViewportHeightRef = useRef(viewportContentHeight);
-  useLayoutEffect(() => {
-    const previous = previousViewportHeightRef.current;
-    previousViewportHeightRef.current = viewportContentHeight;
-    if (state.scrollOffset > 0 && viewportContentHeight > previous) {
-      dispatch({ type: "SCROLL_BY", delta: viewportContentHeight - previous });
-    }
-  }, [dispatch, viewportContentHeight, state.scrollOffset]);
-
   useLayoutEffect(() => {
     dispatch({
       type: "SET_MAX_SCROLL_OFFSET",
       offset: Math.max(0, viewportContentHeight - Math.max(1, Math.max(3, feedHeight) - 1)),
     });
   }, [dispatch, viewportContentHeight, feedHeight]);
+  const previousViewportHeightRef = useRef(viewportContentHeight);
+  useLayoutEffect(() => {
+    const previous = previousViewportHeightRef.current;
+    previousViewportHeightRef.current = viewportContentHeight;
+    // The max-offset effect above runs first, so this compensation is not
+    // clamped against the previous (smaller) scrollback range.
+    if (state.scrollOffset > 0 && viewportContentHeight > previous) {
+      dispatch({ type: "SCROLL_BY", delta: viewportContentHeight - previous });
+    }
+  }, [dispatch, viewportContentHeight, state.scrollOffset]);
 
   useEffect(() => {
     const status = state.pendingPermission ? "Needs input"
@@ -2045,6 +2230,9 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
 
   return (
     <Box flexDirection="column" width={termWidth} height={termHeight} overflow="hidden">
+      {/* Inline layout emits sealed transcript blocks directly through the
+          renderer's static-burst channel (see writeStaticBurst); the dynamic
+          frame never re-renders them. */}
       <Header modelName={state.modelName} cwd={cwd} dashboardOpen={dashboardOpen} />
 
       {(state.todoPlan || state.todoItems) && (
@@ -2080,6 +2268,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           availableHeight={feedHeight}
           width={termWidth}
           scrollOffset={state.scrollOffset}
+          historyStartIndex={sealedStatic.sealedCount}
           showHistoryHints
           heightCache={heightCacheRef.current}
         />
@@ -2104,6 +2293,17 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           profileListState={profileListState}
           pickerItemRows={pickerLayout.itemRows}
           width={termWidth}
+          effortLevels={effortLevels}
+          effortLabels={THINKING_LEVEL_DISPLAY_LABELS}
+          effortSelectedIndex={
+            effortPreviewLevel !== undefined
+              ? Math.max(0, effortLevels.indexOf(effortPreviewLevel))
+              : effortSelectedIndex
+          }
+          termWidth={termWidth}
+          onEffortPreview={handleEffortPreview}
+          onEffortConfirm={handleEffortConfirm}
+          onEffortCancel={handleEffortCancel}
         />
       </Box>
 
@@ -2161,7 +2361,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
                 return false;
               }}
               pasteEnabled={!state.pendingPermission && !pendingTodoRunPlan}
-              focus={active && !state.pendingPermission && !pendingTodoRunPlan && !bgPanelOpen && !dashboardOpen}
+              focus={active && !state.pendingPermission && !pendingTodoRunPlan && !bgPanelOpen && !dashboardOpen && acMode !== "effort-picker"}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {
                 if (acMode === "session-list") return;

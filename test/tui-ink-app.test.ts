@@ -13,6 +13,7 @@ import { BgTaskManager, stableBgTaskInstanceId } from "../src/bg-tasks/manager.j
 import { BgTaskStore } from "../src/bg-tasks/store.js";
 import { createBgTaskTools } from "../src/bg-tasks/tools.ts";
 import { SessionManager } from "../src/session-manager.ts";
+import { TerminalInputHistory } from "../src/tui/terminal-input-history.ts";
 import { createBashTool } from "../src/tools/bash.ts";
 import { createTodoWriteTool } from "../src/tools/todo-write.ts";
 import type { Tool } from "../src/tools/types.ts";
@@ -126,6 +127,35 @@ describe("the single Ink terminal", () => {
       await waitForRender();
       assert.equal(handled, true);
       assert.match(view.lastFrame() ?? "", /draft/);
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  it("recalls prompt history with Ctrl+P and restores the draft with Ctrl+N", async () => {
+    const history = new TerminalInputHistory();
+    history.add("older prompt");
+    function PromptHarness(): React.ReactElement {
+      const [value, setValue] = useState("draft");
+      return React.createElement(PromptInput, {
+        value,
+        onChange: setValue,
+        onSubmit: () => {},
+        inputHistory: history,
+      });
+    }
+
+    const view = render!(React.createElement(PromptHarness));
+    try {
+      await waitForRender();
+      view.stdin.write("\x10");
+      await waitForRender();
+      assert.match(view.lastFrame() ?? "", /older prompt/);
+
+      view.stdin.write("\x0e");
+      await waitForRender();
+      assert.match(view.lastFrame() ?? "", /draft/);
+      assert.doesNotMatch(view.lastFrame() ?? "", /older prompt/);
     } finally {
       view.cleanup();
     }
@@ -1195,18 +1225,19 @@ describe("the single Ink terminal", () => {
     }
   });
 
-  it("recalls submitted prompts with Up and restores the draft with Down", async () => {
+  it("recalls submitted prompts with Ctrl+P and restores the draft with Ctrl+N", async () => {
     const view = open();
     const submittedPrompt = "/deploy history-recall-marker";
+    const promptRow = () => (view.lastFrame() ?? "").split("\n").filter((line) => line.includes("⟳")).at(-1) ?? "";
     try {
       await submit(view, submittedPrompt);
-      view.stdin.write("\x1b[A");
+      view.stdin.write("\x10");
       await waitForRender();
-      assert.ok((view.lastFrame() ?? "").includes(submittedPrompt));
+      assert.ok(promptRow().includes(submittedPrompt));
 
-      view.stdin.write("\x1b[B");
+      view.stdin.write("\x0e");
       await waitForRender();
-      assert.ok(!(view.lastFrame() ?? "").includes(submittedPrompt));
+      assert.ok(!promptRow().includes(submittedPrompt));
     } finally {
       view.cleanup();
     }

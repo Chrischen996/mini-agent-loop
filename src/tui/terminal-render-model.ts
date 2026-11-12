@@ -84,13 +84,14 @@ export function buildTerminalRenderLines(
 
   const width = options.width === undefined ? undefined : Math.max(10, options.width);
   const scrollback = options.scrollback === true;
-  // Main-screen transcript mode must keep every completed message in order.
-  // Applying the fullscreen 200-message viewport cap here would shift the
-  // first committed row after message 200 and make the append-only renderer
-  // emit the preceding history again as a new segment.
+  // Main-screen transcript mode keeps every completed message in order, so the
+  // append-only renderer never re-emits history. Non-scrollback (fullscreen)
+  // mode must NOT cap the transcript to a fixed window — that would re-introduce
+  // the old "stuck after N messages" behaviour. Default to rendering the whole
+  // canonical transcript; callers that need a bound can pass `maxMessages`.
   const messageStart = scrollback
     ? 0
-    : Math.max(0, state.messages.length - (options.maxMessages ?? 200));
+    : Math.max(0, state.messages.length - (options.maxMessages ?? Number.MAX_SAFE_INTEGER));
   const header = options.header?.show === false ? [] : options.header ? headerRenderLines(state, options.header, width) : [];
 
   const taskTodos = resolveTodoItems({ plan: state.todoPlan, todos: state.todoItems });

@@ -1,225 +1,50 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { resolveSubagentMessage, type ChatMessage, type PendingPermissionState, type ThinkingDisplayMode } from "../state.ts";
-import { SubagentCard } from "./SubagentCard.tsx";
 import { TUI_COLORS as C } from "../theme.ts";
-import { selectMessageViewport, type ViewportItem, MessageHeightCache } from "../message-viewport.ts";
-import { MarkdownText } from "./MarkdownText.tsx";
-import { toMessageRenderModel } from "../render-model.ts";
-import { toolVisualName, toolVisualStatusIcon } from "../tool-lines.ts";
-import { buildToolResultRows } from "../tool-result-lines.ts";
-import { RESULT_GUTTER, STATUS_ERROR } from "../render-lines.ts";
-import { thinkingRenderLines, thinkingVisibleLines } from "../thinking-lines.ts";
-import { compactStreamingText, stripLeadingBlankLines } from "../text-utils.ts";
-import { noticeText, noticeTitle, statusLabel, toolArgumentSummary } from "../claude-style.ts";
-import { isSubagentProtocolText, isSubagentToolName } from "../subagent-lines.ts";
+import { selectMessageViewport, type MessageHeightCache, type ViewportItem } from "../message-viewport.ts";
+import type { PhysicalRow } from "../message-rows.ts";
 import { activityPresentation, formatActivity, loadingGlyph, loadingMarkerBright, LOADING_FRAME_MS } from "../activity.ts";
-import { stripInlineMarkdown } from "../markdown-lines.ts";
+import { statusLabel } from "../claude-style.ts";
+import { hexToAnsi } from "../render-line-format.ts";
 
-// ─── helpers ────────────────────────────────────────────────────────────────
+// ─── physical rows ───────────────────────────────────────────────────────────
 
-// ─── ThinkingBlock ───────────────────────────────────────────────────────────
-
-type ThinkingBlockProps = {
-  content: string;
-  isStreaming?: boolean;
-  mode: ThinkingDisplayMode;
-  /** Force full expand for this block (per-message override). */
-  forceExpanded?: boolean;
-  focused?: boolean;
-};
+function rowColor(row: PhysicalRow): string | undefined {
+  if (row.tone === "success") return C.success;
+  if (row.tone === "running") return C.running;
+  if (row.tone === "error" || row.style === "error") return C.error;
+  if (row.style === "thinking") return C.thinking;
+  if (row.style === "tool" || row.style === "todo") return C.info;
+  if (row.style === "user") return C.user;
+  if (row.style === "border" || row.style === "muted") return C.muted;
+  return undefined;
+}
 
 /**
- * Collapsible extended-thinking display.
+ * One terminal row, pre-wrapped by the shared projection.
  *
- * - hidden: nothing
- * - summary: a compact expand hint
- * - full: complete content
- *
- * Streaming content auto-collapses after THINKING_AUTO_COLLAPSE_LINES lines
- * unless mode is already "full" or forceExpanded is true.
+ * `wrap="truncate-end"` is a defensive bound only: rows arrive already
+ * wrapped at the feed width, so nothing should ever exceed the column budget.
+ * The old layout let whole markdown trees overflow `hidden` boxes under
+ * negative top margins; Ink applies only the innermost clip, which is how
+ * scrolled history escaped its slice and overwrote other frame rows.
  */
-export function ThinkingBlock({
-  content,
-  isStreaming = false,
-  mode,
-  forceExpanded = false,
-  focused = false,
-}: ThinkingBlockProps): React.ReactElement | null {
-  if (mode === "hidden" && !forceExpanded) return null;
-  if (!content) return null;
-
-  const visibleModel = thinkingVisibleLines(content, { mode, isStreaming, forceExpanded });
-  const showFull = visibleModel.expanded;
-
-  // Claude Code keeps thinking as a quiet transcript block. It does not put
-  // reasoning inside a rounded card or expose token/character counters in the
-  // message feed; the expand hint is the only extra chrome in collapsed mode.
-  if (!showFull) {
-    return (
-      <Box marginTop={0}>
-        <Text color={focused ? C.running : C.thinking} dimColor italic>
-          ∴ Thinking ▸
-        </Text>
-      </Box>
-    );
-  }
-
-  const body = thinkingRenderLines(content, { mode, isStreaming, forceExpanded }).map((line) => (
+const PhysicalRowText = React.memo(function PhysicalRowText({ row, marker }: { row: PhysicalRow; marker: string }): React.ReactElement {
+  return (
     <Text
-      key={line.key}
-      color={line.style === "thinking" ? C.thinking : line.style === "muted" ? C.muted : C.assistant}
-      dimColor={line.dim}
-      wrap="wrap"
+      color={rowColor(row)}
+      dimColor={row.dim}
+      bold={row.bold}
+      italic={row.italic}
+      wrap="truncate-end"
     >
-      {line.text}
+      {marker}{row.text}
     </Text>
-  ));
-
-  return (
-    <Box
-      flexDirection="column"
-      marginTop={0}
-      marginBottom={0}
-      width="100%"
-    >
-      <Text color={focused ? C.running : C.thinking} dimColor italic>∴ Thinking…</Text>
-      <Box paddingLeft={2} flexDirection="column">
-        {body}
-      </Box>
-    </Box>
   );
-}
+});
 
-// ─── tool activity ───────────────────────────────────────────────────────────
-
-// ─── dispatcher ──────────────────────────────────────────────────────────────
-
-function ToolCallRow({ msg }: { msg: Extract<ChatMessage, { kind: "tool_call" }> }): React.ReactElement {
-  const isRunning = msg.status === "running";
-  const isError = msg.status === "error";
-  const argument = toolArgumentSummary(msg.name, msg.rawArgs, msg.args).replace(/^\$\s*/, "");
-  const resultRows = msg.result ? buildToolResultRows(msg.result) : [];
-  // Keep the activity marker expressive while the tool label stays readable;
-  // Claude Code does not turn an entire command row amber just because it is
-  // still running.
-  const markerColor = isError ? C.error : isRunning ? C.running : C.primary;
-
-  // Match Claude Code's AssistantToolUseMessage/MessageResponse pair:
-  // one compact tool-use row followed by a single nested result gutter.
-  return (
-    <Box flexDirection="column" marginTop={1} marginBottom={0}>
-      <Box flexDirection="row">
-        <Text color={markerColor} bold>{toolVisualStatusIcon(msg.status)} </Text>
-        <Text color={isError ? C.error : C.info} bold>{toolVisualName(msg.name)}</Text>
-        {argument ? <Text color={C.assistant}>({argument})</Text> : null}
-      </Box>
-      {resultRows.length > 0 ? (
-        <Box flexDirection="column">
-          {resultRows.map((row, index) => (
-            <Text
-              key={index}
-              color={row.tone === "error" ? C.error : row.tone === "success" ? C.success : isError ? C.error : C.muted}
-              dimColor={row.dim}
-              wrap="truncate-end"
-            >
-              {RESULT_GUTTER}{row.text}
-            </Text>
-          ))}
-        </Box>
-      ) : isRunning ? (
-        <Text color={C.muted} dimColor>{RESULT_GUTTER}Working…</Text>
-      ) : null}
-    </Box>
-  );
-}
-
-// ─── main feed ───────────────────────────────────────────────────────────────
-
-type MessageFeedProps = {
-  messages: ChatMessage[];
-  streamingText: string;
-  streamingReasoning?: string;
-  /** @deprecated Prefer thinkingMode. Kept for backward compatibility. */
-  showThinking?: boolean;
-  thinkingMode?: ThinkingDisplayMode;
-  expandedThinking?: number[];
-  focusedMessageIndex?: number;
-  busy?: boolean;
-  status?: string;
-  pendingPermission?: PendingPermissionState;
-  turnStartedAt?: number;
-  lastStreamAt?: number;
-  /** Active Todo tip rendered inside the single loading row. */
-  spinnerMessage?: string;
-  /** True while TodoPanel is on screen and already names the active step. */
-  todoPanelVisible?: boolean;
-  maxMessages?: number;
-  /** Rows available for the feed after chrome (header/input/status). */
-  availableHeight?: number;
-  /** Terminal width used for wrap-aware height estimates. */
-  width?: number;
-  /**
-   * Number of trailing history messages hidden below the viewport.
-   * 0 = stick to bottom.
-   */
-  scrollOffset?: number;
-  /** Match Claude Code by leaving clipped history unobstructed. */
-  showHistoryHints?: boolean;
-  /** Optional per-message height cache shared with the App-level estimates. */
-  heightCache?: MessageHeightCache;
-  subagentById?: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>>;
-  subagentRevision?: number;
-  subagentChange?: { id: string; index: number; revision: number };
-  toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>;
-  toolRevision?: number;
-  toolChange?: { id: string; index: number; revision: number };
-  activeToolId?: string;
-};
-
-function ViewportSlice({
-  clipTop,
-  visibleHeight,
-  children,
-}: {
-  clipTop: number;
-  visibleHeight: number;
-  children: React.ReactNode;
-}): React.ReactElement | null {
-  if (visibleHeight <= 0) return null;
-  if (clipTop === 0) {
-    return (
-      <Box height={visibleHeight} flexShrink={0} overflow="hidden">
-        {children}
-      </Box>
-    );
-  }
-  return (
-    <Box height={visibleHeight} flexShrink={0} overflow="hidden">
-      <Box flexDirection="column" marginTop={-clipTop}>
-        {children}
-      </Box>
-    </Box>
-  );
-}
-
-/**
- * Clamp a slice box to the rows its content actually draws. Scroll clipping
- * still runs in estimated-row space (`visibleHeight`), but the box itself
- * shrinks by the real clipped rows (`clipTopActual`) so estimate surplus never
- * pads the gap between the transcript and the prompt.
- */
-type ClippedViewportItem = Extract<ViewportItem, { clipTop: number; clipTopActual: number; visibleHeight: number }>;
-function sliceHeightFor(item: ClippedViewportItem): number {
-  return Math.max(
-    0,
-    Math.min(
-      item.visibleHeight,
-      (item.actualHeight ?? item.visibleHeight) - (item.clipTopActual ?? 0),
-    ),
-  );
-}
-
+// ─── live activity ───────────────────────────────────────────────────────────
 
 function ActivityRow({
   status,
@@ -283,110 +108,54 @@ function ActivityRow({
   );
 }
 
-type HistoryMessageContentProps = {
-  msg: ChatMessage;
-  index: number;
-  width: number;
-  thinkingMode: ThinkingDisplayMode;
-  /** Stable reference from TuiState; only changes when the user expands/collapses thinking. */
-  expandedThinking: number[];
-  focusedMessageIndex: number;
-};
+// ─── main feed ───────────────────────────────────────────────────────────────
 
-/**
- * Inner content of one completed history block.
- *
- * Memoized on the immutable message reference plus the rare-changing render
- * params (width / thinking mode / focus / expanded-thinking set), so a
- * streaming flush — which only shifts the live stack and the slice clipping
- * of already-estimated rows — skips re-rendering every finished message's
- * markdown subtree instead of re-running `parseMarkdownLines` for the whole
- * transcript on every 80 ms tick.
- */
-const HistoryMessageContent = React.memo(function HistoryMessageContent({
-  msg,
-  index,
-  width,
-  thinkingMode,
-  expandedThinking,
-  focusedMessageIndex,
-}: HistoryMessageContentProps): React.ReactElement | null {
-  const visual = toMessageRenderModel(msg);
-  const expanded = expandedThinking.includes(index);
-  const focused = focusedMessageIndex === index;
-  if (msg.kind === "user") {
-    return (
-      <Box
-        marginBottom={0}
-        flexDirection="column"
-        paddingX={1}
-        marginTop={1}
-        width="100%"
-      >
-        <Text backgroundColor={C.userBg} color={C.assistant} wrap="wrap">
-          <Text color={C.muted}>{visual.marker}</Text>{" "}{msg.displayText ?? msg.text}
-        </Text>
-        {msg.images?.length ? (
-          <Box marginLeft={2} marginTop={0} gap={1}>
-            {msg.images.map((image) => (
-              <Text key={image.path} color={C.info}>[image: {image.path.split("/").pop()}]</Text>
-            ))}
-          </Box>
-        ) : null}
-      </Box>
-    );
-  }
-  if (msg.kind === "assistant") {
-    if (isSubagentProtocolText(msg.text)) return null;
-    // Tool-only turns draw no lone "⏺ " marker row: with no reasoning
-    // and no text the block would render a bare dot plus a 1-row gap.
-    // The tool rows that follow carry the conversation flow (the ANSI
-    // render model already draws empty assistant messages as 0 rows).
-    if (!msg.reasoning && !msg.text) return null;
-    return (
-      <Box marginBottom={0} flexDirection="column" marginTop={1}>
-        <Box flexDirection="row">
-          <Text color={focused ? C.running : C.assistant} bold>{focused ? "◆" : visual.marker} </Text>
-          <Box flexDirection="column" flexGrow={1}>
-            {msg.reasoning && (
-              <ThinkingBlock
-                content={msg.reasoning}
-                mode={thinkingMode}
-                forceExpanded={expanded}
-                focused={focused}
-              />
-            )}
-            {msg.text && <MarkdownText text={msg.text} width={width - 4} />}
-          </Box>
-        </Box>
-      </Box>
-    );
-  }
-  if (msg.kind === "tool_call") {
-    if (isSubagentToolName(msg.name)) return null;
-    return <ToolCallRow msg={msg} />;
-  }
-  if (msg.kind === "notice") {
-    return (
-      <Box flexDirection="column" paddingX={1} marginTop={1}>
-        {msg.title && <Text color={C.info} dimColor>{noticeTitle(msg.title)}</Text>}
-        <Text color={C.assistant}>{noticeText(msg.text)}</Text>
-      </Box>
-    );
-  }
-  if (msg.kind === "subagent_call") {
-    return <SubagentCard msg={msg} width={width} />;
-  }
-  if (msg.kind === "error") {
-    return (
-      <Box flexDirection="row" minWidth={0} marginTop={1}>
-        <Text color={C.error} bold>{STATUS_ERROR} </Text>
-        <Text color={C.assistant} wrap="wrap">{msg.text}</Text>
-      </Box>
-    );
-  }
-  return null;
-});
+type MessageFeedProps = {
+  messages: ChatMessage[];
+  streamingText: string;
+  streamingReasoning?: string;
+  /** @deprecated Prefer thinkingMode. Kept for backward compatibility. */
+  showThinking?: boolean;
+  thinkingMode?: ThinkingDisplayMode;
+  expandedThinking?: number[];
+  focusedMessageIndex?: number;
+  busy?: boolean;
+  status?: string;
+  pendingPermission?: PendingPermissionState;
+  turnStartedAt?: number;
+  lastStreamAt?: number;
+  /** Active Todo tip rendered inside the single loading row. */
+  spinnerMessage?: string;
+  /** True while TodoPanel is on screen and already names the active step. */
+  todoPanelVisible?: boolean;
+  maxMessages?: number;
+  /**
+   * First transcript index owned by the dynamic frame. Sealed rows already
+   * live in the terminal's native scrollback via `<Static>` (inline layout
+   * mode) and must not be re-rendered here.
+   */
+  historyStartIndex?: number;
+  /** Rows available for the feed after chrome (header/input/status). */
+  availableHeight?: number;
+  /** Terminal width used for wrap-aware height estimates. */
+  width?: number;
+  /**
+   * Number of trailing history messages hidden below the viewport.
+   * 0 = stick to bottom.
+   */
+  scrollOffset?: number;
+  /** Match Claude Code by leaving clipped history unobstructed. */
+  showHistoryHints?: boolean;
+  /** Optional per-message height cache shared with the App-level estimates. */
+  heightCache?: MessageHeightCache;
+  subagentById?: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>>;
+  subagentRevision?: number;
+  subagentChange?: { id: string; index: number; revision: number };
+  toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>;
+  toolRevision?: number;
+  toolChange?: { id: string; index: number; revision: number };
+  activeToolId?: string;
+};
 
 export function MessageFeed({
   messages,
@@ -404,6 +173,7 @@ export function MessageFeed({
   spinnerMessage,
   todoPanelVisible = false,
   maxMessages = Number.MAX_SAFE_INTEGER,
+  historyStartIndex = 0,
   availableHeight = 20,
   width = 80,
   scrollOffset = 0,
@@ -419,10 +189,10 @@ export function MessageFeed({
 }: MessageFeedProps): React.ReactElement {
   const effectiveMode: ThinkingDisplayMode =
     thinkingMode ?? (showThinking ? "summary" : "hidden");
+  void resolveSubagentMessage;
 
   const viewport = selectMessageViewport({
     messages,
-    subagentById,
     streamingText,
     streamingReasoning,
     busy,
@@ -432,8 +202,10 @@ export function MessageFeed({
     availableHeight,
     width,
     maxMessages,
+    historyStartIndex,
     showHistoryHints,
     cache: heightCache,
+    subagentById,
     subagentRevision,
     subagentChange,
     toolById,
@@ -443,24 +215,14 @@ export function MessageFeed({
 
   return (
     <Box flexDirection="column" flexGrow={1} paddingX={1} width={width} minWidth={0} overflow="hidden">
-      {/* Pinned to the newest rows the transcript stays bottom-anchored: the
+      {/* Pinned to the newest rows the transcript stays bottom-anchored; the
           surplus rows the wrap-aware frame height may over-reserve are
           absorbed above the visible window so the last message remains
           directly above the input chrome. Scrolled-up windows instead carry
-          the surplus below the slice, otherwise it forms a black band
-          between the header and the visible rows. */}
+          the surplus below the slice so the visible rows start flush under
+          the header. */}
       {viewport.pinnedToBottom ? <Box flexGrow={1} minHeight={0} /> : null}
       {viewport.items.map((item) => {
-        {/* Spacing convention — keep in lockstep with estimateMessageHeight /
-            buildBlocks in message-viewport.ts and estimateNewMessageRows in
-            state.ts:
-            - every history block (user/assistant/notice/tool_call/
-              subagent_call/error) renders with a 1-row gap above it;
-            - the live stack (streaming_reasoning → streaming_text →
-              busy_status) previews the next history assistant, so only its
-              FIRST row carries the 1-row gap; later live rows follow with 0,
-              keeping the replacement seamless;
-            - subagent tool rows and protocol text render nothing. */}
         if (item.kind === "history_hint") {
           // Show a thin 1-row hint so the user knows more content is available
           // above/below without obstructing the transcript.
@@ -468,37 +230,18 @@ export function MessageFeed({
             ? `⌃ ${item.hiddenRows} lines above (PgUp to scroll)`
             : `⌄ ${item.hiddenRows} lines below (PgDn to scroll)`;
           return (
-            <ViewportSlice key={`history-hint-${item.direction}`} clipTop={0} visibleHeight={1}>
-              <Text color={C.muted} dimColor wrap="truncate-end">{label}</Text>
-            </ViewportSlice>
-          );
-        }
-        if (item.kind === "streaming_reasoning") {
-          return (
-            <ViewportSlice key="streaming-reasoning" clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
-              <Box marginBottom={0} flexDirection="column" marginTop={1}>
-                <ThinkingBlock content={streamingReasoning} isStreaming={busy} mode={effectiveMode} />
-              </Box>
-            </ViewportSlice>
-          );
-        }
-        if (item.kind === "streaming_text") {
-          return (
-            <ViewportSlice key="streaming-text" clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
-              <Box flexDirection="row" marginTop={streamingReasoning ? 0 : 1}>
-                <Text color={C.primary} bold>⏺ </Text>
-                <Text color={C.assistant} wrap="wrap">{heightCache
-                  ? heightCache.getStreamingDisplayText(streamingText, busy)
-                  : stripLeadingBlankLines(busy ? compactStreamingText(stripInlineMarkdown(streamingText)) : stripInlineMarkdown(streamingText))}</Text>
-              </Box>
-            </ViewportSlice>
+            <Text key={`history-hint-${item.direction}`} color={C.muted} dimColor wrap="truncate-end">
+              {label}
+            </Text>
           );
         }
         if (item.kind === "busy_status") {
           return (
-            <ViewportSlice key="busy-status" clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
-              <Box flexDirection="column" marginTop={streamingReasoning || streamingText ? 0 : 1}>
-                <ActivityRow
+            <React.Fragment key="busy-status">
+              {item.rows.filter((row) => row.key.startsWith("live-gap")).map((row) => (
+                <Text key={row.key}> </Text>
+              ))}
+              <ActivityRow
                 status={status}
                 streamingText={streamingText}
                 streamingReasoning={streamingReasoning}
@@ -511,31 +254,42 @@ export function MessageFeed({
                 spinnerMessage={spinnerMessage}
                 todoPanelVisible={todoPanelVisible}
               />
-              </Box>
-            </ViewportSlice>
+            </React.Fragment>
           );
         }
-
-        // Completed history blocks: the slice wrapper shifts clipping as the
-        // live stack grows, but the inner content (markdown, subagent cards,
-        // tool rows) is memoized in HistoryMessageContent so a flush never
-        // re-renders finished messages.
+        // Message / streaming blocks: physical rows are already wrapped and
+        // sliced to the exact visible window, so each row renders once with
+        // no nested overflow clipping and no negative margins.
         return (
-          <ViewportSlice key={item.index} clipTop={item.clipTopActual ?? item.clipTop} visibleHeight={sliceHeightFor(item)}>
-            <HistoryMessageContent
-              msg={resolveSubagentMessage(item.message, subagentById ?? {})}
-              index={item.index}
-              width={width}
-              thinkingMode={effectiveMode}
-              expandedThinking={expandedThinking}
-              focusedMessageIndex={focusedMessageIndex}
-            />
-          </ViewportSlice>
+          <React.Fragment key={item.kind === "message" ? item.index : item.kind}>
+            {item.rows.map((row) => (
+              <PhysicalRowText key={row.key} row={row} marker="" />
+            ))}
+          </React.Fragment>
         );
       })}
       {/* Scrolled-up windows keep the surplus below the slice so the visible
-          rows start flush under the header instead of under a black band. */}
+          rows start flush under the header instead of under a blank band. */}
       {viewport.pinnedToBottom ? null : <Box flexGrow={1} minHeight={0} />}
     </Box>
   );
+}
+
+/**
+ * Render sealed transcript rows to self-contained ANSI text for the inline
+ * layout's native-scrollback bursts. Each line carries its own SGR attributes
+ * and a hard reset, so styling never bleeds between rows written raw to the
+ * terminal (outside Ink's per-row erase pipeline). The leading space mirrors
+ * the dynamic feed's `paddingX={1}`.
+ */
+export function formatSealedRowsText(rows: readonly PhysicalRow[]): string {
+  const lines = rows.map((row) => {
+    const codes: string[] = [];
+    if (row.bold) codes.push("1");
+    if (row.italic) codes.push("3");
+    if (row.dim) codes.push("2");
+    codes.push(hexToAnsi(rowColor(row) ?? C.assistant));
+    return `\x1b[${codes.join(";")}m ${row.text}\x1b[0m`;
+  });
+  return `${lines.join("\n")}\n`;
 }

@@ -73,7 +73,8 @@ function backgroundCodes(background: NonNullable<RenderLine["background"]>): num
   return value.split(";").map(Number);
 }
 
-function hexToAnsi(hex: string): string {
+/** Convert a TUI hex color to a truecolor SGR parameter list. */
+export function hexToAnsi(hex: string): string {
   const value = hex.replace(/^#/, "");
   if (value.length !== 6) return "38;5;7";
   const red = Number.parseInt(value.slice(0, 2), 16);

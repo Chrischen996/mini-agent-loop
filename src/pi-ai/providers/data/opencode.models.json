@@ -1179,6 +1179,13 @@
 			"maxTokensField": "max_tokens"
 		},
 		"reasoning": true,
+		"thinkingLevelMap": {
+			"off": null,
+			"low": "low",
+			"medium": "medium",
+			"high": "high",
+			"ultra": "ultra"
+		},
 		"input": [
 			"text"
 		],

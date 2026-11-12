@@ -1054,9 +1054,12 @@ overrides. Sessions are persisted under the shared `AGENT_DATA_DIR` root and
 restore history, tool results, Todo/Plan state, permission mode, and model
 settings on the next start. The Ink interface follows the Claude Code-style
 conversation layout.
-The fullscreen transcript retains and scrolls to the most recent 500 messages;
-`PgUp`/`PgDn`, `Ctrl+↑/↓`, mouse wheel, or empty-prompt `↑/↓` moves the view, and
-`Ctrl+G` returns to the latest message.
+The fullscreen transcript retains the complete conversation and scrolls it
+without dropping older messages. `↑/↓` scroll by a few rows, `PgUp`/`PgDn`
+scroll by a page, `Ctrl+↑/↓` scroll by one row, the mouse wheel scrolls, and
+`Ctrl+G` returns to the latest message. In a multiline draft, `↑/↓` first move
+the text cursor and scroll the transcript only after reaching the first or last
+line.
 TUI runs use `AgentRunPolicy` by default. Token, time, tool and write budgets,
 context compaction, repeated-action detection, and no-progress detection can
 pause a run while preserving its partial history. The task summary reports the
@@ -1068,9 +1071,11 @@ TUI supports plan workflow slash commands: `/plan`, `/plan-show`, `/plan-approve
 `/plan-reject`, `/plan-run`, `/plan-retry`, `/plan-history`, `/plan-archive`.
 Terminal input follows the Claude Code-style priority order: `Tab`/`↑↓` first
 operate the active command, argument, file, model, or profile picker; when no
-picker is open, `↑`/`↓` recall the last 200 submitted prompts (multiline drafts
-keep vertical cursor movement). `Alt+↑`/`Alt+↓` moves focus between reasoning
-messages, and `Alt+T` expands or collapses the focused reasoning block.
+picker is open, `Ctrl+P`/`Ctrl+N` (or `Cmd+P`/`Cmd+N`) recall older and newer
+submitted prompts while preserving the current draft. `↑`/`↓` are reserved for
+transcript scrolling, except that multiline drafts move the text cursor first.
+`Alt+↑`/`Alt+↓` moves focus between reasoning messages, and `Alt+T` expands or
+collapses the focused reasoning block.
 `/tasks`, `/copy`, `/skills`, and `/resume` provide argument completion;
 `/resume` loads session IDs from the shared session store.
 

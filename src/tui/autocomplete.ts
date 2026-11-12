@@ -3,7 +3,7 @@ import { extractFileAcTrigger, type AcMode, type FileAcTrigger } from "./input-u
 import { modelSearchQuery, parseModelCommand } from "./model-command.ts";
 import type { ModelPickerSection } from "./model-picker.ts";
 
-export const STICKY_AC_MODES = new Set<AcMode>(["model-setup", "profile-name", "profile-list", "role-setup"]);
+export const STICKY_AC_MODES = new Set<AcMode>(["model-setup", "profile-name", "profile-list", "role-setup", "effort-picker"]);
 export const PICKER_AC_MODES = new Set<AcMode>([
   "file",
   "command",

@@ -11,7 +11,6 @@ import { isTodoRevisionNewer, nextTodoRevision, TODO_WRITE_TOOL_NAME, type TodoI
 import { executionPlanToTodoItems } from "./todo-format.ts";
 import { toolArgumentSummary } from "./claude-style.ts";
 import { toolVisualName } from "./tool-lines.ts";
-import { subagentRenderLineCount } from "./subagent-lines.ts";
 import { STATUS_DONE, STATUS_ERROR } from "./render-lines.ts";
 import { compactText } from "./text-utils.ts";
 
@@ -354,46 +353,6 @@ export function reasoningMessageIndices(messages: ChatMessage[]): number[] {
 }
 
 /**
- * Reducer-level append operations retain the current row offset. App.tsx adds
- * the measured row-height delta after render so wrapped text stays anchored.
- */
-export function preserveScrollOnAppend(
-  scrollOffset: number,
-  addedRows: number,
-): number {
-  // Stick to bottom when pinned; otherwise preserve visual position.
-  if (scrollOffset === 0) return 0;
-  return Math.max(0, scrollOffset + addedRows);
-}
-
-/**
- * Estimate the rendered row count contributed by newly added messages.
- * Cannot use estimateMessageHeight (circular dependency), so we count
- * newline characters as a cheap proxy – accurate enough to keep the scroll
- * position stable without knowing the terminal width.
- */
-function estimateNewMessageRows(previous: readonly ChatMessage[], next: readonly ChatMessage[]): number {
-  let rows = 0;
-  for (let i = previous.length; i < next.length; i++) {
-    const msg = next[i]!;
-    if (msg.kind === "subagent_call") {
-      // SubagentCard draws subagentRenderLineCount rows beneath a marginTop=1
-      // gap. subagent_call carries no `text` field, so the newline-count
-      // fallback below would always undercount it as 2 rows.
-      rows += 1 + subagentRenderLineCount(msg);
-      continue;
-    }
-    const text = ("text" in msg ? msg.text : "") || "";
-    // Tool-only assistant turns draw no marker row (MessageFeed and the ANSI
-    // render model both skip empty assistant messages), so reserve no rows.
-    if (msg.kind === "assistant" && !msg.reasoning && !text) continue;
-    // +1 for the mandatory margin row above each message, then count text lines.
-    rows += 1 + Math.max(1, text.split("\n").length);
-  }
-  return rows;
-}
-
-/**
  * Project persisted AgentMessage history into the reducer's chat feed.
  *
  * Agent history is the source of truth for the loop; this projection is only
@@ -502,11 +461,24 @@ function taskDuration(startedAt?: number): number | undefined {
 }
 
 /**
- * Maximum transcript messages retained between compactions.
- * Prevents unbounded growth of state.messages when compaction events are
- * infrequent. Kept in sync with the context_compacted truncation threshold.
+ * When the in-memory UI transcript grows past this many messages, the oldest
+ * entries are dropped from memory but remain in the persisted session snapshot
+ * (so rewind/fork/restore can still reach them). This bounds memory WITHOUT
+ * truncating the scrollback the user can page through during a session — only
+ * the in-memory live window is capped. Set via `MINI_AGENT_TUI_TRANSCRIPT_OFFLOAD`.
+ *
+ * Default is 0 (offload disabled): the full transcript stays resident in memory
+ * so scrolling is always physically continuous with zero reconstruction
+ * latency, matching Antigravity CLI. The persisted snapshot and the model-
+ * context compaction still bound on-disk/context growth, and an operator can
+ * set a positive threshold to re-enable the memory safety net on pathologically
+ * long sessions.
  */
-export const MAX_TRANSCRIPT_MESSAGES = 500;
+export const TRANSCRIPT_OFFLOAD_THRESHOLD = (() => {
+  const raw = Number(process.env.MINI_AGENT_TUI_TRANSCRIPT_OFFLOAD);
+  if (Number.isFinite(raw) && raw >= 0) return Math.trunc(raw);
+  return 0;
+})();
 
 /**
  * Maximum entries kept in the tool/subagent lookup dictionaries.
@@ -519,35 +491,37 @@ const MAX_DICT_ENTRIES = 500;
 const MAX_CONTEXT_COMPACTIONS = 50;
 
 /**
- * Trim the transcript to the most recent MAX_TRANSCRIPT_MESSAGES entries,
- * always preserving the first user message (goal prompt) when it falls
- * outside the retained window.
+ * Offload the oldest transcript entries from memory once the transcript grows
+ * past `TRANSCRIPT_OFFLOAD_THRESHOLD`. Offloaded messages stay in the persisted
+ * session snapshot, so rewind/fork/restore still reach them; only the in-memory
+ * live transcript drops them. This bounds memory WITHOUT truncating the
+ * scrollback the user can page through (that would re-introduce the old
+ * "stuck after 500 messages" behaviour). Returns the same array unchanged when
+ * offload is disabled (`TRANSCRIPT_OFFLOAD_THRESHOLD === 0`) or not yet hit.
  */
-function trimTranscript(messages: readonly ChatMessage[]): ChatMessage[] {
-  if (messages.length <= MAX_TRANSCRIPT_MESSAGES) return messages as ChatMessage[];
-  const keepFrom = messages.length - MAX_TRANSCRIPT_MESSAGES;
+function offloadTranscript(messages: readonly ChatMessage[]): ChatMessage[] {
+  if (TRANSCRIPT_OFFLOAD_THRESHOLD <= 0) return messages as ChatMessage[];
+  if (messages.length <= TRANSCRIPT_OFFLOAD_THRESHOLD) return messages as ChatMessage[];
+  const keepFrom = messages.length - TRANSCRIPT_OFFLOAD_THRESHOLD;
   const firstUserIdx = messages.findIndex((m) => m.kind === "user");
-  const trimmed: ChatMessage[] = [];
-  // Only include the first user message if it is BEFORE the retained window;
-  // otherwise slice(keepFrom) already contains it and pushing again would
-  // duplicate the entry.
+  const offloaded: ChatMessage[] = [];
+  // Always preserve the first user message (goal prompt) even if it falls
+  // outside the retained window, so the conversation origin stays reachable.
   if (firstUserIdx >= 0 && firstUserIdx < keepFrom) {
-    trimmed.push(messages[firstUserIdx]!);
+    offloaded.push(messages[firstUserIdx]!);
   }
-  trimmed.push(...messages.slice(keepFrom));
-  return trimmed;
+  offloaded.push(...messages.slice(keepFrom));
+  return offloaded;
 }
 /**
- * Truncate state.messages to the most recent MAX_TRANSCRIPT_MESSAGES,
- * always preserving the first user message (goal prompt) when it falls
- * outside the retained window. Also prunes stale tool/subagent dictionary
- * entries that no longer reference a transcript message.
+ * Prune stale tool/subagent lookup dictionaries that no longer reference a
+ * transcript message. Never truncates the visible transcript — scrolling must
+ * remain available for the full canonical history. Memory is bounded by
+ * `offloadTranscript` (offload to disk-backed snapshot) and by `historyRef`
+ * compaction in App.tsx, not by deleting UI history.
  */
 function pruneTranscriptAndDictionaries(state: TuiState): TuiState {
-  let messages = state.messages;
-  if (messages.length > MAX_TRANSCRIPT_MESSAGES) {
-    messages = trimTranscript(messages);
-  }
+  const messages = offloadTranscript(state.messages);
   const { subagent, tools } = messageIndices(messages);
   const subagentById = Object.fromEntries(
     Object.entries(state.subagentById).filter(([id]) => id in subagent),
@@ -1028,10 +1002,6 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             taskTokens: state.taskTokens + (event.usage?.totalTokens ?? 0),
             contextTokens,
             cacheReadTokens,
-            scrollOffset: preserveScrollOnAppend(
-              state.scrollOffset,
-              estimateNewMessageRows(state.messages, newMessages),
-            ),
           };
           return pruneTranscriptAndDictionaries(baseNext);
         }
@@ -1057,10 +1027,6 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             status: isTruncated ? "Output truncated" : "Request failed",
             taskStatus: "failed",
             taskDurationMs: taskDuration(state.taskStartedAt),
-            scrollOffset: preserveScrollOnAppend(
-              state.scrollOffset,
-              estimateNewMessageRows(state.messages, newMessages),
-            ),
           };
           return pruneTranscriptAndDictionaries(baseNext);
         }
@@ -1119,7 +1085,6 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             pendingPermission: undefined,
             spinnerMessage: undefined,
             status: "Paused · /continue to resume",
-            scrollOffset: preserveScrollOnAppend(state.scrollOffset, estimateNewMessageRows(state.messages, newMessages)),
           };
           return pruneTranscriptAndDictionaries(baseNext);
         }
@@ -1133,14 +1098,12 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             // a stable ordinal until that event contract gains one.
             turn: state.contextCompactions.length + 1,
           };
-          // Trim the transcript in place to mirror the LLM history compaction.
-          // Drop the oldest non-user, non-notice messages (tool cards, old
-          // assistant messages) until the array is back to a reasonable size;
-          // always keep the first user prompt and the most recent context.
-          let messages = state.messages;
-          if (messages.length > MAX_TRANSCRIPT_MESSAGES) {
-            messages = trimTranscript(messages);
-          }
+          // Compaction already reduces the model context (`historyRef`) and the
+          // persisted snapshot. Do NOT delete the visible transcript here — that
+          // would re-break scrolling history. Only offload oldest entries from
+          // memory past the (opt-in) threshold; the full canonical history stays
+          // reachable for rewind/fork and for the user paging back.
+          const messages = offloadTranscript(state.messages);
           return {
             ...state,
             messages,
@@ -1223,10 +1186,6 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             toolCards: [...state.toolCards.filter((item) => item.id !== sidebarCard.id), sidebarCard],
             status: `${event.call.name}...`,
             spinnerMessage: undefined,
-            scrollOffset: preserveScrollOnAppend(
-              state.scrollOffset,
-              estimateNewMessageRows(state.messages, newMessages),
-            ),
           };
           return pruneTranscriptAndDictionaries(baseNext);
         }
@@ -1468,10 +1427,6 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             subagentRevision: revision,
             subagentChange: { id: evt.id, index: newMessages.length - 1, revision },
             status: `Delegating (depth ${evt.depth})…`,
-            scrollOffset: preserveScrollOnAppend(
-              state.scrollOffset,
-              estimateNewMessageRows(state.messages, newMessages),
-            ),
           };
           return pruneTranscriptAndDictionaries(baseNext);
         }
@@ -1562,10 +1517,6 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         ...state,
         messages: newMessages,
         status: "Unable to attach image",
-        scrollOffset: preserveScrollOnAppend(
-              state.scrollOffset,
-              estimateNewMessageRows(state.messages, newMessages),
-            ),
       };
       return pruneTranscriptAndDictionaries(baseNext);
     }

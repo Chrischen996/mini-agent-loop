@@ -1,7 +1,8 @@
 // Provider-neutral thinking level configuration and interactive level controls.
 
 import type { LlmConfig } from "./llm/config.ts";
-import type { ModelThinkingLevel } from "./pi-ai/types.ts";
+import type { ModelRef } from "./models.ts";
+import type { ModelThinkingLevel, ThinkingLevelMap } from "./pi-ai/types.ts";
 import {
   ALL_THINKING_LEVELS,
   clampToAvailableLevels,
@@ -126,6 +127,22 @@ export function getThinkingLevelChoices(
   if (!config.reasoning) return ["off"];
   const mapped = THINKING_LEVEL_ORDER.filter((level) => modelSupportsLevel(config, level));
   return mapped.length > 0 ? [...mapped] : ["medium"];
+}
+
+/**
+ * Effort levels for a catalog ModelRef (used by pickers that run *before* the
+ * model is committed, e.g. the Effort step inside `/model` setup). ModelRef
+ * carries `reasoning` + `thinkingLevelMap`, which is all the capability check
+ * needs; `piModel` is optional there.
+ */
+export function getThinkingLevelChoicesForModel(
+  model: Pick<ModelRef, "reasoning" | "thinkingLevelMap" | "piModel">,
+): ModelThinkingLevel[] {
+  return getThinkingLevelChoices({
+    reasoning: model.reasoning,
+    thinkingLevelMap: model.thinkingLevelMap as ThinkingLevelMap | undefined,
+    ...(model.piModel ? { piModel: model.piModel } : {}),
+  });
 }
 
 /** Levels accepted by explicit selectors, including supported Off. */

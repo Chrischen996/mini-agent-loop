@@ -1,8 +1,8 @@
 /**
  * Bounded command/prompt history for the Ink prompt and headless input helpers.
  *
- * Navigation keeps the draft that was present before the first Up press, so
- * Down can return to it without touching the Agent history.
+ * Navigation keeps the draft that was present before the first recall, so
+ * forward navigation can return to it without touching the Agent history.
  */
 export class TerminalInputHistory {
   private readonly entries: string[] = [];
@@ -25,7 +25,7 @@ export class TerminalInputHistory {
   navigate(direction: -1 | 1, currentValue: string): string | undefined {
     if (this.entries.length === 0) return undefined;
     // A fresh empty prompt has no forward history to browse. Let the caller
-    // keep its normal Down-arrow behavior (usually viewport scrolling).
+    // keep its normal forward-navigation behavior (usually viewport scrolling).
     if (direction > 0 && this.index === -1 && !currentValue) return undefined;
     if (this.index === -1) {
       this.draft = currentValue;

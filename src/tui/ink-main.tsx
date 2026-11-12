@@ -8,14 +8,31 @@ import { BgTaskManager, stableBgTaskInstanceId } from "../bg-tasks/manager.js";
 import { createSandboxRunner } from "../sandbox/index.ts";
 import { createMcpRuntimeFromEnv } from "../mcp/runtime.ts";
 import { createCodebaseRuntimeFromEnv } from "../codebase/runtime.ts";
-import { createIncrementalStdout } from "./incremental-renderer.ts";
+import { createIncrementalStdoutHandle } from "./incremental-renderer.ts";
+import { createTerminalStdin } from "./terminal-stdin.ts";
 import { disableMouseTracking, enableMouseTracking } from "./mouse-tracking.ts";
+import { resolveTuiLayoutMode } from "./layout-mode.ts";
+import {
+  installRenderStatsReporting,
+  resolveSlowFrameThresholdFromEnv,
+  setSlowFrameThreshold,
+} from "./perf-monitor.ts";
 import { openInspectorFromArgs } from "./inspect.ts";
 import { getStartupSessionRequest } from "./session-serialization.ts";
 import { loadTuiSystemPromptContext } from "./system-prompt.ts";
 import { RELAUNCH_EXIT_CODE } from "./relaunch-constants.ts";
 
 const cwd = process.cwd();
+
+// Layout selection: `inline` runs the UI on the main screen buffer with sealed
+// transcript history flowing into the terminal's native scrollback via Ink's
+// `<Static>`; `alternate` (default) keeps everything in the alternate screen
+// buffer so the user's shell history stays untouched.
+const layoutMode = resolveTuiLayoutMode();
+
+// Slow-frame threshold + optional at-exit render report (MINI_AGENT_RENDER_STATS).
+setSlowFrameThreshold(resolveSlowFrameThresholdFromEnv());
+const disposeRenderStatsReport = installRenderStatsReporting();
 
 // Keep Ink's frequent redraws isolated from the shell's main screen. This is
 // also what prevents a completed TUI session from leaving its frame in the
@@ -113,9 +130,18 @@ async function runMain(): Promise<void> {
       ...bgToolsForCwd(workspaceCwd),
     ]);
     const systemPromptContext = await loadTuiSystemPromptContext(cwd);
-    process.stdout.write(ALTERNATE_SCREEN);
-    enableMouseTracking(process.stdout);
-    const incrementalStdout = createIncrementalStdout(process.stdout);
+    // Alternate screen + mouse tracking only apply to the alternate layout.
+    // Inline mode keeps mouse tracking off so the wheel scrolls the terminal's
+    // native scrollback (where the sealed transcript lives).
+    if (layoutMode === "alternate") {
+      process.stdout.write(ALTERNATE_SCREEN);
+      enableMouseTracking(process.stdout);
+    }
+    const { facade: incrementalStdout, renderer: incrementalRenderer } =
+      createIncrementalStdoutHandle(process.stdout, { mode: layoutMode });
+    // Frame stdin before Ink: concatenated/split mouse reports must reach
+    // useInput as atomic reads instead of leaking into the prompt as text.
+    const terminalStdin = createTerminalStdin(process.stdin);
     const app = render(
       <App
         cwd={cwd}
@@ -126,15 +152,21 @@ async function runMain(): Promise<void> {
         bgManagerForCwd={bgManagerForCwd}
         mcpStatuses={() => mcpRuntime.statuses()}
         mcpTools={() => mcpRuntime.snapshot()}
+        layoutMode={layoutMode}
+        writeStaticBurst={layoutMode === "inline" ? (text: string) => incrementalRenderer.emitStaticBurst(text) : undefined}
       />,
-      { stdout: incrementalStdout },
+      { stdout: incrementalStdout, stdin: terminalStdin },
     );
     await app.waitUntilExit();
+    terminalStdin.dispose();
     bgTaskDispose?.();
     for (const manager of childBgManagers.values()) manager.dispose();
   } finally {
-    disableMouseTracking(process.stdout);
-    process.stdout.write(MAIN_SCREEN);
+    if (layoutMode === "alternate") {
+      disableMouseTracking(process.stdout);
+      process.stdout.write(MAIN_SCREEN);
+    }
+    disposeRenderStatsReport();
     await Promise.all([mcpRuntime.close(), codebaseRuntime.close(), sandboxRunner?.cleanup() ?? Promise.resolve()]);
   }
 }

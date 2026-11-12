@@ -150,6 +150,29 @@ describe("incremental terminal renderer", () => {
     assert.match(output.writes[0]!, /3;1H.*footer/);
   });
 
+  it("keeps SGR escape bytes so styled rows are not painted as literal text", () => {
+    const output = sink();
+    const renderer = new IncrementalTerminalRenderer(output.target as never);
+
+    renderer.write("\x1b[1m\x1b[38;5;231mmini-agent\x1b[39m\x1b[22m plain\n");
+
+    const frame = output.writes.join("");
+    assert.ok(frame.includes("\x1b[1m"), "bold escape must survive");
+    assert.ok(frame.includes("\x1b[38;5;231m"), "256-color escape must survive");
+    // The regression: stripping ESC turned `ESC[38;5;231m` into visible text.
+    assert.ok(!/[^\x1b]\[38;5;231m/.test(frame), "no literal escape text may leak");
+  });
+
+  it("still strips real control characters from painted rows", () => {
+    const output = sink();
+    const renderer = new IncrementalTerminalRenderer(output.target as never);
+
+    renderer.write("a\u0000b\u0007c\u001bd\n");
+
+    const frame = output.writes.join("");
+    assert.ok(frame.includes("abcd"));
+  });
+
   it("preserves WriteStream dimensions through the Ink facade", () => {
     const writes: string[] = [];
     const target = Object.assign(new EventEmitter(), {
@@ -169,3 +192,122 @@ describe("incremental terminal renderer", () => {
     assert.ok(writes.some((value) => value.includes("hello")));
   });
 });
+
+describe("incremental renderer inline mode", () => {
+  function sizedSink(rows: number, columns = 40) {
+    const writes: string[] = [];
+    const target = {
+      rows,
+      columns,
+      write(value: string) {
+        writes.push(value);
+        return true;
+      },
+    };
+    return { writes, target };
+  }
+
+  it("anchors the first inline frame at the screen bottom", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+
+    renderer.write("a\nb\nc");
+
+    const painted = output.writes.join("");
+    assert.match(painted, /\x1b\[8;1H\x1b\[2Ka/);
+    assert.match(painted, /\x1b\[9;1H\x1b\[2Kb/);
+    assert.match(painted, /\x1b\[10;1H\x1b\[2Kc/);
+    assert.ok(!painted.includes("\x1b[7;1H"), "rows above the anchor stay untouched");
+  });
+
+  it("erases the frame region and repaints the frame below a static burst", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+    renderer.write("a\nb\nc");
+    output.writes.length = 0;
+
+    renderer.emitStaticBurst("hello\n");
+    const painted = output.writes.join("");
+    // Old frame region erased, burst printed at the anchor...
+    assert.match(painted, /\x1b\[8;1H\x1b\[2K/);
+    assert.match(painted, /\x1b\[10;1H\x1b\[2K/);
+    assert.ok(painted.includes("\x1b[8;1Hhello\n"));
+    // ...and the dynamic frame repainted below the burst (anchor advanced
+    // past one emitted line, then deficit-scrolled by one to fit 3 rows).
+    assert.ok(output.writes.some((value) => value.startsWith("\x1b[10;1H\n")), "deficit scroll at the bottom row");
+    assert.match(painted, /\x1b\[8;1H\x1b\[2Ka/);
+    assert.match(painted, /\x1b\[9;1H\x1b\[2Kb/);
+    assert.match(painted, /\x1b\[10;1H\x1b\[2Kc/);
+
+    // A following frame diffs against the repainted baseline.
+    output.writes.length = 0;
+    renderer.write("a\nb\nx\n");
+    const next = output.writes.join("");
+    assert.match(next, /\x1b\[10;1H\x1b\[2Kx/);
+    assert.ok(!next.includes("b"), "unchanged rows are not rewritten");
+  });
+
+  it("scrolls the deficit so an overflowing frame fits below static bursts", () => {
+    const output = sizedSink(4);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+    renderer.write("a\nb");
+    output.writes.length = 0;
+
+    // The burst advances the anchor past the screen bottom; the repaint
+    // deficit-scrolls so the frame stays fully on screen.
+    renderer.emitStaticBurst("s1\ns2\ns3\n");
+    assert.ok(output.writes.some((value) => value.includes("s1\ns2\ns3\n")), "burst written raw at the anchor");
+    assert.ok(output.writes.some((value) => value.startsWith("\x1b[4;1H\n")), "repaint deficit scroll");
+
+    output.writes.length = 0;
+    renderer.write("x\ny\nz\n");
+    const painted = output.writes.join("");
+    assert.match(painted, /\x1b\[2;1H\x1b\[2Kx/);
+    assert.match(painted, /\x1b\[3;1H\x1b\[2Ky/);
+    assert.match(painted, /\x1b\[4;1H\x1b\[2Kz/);
+  });
+
+  it("blanks the screen for a burst emitted before the first frame", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+
+    // Unknown anchor (e.g. resumed session): the burst flows into scrollback,
+    // then the screen clears so the first frame anchors on a clean surface.
+    renderer.emitStaticBurst("blob\n");
+    assert.equal(output.writes[0], "\x1b[10;1H\nblob\n");
+    assert.equal(output.writes[1], `\x1b[10;1H${"\n".repeat(10)}`);
+
+    output.writes.length = 0;
+    renderer.write("a\nb\n");
+    const painted = output.writes.join("");
+    assert.match(painted, /\x1b\[9;1H\x1b\[2Ka/, "first frame bottom-anchors on the clean screen");
+    assert.match(painted, /\x1b\[10;1H\x1b\[2Kb/);
+  });
+
+  it("skips unchanged rows and clears rows left by a shorter frame", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+    renderer.write("a\nb\nc");
+    output.writes.length = 0;
+
+    renderer.write("a\nb\nc");
+    assert.deepEqual(output.writes, [], "identical frame at the same anchor repaints nothing");
+
+    renderer.write("a\n");
+    const painted = output.writes.join("");
+    assert.match(painted, /\x1b\[9;1H\x1b\[2K/);
+    assert.match(painted, /\x1b\[10;1H\x1b\[2K/);
+    assert.ok(!painted.includes("a\n"), "unchanged first row is not rewritten");
+  });
+
+  it("keeps the legacy trailing-newline-as-frame behavior in alternate mode", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "alternate" });
+
+    renderer.write("one\ntwo\n");
+    const painted = output.writes.join("");
+    assert.match(painted, /\x1b\[1;1H\x1b\[2Kone/, "alternate mode top-anchors bare writes as frames");
+    assert.match(painted, /\x1b\[2;1H\x1b\[2Ktwo/);
+  });
+});
+

@@ -219,7 +219,8 @@ describe("shared TUI presentation", () => {
     // and the Ink CommandPalette line up row for row.
     const column = commandUsageColumn(candidates);
     assert.equal(rows[1]?.text, `  ${"/model [ref] [url] [key] [--protocol]".padEnd(column)}Switch model and gateway`);
-    assert.equal(rows[2]?.text, `❯ ${"/profiles".padEnd(column)}List and activate model profiles`);
+    const effortUsage = "/effort [off|minimal|low|med|high|xhigh|max|ultra]";
+    assert.equal(rows[2]?.text, `❯ ${effortUsage.padEnd(Math.max(column, effortUsage.length + 2))}Open the Effort slider or set a thinking level directly`);
     for (const row of rows.slice(1)) {
       const command = candidates.find((entry) => row.text.startsWith(`  ${entry.usage}`) || row.text.startsWith(`❯ ${entry.usage}`));
       if (!command) continue;
