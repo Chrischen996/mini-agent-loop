@@ -1,8 +1,11 @@
+/// <reference types="../ink-testing-library.d.ts" />
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import React from "react";
+import { ThemeDialog } from "../src/tui/components/ThemeDialog.tsx";
 import {
   THEME_NAMES,
   DEFAULT_THEME_NAME,
@@ -13,8 +16,10 @@ import {
   formatThemeListText,
   persistThemeName,
   readStoredThemeName,
+  hasThemeSelection,
   resetTheme,
   resolveInitialThemeName,
+  shouldPromptForThemeAtStartup,
 } from "../src/tui/theme.ts";
 import { formatRenderLine, hexToAnsi } from "../src/tui/render-line-format.ts";
 import type { RenderLine } from "../src/tui/render-lines.ts";
@@ -22,6 +27,13 @@ import type { RenderLine } from "../src/tui/render-lines.ts";
 after(() => {
   resetTheme();
 });
+
+let render: typeof import("ink-testing-library").render | undefined;
+try {
+  ({ render } = await import("ink-testing-library"));
+} catch {
+  // ink-testing-library unavailable; ThemeDialog suite is skipped
+}
 
 describe("theme registry", () => {
   it("keeps claude-dark first and ports the gemini catalogue", () => {
@@ -110,6 +122,87 @@ describe("ANSI emission of themed colors", () => {
     assert.match(user, /^\x1b\[34m/);
     // Foreground is "" for ansi-dark: assistant rows carry no color sequence.
     assert.equal(formatRenderLine(row({ text: "plain" })), "plain\x1b[0m");
+    resetTheme();
+  });
+});
+
+
+describe("hasThemeSelection", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "theme-sel-"));
+  const store = path.join(dir, "theme.json");
+
+  it("is false when neither env nor store carries a valid theme", () => {
+    assert.equal(hasThemeSelection({ MINI_AGENT_THEME_CONFIG: path.join(dir, "missing.json") }), false);
+    assert.equal(hasThemeSelection({ MINI_AGENT_THEME_CONFIG: store, MINI_AGENT_THEME: "bogus" }), false);
+  });
+
+  it("is true for a valid env or persisted selection", () => {
+    assert.equal(hasThemeSelection({ MINI_AGENT_THEME: "ayu-dark", MINI_AGENT_THEME_CONFIG: path.join(dir, "missing.json") }), true);
+    writeFileSync(store, JSON.stringify({ version: 1, theme: "dracula-dark" }), "utf8");
+    assert.equal(hasThemeSelection({ MINI_AGENT_THEME_CONFIG: store }), true);
+  });
+
+  it("startup prompting is suppressed on non-TTY, under the test runner, or with a selection", () => {
+    assert.equal(shouldPromptForThemeAtStartup({}, false), false, "not a TTY");
+    assert.equal(shouldPromptForThemeAtStartup({ NODE_TEST_CONTEXT: "child-v8" }, true), false, "test child");
+    assert.equal(shouldPromptForThemeAtStartup({ MINI_AGENT_THEME_CONFIG: path.join(dir, "missing.json") }, true), true, "interactive first run");
+    assert.equal(shouldPromptForThemeAtStartup({ MINI_AGENT_THEME_CONFIG: store }, true), false, "already chosen");
+  });
+});
+
+describe("ThemeDialog (first-run picker)", () => {
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 30));
+
+  it("previews live on navigation, commits on enter, reverts on escape", async (t) => {
+    if (!render) {
+      t.skip();
+      return;
+    }
+    resetTheme();
+    let selected: string | undefined;
+    const view = render(React.createElement(ThemeDialog, {
+      onSelect: (name: string) => {
+        selected = name;
+        applyTheme(name);
+      },
+      onCancel: () => {},
+    }));
+    await tick();
+    assert.match(view.lastFrame() ?? "", /Select a theme/);
+
+    view.stdin.write("\x1b[B"); // down: live-preview the next theme
+    await tick();
+    const previewed = activeThemeName();
+    assert.notEqual(previewed, DEFAULT_THEME_NAME, "highlight applies the palette live");
+
+    view.stdin.write("\x1b[A"); // up: preview reverts via the previous entry
+    await tick();
+    assert.equal(activeThemeName(), DEFAULT_THEME_NAME);
+
+    view.stdin.write("\x1b[B");
+    await tick();
+    view.stdin.write("\r");
+    await tick();
+    assert.equal(selected, previewed);
+    view.unmount();
+    resetTheme();
+
+    let cancelled = false;
+    const view2 = render(React.createElement(ThemeDialog, {
+      onSelect: () => {},
+      onCancel: () => {
+        cancelled = true;
+      },
+    }));
+    await tick();
+    view2.stdin.write("\x1b[B");
+    await tick();
+    assert.notEqual(activeThemeName(), DEFAULT_THEME_NAME, "second mount previews the next entry live");
+    view2.stdin.write("\x1b");
+    await tick();
+    assert.equal(cancelled, true);
+    assert.equal(activeThemeName(), DEFAULT_THEME_NAME, "escape restores the pre-dialog theme");
+    view2.unmount();
     resetTheme();
   });
 });

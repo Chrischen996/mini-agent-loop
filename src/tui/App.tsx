@@ -83,7 +83,7 @@ import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./l
 import { inputContainerBorderColor, usesInputBorder } from "./input-container.ts";
 import { estimateViewportContentHeight, buildSealedStaticItems, streamingAssistantRows, MessageHeightCache } from "./message-viewport.ts";
 import { resolveTuiLayoutMode, type TuiLayoutMode } from "./layout-mode.ts";
-import { applyTheme, persistThemeName, formatThemeListText, activeThemeName } from "./theme.ts";
+import { applyTheme, persistThemeName, formatThemeListText, activeThemeName, shouldPromptForThemeAtStartup } from "./theme.ts";
 import { computeCommitBoundary, rowTexts, rowCountledCommitted, collectResizeRefreshRows } from "./stream-commit.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
@@ -138,6 +138,7 @@ import {
 } from "../skills/index.ts";
 
 import { Overlays } from "./components/Overlays.tsx";
+import { ThemeDialog } from "./components/ThemeDialog.tsx";
 import { PermissionPanel } from "./components/PermissionPanel.tsx";
 import { PlanApprovalBar } from "./components/PlanApprovalBar.tsx";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
@@ -1643,7 +1644,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     if (themeCommandMatch) {
       const themeArg = themeCommandMatch[1]?.toLowerCase();
       if (!themeArg) {
-        dispatch({ type: "ADD_NOTICE", title: "Theme", text: formatThemeListText() });
+        setThemeDialogOpen(true);
       } else if (applyTheme(themeArg)) {
         persistThemeName(themeArg);
         // Re-print the recent stream window so visible history picks up the
@@ -2297,6 +2298,9 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   // older copies remain in the scrollback, the visible region becomes
   // correct again. Document mode additionally refreshes the committed
   // streaming prefix so the in-flight message stays readable.
+  // First-run theme dialog (gemini-cli style): shown once until an explicit
+  // selection exists (env or persisted store). Highlight previews live.
+  const [themeDialogOpen, setThemeDialogOpen] = useState<boolean>(() => active && shouldPromptForThemeAtStartup());
   const resizeRefreshRef = useRef(termWidth);
   useLayoutEffect(() => {
     // Inactive sessions must not print into the shared terminal; when the
@@ -2434,6 +2438,19 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           showHistoryHints={!isDocumentLayout}
           heightCache={heightCacheRef.current}
         />
+        {themeDialogOpen ? (
+          <ThemeDialog
+            onSelect={(name) => {
+              applyTheme(name);
+              persistThemeName(name);
+              setThemeDialogOpen(false);
+              // Repaint the recent window with the committed palette.
+              resizeRefreshRef.current = Number.NaN;
+              dispatch({ type: "ADD_NOTICE", title: "Theme", text: `Theme set to "${name}". Selection saved for next start.` });
+            }}
+            onCancel={() => setThemeDialogOpen(false)}
+          />
+        ) : null}
         <Overlays
           acMode={acMode}
           input={input}
@@ -2523,7 +2540,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
                 return false;
               }}
               pasteEnabled={!state.pendingPermission && !pendingTodoRunPlan}
-              focus={active && !state.pendingPermission && !pendingTodoRunPlan && !bgPanelOpen && !dashboardOpen && acMode !== "effort-picker"}
+              focus={active && !state.pendingPermission && !pendingTodoRunPlan && !bgPanelOpen && !dashboardOpen && acMode !== "effort-picker" && !themeDialogOpen}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {
                 if (acMode === "session-list") return;

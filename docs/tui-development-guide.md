@@ -821,9 +821,12 @@ describe("PromptInput", () => {
 - **选择顺序**（`initTheme()`，由 `ink-main.tsx` 在首帧前调用）：
   `MINI_AGENT_THEME` 环境变量 → `~/.mini-agent/theme.json`（`/theme` 持久化）→ `claude-dark`。
   测试进程不自动应用（import 无副作用），默认主题稳定。
-- **命令**：`/theme` 列出全部主题（❯ 标记当前）；`/theme <name>` 切换、持久化，并借用
-  resize-refresh 通道（`resizeRefreshRef = NaN`）把最近一屏历史按新配色重打——更早冻结
-  进 scrollback 的行保持旧色（与 gemini 静态历史同行为）。
+- **命令**：`/theme` 打开主题选择对话框（首次启动且无任何显式选择时也自动弹出，与
+  gemini-cli 的 ThemeDialog 同交互：↑↓ **highlight 即全 UI 实时预览**、Enter 提交并
+  持久化、Esc 恢复到打开前的主题）；`/theme <name>` 直接切换并持久化。两种提交路径都
+  借用 resize-refresh 通道（`resizeRefreshRef = NaN`）把最近一屏历史按新配色重打——更早
+  冻结进 scrollback 的行保持旧色（与 gemini 静态历史同行为）。Esc 取消不持久化，下次
+  启动会再次询问。
 - **兼容**：`claude-dark` 下背景发原 256 色码（`48;5;236/24/178`，渲染器测试锚定）；
   其他主题背景由槽位换算（truecolor `48;2;…` 或基本背景 `40-47/100-107`）。
 

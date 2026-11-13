@@ -167,6 +167,31 @@ export function initTheme(env: Record<string, string | undefined> = process.env)
   return name;
 }
 
+/**
+ * Whether the user has an explicit theme selection (env or persisted store).
+ * False means startup should show the theme dialog (gemini-cli first-run).
+ */
+export function hasThemeSelection(env: Record<string, string | undefined> = process.env): boolean {
+  const fromEnv = env[THEME_ENV]?.toLowerCase();
+  if (fromEnv && PALETTES[fromEnv]) return true;
+  const stored = readStoredThemeName(env)?.toLowerCase();
+  return !!stored && !!PALETTES[stored];
+}
+
+/**
+ * Whether the first-run theme dialog should open: real interactive TTY,
+ * outside the node:test runner (its child processes carry NODE_TEST_CONTEXT,
+ * including TUI app instances spawned from tests), and no explicit selection
+ * yet. `/theme` always opens the dialog regardless.
+ */
+export function shouldPromptForThemeAtStartup(
+  env: Record<string, string | undefined> = process.env,
+  isTty: boolean = process.stdout.isTTY === true,
+): boolean {
+  if (!isTty || env.NODE_TEST_CONTEXT) return false;
+  return !hasThemeSelection(env);
+}
+
 /** Human-readable theme listing for `/theme` (current one marked). */
 export function formatThemeListText(): string {
   const lines = [`Available themes (${THEME_NAMES.length}) - use /theme <name>:`, ""];

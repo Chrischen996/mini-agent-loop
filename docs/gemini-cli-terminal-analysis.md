@@ -158,3 +158,5 @@ mini-agent 目前定型行/已发行冻结旧换行、不重打；若 resize 后
 ### 5.5 主题选择（已移植）
 
 mini-agent 现在带 gemini 风格主题系统：`src/tui/theme.ts`（语义槽位 + 可变 `TUI_COLORS` 单例 + env/JSON 持久化选择 + `/theme` 命令）与 `src/tui/gemini-palettes.ts`（19 个 gemini 内建 ColorsTheme 块，由 `tools/extract-gemini-palettes.cjs` 从上游源码抽取）。ColorsTheme→槽位映射：assistant=Foreground、user=AccentBlue、thinking=AccentPurple、running=AccentYellow、success=AccentGreen、error=AccentRed、muted=Gray、gutter/border=DarkGray、userBg=MessageBackground、badgeText 按 type 取 Background/Foreground。`claude-dark`（原品牌色）保持默认。切换时借用 resize-refresh 通道重打最近一屏，可见历史即时换新色。
+
+**启动选择（对齐上游 `ThemeDialog.tsx` + `useThemeCommand.ts`）**：首次启动且无显式选择（env/store 皆无）时自动弹出 `components/ThemeDialog.tsx`——↑↓ highlight 即调 `applyTheme` 全 UI 实时预览（gemini 的 onHighlight 同款，得益于可变调色板单例无需其 remount 机制）、Enter 持久化提交、Esc 恢复原主题且不持久化（下次再问）。`/theme` 无参数也打开该对话框。上游的 scope 选择（User/Workspace）与终端背景色兼容性检测（queryTerminalBackground）未移植——mini-agent 只有用户级 theme.json，且默认不做背景探测。
