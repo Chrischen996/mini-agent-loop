@@ -6,6 +6,7 @@ import { selectMessageViewport, type MessageHeightCache, type ViewportItem } fro
 import type { PhysicalRow } from "../message-rows.ts";
 import { activityPresentation, formatActivity, loadingGlyph, loadingMarkerBright, LOADING_FRAME_MS } from "../activity.ts";
 import { statusLabel } from "../claude-style.ts";
+import { bootProbe } from "../boot-trace.ts";
 import { hexToAnsi } from "../render-line-format.ts";
 import { codeTokenAttrs, codeTokenColor, type CodeSpan } from "../code-highlight.ts";
 
@@ -187,7 +188,11 @@ type MessageFeedProps = {
   activeToolId?: string;
 };
 
-export function MessageFeed({
+export function MessageFeed(props: MessageFeedProps): React.ReactElement {
+  bootProbe("feed-render");
+  return MessageFeedInner(props);
+}
+function MessageFeedInner({
   messages,
   streamingText,
   streamingReasoning = "",

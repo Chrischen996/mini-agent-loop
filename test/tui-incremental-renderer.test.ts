@@ -16,6 +16,27 @@ function sink(): { writes: string[]; target: EventEmitter & { write(value: strin
 }
 
 describe("incremental terminal renderer", () => {
+  it("anchors the first frame at a primed cursor row instead of the screen bottom", () => {
+    const output = sink();
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "document" });
+    renderer.setInitialAnchor(5);
+    renderer.write("frame line one\nframe line two\n");
+    assert.match(output.writes.join(""), /\x1b\[5;1H/, "paint starts at the prompt row");
+    assert.doesNotMatch(output.writes.join(""), /\x1b\[23;1H/, "no bottom-anchored placement");
+  });
+
+  it("ignores a cursor prime once the frame has painted", () => {
+    const output = sink();
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "document" });
+    renderer.write("one\n");
+    const before = output.writes.length;
+    renderer.setInitialAnchor(3);
+    renderer.write("one\ntwo\n");
+    const painted = output.writes.slice(before).join("");
+    assert.match(painted, /\x1b\[24;1H/, "anchor stays at the bottom-derived position after first paint");
+  });
+
+
   it("uses reversible terminal mouse-tracking sequences for alternate-screen scrolling", () => {
     const writes: string[] = [];
     const target = { write(value: string) { writes.push(value); return true; } };

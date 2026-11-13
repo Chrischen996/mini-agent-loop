@@ -83,6 +83,7 @@ import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./l
 import { inputContainerBorderColor, usesInputBorder } from "./input-container.ts";
 import { estimateViewportContentHeight, buildSealedStaticItems, streamingAssistantRows, MessageHeightCache } from "./message-viewport.ts";
 import { resolveTuiLayoutMode, type TuiLayoutMode } from "./layout-mode.ts";
+import { bootProbe } from "./boot-trace.ts";
 import { applyTheme, persistThemeName, formatThemeListText, activeThemeName, shouldPromptForThemeAtStartup } from "./theme.ts";
 import { computeCommitBoundary, rowTexts, rowCountledCommitted, collectResizeRefreshRows } from "./stream-commit.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
@@ -277,6 +278,7 @@ async function startupSessionCwd(projectCwd: string, request: StartupSessionRequ
 }
 
 function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSessionRequest, agentTools, allTools, agentToolsForCwd, allToolsForCwd, bgManagerForCwd, mcpStatuses, mcpTools, layoutMode, writeStaticBurst, requestClearScreen, agentId, initialSessionId, initialPrompt, active, dashboardOpen, onOpenDashboard, onCloseDashboard, onSnapshot, onWorkspaceChange }: AgentSessionAppProps): React.ReactElement | null {
+  bootProbe("session-render");
   const effectiveLayoutMode = layoutMode ?? resolveTuiLayoutMode();
   // Document layout shares the inline burst pipeline; only its frame policy,
   // live-text projection and paragraph-level streaming commits differ.
@@ -2629,6 +2631,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
 }
 
 export function App(props: AppProps): React.ReactElement {
+  bootProbe("root-render");
   const projectCwd = props.projectCwd ?? props.cwd;
   const { stdout } = useStdout();
   const [terminalSize, setTerminalSize] = useState(() => ({

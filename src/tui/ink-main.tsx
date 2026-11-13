@@ -13,6 +13,7 @@ import { createTerminalStdin } from "./terminal-stdin.ts";
 import { disableMouseTracking, enableMouseTracking } from "./mouse-tracking.ts";
 import { resolveTuiLayoutMode } from "./layout-mode.ts";
 import { initTheme } from "./theme.ts";
+import { bootProbe } from "./boot-trace.ts";
 import {
   installRenderStatsReporting,
   resolveSlowFrameThresholdFromEnv,
@@ -35,6 +36,61 @@ const layoutMode = resolveTuiLayoutMode();
 setSlowFrameThreshold(resolveSlowFrameThresholdFromEnv());
 const disposeRenderStatsReport = installRenderStatsReporting();
 
+function bootTrace(step: string): void {
+  bootProbe(step, ` rows=${process.stdout.rows} cols=${process.stdout.columns}`);
+}
+
+/**
+ * Ask the terminal where the cursor currently sits (DSR `CSI 6 n`). Flow
+ * layouts start the frame at the prompt line instead of jumping to the
+ * screen bottom, which would strand the whole gap in between as dead space.
+ *
+ * MUST be awaited BEFORE `render()`: the DSR response bytes arrive on stdin,
+ * and pausing (rather than destroying) the stream between the query and
+ * Ink's own reader keeps them buffered for Ink to discard. Awaiting after
+ * render() would sit behind React's first-paint work in the macrotask queue
+ * and delay the very frame this function is meant to place.
+ * Resolves undefined on non-TTYs, on the alternate layout, or on timeout.
+ */
+async function queryCursorRow(timeoutMs = 300): Promise<number | undefined> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return undefined;
+  if (layoutMode === "alternate") return undefined;
+  return await new Promise((resolve) => {
+    let buffer = "";
+    let settled = false;
+    const stdin = process.stdin;
+    const finish = (value: number | undefined) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      stdin.off("data", onData);
+      try {
+        stdin.setRawMode(false);
+      } catch {
+        // already restored or unsupported
+      }
+      stdin.pause();
+      resolve(value);
+    };
+    const onData = (chunk: Buffer | string) => {
+      buffer += chunk.toString("utf8");
+      // Response shape: ESC [ row ; col R — tolerate splits and noise.
+      const match = buffer.match(/\x1b\[(\d{1,4});\d{1,4}R/);
+      if (match) finish(Number(match[1]) || undefined);
+      else if (buffer.length > 64) finish(undefined);
+    };
+    const timer = setTimeout(() => finish(undefined), timeoutMs);
+    try {
+      stdin.setRawMode(true);
+      stdin.on("data", onData);
+      stdin.resume();
+      process.stdout.write("\x1b[6n");
+    } catch {
+      finish(undefined);
+    }
+  });
+}
+
 // Keep Ink's frequent redraws isolated from the shell's main screen. This is
 // also what prevents a completed TUI session from leaving its frame in the
 // user's scrollback buffer.
@@ -46,12 +102,14 @@ const args = process.argv.slice(2);
 const startupSessionRequest = getStartupSessionRequest(args);
 
 async function runMain(): Promise<void> {
+  bootTrace("runMain-enter");
   // Guard: only the interactive terminal entry may run main().
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     process.stderr.write("mini-agent TUI requires an interactive terminal\n");
     process.exit(1);
   }
 
+  bootTrace("stdin-guard-done");
   const codebaseRuntime = createCodebaseRuntimeFromEnv();
   const mcpRuntime = await createMcpRuntimeFromEnv(cwd).catch(async (error) => {
     await codebaseRuntime.close();
@@ -130,6 +188,7 @@ async function runMain(): Promise<void> {
       ...createAllTools(workspaceCwd, { sandboxRunner, backgroundTaskManager: bgManagerForCwd(workspaceCwd) }),
       ...bgToolsForCwd(workspaceCwd),
     ]);
+    bootTrace("after-mcp-sandbox-bg");
     const systemPromptContext = await loadTuiSystemPromptContext(cwd);
     // Alternate screen + mouse tracking only apply to the alternate layout.
     // Inline mode keeps mouse tracking off so the wheel scrolls the terminal's
@@ -140,9 +199,15 @@ async function runMain(): Promise<void> {
     }
     const { facade: incrementalStdout, renderer: incrementalRenderer } =
       createIncrementalStdoutHandle(process.stdout, { mode: layoutMode });
+    // Flow layouts: anchor the first frame at the prompt's actual row so the
+    // screen between prompt and bottom is not left as dead space.
+    const initialCursorRow = await queryCursorRow();
+    if (initialCursorRow !== undefined) incrementalRenderer.setInitialAnchor(initialCursorRow);
+    bootTrace("after-cursor-probe");
     // Frame stdin before Ink: concatenated/split mouse reports must reach
     // useInput as atomic reads instead of leaking into the prompt as text.
     const terminalStdin = createTerminalStdin(process.stdin);
+    bootTrace("before-render");
     const app = render(
       <App
         cwd={cwd}
@@ -159,6 +224,7 @@ async function runMain(): Promise<void> {
       />,
       { stdout: incrementalStdout, stdin: terminalStdin },
     );
+    bootTrace("after-render-call");
     await app.waitUntilExit();
     terminalStdin.dispose();
     bgTaskDispose?.();

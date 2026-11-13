@@ -2,6 +2,7 @@ import type { WriteStream } from "node:tty";
 import type { RenderLine } from "./render-lines.ts";
 import { formatRenderLine } from "./render-line-format.ts";
 import { truncateTerminalText } from "./terminal-width.ts";
+import { bootProbe } from "./boot-trace.ts";
 import { recordFramePaint, recordRowRepaint } from "./perf-monitor.ts";
 import type { TuiLayoutMode } from "./layout-mode.ts";
 
@@ -35,6 +36,10 @@ const ENABLE_AUTOWRAP = "\x1b[?7h";
  * log-update appends a trailing newline to every dynamic frame and would make
  * such classification ambiguous.
  */
+/** Startup diagnostics: MINI_AGENT_BOOT_TRACE=1 logs anchor/geometry events. */
+const BOOT_TRACE = process.env.MINI_AGENT_BOOT_TRACE === "1";
+
+
 export class IncrementalTerminalRenderer {
   private previousLines: string[] | undefined;
   private forceRedrawOnNextFrame = false;
@@ -104,6 +109,7 @@ export class IncrementalTerminalRenderer {
       this.target.write(`\x1b[${anchor};1H${text}`);
       const emittedLines = text.split("\n").length - 1;
       this.frameTopRow = Math.min(rows, anchor + Math.max(0, emittedLines));
+      bootProbe(`burst lines=${emittedLines} anchor=${anchor} -> top=${this.frameTopRow} rows=${rows}\n`);
       // Repaint the dynamic frame below the burst. Ink may skip the next
       // render entirely (unchanged output), so this repaint is mandatory.
       if (previous.length > 0) {
@@ -136,6 +142,9 @@ export class IncrementalTerminalRenderer {
     const previous = this.previousLines ?? [];
     const columns = Math.max(1, this.target.columns ?? 80);
     const rows = Math.max(1, this.target.rows ?? 24);
+    if (BOOT_TRACE) {
+      process.stderr.write(`\n[boot-trace] paint rows=${rows} cols=${columns} lines=${nextLines.length} mode=${this.inline ? "flow" : "alt"}\n`);
+    }
     if (rows !== this.lastTerminalRows) {
       // Terminal resized: every cached row is physically stale (reflowed or
       // scrolled into scrollback), so repaint the whole visible frame. In
@@ -225,6 +234,7 @@ export class IncrementalTerminalRenderer {
       // survive; the approximation only ever overwrites rows at or below the
       // cursor's last known position.
       this.frameTopRow = Math.max(1, rows - visibleHeight + 1);
+      bootProbe(`anchor-init top=${this.frameTopRow} visible=${visibleHeight} rows=${rows}\n`);
     } else {
       // The frame must fit between its anchor and the screen bottom. Whatever
       // overflows scrolls natively: emit the deficit at the bottom row first,
@@ -232,6 +242,7 @@ export class IncrementalTerminalRenderer {
       // included) into scrollback, then repaint against the shifted anchor.
       const overflow = this.frameTopRow + visibleHeight - 1 - rows;
       if (overflow > 0) {
+        bootProbe(`anchor-scroll overflow=${overflow} top=${this.frameTopRow} visible=${visibleHeight}\n`);
         this.target.write(`\x1b[${rows};1H${"\n".repeat(overflow)}`);
         this.frameTopRow -= overflow;
       }
@@ -289,6 +300,21 @@ export class IncrementalTerminalRenderer {
     this.forceRedrawOnNextFrame = false;
     this.lastTerminalRows = 0;
     this.frameTopRow = undefined;
+  }
+
+  /**
+   * Pre-first-paint anchor from a DSR cursor query (flow layouts only).
+   * Without this, the first paint bottom-anchors the frame, leaving the whole
+   * gap between the shell prompt and the screen bottom visually empty.
+   */
+  setInitialAnchor(row: number): void {
+    if (!this.inline || this.previousLines !== undefined || this.frameTopRow !== undefined) return;
+    const rows = Math.max(1, this.target.rows ?? 24);
+    // Pre-set the geometry baseline: the first paint would otherwise read
+    // lastTerminalRows=0 → "rows changed" → and wipe this anchor.
+    this.lastTerminalRows = rows;
+    this.frameTopRow = Math.min(rows, Math.max(1, Math.floor(row)));
+    bootProbe(`anchor-prime row=${this.frameTopRow}`);
   }
 
   invalidate(): void {
