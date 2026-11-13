@@ -820,7 +820,8 @@ describe("PromptInput", () => {
   发基本 16 色 SGR；空串（`ansi-*` 的 Foreground、no-color 语义）跳过颜色序列。
 - **选择顺序**（`initTheme()`，由 `ink-main.tsx` 在首帧前调用）：
   `MINI_AGENT_THEME` 环境变量 → `~/.mini-agent/theme.json`（`/theme` 持久化）→ `claude-dark`。
-  测试进程不自动应用（import 无副作用），默认主题稳定。
+  测试进程不自动应用（import 无副作用），默认主题稳定。启动弹窗策略
+  `MINI_AGENT_THEME_PROMPT=first-run（默认）|always|never`：`always` 每次启动都进选择界面。
 - **命令**：`/theme` 打开主题选择对话框（首次启动且无任何显式选择时也自动弹出，与
   gemini-cli 的 ThemeDialog 同交互：↑↓ **highlight 即全 UI 实时预览**、Enter 提交并
   持久化、Esc 恢复到打开前的主题）；`/theme <name>` 直接切换并持久化。两种提交路径都

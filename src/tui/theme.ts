@@ -125,6 +125,9 @@ export function resetTheme(): void {
 
 export const THEME_ENV = "MINI_AGENT_THEME";
 
+/** `MINI_AGENT_THEME_PROMPT=always|first-run|never` — startup dialog policy. */
+export const THEME_PROMPT_ENV = "MINI_AGENT_THEME_PROMPT";
+
 /** JSON store for the persisted selection, mirroring the model-profile store. */
 export function resolveThemeStorePath(env: Record<string, string | undefined> = process.env): string {
   return env.MINI_AGENT_THEME_CONFIG || path.join(os.homedir(), ".mini-agent", "theme.json");
@@ -189,6 +192,9 @@ export function shouldPromptForThemeAtStartup(
   isTty: boolean = process.stdout.isTTY === true,
 ): boolean {
   if (!isTty || env.NODE_TEST_CONTEXT) return false;
+  const mode = (env[THEME_PROMPT_ENV] ?? "first-run").toLowerCase();
+  if (mode === "never") return false;
+  if (mode === "always") return true;
   return !hasThemeSelection(env);
 }
 

@@ -147,6 +147,8 @@ describe("hasThemeSelection", () => {
     assert.equal(shouldPromptForThemeAtStartup({ NODE_TEST_CONTEXT: "child-v8" }, true), false, "test child");
     assert.equal(shouldPromptForThemeAtStartup({ MINI_AGENT_THEME_CONFIG: path.join(dir, "missing.json") }, true), true, "interactive first run");
     assert.equal(shouldPromptForThemeAtStartup({ MINI_AGENT_THEME_CONFIG: store }, true), false, "already chosen");
+    assert.equal(shouldPromptForThemeAtStartup({ MINI_AGENT_THEME_CONFIG: store, MINI_AGENT_THEME_PROMPT: "always" }, true), true, "always mode re-prompts");
+    assert.equal(shouldPromptForThemeAtStartup({ MINI_AGENT_THEME_PROMPT: "never" }, true), false, "never mode silences first run");
   });
 });
 
