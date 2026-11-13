@@ -1,6 +1,7 @@
 import { Box, Text, useInput } from "ink";
 import React, { useRef, useState } from "react";
 import { GEMINI_BUILTIN_COLORS } from "../gemini-palettes.ts";
+import { codeTokenAttrs, codeTokenColor, highlightCodeLine } from "../code-highlight.ts";
 import { THEME_NAMES, TUI_COLORS as C, activeThemeName, applyTheme } from "../theme.ts";
 
 /**
@@ -81,6 +82,14 @@ export function ThemeDialog({ onSelect, onCancel }: ThemeDialogProps): React.Rea
             .
           </Text>
           <Text color={C.thinking} italic>{"∴ considering comparison costs..."}</Text>
+          <Text>
+            <Text color={codeTokenColor("gutter")}>{"▌ "}</Text>
+            {highlightCodeLine('const seen = read(path) // cache', "ts").map((span, spanIndex) => (
+              <Text key={spanIndex} color={codeTokenColor(span.kind)} dimColor={codeTokenAttrs(span.kind).dim ?? false}>
+                {span.text}
+              </Text>
+            ))}
+          </Text>
           <Text>
             <Text color={C.success}>✓ done</Text>
             {"  "}

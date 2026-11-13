@@ -7,6 +7,17 @@ import type { PhysicalRow } from "../message-rows.ts";
 import { activityPresentation, formatActivity, loadingGlyph, loadingMarkerBright, LOADING_FRAME_MS } from "../activity.ts";
 import { statusLabel } from "../claude-style.ts";
 import { hexToAnsi } from "../render-line-format.ts";
+import { codeTokenAttrs, codeTokenColor, type CodeSpan } from "../code-highlight.ts";
+
+/** Compose one SGR sequence for a highlighted token run. */
+function spanCodes(span: CodeSpan): string {
+  const attrs = codeTokenAttrs(span.kind);
+  const codes: string[] = [];
+  if (attrs.dim) codes.push("2");
+  if (attrs.italic) codes.push("3");
+  codes.push(hexToAnsi(codeTokenColor(span.kind)));
+  return `\x1b[${codes.join(";")}m`;
+}
 
 // ─── physical rows ───────────────────────────────────────────────────────────
 
@@ -31,6 +42,21 @@ function rowColor(row: PhysicalRow): string | undefined {
  * scrolled history escaped its slice and overwrote other frame rows.
  */
 const PhysicalRowText = React.memo(function PhysicalRowText({ row, marker }: { row: PhysicalRow; marker: string }): React.ReactElement {
+  if (row.spans?.length) {
+    return (
+      <Text wrap="truncate-end">
+        {marker}
+        {row.spans.map((span, spanIndex) => {
+          const attrs = codeTokenAttrs(span.kind);
+          return (
+            <Text key={spanIndex} color={codeTokenColor(span.kind)} dimColor={attrs.dim ?? false} italic={attrs.italic ?? false}>
+              {span.text}
+            </Text>
+          );
+        })}
+      </Text>
+    );
+  }
   return (
     <Text
       color={rowColor(row)}
@@ -292,6 +318,10 @@ export function MessageFeed({
  */
 export function formatSealedRowsText(rows: readonly PhysicalRow[]): string {
   const lines = rows.map((row) => {
+    if (row.spans?.length) {
+      const runs = row.spans.map((span) => `${spanCodes(span)}${span.text}`).join("");
+      return `\x1b[0m ${runs}\x1b[0m`;
+    }
     const codes: string[] = [];
     if (row.bold) codes.push("1");
     if (row.italic) codes.push("3");

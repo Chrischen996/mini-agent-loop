@@ -830,6 +830,14 @@ describe("PromptInput", () => {
   启动会再次询问。
 - **兼容**：`claude-dark` 下背景发原 256 色码（`48;5;236/24/178`，渲染器测试锚定）；
   其他主题背景由槽位换算（truecolor `48;2;…` 或基本背景 `40-47/100-107`）。
+- **代码高亮（gemini hljs 语义移植）**：`src/tui/code-highlight.ts` 是无依赖的按行
+  词法扫描器，token 类别与上游 highlight.js 主题块 1:1 对应（keyword/string/number/
+  comment/function/type/property/variable/operator → hljs-keyword/-string/-number/
+  -comment/-title.function/-type/-attr/-variable/-operator）。`PhysicalRow.spans` 承载
+  token run（**不变量：spans 拼接 === row.text**），Ink 帧与 burst ANSI 两条渲染路径在
+  绘制时刻经 `codeTokenColor()` 读活动调色板——`/theme` 切换即时给代码块换色，行内容
+  与流式提交边界完全不受影响。方言按 fence 语言（js/py/sh/json + generic 兜底），
+  跨行上下文（多行字符串/块注释）按行降级为 plain，与行级提交模型一致。
 
 ## 附录 B: 渲染行类型
 

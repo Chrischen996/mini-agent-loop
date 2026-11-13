@@ -1,6 +1,7 @@
 import type { ChatMessage, ThinkingDisplayMode } from "./state.ts";
 import { noticeText, noticeTitle, toolArgumentSummary } from "./claude-style.ts";
-import { markdownRowText, markdownRuleText, parseMarkdownLines, stripInlineMarkdown } from "./markdown-lines.ts";
+import { CODE_GUTTER, markdownRowText, markdownRuleText, parseMarkdownLines, stripInlineMarkdown } from "./markdown-lines.ts";
+import { highlightCodeLine, type CodeSpan } from "./code-highlight.ts";
 import { isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from "./subagent-lines.ts";
 import { toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
 import { buildToolResultRows } from "./tool-result-lines.ts";
@@ -29,6 +30,8 @@ export type PhysicalRow = {
   dim?: boolean;
   bold?: boolean;
   italic?: boolean;
+  /** Token runs for syntax-highlighted rows (fenced code). */
+  spans?: readonly CodeSpan[];
 };
 
 /** Marker + body column budget for assistant/user blocks inside the feed. */
@@ -100,13 +103,30 @@ function assistantBodyRows(
     }
   }
   if (message.text) {
+    let fenceLang = "";
     parseMarkdownLines(message.text).forEach((line, lineIndex) => {
       const key = `message-${index}-md-${lineIndex}`;
       switch (line.kind) {
-        case "code-fence":
-        case "code":
-          rows.push({ key: `${key}-0`, text: markdownRowText(line), style: "thinking", dim: true });
+        case "code-fence": {
+          // Fence marker rows: keep the gutter + optional language label,
+          // and remember the language for the body rows that follow.
+          const fenceText = markdownRowText(line);
+          fenceLang = line.opening ? line.lang : "";
+          rows.push({
+            key: `${key}-0`,
+            text: fenceText,
+            style: "thinking",
+            dim: true,
+            spans: [{ text: fenceText, kind: "gutter" }],
+          });
           break;
+        }
+        case "code": {
+          const body = line.text;
+          const spans: CodeSpan[] = [{ text: `${CODE_GUTTER} `, kind: "gutter" }, ...highlightCodeLine(body, fenceLang)];
+          rows.push({ key: `${key}-0`, text: `${CODE_GUTTER} ${body}`, style: "thinking", spans });
+          break;
+        }
         case "heading":
           wrapTerminalLine(stripInlineMarkdown(line.text), budget).forEach((text, rowIndex) => {
             rows.push({

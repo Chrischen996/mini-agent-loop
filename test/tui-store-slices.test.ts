@@ -52,7 +52,7 @@ function samePresentFields(label: string, a: TuiState, b: TuiState): void {
  * assert the timestamp fields are numeric.
  */
 const TIMESTAMP_FIELDS = new Set([
-  "startedAt", "turnStartedAt", "lastStreamAt", "durationMs",
+  "startedAt", "turnStartedAt", "lastStreamAt", "durationMs", "taskStartedAt",
 ]);
 
 function blankTimestamps(value: unknown): unknown {
