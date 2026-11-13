@@ -19,39 +19,39 @@ function sizedSink(rows: number, columns = 40) {
 }
 
 describe("computeCommitBoundary (document layout stream commits)", () => {
-  it("commits nothing until a paragraph closes", () => {
+  it("commits completed lines and holds the growing last line", () => {
     assert.equal(computeCommitBoundary(""), 0);
     assert.equal(computeCommitBoundary("Hello wor"), 0);
-    assert.equal(computeCommitBoundary("Hello world\nsecond paragraph grow"), 0);
+    assert.equal(computeCommitBoundary("Hello world\nsecond paragraph grow"), "Hello world\n".length);
   });
 
-  it("commits up to and including the last closing blank line", () => {
+  it("commits every closed line up to the unterminated tail", () => {
     const text = "para one\nstill one\n\npara two ta";
-    const boundary = computeCommitBoundary(text);
-    assert.equal(text.slice(0, boundary), "para one\nstill one\n\n");
+    assert.equal(computeCommitBoundary(text), "para one\nstill one\n\n".length);
   });
 
-  it("holds back an open code fence", () => {
+  it("commits fenced code lines as they complete (stable gutter rows)", () => {
     const text = "intro\n\n```\nconst x = 1\n";
-    const boundary = computeCommitBoundary(text);
-    assert.equal(text.slice(0, boundary), "intro\n\n");
+    assert.equal(computeCommitBoundary(text), text.length);
   });
 
-  it("does not commit blank lines inside a fence", () => {
+  it("commits blank lines inside a fence", () => {
     const text = "```\n\nstill code\n";
-    assert.equal(computeCommitBoundary(text), 0);
+    assert.equal(computeCommitBoundary(text), text.length);
   });
 
-  it("commits the fence once it closes and the next paragraph breaks", () => {
-    const text = "```\ncode\n```\n\nnext\n";
-    assert.equal(computeCommitBoundary(text), text.length - "next\n".length);
-  });
-
-  it("holds back a table until the blank line closes it", () => {
+  it("holds back an open table until a following line closes it", () => {
     const held = "| a | b |\n| - | - |\n| 1 | 2 |\n";
     assert.equal(computeCommitBoundary(held), 0);
-    const closed = "| a | b |\n| - | - |\n| 1 | 2 |\n\nafter\n";
-    assert.equal(computeCommitBoundary(closed), "| a | b |\n| - | - |\n| 1 | 2 |\n\n".length);
+    const closedByBlank = "| a | b |\n| - | - |\n| 1 | 2 |\n\nafter\n";
+    assert.equal(computeCommitBoundary(closedByBlank), closedByBlank.length);
+    const closedByLine = "| a | b |\n| - | - |\n| 1 | 2 |\nplain tail";
+    assert.equal(computeCommitBoundary(closedByLine), "| a | b |\n| - | - |\n| 1 | 2 |\n".length);
+  });
+
+  it("does not mistake pipe lines inside a fence for a table", () => {
+    const text = "```\n| not | a table |\n```\n";
+    assert.equal(computeCommitBoundary(text), text.length);
   });
 });
 
@@ -138,12 +138,13 @@ describe("document layout renderer (anchor pipeline)", () => {
 });
 
 describe("resolveTuiLayoutMode", () => {
-  it("accepts document aliases and keeps inline the default", () => {
-    assert.equal(resolveTuiLayoutMode({}), "inline");
+  it("accepts document aliases and keeps document the default", () => {
+    assert.equal(resolveTuiLayoutMode({}), "document");
     for (const raw of ["document", "doc", "flow", "INSERT"]) {
       assert.equal(resolveTuiLayoutMode({ MINI_AGENT_TUI_LAYOUT: raw }), "document");
     }
     assert.equal(resolveTuiLayoutMode({ MINI_AGENT_TUI_LAYOUT: "alt" }), "alternate");
+    assert.equal(resolveTuiLayoutMode({ MINI_AGENT_TUI_LAYOUT: "inline" }), "inline");
   });
 });
 

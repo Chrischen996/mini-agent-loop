@@ -12,36 +12,40 @@
 
 /**
  * Char offset of the longest prefix of `text` that is safe to append to the
- * stream: everything up to (and including) the last blank line that is not
- * inside an open ``` fence and is followed by settled state. Tables commit
- * with the blank line that closes them; a trailing unclosed block stays in
- * the live frame until the message finalizes.
+ * stream. Row-stability decides granularity: paragraphs, headings, lists and
+ * fenced code all render one stable terminal-row set per source line (code
+ * keeps a fixed `│` gutter, one row per line — see markdown-lines), so every
+ * COMPLETED line commits as soon as its newline arrives. Only tables are held
+ * back: `formatMarkdownTable` aligns columns across the whole block, so a
+ * partial table would freeze mis-aligned. The growing last (unterminated)
+ * line always stays live.
  */
 export function computeCommitBoundary(text: string): number {
   let safeOffset = 0;
   let offset = 0;
   let fenceOpen = false;
-  let inTable = false;
+  let tableOpen = false;
 
   for (const line of text.split(/(?<=\n)/)) {
     const terminated = line.endsWith("\n");
-    const body = line.slice(0, -1).trimEnd();
-    const trimmed = body.trim();
+    const trimmed = (terminated ? line.slice(0, -1) : line).trim();
 
-    if (/^(`{3,}|~{3,})/.test(trimmed)) fenceOpen = !fenceOpen;
-    const lineIsTable = !fenceOpen && trimmed.startsWith("|");
-    if (lineIsTable) inTable = true;
-    else if (trimmed !== "" || !fenceOpen) {
-      // Any non-table line outside a fence (blank lines included) ends the
-      // table run; the blank line then commits the closed table.
-      inTable = false;
+    if (!tableOpen && /^(`{3,}|~{3,})/.test(trimmed)) fenceOpen = !fenceOpen;
+    const isTableLine = !fenceOpen && trimmed.startsWith("|");
+    const closesTable = tableOpen && !isTableLine;
+    if (isTableLine) tableOpen = true;
+    else if (tableOpen) tableOpen = false; // this line closes the table
+
+    if (!terminated) {
+      // The growing line itself never commits; but when it closes an open
+      // table, the finished table above it is final and freezes now.
+      if (closesTable) safeOffset = offset;
+      break;
     }
-
     offset += line.length;
-
-    // A paragraph boundary we may freeze at: blank line, outside any fence,
-    // with no table still in progress.
-    if (terminated && trimmed === "" && !fenceOpen && !inTable) safeOffset = offset;
+    // Commit everything whose rendering is final at line granularity; table
+    // lines commit with the closing line that follows them.
+    if (!tableOpen && !isTableLine) safeOffset = offset;
   }
   return safeOffset;
 }

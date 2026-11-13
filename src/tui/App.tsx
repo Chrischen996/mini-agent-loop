@@ -2365,7 +2365,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           historyStartIndex={sealedStatic.sealedCount}
           documentMode={isDocumentLayout}
           committedStreamingRows={committedStreamingRows}
-          showHistoryHints
+          showHistoryHints={!isDocumentLayout}
           heightCache={heightCacheRef.current}
         />
         <Overlays
