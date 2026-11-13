@@ -117,3 +117,39 @@ inline 模式下动态区高度封顶 `terminalHeight - 1` + `flex-end`，输入
 | 6 | backbuffer / 同步输出 | 跟随第 5 项 | 中 |
 
 **结论**：最值得加的是 `<Static>` 分治——现有实现已解决"重复布局"，未解决"定型历史仍参与每帧 diff"与"历史深于视口即不可见"。但要真正拿到原生 scrollback 深度，必须先解决前置的布局模式选择（inline vs alt screen）；宽度缓存与监控是顺手小钱；alt buffer 虚拟列表大投入可作为不依赖终端能力的备选模式后置。
+
+## 5. main 分支源码复核（2026-11，codeload tarball 实测）
+
+对照当前 main 重新核实三个关键问题的实现（`packages/cli/src/ui/`）：
+
+### 5.1 Header 怎么放（`components/MainContent.tsx`）
+
+默认（inline）路径的最终输出就是：
+
+```tsx
+<Static key={historyRemountKey}
+        items={[<AppHeader/>, ...historyItems.slice(staticHistoryStartIndex)]}>
+{pendingItems}
+```
+
+**Header 是 `<Static>` 的第一项**：打印一次进终端流，之后随历史滚进 scrollback，动态帧里永远没有它。terminalBuffer 新路径同理（`isStaticItem(header) === true` → `StaticRender`）。mini-agent document 模式已对齐此做法（`headerStaticText` 一次性 burst）。
+
+### 5.2 流式内容会不会截断（会）
+
+- 静态化是**消息/条目粒度**：`STATIC_HISTORY_ITEM_TYPES`（user/gemini/thinking/info/…）完成才从 pending 移入 history 进 Static；`tool_group` 永不静态（与 mini-agent 的 subagent/工具卡规则一致）。
+- pending 项留在动态帧里，按 `availableTerminalHeight` 用 Largest Remainder 分配高度预算——装不下就截。代码块更有显式占位符：pending 且超高时显示 `... code is being written ...`（`utils/MarkdownDisplay.tsx` RenderCodeBlockInternal）。
+- 表格：需 header+separator 两行确认才成表（`tableRowRegex`+`tableSeparatorRegex`），流式中整块留在 pending 帧内，完成才进 Static。
+- 结论：gemini-cli 默认模式仍有"流式临时截断"。mini-agent document 模式的行级发射（完成一行进流一行、无提示、无预算截断）在连续性上强于 gemini 默认路径。
+
+
+
+### 5.3 resize 怎么办（值得抄）
+
+`hooks/useStaticHistoryStartIndex.ts`：宽度变化 → `historyRemountKey` 变更 → `<Static>` 重挂载 → **重新打印最近历史窗口**：从新往旧累计，至少覆盖一屏（`countHistoryItemMinRows ≥ terminalHeight`），字符预算 `RESIZE_REFRESH_MAX_HISTORY_CHARS = 1000` 之外且已过一屏即停。更旧的条目不重打（留在 scrollback，哪怕换行已乱）。即：接受 scrollback 里存在"旧宽度版本"，用重打尾部保证 resize 后可见区域正确。
+
+mini-agent 目前定型行/已发行冻结旧换行、不重打；若 resize 后历史观感成为抱怨点，可按此方案在宽度变化时重打最近一屏。
+
+### 5.4 其它
+
+- ink 依赖是 fork：`"ink": "npm:@jrichman/ink@6.6.9"`，带 `StaticRender` 导出（terminalBuffer 路径的 backbuffer 打印原语）。
+- 三条渲染路径开关（`config/settingsSchema.ts`）：`useAlternateBuffer`（默认 false）、`terminalBuffer`（默认 false；`useAlternateBuffer.ts` 注释明言它将成为唯一路径）、否则 inline Static。`isAlternateBufferEnabled = alternate || terminalBuffer`——terminalBuffer 按 alt-buffer 特判处理，但其 VirtualizedList 配 `renderStatic` + `overflowToBackbuffer` 时 static 项打进 backbuffer、pending 项保持动态，架构上正向"整个会话是一条列表、完成项全部进终端流"收敛——与 mini-agent document 模式同一方向。
