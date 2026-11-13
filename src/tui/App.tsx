@@ -81,8 +81,9 @@ import {
 import { TurnEventBuffer } from "./stream-buffer.ts";
 import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./layout.ts";
 import { inputContainerBorderColor, usesInputBorder } from "./input-container.ts";
-import { estimateViewportContentHeight, buildSealedStaticItems, MessageHeightCache } from "./message-viewport.ts";
+import { estimateViewportContentHeight, buildSealedStaticItems, streamingAssistantRows, MessageHeightCache } from "./message-viewport.ts";
 import { resolveTuiLayoutMode, type TuiLayoutMode } from "./layout-mode.ts";
+import { computeCommitBoundary, rowTexts, rowCountledCommitted } from "./stream-commit.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
@@ -181,6 +182,8 @@ type AppProps = {
    * native scrollback through it, bypassing Ink's frame pipeline.
    */
   writeStaticBurst?: (text: string) => void;
+  /** Ctrl+L: clear the visible screen while keeping the native scrollback. */
+  requestClearScreen?: () => void;
 };
 type ManagedAgent = DashboardAgent & {
   initialSessionId: string;
@@ -271,8 +274,12 @@ async function startupSessionCwd(projectCwd: string, request: StartupSessionRequ
   return resolveSessionWorkspaceCwd(projectCwd, session?.cwd);
 }
 
-function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSessionRequest, agentTools, allTools, agentToolsForCwd, allToolsForCwd, bgManagerForCwd, mcpStatuses, mcpTools, layoutMode, writeStaticBurst, agentId, initialSessionId, initialPrompt, active, dashboardOpen, onOpenDashboard, onCloseDashboard, onSnapshot, onWorkspaceChange }: AgentSessionAppProps): React.ReactElement | null {
+function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSessionRequest, agentTools, allTools, agentToolsForCwd, allToolsForCwd, bgManagerForCwd, mcpStatuses, mcpTools, layoutMode, writeStaticBurst, requestClearScreen, agentId, initialSessionId, initialPrompt, active, dashboardOpen, onOpenDashboard, onCloseDashboard, onSnapshot, onWorkspaceChange }: AgentSessionAppProps): React.ReactElement | null {
   const effectiveLayoutMode = layoutMode ?? resolveTuiLayoutMode();
+  // Document layout shares the inline burst pipeline; only its frame policy,
+  // live-text projection and paragraph-level streaming commits differ.
+  const isDocumentLayout = effectiveLayoutMode === "document";
+  const usesStreamChannel = effectiveLayoutMode === "inline" || isDocumentLayout;
   const { exit } = useApp();
   const { stdout } = useStdout();
   const [terminalSize, setTerminalSize] = useState(() => ({
@@ -625,9 +632,25 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     scrollTo: (offset) => dispatchRef.current({ type: "SCROLL_TO", offset }),
   }));
   const heightCacheRef = useLazyRef(() => new MessageHeightCache());
+  const scrollBackhintShownRef = useRef(false);
   const scrollBy = useCallback((delta: number) => {
+    // Inline layout: deep history lives in the terminal's native scrollback,
+    // not in the in-app window (which only covers the unsealed tail). Guide
+    // the user once when an upward page-up finds nothing left to scroll.
+    if (delta > 0 && usesStreamChannel && !scrollBackhintShownRef.current) {
+      const current = stateRef.current;
+      const max = current.maxScrollOffset ?? 0;
+      if (max <= 0 || current.scrollOffset >= max) {
+        scrollBackhintShownRef.current = true;
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "Scrolling history",
+          text: "Earlier replies live in the terminal's native scrollback — use the mouse wheel, trackpad, or your terminal's scroll-back shortcut. PgUp/PgDn page the live view; Ctrl+G returns to the bottom; Ctrl+L clears the screen.",
+        });
+      }
+    }
     smoothScrollRef.current.scrollBy(delta);
-  }, [smoothScrollRef]);
+  }, [smoothScrollRef, effectiveLayoutMode, dispatch]);
   const jumpToBottom = useCallback(() => {
     smoothScrollRef.current.jumpTo(0);
   }, [smoothScrollRef]);
@@ -1164,6 +1187,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   useKeyboardHandler({
     exit, abortRef, copyResolvedText, pasteImage: handlePasteImageRef, getPermissionManager,
     adjustThinkingLevel, resolvePendingPermission, dispatch, scrollBy, jumpToBottom,
+    clearScreen: requestClearScreen,
     acMode, state, feedHeight, handleAutocompleteKey, historyRef,
     suppressInputEchoRef, pendingPermissionRef,
     bgPanelOpen, onCloseBgPanel: () => setBgPanelOpen(false),
@@ -2121,7 +2145,10 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   }
 
   const sealedStatic = useMemo(() => {
-    if (effectiveLayoutMode !== "inline") return { sealedCount: 0, items: [] };
+    // The sealed split requires the burst channel: without an emitter (tests
+    // render App directly, alternate layout), every row must stay in the
+    // dynamic frame or sealed history would vanish from the screen entirely.
+    if (!usesStreamChannel || !writeStaticBurst) return { sealedCount: 0, items: [] };
     return buildSealedStaticItems({
       messages: state.messages,
       width: termWidth,
@@ -2135,6 +2162,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     });
   }, [
     effectiveLayoutMode,
+    writeStaticBurst,
     state.messages,
     termWidth,
     state.thinkingMode,
@@ -2145,12 +2173,28 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     state.toolRevision,
   ]);
 
+  // Document layout ledger: rows of the streaming assistant projection that
+  // were already appended to the stream. Sealing the finalized message must
+  // only emit the uncommitted remainder (longest-common-prefix dedup).
+  const streamLedgerRef = useRef({ offset: 0, rowCount: 0, width: 0, lastText: "", texts: [] as string[] });
+
+  // Render-side floor for the live text block: identical pure computation the
+  // commit effect performs, so the frame tail and the stream never overlap.
+  // Without the burst channel (tests render App directly) nothing may be
+  // sliced out of the frame or the streamed rows would vanish.
+  const committedStreamingRows = isDocumentLayout && writeStaticBurst && state.streamingText
+    ? streamingAssistantRows(state.streamingText.slice(0, computeCommitBoundary(state.streamingText)), {
+      width: termWidth,
+      thinkingMode: state.thinkingMode,
+    }).length
+    : 0;
+
   // Emit newly sealed transcript rows into the native scrollback. Layout
   // effects run synchronously after the commit but before Ink's throttled
   // frame render, so the burst lands above the frame that follows it.
   const emittedStaticRef = useRef({ generation: -1, count: 0 });
   useLayoutEffect(() => {
-    if (effectiveLayoutMode !== "inline" || !writeStaticBurst) return;
+    if (!usesStreamChannel || !writeStaticBurst) return;
     const tracked = emittedStaticRef.current;
     const generation = sealedGenerationRef.current.generation;
     if (tracked.generation !== generation) {
@@ -2158,12 +2202,60 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       tracked.count = 0;
     }
     if (sealedStatic.items.length <= tracked.count) return;
-    const burst = formatSealedRowsText(
-      sealedStatic.items.slice(tracked.count).flatMap((item) => item.rows),
-    );
-    if (burst) writeStaticBurst(burst);
+    const pending = sealedStatic.items.slice(tracked.count);
     tracked.count = sealedStatic.items.length;
-  }, [effectiveLayoutMode, writeStaticBurst, sealedStatic]);
+    const ledger = streamLedgerRef.current;
+    for (const item of pending) {
+      let rows = item.rows;
+      if (isDocumentLayout && item.kind === "assistant" && ledger.texts.length > 0) {
+        // The streamed prefix is already frozen in the scrollback; skip it.
+        const overlap = rowCountledCommitted(rowTexts(rows), ledger.texts);
+        if (overlap > 0) rows = rows.slice(overlap);
+        ledger.offset = 0;
+        ledger.rowCount = 0;
+        ledger.texts = [];
+        ledger.lastText = "";
+      }
+      const burst = formatSealedRowsText(rows);
+      if (burst) writeStaticBurst(burst);
+    }
+  }, [usesStreamChannel, isDocumentLayout, writeStaticBurst, sealedStatic]);
+
+  // Document layout: append closed streaming paragraphs into the terminal
+  // stream as they complete (fences/tables held back by computeCommitBoundary
+  // until the block closes), so the whole conversation scrolls as one flow.
+  useLayoutEffect(() => {
+    if (!isDocumentLayout || !writeStaticBurst) return;
+    const ledger = streamLedgerRef.current;
+    const text = state.streamingText;
+    if (!text) return;
+    if (!text.startsWith(ledger.lastText)) {
+      // Fresh stream generation (previous turn consumed or interrupted).
+      ledger.offset = 0;
+      ledger.rowCount = 0;
+      ledger.texts = [];
+      ledger.width = termWidth;
+    }
+    ledger.lastText = text;
+    const project = (upto: number) =>
+      streamingAssistantRows(text.slice(0, upto), { width: termWidth, thinkingMode: state.thinkingMode });
+    if (ledger.width !== termWidth) {
+      // Width flip mid-stream: rows already frozen keep their old wrap;
+      // rebaseline the ledger so the live floor and dedup stay aligned.
+      ledger.width = termWidth;
+      const base = project(ledger.offset);
+      ledger.rowCount = base.length;
+      ledger.texts = rowTexts(base);
+    }
+    const boundary = computeCommitBoundary(text);
+    if (boundary <= ledger.offset) return;
+    const rows = project(boundary);
+    const fresh = rows.slice(ledger.rowCount);
+    ledger.offset = boundary;
+    ledger.rowCount = rows.length;
+    ledger.texts = rowTexts(rows);
+    if (fresh.length > 0) writeStaticBurst(formatSealedRowsText(fresh));
+  }, [isDocumentLayout, writeStaticBurst, state.streamingText, termWidth, state.thinkingMode]);
 
   const viewportContentHeight = estimateViewportContentHeight({
     messages: state.messages,
@@ -2176,6 +2268,8 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     // Sealed rows live in the terminal's native scrollback (inline mode);
     // scroll accounting covers only the dynamic frame's transcript.
     historyStartIndex: sealedStatic.sealedCount,
+    documentMode: isDocumentLayout,
+    committedStreamingRows,
     // Estimate against the FULL canonical transcript (no 500 cap) so the scroll
     // offset/scrollback math covers the entire history the user can page back
     // through, matching Antigravity-style scrolling.
@@ -2229,7 +2323,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   if (!active || dashboardOpen) return null;
 
   return (
-    <Box flexDirection="column" width={termWidth} height={termHeight} overflow="hidden">
+    <Box flexDirection="column" width={termWidth} height={isDocumentLayout ? undefined : termHeight} overflow="hidden">
       {/* Inline layout emits sealed transcript blocks directly through the
           renderer's static-burst channel (see writeStaticBurst); the dynamic
           frame never re-renders them. */}
@@ -2269,6 +2363,8 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           width={termWidth}
           scrollOffset={state.scrollOffset}
           historyStartIndex={sealedStatic.sealedCount}
+          documentMode={isDocumentLayout}
+          committedStreamingRows={committedStreamingRows}
           showHistoryHints
           heightCache={heightCacheRef.current}
         />

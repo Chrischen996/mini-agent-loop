@@ -153,7 +153,8 @@ async function runMain(): Promise<void> {
         mcpStatuses={() => mcpRuntime.statuses()}
         mcpTools={() => mcpRuntime.snapshot()}
         layoutMode={layoutMode}
-        writeStaticBurst={layoutMode === "inline" ? (text: string) => incrementalRenderer.emitStaticBurst(text) : undefined}
+        writeStaticBurst={layoutMode === "inline" || layoutMode === "document" ? (text: string) => incrementalRenderer.emitStaticBurst(text) : undefined}
+        requestClearScreen={() => incrementalRenderer.clearScreen()}
       />,
       { stdout: incrementalStdout, stdin: terminalStdin },
     );

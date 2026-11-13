@@ -61,6 +61,8 @@ type LiveBlocksKey = {
   busy: boolean;
   thinkingMode: ThinkingDisplayMode;
   width: number;
+  documentMode: boolean;
+  committedStreamingRows: number;
 };
 
 type LiveBlocksEntry = {
@@ -235,7 +237,9 @@ export class MessageHeightCache {
       previous.streamingReasoning === key.streamingReasoning &&
       previous.busy === key.busy &&
       previous.thinkingMode === key.thinkingMode &&
-      previous.width === key.width
+      previous.width === key.width &&
+      previous.documentMode === key.documentMode &&
+      previous.committedStreamingRows === key.committedStreamingRows
     ) return this.liveEntry!.blocks;
     const blocks = build();
     this.liveEntry = { key, blocks };
@@ -301,9 +305,9 @@ export class MessageHeightCache {
   }
 }
 
-// ─── sealed transcript prefix (inline `<Static>` scrollback) ─────────────────
+// ─── sealed transcript prefix (native-scrollback layouts) ───────────────────
 
-export type SealedStaticItem = { index: number; rows: PhysicalRow[] };
+export type SealedStaticItem = { index: number; kind: ChatMessage["kind"]; rows: PhysicalRow[] };
 
 export type SealOverlays = {
   subagentById?: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>>;
@@ -341,6 +345,18 @@ export function sealedTranscriptCount(messages: readonly ChatMessage[], overlays
   return count;
 }
 
+export function streamingAssistantRows(
+  streamingText: string,
+  options: { width: number; thinkingMode: ThinkingDisplayMode },
+): PhysicalRow[] {
+  return messagePhysicalRows({ kind: "assistant", text: streamingText }, -1, {
+    width: options.width,
+    thinkingMode: options.thinkingMode,
+    expanded: false,
+    focused: false,
+  });
+}
+
 function computeSealedStaticItems(
   messages: ChatMessage[],
   options: {
@@ -368,7 +384,7 @@ function computeSealedStaticItems(
         expanded: expanded.has(index),
         focused: false,
       });
-    items.push({ index, rows });
+    items.push({ index, kind: resolved.kind, rows });
     sealedCount += 1;
   }
   return { sealedCount, items };
@@ -426,6 +442,10 @@ function buildBlocks(options: {
   maxMessages: number;
   /** First transcript index owned by the dynamic frame; earlier rows are sealed. */
   historyStartIndex?: number;
+  /** Document layout: live text renders the committed-prefix projection minus streamed rows. */
+  documentMode?: boolean;
+  /** Rows of the streaming assistant projection already appended to the stream. */
+  committedStreamingRows?: number;
   cache?: MessageHeightCache;
   subagentById?: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>>;
   toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>;
@@ -470,16 +490,30 @@ function buildBlocks(options: {
       });
     }
     if (options.streamingText) {
-      const textRows = streamingPhysicalRows({
-        streamingText: options.streamingText,
-        streamingReasoning: "",
-        busy: options.busy,
-        width: options.width,
-        reasoningMode: options.thinkingMode,
-      });
-      const topMargin = options.streamingReasoning ? 0 : 1;
-      const rows = [...(topMargin ? [gapRow("live-gap-text")] : []), ...textRows];
-      live.push({ item: { kind: "streaming_text" }, height: Math.max(1, rows.length), rows });
+      if (options.documentMode) {
+        // Document layout: the live block renders the SAME full-markdown
+        // projection the commit channel appends, minus the rows already
+        // frozen into the stream. Only the growing tail (open paragraph,
+        // unclosed table/fence) stays live in the frame.
+        const allRows = streamingAssistantRows(options.streamingText, {
+          width: options.width,
+          thinkingMode: options.thinkingMode,
+        });
+        const floor = Math.min(options.committedStreamingRows ?? 0, allRows.length);
+        const rows = allRows.slice(floor);
+        live.push({ item: { kind: "streaming_text" }, height: Math.max(1, rows.length), rows });
+      } else {
+        const textRows = streamingPhysicalRows({
+          streamingText: options.streamingText,
+          streamingReasoning: "",
+          busy: options.busy,
+          width: options.width,
+          reasoningMode: options.thinkingMode,
+        });
+        const topMargin = options.streamingReasoning ? 0 : 1;
+        const rows = [...(topMargin ? [gapRow("live-gap-text")] : []), ...textRows];
+        live.push({ item: { kind: "streaming_text" }, height: Math.max(1, rows.length), rows });
+      }
     }
     if (options.busy) {
       const topMargin = options.streamingReasoning || options.streamingText ? 0 : 1;
@@ -495,6 +529,8 @@ function buildBlocks(options: {
       busy: options.busy,
       thinkingMode: options.thinkingMode,
       width: options.width,
+      documentMode: options.documentMode ?? false,
+      committedStreamingRows: options.committedStreamingRows ?? 0,
     }, buildLiveBlocks)
     : buildLiveBlocks();
   const liveTotalHeight = liveBlocks.reduce((sum, block) => sum + block.height, 0);
@@ -582,6 +618,10 @@ export function selectMessageViewport(options: {
    * from scroll accounting, hints, and the rendered frame.
    */
   historyStartIndex?: number;
+  /** Document layout: live text renders the committed-prefix projection minus streamed rows. */
+  documentMode?: boolean;
+  /** Rows of the streaming assistant projection already appended to the stream. */
+  committedStreamingRows?: number;
   /** Renderers may hide the hint row while retaining scroll accounting. */
   showHistoryHints?: boolean;
   /** Optional per-message height cache for completed history blocks. */

@@ -135,6 +135,10 @@ type MessageFeedProps = {
    * mode) and must not be re-rendered here.
    */
   historyStartIndex?: number;
+  /** Document layout: live text renders the full-markdown projection minus streamed rows. */
+  documentMode?: boolean;
+  /** Rows of the streaming assistant projection already appended to the stream. */
+  committedStreamingRows?: number;
   /** Rows available for the feed after chrome (header/input/status). */
   availableHeight?: number;
   /** Terminal width used for wrap-aware height estimates. */
@@ -174,6 +178,8 @@ export function MessageFeed({
   todoPanelVisible = false,
   maxMessages = Number.MAX_SAFE_INTEGER,
   historyStartIndex = 0,
+  documentMode = false,
+  committedStreamingRows = 0,
   availableHeight = 20,
   width = 80,
   scrollOffset = 0,
@@ -203,6 +209,8 @@ export function MessageFeed({
     width,
     maxMessages,
     historyStartIndex,
+    documentMode,
+    committedStreamingRows,
     showHistoryHints,
     cache: heightCache,
     subagentById,

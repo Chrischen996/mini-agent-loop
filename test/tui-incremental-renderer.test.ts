@@ -300,6 +300,26 @@ describe("incremental renderer inline mode", () => {
     assert.ok(!painted.includes("a\n"), "unchanged first row is not rewritten");
   });
 
+  it("clearScreen wipes the visible screen and repaints the frame below", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+    renderer.write("a\nb\nc");
+    renderer.write("a\nb\nx");
+    output.writes.length = 0;
+
+    renderer.clearScreen();
+    const cleared = output.writes.join("");
+    assert.ok(cleared.includes("\x1b[2J\x1b[H"), "clear screen then home");
+    assert.match(cleared, /\x1b\[8;1H\x1b\[2Ka/);
+    assert.match(cleared, /\x1b\[9;1H\x1b\[2Kb/);
+    assert.match(cleared, /\x1b\[10;1H\x1b\[2Kx/);
+
+    // The repaint becomes the diff baseline again: unchanged frames write nothing.
+    output.writes.length = 0;
+    renderer.write("a\nb\nx\n");
+    assert.deepEqual(output.writes, [], "post-clear frames diff against the repainted baseline");
+  });
+
   it("keeps the legacy trailing-newline-as-frame behavior in alternate mode", () => {
     const output = sizedSink(10);
     const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "alternate" });

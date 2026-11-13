@@ -41,13 +41,14 @@ export class IncrementalTerminalRenderer {
   private lastTerminalRows = 0;
   /** Inline mode: absolute 1-based screen row of the dynamic frame's top line. */
   private frameTopRow: number | undefined;
+  /** Anchor-to-main-screen pipeline flag: true for inline AND document layouts. */
   private readonly inline: boolean;
 
   constructor(
     private readonly target: WriteStream,
     options: { mode?: TuiLayoutMode } = {},
   ) {
-    this.inline = options.mode === "inline";
+    this.inline = options.mode === "inline" || options.mode === "document";
   }
 
   write(data: string): boolean {
@@ -261,6 +262,26 @@ export class IncrementalTerminalRenderer {
       this.target.write(output);
     }
     return output;
+  }
+
+  /**
+   * Clear the visible screen while keeping the terminal's scrollback intact,
+   * then repaint the current dynamic frame. Mirrors the `Ctrl+L` behavior of
+   * terminal-first agents: the sealed transcript above stays reachable in the
+   * native scrollback, and the frame re-anchors fresh.
+   *
+   * The repaint is driven from the saved frame content because Ink skips
+   * writes for unchanged output — after a screen clear there is nothing on
+   * screen to diff against, so the renderer must restore its own baseline.
+   */
+  clearScreen(): void {
+    const previous = this.previousLines ? [...this.previousLines] : [];
+    this.target.write(`${ANSI_CLEAR_TERMINAL}\x1b[H`);
+    this.previousLines = undefined;
+    this.frameTopRow = undefined;
+    this.lastTerminalRows = 0;
+    this.forceRedrawOnNextFrame = false;
+    if (previous.length > 0) this.renderRows(previous, true);
   }
 
   reset(): void {

@@ -532,16 +532,19 @@ export function buildTerminalRenderLines(
 }
 ```
 
-### 7.3 布局模式与静态分流（inline / alternate）
+### 7.3 布局模式与静态分流（inline / document / alternate）
 
 终端布局由环境变量 `MINI_AGENT_TUI_LAYOUT` 在启动时选择（`src/tui/layout-mode.ts`）：
 
-- **`alternate`（默认）**：整 UI 运行在备用屏幕缓冲（`ESC[?1049h`），退出后不污染 shell 滚屏历史；鼠标跟踪开启，滚轮/PageUp 在应用内滚动历史。
-- **`inline`**：UI 运行在主屏幕缓冲。已“定型”的会话前缀（user / assistant / notice / error / 已完成的 tool_call；subagent 卡片永远保持动态）通过渲染器的 `emitStaticBurst()` 直接写入终端**原生 scrollback**——滚轮/搜索/复制走终端原生能力，退出后历史保留。鼠标跟踪关闭以让滚轮自然滚动 scrollback。
+- **`inline`（默认）**：UI 运行在主屏幕缓冲。已“定型”的会话前缀（user / assistant / notice / error / 已完成的 tool_call；subagent 卡片永远保持动态）通过渲染器的 `emitStaticBurst()` 直接写入终端**原生 scrollback**——滚轮/搜索/复制走终端原生能力，退出后历史保留。鼠标跟踪关闭以让滚轮自然滚动 scrollback。
+- **`document`（实验，别名 `doc`/`flow`/`insert`）**：完全文档流（aider / Codex insert 风格）——没有任何钉住的区域。流式回复按**段落闭合**逐段追加进终端流（`src/tui/stream-commit.ts` 的 `computeCommitBoundary`：未闭合的 ``` 围栏 / 表格扣在窗口内不发射，保证 scrollback 保真），动态帧只剩“正在长的尾部 + 输入框”，因此滚轮上下滚动时**整个对话（包括输入框所在位置）作为一个连续文档一起移动**。消息定型时用最长公共行前缀去重（`rowCountledCommitted`），已流出的行不会在 seal 时重复打印。流式文本在 document 模式下直接渲染完整 markdown 投影（`streamingAssistantRows`），不再是压缩预览。
+- **`alternate`（备选/回退）**：整 UI 运行在备用屏幕缓冲（`ESC[?1049h`），退出后不污染 shell 滚屏历史；鼠标跟踪开启，滚轮/PageUp 在应用内滚动历史。用 `MINI_AGENT_TUI_LAYOUT=alternate` 一键回退。
+
+静态分流与 burst 通道强绑定：宿主未提供 `writeStaticBurst`（如测试直接渲染 `App`）时自动退回“全部动态渲染”，不会丢行。
 
 关键机制：
 
-- 渲染器（`IncrementalTerminalRenderer`）在 inline 模式下维护只向下移动的帧锚点 `frameTopRow`：静态突发写在锚点处并推进锚点，动态帧从锚点向下重绘；帧超出屏幕底部时先在底行发出差额滚动（deficit scroll），把先前内容推入 scrollback 再重绘。
+- 渲染器（`IncrementalTerminalRenderer`）在 inline / document 模式下维护只向下移动的帧锚点 `frameTopRow`：静态突发写在锚点处并推进锚点，动态帧从锚点向下重绘；帧超出屏幕底部时先在底行发出差额滚动（deficit scroll），把先前内容推入 scrollback 再重绘。document 模式复用同一锚点管线，只是帧内容缩小为“未提交尾部 + chrome”，帧根不再固定为整屏高（`height=undefined`）。
 - 静态突发由 App 在 layout effect 中发射（`writeStaticBurst` prop → `emitStaticBurst`），绕过 Ink 的写入管线——Ink 的 log-update 给每个动态帧追加尾随换行，使得按写入形状分类静态/动态不可靠。发射位置按会话代际（transcript generation）追踪：数组追加式增长沿用，RESET / 恢复会话 / 回滚则从头重发。
 - 定型行的视口排除由 `selectMessageViewport({ historyStartIndex })` 完成：滚动核算、history hint 与渲染都只覆盖未定型尾部，行级缓存在定型/动态两侧共享，滚动簿记不再计入已进入 scrollback 的行。
 - 慢帧/闪烁监控（`src/tui/perf-monitor.ts`）：渲染器逐帧上报耗时与重绘行；`MINI_AGENT_SLOW_FRAME_MS`（默认 200）定义慢帧阈值，同一物理行 1 秒内重绘 ≥12 次记为闪烁嫌疑；`MINI_AGENT_RENDER_STATS=1` 在进程退出时向 stderr 打印汇总。

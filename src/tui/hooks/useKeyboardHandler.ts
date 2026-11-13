@@ -19,6 +19,8 @@ export type UseKeyboardHandlerDeps = {
   dispatch: Dispatch<TuiAction>;
   scrollBy?: (delta: number) => void;
   jumpToBottom?: () => void;
+  /** Ctrl+L: clear the visible screen, keep the native scrollback, repaint the frame. */
+  clearScreen?: () => void;
   acMode: string | null;
   state: { busy: boolean; pendingPermission?: unknown; phase: string; currentPlan?: { id: string } };
   feedHeight: number;
@@ -38,7 +40,7 @@ export type UseKeyboardHandlerDeps = {
 export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
   const {
     exit, abortRef, copyResolvedText, pasteImage, getPermissionManager, historyRef,
-    adjustThinkingLevel, resolvePendingPermission, dispatch, scrollBy, jumpToBottom,
+    adjustThinkingLevel, resolvePendingPermission, dispatch, scrollBy, jumpToBottom, clearScreen,
     acMode, state, feedHeight, handleAutocompleteKey,
     suppressInputEchoRef, pendingPermissionRef, bgPanelOpen, onCloseBgPanel,
     backgroundForegroundTask,
@@ -190,6 +192,15 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
 
     // Scrolling
     if (!acMode && !dashboardOpen) {
+      // Ctrl+L clears the visible screen like the released TUIs: the sealed
+      // transcript stays reachable in the terminal's native scrollback and
+      // the dynamic frame is repainted fresh. Raw terminals deliver the form
+      // feed byte; Ink surfaces `ctrl` + letter for the rest.
+      if ((key.ctrl && (_ch === "l" || _ch === "L")) || _ch === "\u000c") {
+        suppressInputEchoRef.current = true;
+        clearScreen?.();
+        return;
+      }
       if (key.pageUp) {
         requestScroll(Math.max(1, feedHeight - 2));
         return;
