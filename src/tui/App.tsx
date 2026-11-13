@@ -83,7 +83,7 @@ import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./l
 import { inputContainerBorderColor, usesInputBorder } from "./input-container.ts";
 import { estimateViewportContentHeight, buildSealedStaticItems, streamingAssistantRows, MessageHeightCache } from "./message-viewport.ts";
 import { resolveTuiLayoutMode, type TuiLayoutMode } from "./layout-mode.ts";
-import { computeCommitBoundary, rowTexts, rowCountledCommitted } from "./stream-commit.ts";
+import { computeCommitBoundary, rowTexts, rowCountledCommitted, collectResizeRefreshRows } from "./stream-commit.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
@@ -2269,6 +2269,37 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     ledger.texts = rowTexts(rows);
     if (fresh.length > 0) writeStaticBurst(formatSealedRowsText(fresh));
   }, [isDocumentLayout, writeStaticBurst, state.streamingText, termWidth, state.thinkingMode]);
+
+  // Resize refresh (gemini-cli style): when the terminal WIDTH changes, the
+  // rows already frozen into the scrollback carry a stale wrap. Re-print the
+  // newest window (at least one screen, budget-capped) at the new width;
+  // older copies remain in the scrollback, the visible region becomes
+  // correct again. Document mode additionally refreshes the committed
+  // streaming prefix so the in-flight message stays readable.
+  const resizeRefreshRef = useRef(termWidth);
+  useLayoutEffect(() => {
+    // Inactive sessions must not print into the shared terminal; when the
+    // session later activates with a changed width, this effect fires the
+    // refresh once (the ref intentionally stays stale while inactive).
+    if (!active || !usesStreamChannel || !writeStaticBurst) return;
+    if (resizeRefreshRef.current === termWidth) return;
+    resizeRefreshRef.current = termWidth;
+    if (sealedStatic.items.length > 0) {
+      const window = collectResizeRefreshRows(sealedStatic.items, { minRows: termHeight });
+      if (window.length > 0) writeStaticBurst(formatSealedRowsText(window));
+    }
+    if (isDocumentLayout && state.streamingText) {
+      const boundary = computeCommitBoundary(state.streamingText);
+      if (boundary > 0) {
+        const rows = streamingAssistantRows(state.streamingText.slice(0, boundary), {
+          width: termWidth,
+          thinkingMode: state.thinkingMode,
+        });
+        const tail = rows.slice(Math.max(0, rows.length - termHeight));
+        if (tail.length > 0) writeStaticBurst(formatSealedRowsText(tail));
+      }
+    }
+  }, [active, usesStreamChannel, isDocumentLayout, writeStaticBurst, termWidth, termHeight, sealedStatic, state.streamingText, state.thinkingMode]);
 
   const viewportContentHeight = estimateViewportContentHeight({
     messages: state.messages,

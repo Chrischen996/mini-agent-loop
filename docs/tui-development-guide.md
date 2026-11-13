@@ -546,6 +546,7 @@ export function buildTerminalRenderLines(
 
 - 渲染器（`IncrementalTerminalRenderer`）在 inline / document 模式下维护只向下移动的帧锚点 `frameTopRow`：静态突发写在锚点处并推进锚点，动态帧从锚点向下重绘；帧超出屏幕底部时先在底行发出差额滚动（deficit scroll），把先前内容推入 scrollback 再重绘。document 模式复用同一锚点管线，只是帧内容缩小为“未提交尾部 + chrome”，帧根不再固定为整屏高（`height=undefined`）。
 - 静态突发由 App 在 layout effect 中发射（`writeStaticBurst` prop → `emitStaticBurst`），绕过 Ink 的写入管线——Ink 的 log-update 给每个动态帧追加尾随换行，使得按写入形状分类静态/动态不可靠。发射位置按会话代际（transcript generation）追踪：数组追加式增长沿用，RESET / 恢复会话 / 回滚则从头重发。
+- **resize 重打（gemini-cli 同款）**：终端宽度变化时，App 用 `collectResizeRefreshRows` 从新到旧收集最近定型行（至少覆盖一屏，字符预算 `RESIZE_REFRESH_MAX_CHARS = 1000`），按新宽度重新 burst 进流；更早的旧副本留在 scrollback 里保持原换行。document 模式还会重打当前流式消息已提交前缀的新宽度尾部。非活动会话不打印，激活后若宽度已变会补发一次。
 - 定型行的视口排除由 `selectMessageViewport({ historyStartIndex })` 完成：滚动核算、history hint 与渲染都只覆盖未定型尾部，行级缓存在定型/动态两侧共享，滚动簿记不再计入已进入 scrollback 的行。
 - 慢帧/闪烁监控（`src/tui/perf-monitor.ts`）：渲染器逐帧上报耗时与重绘行；`MINI_AGENT_SLOW_FRAME_MS`（默认 200）定义慢帧阈值，同一物理行 1 秒内重绘 ≥12 次记为闪烁嫌疑；`MINI_AGENT_RENDER_STATS=1` 在进程退出时向 stderr 打印汇总。
 - 字符串宽度缓存（`terminal-width.ts`）：grapheme 级与整行级双层记忆化，CJK/emoji 场景每帧宽度计算从 O(字符) 降为查表；缓存有界（超限整体清空），`clearTerminalWidthCaches()` 供测试使用。

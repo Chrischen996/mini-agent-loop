@@ -55,6 +55,40 @@ export function rowTexts(rows: readonly { text: string }[]): string[] {
   return rows.map((row) => row.text);
 }
 
+/** Character budget for the resize refresh window, mirroring gemini-cli's RESIZE_REFRESH_MAX_HISTORY_CHARS. */
+export const RESIZE_REFRESH_MAX_CHARS = 1000;
+
+/**
+ * Window of rows to re-print after a terminal WIDTH change (gemini-cli's
+ * resize refresh): accumulate newest-to-oldest until at least one screen of
+ * rows is covered AND the character budget is exceeded. Older rows stay in
+ * the scrollback with their original wrap — duplicated but stale; the
+ * visible region becomes correct again.
+ *
+ * Returns the collected rows in chronological order.
+ */
+export function collectResizeRefreshRows<T extends { text: string }>(
+  items: readonly { rows: readonly T[] }[],
+  options: { minRows: number; maxChars?: number },
+): T[] {
+  const maxChars = options.maxChars ?? RESIZE_REFRESH_MAX_CHARS;
+  const minRows = Math.max(1, options.minRows);
+  const window: T[] = [];
+  let rows = 0;
+  let chars = 0;
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const itemRows = items[i]!.rows;
+    for (let j = itemRows.length - 1; j >= 0; j -= 1) {
+      const row = itemRows[j]!;
+      window.unshift(row);
+      rows += 1;
+      chars += row.text.length;
+      if (rows >= minRows && chars >= maxChars) return window;
+    }
+  }
+  return window;
+}
+
 /**
  * Length of the longest common prefix of two row-text sequences — the number
  * of finalized rows already present in the stream (skip them on flush).

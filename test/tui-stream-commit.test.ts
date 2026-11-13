@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { computeCommitBoundary, rowCountledCommitted, rowTexts } from "../src/tui/stream-commit.ts";
+import { computeCommitBoundary, rowCountledCommitted, rowTexts, collectResizeRefreshRows } from "../src/tui/stream-commit.ts";
 import { selectMessageViewport, streamingAssistantRows } from "../src/tui/message-viewport.ts";
 import { IncrementalTerminalRenderer } from "../src/tui/incremental-renderer.ts";
 import { resolveTuiLayoutMode } from "../src/tui/layout-mode.ts";
@@ -162,6 +162,42 @@ describe("headerStaticText (document layout header burst)", () => {
   it("omits missing model/cwd segments", () => {
     const line = headerStaticText({ width: 80 });
     assert.equal(line.split("\x1b[").length - 1, 2, "one segment: open + reset");
+
+describe("collectResizeRefreshRows (gemini-style resize refresh)", () => {
+  const rows = (prefix: string, n: number, textLen = 40) =>
+    Array.from({ length: n }, (_, i) => ({ text: `${prefix}${i}x`.padEnd(textLen, "x") }));
+
+  it("returns nothing for empty items", () => {
+    assert.deepEqual(collectResizeRefreshRows([], { minRows: 10 }), []);
+  });
+
+  it("covers at least one screen even when the char budget is small", () => {
+    const items = [{ rows: rows("r", 30) }];
+    const window = collectResizeRefreshRows(items, { minRows: 10, maxChars: 10 });
+    assert.ok(window.length >= 10, "one screen minimum wins over the budget");
+  });
+
+  it("keeps accumulating past one screen with short rows until the char budget", () => {
+    const items = [{ rows: rows("s", 50, 5) }];
+    const window = collectResizeRefreshRows(items, { minRows: 5, maxChars: 100 });
+    assert.ok(window.length >= 20, "short rows need more lines to hit the budget");
+    assert.ok(window.length < 50, "and it stops before the full history");
+  });
+
+  it("returns chronological order across items", () => {
+    const items = [{ rows: rows("a", 2) }, { rows: rows("b", 2) }, { rows: rows("c", 2) }];
+    const window = collectResizeRefreshRows(items, { minRows: 6, maxChars: 100_000 });
+    assert.deepEqual(window.map((row) => row.text[0]), ["a", "a", "b", "b", "c", "c"]);
+  });
+
+  it("includes the newest item fully before any budget stop", () => {
+    const items = [{ rows: rows("o", 3) }, { rows: rows("n", 40, 60) }];
+    const window = collectResizeRefreshRows(items, { minRows: 5, maxChars: 100 });
+    assert.equal(window[window.length - 1]!.text[0], "n");
+    assert.ok(window.filter((row) => row.text[0] === "n").length >= 5);
+  });
+});
+
   });
 });
 
