@@ -1075,7 +1075,7 @@ async function main(): Promise<void> {
       if (!goalIntent.objective && !parsedPrompt) return;
     }
   } else if (goalIntent) {
-    console.error("Goals are disabled. Set MINI_AGENT_GOALS=1 to enable them.");
+    console.error("Goals are disabled by MINI_AGENT_GOALS=0. Remove that override to enable them.");
     return;
   }
   const globalTokenBudget = loadGlobalTokenBudgetFromEnv();

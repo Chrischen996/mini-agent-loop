@@ -1623,7 +1623,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
     });
   });
 
-  /** Persistent thread goal, opt-in via MINI_AGENT_GOALS=1. */
+  /** Persistent thread goal; enabled by default, disable via MINI_AGENT_GOALS=0. */
   app.get("/api/sessions/:id/goal", async (request, response) => {
     const session = sessions.get(request.params.id);
     if (!session) { response.status(404).json({ error: "Session not found" }); return; }

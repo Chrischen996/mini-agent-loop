@@ -1281,7 +1281,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     if (goalCommand) {
       setInput("");
       if (!goalConfig.enabled) {
-        dispatch({ type: "ADD_NOTICE", title: "Goals", text: "Goals are disabled. Set MINI_AGENT_GOALS=1 to enable them." });
+        dispatch({ type: "ADD_NOTICE", title: "Goals", text: "Goals are disabled by MINI_AGENT_GOALS=0. Remove that override to enable them." });
         return;
       }
       const goalSession = getGoalSession();

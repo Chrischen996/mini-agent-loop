@@ -144,8 +144,10 @@ describe("goal tools", () => {
 });
 
 describe("goal config", () => {
-  it("resolves the opt-in flag and budget ceilings", () => {
-    assert.equal(resolveGoalConfig({}).enabled, false);
+  it("resolves the goal feature flag (default-on) and budget ceilings", () => {
+    assert.equal(resolveGoalConfig({}).enabled, true);
+    assert.equal(resolveGoalConfig({ MINI_AGENT_GOALS: "0" } as unknown as NodeJS.ProcessEnv).enabled, false);
+    assert.equal(resolveGoalConfig({ MINI_AGENT_GOALS: "off" } as unknown as NodeJS.ProcessEnv).enabled, false);
     const config = resolveGoalConfig({
       MINI_AGENT_GOALS: "1",
       MINI_AGENT_GOAL_MAX_TOKEN_BUDGET: "5000",

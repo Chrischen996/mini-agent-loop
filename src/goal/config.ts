@@ -19,17 +19,21 @@ export type GoalSessionContext = {
   tools: Tool[];
 };
 
-const TRUE_VALUES = new Set(["1", "true", "yes", "on"]);
-
 function parsePositiveInteger(value: string | undefined): number | undefined {
   if (!value) return undefined;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-/** Opt-in feature resolution shared by CLI, TUI, and server. Default: disabled. */
+/**
+ * Goal feature resolution shared by CLI, TUI, and server.
+ * Default: ENABLED (setting a goal just works). Opt out explicitly with
+ * `MINI_AGENT_GOALS=0|false|no|off`. Steering/auto-continuation only ever
+ * activates while an *active* goal exists, so the default-on path is inert.
+ */
 export function resolveGoalConfig(env: NodeJS.ProcessEnv = process.env): GoalFeatureConfig {
-  const enabled = TRUE_VALUES.has((env.MINI_AGENT_GOALS ?? "").trim().toLowerCase());
+  const raw = (env.MINI_AGENT_GOALS ?? "").trim().toLowerCase();
+  const enabled = raw === "" ? true : !["0", "false", "no", "off"].includes(raw);
   return {
     enabled,
     maxGoalTokenBudget: parsePositiveInteger(env.MINI_AGENT_GOAL_MAX_TOKEN_BUDGET),
