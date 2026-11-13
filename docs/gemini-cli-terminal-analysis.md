@@ -153,3 +153,8 @@ mini-agent 目前定型行/已发行冻结旧换行、不重打；若 resize 后
 
 - ink 依赖是 fork：`"ink": "npm:@jrichman/ink@6.6.9"`，带 `StaticRender` 导出（terminalBuffer 路径的 backbuffer 打印原语）。
 - 三条渲染路径开关（`config/settingsSchema.ts`）：`useAlternateBuffer`（默认 false）、`terminalBuffer`（默认 false；`useAlternateBuffer.ts` 注释明言它将成为唯一路径）、否则 inline Static。`isAlternateBufferEnabled = alternate || terminalBuffer`——terminalBuffer 按 alt-buffer 特判处理，但其 VirtualizedList 配 `renderStatic` + `overflowToBackbuffer` 时 static 项打进 backbuffer、pending 项保持动态，架构上正向"整个会话是一条列表、完成项全部进终端流"收敛——与 mini-agent document 模式同一方向。
+
+
+### 5.5 主题选择（已移植）
+
+mini-agent 现在带 gemini 风格主题系统：`src/tui/theme.ts`（语义槽位 + 可变 `TUI_COLORS` 单例 + env/JSON 持久化选择 + `/theme` 命令）与 `src/tui/gemini-palettes.ts`（19 个 gemini 内建 ColorsTheme 块，由 `tools/extract-gemini-palettes.cjs` 从上游源码抽取）。ColorsTheme→槽位映射：assistant=Foreground、user=AccentBlue、thinking=AccentPurple、running=AccentYellow、success=AccentGreen、error=AccentRed、muted=Gray、gutter/border=DarkGray、userBg=MessageBackground、badgeText 按 type 取 Background/Foreground。`claude-dark`（原品牌色）保持默认。切换时借用 resize-refresh 通道重打最近一屏，可见历史即时换新色。

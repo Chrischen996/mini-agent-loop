@@ -803,21 +803,29 @@ describe("PromptInput", () => {
 
 ## 附录 A: 主题颜色
 
-```typescript
-export const TUI_COLORS = {
-  user: "cyan",
-  assistant: "white",
-  muted: "gray",
-  accent: "blue",
-  success: "green",
-  warning: "yellow",
-  error: "red",
-  running: "cyan",
-  background: "blue",
-  bashBorder: "cyan",
-  promptBorder: "white",
-};
-```
+`src/tui/theme.ts` 提供 gemini-cli 风格的**主题选择系统**（对齐其
+`packages/cli/src/ui/themes` 体系，颜色值经 `tools/extract-gemini-palettes.cjs`
+从 gemini 源码抽取到 `src/tui/gemini-palettes.ts`）。
+
+- **语义槽位**：`TUI_COLORS` 是可变单例（17 个槽位：`assistant/user/thinking/tool(info)/
+  running/success/error/muted/border/gutter/selection/userBg/inlineCodeBg/badgeText/
+  primary/planMode/inputBorder`）。Ink 组件与 ANSI 投影（`render-line-format.ts`）都在
+  绘制时读取它，所以 `applyTheme()` 即时换色、无需重挂载。
+- **主题表**：默认 `claude-dark`（历史 Claude 品牌色），外加 19 个 gemini 移植：
+  `gemini-dark / gemini-light / solarized-dark / solarized-light / tokyonight-dark /
+  dracula-dark / atom-one-dark / ayu-dark / ayu-light / github-dark / github-light /
+  github-*-colorblind / holiday-dark / shades-of-purple-dark / googlecode-light /
+  xcode-light / ansi-dark / ansi-light`。ColorsTheme → 语义槽位映射在 `derivePalette()`。
+- **颜色格式**：hex（`#rrggbb`/`#rgb`）走 truecolor；ANSI 色名（`"blue"`、`"bluebright"`）
+  发基本 16 色 SGR；空串（`ansi-*` 的 Foreground、no-color 语义）跳过颜色序列。
+- **选择顺序**（`initTheme()`，由 `ink-main.tsx` 在首帧前调用）：
+  `MINI_AGENT_THEME` 环境变量 → `~/.mini-agent/theme.json`（`/theme` 持久化）→ `claude-dark`。
+  测试进程不自动应用（import 无副作用），默认主题稳定。
+- **命令**：`/theme` 列出全部主题（❯ 标记当前）；`/theme <name>` 切换、持久化，并借用
+  resize-refresh 通道（`resizeRefreshRef = NaN`）把最近一屏历史按新配色重打——更早冻结
+  进 scrollback 的行保持旧色（与 gemini 静态历史同行为）。
+- **兼容**：`claude-dark` 下背景发原 256 色码（`48;5;236/24/178`，渲染器测试锚定）；
+  其他主题背景由槽位换算（truecolor `48;2;…` 或基本背景 `40-47/100-107`）。
 
 ## 附录 B: 渲染行类型
 

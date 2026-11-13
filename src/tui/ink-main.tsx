@@ -12,6 +12,7 @@ import { createIncrementalStdoutHandle } from "./incremental-renderer.ts";
 import { createTerminalStdin } from "./terminal-stdin.ts";
 import { disableMouseTracking, enableMouseTracking } from "./mouse-tracking.ts";
 import { resolveTuiLayoutMode } from "./layout-mode.ts";
+import { initTheme } from "./theme.ts";
 import {
   installRenderStatsReporting,
   resolveSlowFrameThresholdFromEnv,
@@ -177,6 +178,7 @@ async function runMain(): Promise<void> {
  * directly when running as the child process (MINI_AGENT_CHILD=1).
  */
 export async function main(): Promise<void> {
+  initTheme(); // MINI_AGENT_THEME / persisted selection before the first frame
   await runMain();
 }
 

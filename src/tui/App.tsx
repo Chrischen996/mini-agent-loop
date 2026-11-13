@@ -83,6 +83,7 @@ import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./l
 import { inputContainerBorderColor, usesInputBorder } from "./input-container.ts";
 import { estimateViewportContentHeight, buildSealedStaticItems, streamingAssistantRows, MessageHeightCache } from "./message-viewport.ts";
 import { resolveTuiLayoutMode, type TuiLayoutMode } from "./layout-mode.ts";
+import { applyTheme, persistThemeName, formatThemeListText, activeThemeName } from "./theme.ts";
 import { computeCommitBoundary, rowTexts, rowCountledCommitted, collectResizeRefreshRows } from "./stream-commit.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
@@ -1634,6 +1635,26 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       }
       setInput("");
       dispatch({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
+      return;
+    }
+
+    // /theme [name]: list or switch terminal color themes (gemini-cli style).
+    const themeCommandMatch = trimmed.match(/^\/theme(?:\s+(\S+))?$/i);
+    if (themeCommandMatch) {
+      const themeArg = themeCommandMatch[1]?.toLowerCase();
+      if (!themeArg) {
+        dispatch({ type: "ADD_NOTICE", title: "Theme", text: formatThemeListText() });
+      } else if (applyTheme(themeArg)) {
+        persistThemeName(themeArg);
+        // Re-print the recent stream window so visible history picks up the
+        // new palette; older frozen lines keep their old colors. NaN defeats
+        // the width-equality guard in the resize-refresh effect exactly once.
+        resizeRefreshRef.current = Number.NaN;
+        dispatch({ type: "ADD_NOTICE", title: "Theme", text: `Theme set to "${activeThemeName()}". Selection saved for next start.` });
+      } else {
+        dispatch({ type: "ADD_NOTICE", title: "Theme", text: `Unknown theme "${themeArg}".\n\n${formatThemeListText()}` });
+      }
+      setInput("");
       return;
     }
 
