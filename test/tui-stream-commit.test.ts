@@ -4,6 +4,7 @@ import { computeCommitBoundary, rowCountledCommitted, rowTexts } from "../src/tu
 import { selectMessageViewport, streamingAssistantRows } from "../src/tui/message-viewport.ts";
 import { IncrementalTerminalRenderer } from "../src/tui/incremental-renderer.ts";
 import { resolveTuiLayoutMode } from "../src/tui/layout-mode.ts";
+import { headerStaticText } from "../src/tui/components/Header.tsx";
 
 function sizedSink(rows: number, columns = 40) {
   const writes: string[] = [];
@@ -146,5 +147,23 @@ describe("resolveTuiLayoutMode", () => {
     assert.equal(resolveTuiLayoutMode({ MINI_AGENT_TUI_LAYOUT: "alt" }), "alternate");
     assert.equal(resolveTuiLayoutMode({ MINI_AGENT_TUI_LAYOUT: "inline" }), "inline");
   });
+
+describe("headerStaticText (document layout header burst)", () => {
+  it("renders one ANSI line with brand, model and cwd", () => {
+    const line = headerStaticText({ width: 80, modelName: "gpt-test", cwd: "/tmp/proj" });
+    assert.ok(!line.includes("\n"), "single line");
+    assert.ok(line.includes("mini-agent"));
+    assert.ok(line.includes("gpt-test"));
+    assert.ok(line.includes("/tmp/proj"));
+    assert.ok(line.startsWith("\x1b[1;38;2;"), "bold brand segment opens with SGR");
+    assert.ok(line.endsWith("\x1b[0m"), "self-contained reset");
+  });
+
+  it("omits missing model/cwd segments", () => {
+    const line = headerStaticText({ width: 80 });
+    assert.equal(line.split("\x1b[").length - 1, 2, "one segment: open + reset");
+  });
+});
+
 });
 

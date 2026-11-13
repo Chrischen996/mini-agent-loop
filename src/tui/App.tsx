@@ -4,7 +4,7 @@ import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { Box, Text, useApp, useStdout, useInput } from "ink";
 import { MessageFeed, formatSealedRowsText } from "./components/MessageFeed.tsx";
-import { Header } from "./components/Header.tsx";
+import { Header, headerStaticText } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
 import { TodoPanel } from "./components/TodoPanel.tsx";
 import { getTodoPanelRows } from "./todo-format.ts";
@@ -2189,6 +2189,19 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     }).length
     : 0;
 
+  // Document layout: the identity header is part of the stream, not the
+  // frame — printed once per transcript generation (and on model/cwd change)
+  // above the first rows, then it scrolls away with the conversation.
+  const headerBurstRef = useRef({ generation: -1, signature: "" });
+  useLayoutEffect(() => {
+    if (!isDocumentLayout || !writeStaticBurst) return;
+    const generation = sealedGenerationRef.current.generation;
+    const signature = `${state.modelName ?? ""}|${cwd}`;
+    if (headerBurstRef.current.generation === generation && headerBurstRef.current.signature === signature) return;
+    headerBurstRef.current = { generation, signature };
+    writeStaticBurst(`${headerStaticText({ width: termWidth, modelName: state.modelName, cwd })}\n`);
+  }, [isDocumentLayout, writeStaticBurst, state.modelName, cwd, termWidth, state.messages]);
+
   // Emit newly sealed transcript rows into the native scrollback. Layout
   // effects run synchronously after the commit but before Ink's throttled
   // frame render, so the burst lands above the frame that follows it.
@@ -2326,8 +2339,9 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     <Box flexDirection="column" width={termWidth} height={isDocumentLayout ? undefined : termHeight} overflow="hidden">
       {/* Inline layout emits sealed transcript blocks directly through the
           renderer's static-burst channel (see writeStaticBurst); the dynamic
-          frame never re-renders them. */}
-      <Header modelName={state.modelName} cwd={cwd} dashboardOpen={dashboardOpen} />
+          frame never re-renders them. Document layout additionally streams
+          the header once, so nothing above the tail is pinned. */}
+      {isDocumentLayout ? null : <Header modelName={state.modelName} cwd={cwd} dashboardOpen={dashboardOpen} />}
 
       {(state.todoPlan || state.todoItems) && (
         <TodoPanel

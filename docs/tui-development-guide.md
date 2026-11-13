@@ -536,7 +536,7 @@ export function buildTerminalRenderLines(
 
 终端布局由环境变量 `MINI_AGENT_TUI_LAYOUT` 在启动时选择（`src/tui/layout-mode.ts`）：
 
-- **`document`（默认）**：完全文档流（aider / Codex insert 风格）——没有任何钉住的区域，也没有截断提示。流式回复的**每一行源码在换行到达时立即追加**进终端流（`src/tui/stream-commit.ts` 的 `computeCommitBoundary`：段落/标题/列表/代码块全部逐行稳定——代码行渲染为固定 `│` gutter 行，唯未闭合的表格因列宽需全局对齐而扣住，由后随行闭合时整体冻结），动态帧只剩"正在长的那一行 + 输入框"，因此滚轮上下滚动时**整个对话（包括输入框所在位置）作为一个连续文档一起移动**。消息定型时用最长公共行前缀去重（`rowCountledCommitted`），已流出的行不会在 seal 时重复打印。流式文本在 document 模式下直接渲染完整 markdown 投影（`streamingAssistantRows`），不再是压缩预览。
+- **`document`（默认）**：完全文档流（aider / Codex insert 风格）——没有任何钉住的区域，也没有截断提示。头部信息条（品牌/模型/路径）在会话开始（以及代际/模型/目录变化）时作为一行**打印进终端流**并随历史滚走（`headerStaticText`），帧内不再渲染 Header；模型状态仍见底部 StatusBar。流式回复的**每一行源码在换行到达时立即追加**进终端流（`src/tui/stream-commit.ts` 的 `computeCommitBoundary`：段落/标题/列表/代码块全部逐行稳定——代码行渲染为固定 `│` gutter 行，唯未闭合的表格因列宽需全局对齐而扣住，由后随行闭合时整体冻结），动态帧只剩"正在长的那一行 + 输入框"，因此滚轮上下滚动时**整个对话（包括输入框所在位置）作为一个连续文档一起移动**。消息定型时用最长公共行前缀去重（`rowCountledCommitted`），已流出的行不会在 seal 时重复打印。流式文本在 document 模式下直接渲染完整 markdown 投影（`streamingAssistantRows`），不再是压缩预览。
 - **`inline`（消息级，`MINI_AGENT_TUI_LAYOUT=inline`）**：UI 运行在主屏幕缓冲。已"定型"的会话前缀（user / assistant / notice / error / 已完成的 tool_call；subagent 卡片永远保持动态）通过渲染器的 `emitStaticBurst()` 直接写入终端**原生 scrollback**——滚轮/搜索/复制走终端原生能力，退出后历史保留。鼠标跟踪关闭以让滚轮自然滚动 scrollback。流式中的消息暂存于动态帧窗口。
 - **`alternate`（备选/回退）**：整 UI 运行在备用屏幕缓冲（`ESC[?1049h`），退出后不污染 shell 滚屏历史；鼠标跟踪开启，滚轮/PageUp 在应用内滚动历史。用 `MINI_AGENT_TUI_LAYOUT=alternate` 一键回退。
 
