@@ -109,9 +109,11 @@ async function snapshotTree(root: string): Promise<string> {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "mini-agent-index-"));
   const index = path.join(tempDir, "index");
   try {
+    const head = (await runGit(root, ["rev-parse", "HEAD"])).trim();
+    const indexTree = (await runGit(root, ["write-tree"])).trim();
+    await runGit(root, ["read-tree", indexTree], { env: { GIT_INDEX_FILE: index } });
     await runGit(root, ["add", "-A"], { env: { GIT_INDEX_FILE: index } });
     const tree = (await runGit(root, ["write-tree"], { env: { GIT_INDEX_FILE: index } })).trim();
-    const head = (await runGit(root, ["rev-parse", "HEAD"])).trim();
     return (await runGit(root, ["commit-tree", tree, "-p", head, "-m", "mini-agent checkpoint"], {
       env: {
         GIT_INDEX_FILE: index,
@@ -268,15 +270,27 @@ export class GitWorkflow {
 
   async createIsolatedBranch(label = "task"): Promise<IsolatedBranch> {
     const status = await this.status();
-    // Snapshot dirty state without touching the source index or worktree so the
-    // new agent sees the same project contents while keeping its own checkout.
-    const base = status.dirty ? await snapshotTree(status.root) : status.head;
+    // Snapshot dirty state (index + working tree) without touching the source
+    // index or worktree, so the new agent sees the same project contents while
+    // keeping its own checkout.
+    const indexSnapshot = status.dirty ? (await runGit(status.root, ["write-tree"])).trim() : undefined;
+    const workingTreeSnapshot = status.dirty ? await snapshotTree(status.root) : undefined;
     const branch = `mini-agent/${safeLabel(label)}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
     const baseDir = this.worktreeDir;
     await (await import("node:fs/promises")).mkdir(baseDir, { recursive: true });
     const target = path.join(baseDir, branch.slice("mini-agent/".length));
-    await runGit(status.root, ["worktree", "add", "-b", branch, target, base]);
-    return { branch, path: target, base };
+    await runGit(status.root, ["worktree", "add", "-b", branch, target, status.head]);
+    if (indexSnapshot && workingTreeSnapshot) {
+      try {
+        await runGit(target, ["read-tree", indexSnapshot]);
+        await runGit(target, ["restore", "--source", workingTreeSnapshot, "--worktree", "--no-overlay", "."]);
+      } catch (error) {
+        await runGit(status.root, ["worktree", "remove", "--force", target]).catch(() => undefined);
+        await runGit(status.root, ["branch", "-D", branch]).catch(() => undefined);
+        throw error;
+      }
+    }
+    return { branch, path: target, base: status.head };
   }
 
   async isRegisteredWorktree(target: string): Promise<boolean> {

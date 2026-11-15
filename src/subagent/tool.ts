@@ -481,6 +481,7 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
     onToolExecutionAudit,
     globalConcurrencyLimit,
     roleLlmConfigs = {},
+    sessionRoleLlmConfigs = {},
   } = options;
   const foregroundAwaitBudgetMs = resolveSubagentAwaitBudgetMs(configuredAwaitBudgetMs);
   const configuredGlobalBudgetState = resolveSharedGlobalBudgetState(options);
@@ -675,18 +676,20 @@ ${args.sharedContext}
       const effectiveMaxEscalations =
         args.maxThinkingEscalations ?? profile?.maxThinkingEscalations ?? effectiveParentMaxEscalations ?? 2;
 
-      // Model resolution: args.model > profile.llm > roleLlmConfigs[role] > parentLlm
       // Track whether the model switch actually succeeded.
       let llm: LlmConfig = profile?.llm ?? effectiveParentLlm;
       let modelSwitchSucceeded = true;
 
-      // Per-role LlmConfig override from profile store
-      // Priority: args.model > profile.llm > roleLlmConfigs[role] > parentLlm
-      const roleLlmOverride = args.profile ? roleLlmConfigs[args.profile] : undefined;
-      if (roleLlmOverride && !profile?.llm && !args.model) {
-        llm = roleLlmOverride;
+      // Per-role resolution: explicit model > session role > profile > global role > parent.
+      const sessionRoleLlmOverride = args.profile ? sessionRoleLlmConfigs[args.profile] : undefined;
+      const globalRoleLlmOverride = args.profile ? roleLlmConfigs[args.profile] : undefined;
+      if (!args.model && sessionRoleLlmOverride) {
+        llm = sessionRoleLlmOverride;
+      } else if (!args.model && profile?.llm) {
+        llm = profile.llm;
+      } else if (!args.model && globalRoleLlmOverride) {
+        llm = globalRoleLlmOverride;
       }
-
       if (args.model) {
         try {
           llm = switchLlmModel(effectiveParentLlm, args.model);
@@ -698,7 +701,7 @@ ${args.sharedContext}
             isError: true,
           };
         }
-      } else if (resumeRecord?.runtime?.model && !profile?.llm && !roleLlmOverride) {
+      } else if (resumeRecord?.runtime?.model && !profile?.llm && !sessionRoleLlmOverride && !globalRoleLlmOverride) {
         try {
           llm = switchLlmModel(effectiveParentLlm, resumeRecord.runtime.model);
         } catch {

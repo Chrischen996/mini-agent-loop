@@ -56,6 +56,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "effort", usage: "/effort [off|minimal|low|med|high|xhigh|max|ultra]", description: "Open the Effort slider or set a thinking level directly" },
   { name: "profiles", usage: "/profiles", description: "List and activate model profiles" },
   { name: "theme", usage: "/theme [name]", description: "List or switch the terminal color theme" },
+  { name: "model-role", usage: "/model-role <role> <profile|clear>", description: "Set a conversation-specific subagent model" },
   { name: "image", usage: "/image <path>", description: "Attach a local image" },
   { name: "paste-image", usage: "/paste-image", description: "Attach an image from the clipboard" },
   { name: "read", usage: "/read <path>", description: "Read a file" },

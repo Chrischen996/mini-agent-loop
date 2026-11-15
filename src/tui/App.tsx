@@ -36,7 +36,7 @@ import {
   type LoopEvent,
 } from "../loop.ts";
 import { LlmTimeoutError } from "../llm/retry.ts";
-import { loadLlmConfigFromEnv, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
+import { loadLlmConfigFromEnv, switchLlmModel, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
 import {
   buildIntenseLlm,
   cycleThinkingLevel,
@@ -58,6 +58,7 @@ import {
 } from "./model-command.ts";
 import {
   activateProfile,
+  loadProfileStore,
   removeProfile,
   saveProfile,
 } from "../profile-store.ts";
@@ -94,7 +95,7 @@ import { addPendingImage, handlePasteImage } from "./image-handler.ts";
 import { activateSavedModelProfile, startModelSetup, commitModelSetup, openProfileList } from "./profile-manager.ts";
 import { selectModel } from "./model-switcher.ts";
 import { SubagentToolsFactory } from "./subagent-tools-factory.ts";
-import { formatAmbiguousSessionNotice, parseForeignResumeCommand, parseResumeCommand, restoreLlmConfig, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
+import { formatAmbiguousSessionNotice, parseForeignResumeCommand, parseResumeCommand, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
 import { resolveSessionByPrefix, SessionManager } from "../session-manager.ts";
 import { ForeignSessionError, formatForeignSessionList, importForeignSession, listForeignSessions } from "../foreign-session.ts";
 import type { PersistedSession } from "../session-store.ts";
@@ -110,6 +111,8 @@ import { useKeyboardHandler } from "./hooks/useKeyboardHandler.ts";
 import { SmoothScrollController } from "./smooth-scroll.ts";
 import { TerminalInputHistory } from "./terminal-input-history.ts";
 import { buildTuiSystemPrompt, createTuiAgentHistory, type TuiSystemPromptContext } from "./system-prompt.ts";
+import { buildRoleLlmConfigs } from "./tui-core/bootstrap.ts";
+import { restoreTuiLlmConfig, restoreTuiModelConfig, serializeTuiModelConfig } from "./model-isolation.ts";
 
 import { TUI_COLORS as C } from "./theme.ts";
 import { bgTaskStatusGlyph } from "./bg-task-status-color.ts";
@@ -397,6 +400,8 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   // Create the subagent tool — dispatches SubagentEvents to the TUI reducer
   const subagentFactory = useLazyRef(() => new SubagentToolsFactory()).current;
   const subagentTaskRegistry = useLazyRef(() => new SubagentTaskRegistry(projectCwd)).current;
+  const globalRoleLlmConfigs = useMemo(() => buildRoleLlmConfigs(llm), []);
+  const localRoleLlmConfigsRef = useRef<Record<string, LlmConfig>>({});
   const subagentRuntimeRef = useRef<AgentRuntimeRef>({});
   const backgroundSubagentsRef = useRef(new Map<string, { task: string; ownerSessionId?: string }>());
   const getSubagentTools = useCallback((parentLlm = llm): Tool[] => {
@@ -475,6 +480,8 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       parentRuntime: subagentRuntimeRef.current,
       globalTokenBudget,
       globalConcurrencyLimit,
+      roleLlmConfigs: globalRoleLlmConfigs,
+      sessionRoleLlmConfigs: localRoleLlmConfigsRef.current,
     });
   }, [llm, vision, subagentTaskRegistry]);
 
@@ -754,8 +761,15 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
 
       const permissionMode = session.permissionMode ?? "plan";
       const restored = restoreTuiSession(session, buildTuiSystemPrompt(permissionMode, systemPromptContext));
-      const restoredLlm = restoreLlmConfig(llmRef.current, session);
+      const restoredModel = restoreTuiLlmConfig(llmRef.current, session);
+      const restoredLlm = restoredModel.config;
       const restoredSkillNames = session.skillNames ? [...session.skillNames] : loadSkillNamesFromEnv();
+      localRoleLlmConfigsRef.current = Object.fromEntries(
+        Object.entries(session.subagentModelConfigs ?? {}).flatMap(([role, snapshot]) => {
+          const config = restoreTuiModelConfig(restoredLlm, snapshot);
+          return config ? [[role, config]] : [];
+        }),
+      );
       manager.setSessionId(session.id);
       setConversationId(session.id);
       historyRef.current = restored.history;
@@ -770,6 +784,9 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       getPermissionManager().setMode(permissionMode);
       llmRef.current = restoredLlm;
       setLlm(restoredLlm);
+      if (restoredModel.warning) {
+        dispatch({ type: "ADD_NOTICE", title: "Model unavailable", text: `Could not restore ${restoredModel.warning}; keeping the current model.` });
+      }
       setSkillNames(restoredSkillNames);
       skillNamesRef.current = restoredSkillNames;
       dispatch({ type: "MODEL_CHANGED", modelName: restoredLlm.model });
@@ -810,6 +827,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       const imported = await importForeignSession(manager, source, cwd, reference, cwd);
       const permissionMode = imported.session.permissionMode ?? "plan";
       const restored = restoreTuiSession(imported.session, buildTuiSystemPrompt(permissionMode, systemPromptContext));
+      localRoleLlmConfigsRef.current = {};
       manager.setSessionId(imported.session.id);
       setConversationId(imported.session.id);
       sessionProvenanceRef.current = { origin: imported.session.origin };
@@ -855,12 +873,16 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     void resumeSession(sessionId);
   }, [resumeSession]);
 
-  const sessionSnapshotFields = useCallback(() => {
+  const sessionSnapshotFields = useCallback((modelOverride?: LlmConfig) => {
     const current = stateRef.current;
     return {
       id: conversationIdRef.current,
-      modelId: llmRef.current.model,
-      thinkingLevel: llmRef.current.thinkingLevel,
+      modelId: `${(modelOverride ?? llmRef.current).provider}/${(modelOverride ?? llmRef.current).model}`,
+      modelConfig: serializeTuiModelConfig(modelOverride ?? llmRef.current),
+      subagentModelConfigs: Object.fromEntries(
+        Object.entries(localRoleLlmConfigsRef.current).map(([role, config]) => [role, serializeTuiModelConfig(config)]),
+      ),
+      thinkingLevel: (modelOverride ?? llmRef.current).thinkingLevel,
       thinkingMode: thinkingPolicyModeRef.current,
       permissionMode: getPermissionManager().getMode(),
       skillNames: [...skillNamesRef.current],
@@ -879,7 +901,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
    *  raw AgentMessage array grow past what two context windows would hold. */
   const MAX_IN_MEMORY_MESSAGES = 2_500;
 
-  const persistSessionSnapshot = useCallback(async (messages: AgentMessage[]) => {
+  const persistSessionSnapshot = useCallback(async (messages: AgentMessage[], modelConfig?: LlmConfig) => {
     try {
       // Trim in-memory history to bound peak allocation between compaction cycles.
       const inMemory = messages.length > MAX_IN_MEMORY_MESSAGES
@@ -889,7 +911,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       const trimmed = inMemory.length > MAX_PERSISTED_MESSAGES
         ? inMemory.slice(-MAX_PERSISTED_MESSAGES)
         : inMemory;
-      await getSessionManager().save({ ...sessionSnapshotFields(), messages: trimmed });
+      await getSessionManager().save({ ...sessionSnapshotFields(modelConfig), messages: trimmed });
     } catch (error) {
       dispatch({
         type: "ADD_NOTICE",
@@ -1068,6 +1090,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       setAcMode("model-setup");
       void commitModelSetup(modelSetup, modelSetup.apiKey, {
         llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
+        persistSession: persistSessionSnapshot,
       }, { thinkingLevel: level });
       return;
     }
@@ -1087,6 +1110,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       setAcMode("model-setup");
       void commitModelSetup(modelSetup, modelSetup.apiKey, {
         llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
+        persistSession: persistSessionSnapshot,
       });
       return;
     }
@@ -1349,8 +1373,9 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       if (selected) {
         try {
           await activateProfile(selected.name);
-          const previousLlm = llm;
+          const previousLlm = llmRef.current;
           const newLlm = loadLlmConfigFromEnv();
+          llmRef.current = newLlm;
           setLlm(newLlm);
           dispatch({ type: "MODEL_CHANGED", modelName: newLlm.model });
           // Adapt existing conversation history for the new model's capabilities
@@ -1360,6 +1385,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
               sourceCapabilities: previousLlm.capabilities,
             });
           }
+          await persistSessionSnapshot(historyRef.current, newLlm);
         } catch { /* non-fatal */ }
       }
       setInput("");
@@ -1513,6 +1539,22 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       // Generate new conversation ID for fresh session
       const nextSessionId = randomUUID();
       sessionManagerRef.current?.newSession(nextSessionId);
+      localRoleLlmConfigsRef.current = {};
+      const nextLlm = llmRef.current;
+      void getSessionManager().save({
+        id: nextSessionId,
+        modelId: `${nextLlm.provider}/${nextLlm.model}`,
+        modelConfig: serializeTuiModelConfig(nextLlm),
+        thinkingLevel: nextLlm.thinkingLevel,
+        thinkingMode: thinkingPolicyModeRef.current,
+        permissionMode: getPermissionManager().getMode(),
+        cwd,
+        messages: historyRef.current,
+      }).catch((error) => dispatch({
+        type: "ADD_NOTICE",
+        title: "Session save failed",
+        text: error instanceof Error ? error.message : String(error),
+      }));
       sessionProvenanceRef.current = {};
       activeTodosRef.current = undefined;
       setConversationId(nextSessionId);
@@ -1627,6 +1669,38 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     }
 
     // /profiles delete <name>
+    const modelRoleMatch = trimmed.match(/^\/model-role\s+([\w-]+)\s+(.+)$/i);
+    if (modelRoleMatch) {
+      const role = modelRoleMatch[1]!.toLowerCase();
+      const profileName = modelRoleMatch[2]!.trim();
+      try {
+        if (profileName.toLowerCase() === "clear") {
+          delete localRoleLlmConfigsRef.current[role];
+        } else {
+          const store = await loadProfileStore();
+          const profile = store.profiles[profileName];
+          if (!profile) throw new Error(`Profile not found: ${profileName}`);
+          const roleLlm = switchLlmModel(llmRef.current, profile.model, {
+            baseUrl: profile.baseUrl,
+            apiKey: profile.apiKey,
+          });
+          localRoleLlmConfigsRef.current = { ...localRoleLlmConfigsRef.current, [role]: roleLlm };
+        }
+        await persistSessionSnapshot(historyRef.current);
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "Subagent model",
+          text: profileName.toLowerCase() === "clear"
+            ? `Cleared the ${role} model override for this conversation.`
+            : `Set the ${role} model override for this conversation.`,
+        });
+      } catch (error) {
+        dispatch({ type: "ADD_NOTICE", title: "Subagent model", text: error instanceof Error ? error.message : String(error) });
+      }
+      setInput("");
+      return;
+    }
+
     const profileDeleteMatch = trimmed.match(/^\/profiles?\s+delete\s+(.+)$/i);
     if (profileDeleteMatch) {
       const name = profileDeleteMatch[1]!.trim();

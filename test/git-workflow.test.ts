@@ -144,4 +144,71 @@ describe("GitWorkflow", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("creates an isolated worktree from the dirty workspace snapshot without changing the source", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-git-dirty-worktree-"));
+    const isolatedPaths: string[] = [];
+    try {
+      await git(root, "init", "-q");
+      await git(root, "config", "core.autocrlf", "false");
+      await writeFile(path.join(root, ".gitignore"), "", "utf8");
+      await writeFile(path.join(root, "tracked.txt"), "one\n", "utf8");
+      await writeFile(path.join(root, "deleted.txt"), "remove me\n", "utf8");
+      await writeFile(path.join(root, "ignored-when-modified.txt"), "one\n", "utf8");
+      await git(root, "add", "-A");
+      await git(root, "commit", "-qm", "initial");
+
+      await writeFile(path.join(root, ".gitignore"), "ignored-when-modified.txt\nignored-untracked.txt\n", "utf8");
+      await writeFile(path.join(root, "tracked.txt"), "staged\n", "utf8");
+      await git(root, "add", "tracked.txt");
+      await writeFile(path.join(root, "tracked.txt"), "staged\nunstaged\n", "utf8");
+      await writeFile(path.join(root, "staged-only.txt"), "staged only\n", "utf8");
+      await git(root, "add", "staged-only.txt");
+      await writeFile(path.join(root, "ignored-when-modified.txt"), "modified tracked\n", "utf8");
+      await rm(path.join(root, "deleted.txt"));
+      await writeFile(path.join(root, "untracked.txt"), "new file\n", "utf8");
+      await writeFile(path.join(root, "ignored-staged.txt"), "explicitly staged ignored file\n", "utf8");
+      await git(root, "add", "-f", "ignored-staged.txt");
+      await writeFile(path.join(root, "ignored-untracked.txt"), "skip me\n", "utf8");
+
+      const workflow = new GitWorkflow(root, { worktreeDir: `${root}-worktrees` });
+      const sourceStatusBefore = await git(root, "status", "--porcelain");
+      const sourceIndexBefore = await git(root, "write-tree");
+      const [isolated, concurrent] = await Promise.all([
+        workflow.createIsolatedBranch("dirty task"),
+        workflow.createIsolatedBranch("dirty task peer"),
+      ]);
+      isolatedPaths.push(isolated.path, concurrent.path);
+
+      for (const worktree of [isolated, concurrent]) {
+        assert.equal(await git(worktree.path, "rev-parse", "HEAD"), `${worktree.base}\n`);
+        assert.equal(await readFile(path.join(worktree.path, "tracked.txt"), "utf8"), "staged\nunstaged\n");
+        assert.equal(await readFile(path.join(worktree.path, "staged-only.txt"), "utf8"), "staged only\n");
+        assert.equal(await readFile(path.join(worktree.path, "ignored-when-modified.txt"), "utf8"), "modified tracked\n");
+        assert.equal(await readFile(path.join(worktree.path, "untracked.txt"), "utf8"), "new file\n");
+        assert.equal(await readFile(path.join(worktree.path, "ignored-staged.txt"), "utf8"), "explicitly staged ignored file\n");
+        await assert.rejects(readFile(path.join(worktree.path, "deleted.txt"), "utf8"));
+        await assert.rejects(readFile(path.join(worktree.path, "ignored-untracked.txt"), "utf8"));
+      }
+
+      const isolatedStatus = await git(isolated.path, "status", "--porcelain");
+      assert.match(isolatedStatus, /^MM tracked\.txt$/m);
+      assert.match(isolatedStatus, /^A  staged-only\.txt$/m);
+      assert.match(isolatedStatus, /^ D deleted\.txt$/m);
+      assert.match(isolatedStatus, /^\?\? untracked\.txt$/m);
+      assert.match(isolatedStatus, /^A  ignored-staged\.txt$/m);
+      assert.match(isolatedStatus, /^ M ignored-when-modified\.txt$/m);
+      assert.equal(await git(root, "status", "--porcelain"), sourceStatusBefore);
+      assert.equal(await git(root, "write-tree"), sourceIndexBefore);
+      assert.equal(await readFile(path.join(root, "tracked.txt"), "utf8"), "staged\nunstaged\n");
+      assert.equal(await workflow.isRegisteredWorktree(isolated.path), true);
+      assert.equal(await workflow.isRegisteredWorktree(concurrent.path), true);
+    } finally {
+      for (const isolatedPath of isolatedPaths) {
+        await git(root, "worktree", "remove", "--force", isolatedPath).catch(() => undefined);
+      }
+      await rm(`${root}-worktrees`, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

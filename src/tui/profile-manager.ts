@@ -21,7 +21,7 @@ export type ProfileManagerDeps = {
   dispatch: (action: TuiAction) => void;
   historyRef: { current: AgentMessage[] };
   /** Persist the adapted transcript immediately after a model switch. */
-  persistSession?: (history: AgentMessage[]) => Promise<void>;
+  persistSession?: (history: AgentMessage[], llm: LlmConfig) => Promise<void>;
 };
 
 /** Switch directly when a model has configured credentials; otherwise open setup. */
@@ -98,7 +98,7 @@ export async function commitModelSetup(
         sourceCapabilities: llm.capabilities,
       });
     }
-    await deps.persistSession?.(historyRef.current);
+    await deps.persistSession?.(historyRef.current, newLlmConfig);
 
     setModelSetup(undefined);
     setAcMode(null);
@@ -112,7 +112,7 @@ export async function commitModelSetup(
       try {
         await saveProfile(defaultName, {
           model: `${setup.model.provider}/${setup.model.id}`,
-          baseUrl: setup.baseUrl,
+          baseUrl: newLlmConfig.baseUrl,
           apiKey: newLlmConfig.apiKey,
           thinkingLevel: newLlmConfig.thinkingLevel,
           ...(newLlmConfig.timeoutMs !== undefined ? { timeoutMs: newLlmConfig.timeoutMs } : {}),
@@ -150,7 +150,7 @@ export async function activateSavedModelProfile(
       sourceCapabilities: llm.capabilities,
     });
   }
-  await deps.persistSession?.(historyRef.current);
+  await deps.persistSession?.(historyRef.current, newLlm);
   setModelSetup(undefined);
   setAcMode(null);
   setInput("");

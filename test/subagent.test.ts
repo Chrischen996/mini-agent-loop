@@ -1003,6 +1003,33 @@ describe("createSubagentTool", () => {
       assert.equal(capturedConfig?.apiKey, "test-key");
     });
 
+    it("prefers a session role LLM config over profile and global role bindings", async () => {
+      const sessionLlm = makeLlmConfig({ apiKey: "session-role-key", baseUrl: "https://session.example/v1", model: "gpt-4o-mini" });
+      const globalLlm = makeLlmConfig({ apiKey: "global-role-key", baseUrl: "https://global.example/v1", model: "gpt-4o-mini" });
+      const profileLlm = makeLlmConfig({ apiKey: "profile-key", baseUrl: "https://profile.example/v1", model: "gpt-4o-mini" });
+      let capturedConfig: import("../src/llm/index.ts").LlmConfig | undefined;
+      const tool = createSubagentTool({
+        parentLlm: dummyLlm,
+        parentTools: [],
+        profiles: [{
+          name: "researcher",
+          description: "researcher",
+          systemPrompt: "research",
+          llm: profileLlm,
+        }],
+        roleLlmConfigs: { researcher: globalLlm },
+        sessionRoleLlmConfigs: { researcher: sessionLlm },
+        chat: async (config) => {
+          capturedConfig = config;
+          return { role: "assistant", content: "done" };
+        },
+      });
+
+      await tool.execute({ task: "research", profile: "researcher" });
+      assert.equal(capturedConfig?.apiKey, "session-role-key");
+      assert.equal(capturedConfig?.baseUrl, "https://session.example/v1");
+    });
+
     it("uses profile LLM config when profile specifies one", async () => {
       const profileLlm = makeLlmConfig({
         apiKey: "profile-key",

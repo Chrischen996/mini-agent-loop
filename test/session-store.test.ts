@@ -5,10 +5,43 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import { truncateSessionMessages } from "../src/server.ts";
 import { SessionStore } from "../src/session-store.ts";
+import { makeLlmConfig } from "../src/llm/index.ts";
 import type { TodoItem } from "../src/tools/todo.ts";
 import type { ExecutionPlan } from "../src/plan-act/types.ts";
 
 describe("SessionStore", () => {
+  it("round-trips TUI model snapshots without exposing API keys in session metadata", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-model-snapshot-"));
+    try {
+      const store = new SessionStore(root);
+      await store.save({
+        id: "tui-model-snapshot",
+        createdAt: Date.now(),
+        modelId: "gateway/model-a",
+        modelConfig: {
+          ...makeLlmConfig({ model: "gpt-4o-mini", apiKey: "session-secret", baseUrl: "https://gateway.example/v1" }),
+          provider: "gateway",
+          modelId: "gateway/gpt-4o-mini",
+        },
+        subagentModelConfigs: {
+          researcher: {
+            ...makeLlmConfig({ model: "gpt-4o-mini", apiKey: "role-secret", baseUrl: "https://role.example/v1" }),
+            modelId: "openai/gpt-4o-mini",
+          },
+        },
+        messages: [{ role: "user", content: "hello" }],
+      });
+
+      const restored = await store.load("tui-model-snapshot");
+      assert.equal(restored?.modelConfig?.apiKey, "session-secret");
+      assert.equal(restored?.subagentModelConfigs?.researcher?.apiKey, "role-secret");
+      const meta = await readFile(path.join(root, "tui-model-snapshot", "meta.json"), "utf8");
+      assert.doesNotMatch(meta, /session-secret|role-secret/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("truncates an incomplete assistant tool-call block as one unit", () => {
     const messages = truncateSessionMessages([
       { role: "system", content: "system" },

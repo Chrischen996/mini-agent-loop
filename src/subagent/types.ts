@@ -188,6 +188,8 @@ export type SubagentToolOptions = {
    * @example { researcher: llmConfigFromProfile, coder: llmConfigFromProfile }
    */
   roleLlmConfigs?: Record<string, import("../llm/index.ts").LlmConfig>;
+  /** Conversation-specific role models override global bindings and profile defaults. */
+  sessionRoleLlmConfigs?: Record<string, import("../llm/index.ts").LlmConfig>;
 };
 
 // ─── Tool call arguments (what the LLM sends) ───────────────────────────────

@@ -23,6 +23,7 @@ export type SubagentToolsFactoryDeps = {
   globalTokenBudget?: number;
   globalConcurrencyLimit?: number;
   roleLlmConfigs?: Record<string, import("../llm/index.ts").LlmConfig>;
+  sessionRoleLlmConfigs?: Record<string, import("../llm/index.ts").LlmConfig>;
   /** Enable the `search_orchestrate` tool. Default: false. */
   searchOrchestrationEnabled?: boolean;
   /**
@@ -51,7 +52,9 @@ export class SubagentToolsFactory {
     const valuesChanged =
       this.lastDeps === null ||
       JSON.stringify(this.lastDeps?.roleLlmConfigs ?? {}) !==
-        JSON.stringify(deps.roleLlmConfigs ?? {});
+        JSON.stringify(deps.roleLlmConfigs ?? {}) ||
+      JSON.stringify(this.lastDeps?.sessionRoleLlmConfigs ?? {}) !==
+        JSON.stringify(deps.sessionRoleLlmConfigs ?? {});
     const modelChanged =
       this.lastDeps === null || this.lastDeps.parentLlm.model !== deps.parentLlm.model;
     const orchestrationChanged =
@@ -76,6 +79,7 @@ export class SubagentToolsFactory {
         globalTokenBudget: deps.globalTokenBudget,
         globalConcurrencyLimit: deps.globalConcurrencyLimit,
         roleLlmConfigs: deps.roleLlmConfigs,
+        sessionRoleLlmConfigs: deps.sessionRoleLlmConfigs,
       };
       const subagent = createSubagentTool(sharedOptions) as Tool<SubagentArgs>;
       const tools: Tool[] = [

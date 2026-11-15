@@ -17,6 +17,7 @@ import { TerminalInputHistory } from "../src/tui/terminal-input-history.ts";
 import { createBashTool } from "../src/tools/bash.ts";
 import { createTodoWriteTool } from "../src/tools/todo-write.ts";
 import type { Tool } from "../src/tools/types.ts";
+import { saveProfile } from "../src/profile-store.ts";
 
 let render: typeof import("ink-testing-library").render | undefined;
 try {
@@ -80,6 +81,33 @@ describe("the single Ink terminal", () => {
     view.stdin.write("\r");
     await waitForRender();
   }
+
+  it("keeps subagent role model overrides on the old session after /clear", async () => {
+    await saveProfile("test-researcher", {
+      model: "openai/gpt-4o-mini",
+      baseUrl: "https://role.example/v1",
+      apiKey: "role-test-key",
+    }, false);
+    const view = open();
+    try {
+      await submit(view, "/model-role researcher test-researcher");
+      const manager = new SessionManager({ workspaceId: cwd });
+      const beforeClear = [...(await manager.loadAll()).values()];
+      const previousSession = beforeClear.find((session) => session.subagentModelConfigs?.researcher);
+      assert.ok(previousSession, "role override is saved in the current conversation");
+      assert.equal(previousSession.subagentModelConfigs?.researcher?.apiKey, "role-test-key");
+
+      await submit(view, "/clear");
+      const afterClear = [...(await manager.loadAll()).values()];
+      const newSession = afterClear.find((session) => session.id !== previousSession.id);
+      assert.ok(newSession, "clear creates a distinct session");
+      assert.equal(newSession.subagentModelConfigs?.researcher, undefined);
+      const savedPreviousSession = await manager.load(previousSession.id);
+      assert.equal(savedPreviousSession?.subagentModelConfigs?.researcher?.apiKey, "role-test-key");
+    } finally {
+      view.cleanup();
+    }
+  });
 
   it("moves PromptInput by words for Ctrl+Arrow without modifying the draft", async () => {
     function PromptHarness(): React.ReactElement {
@@ -891,7 +919,8 @@ describe("the single Ink terminal", () => {
       assert.ok(worktreeCwd, "the dispatched agent should receive a worktree-specific tool provider");
       createdWorktreeCwd = worktreeCwd;
       assert.equal(readFileSync(path.join(project, "base.txt"), "utf8"), "committed baseline\n");
-      assert.match(execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: project, encoding: "utf8" }), new RegExp(worktreeCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      const worktreeList = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: project, encoding: "utf8" }).replaceAll("\\", "/");
+      assert.ok(worktreeList.includes(worktreeCwd.replaceAll("\\", "/")));
       assert.equal(requests.length, 1);
       assert.ok(requests[0]?.messages?.some((message) => message.role === "user" && message.content === "Inspect the auth flow"));
 
@@ -1025,6 +1054,7 @@ describe("the single Ink terminal", () => {
         "data: [DONE]",
         "",
       ].join("\n\n");
+
       return new Response(payload, { headers: { "content-type": "text/event-stream" } });
     }) as typeof fetch;
     const providerCwds: string[] = [];

@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +11,7 @@ import type { ThinkingMode } from "./thinking-policy.ts";
 import type { SessionPhase, ExecutionPlan } from "./plan-act/types.ts";
 import type { TodoItem, TodoStatus } from "./todo.ts";
 import type { AgentRunPolicy } from "./loop.ts";
+import type { LlmConfig } from "./llm/config.ts";
 
 export type PersistedTodoItem = {
   id: string;
@@ -78,6 +79,8 @@ type SessionCreatedEvent = {
   workspaceId?: string;
   cwd?: string;
   origin?: ForeignSessionOrigin;
+  modelConfig?: TuiModelConfigSnapshot;
+  subagentModelConfigs?: Record<string, TuiModelConfigSnapshot>;
 };
 
 type SessionSnapshotEvent = {
@@ -103,9 +106,15 @@ type SessionSnapshotEvent = {
   workspaceId?: string;
   cwd?: string;
   origin?: ForeignSessionOrigin;
+  modelConfig?: TuiModelConfigSnapshot;
+  subagentModelConfigs?: Record<string, TuiModelConfigSnapshot>;
 };
 
 type SessionEvent = SessionCreatedEvent | SessionSnapshotEvent;
+
+export type TuiModelConfigSnapshot = Omit<LlmConfig, "getApiKey" | "sessionId"> & {
+  modelId: string;
+};
 
 export type ForeignSessionOrigin = {
   source: "claude" | "codex";
@@ -144,6 +153,9 @@ export type PersistedSession = {
   forkedFromMessageId?: string;
   /** Set when this session was created from a Claude Code or Codex transcript. */
   origin?: ForeignSessionOrigin;
+  /** TUI-only model connection and role overrides. */
+  modelConfig?: TuiModelConfigSnapshot;
+  subagentModelConfigs?: Record<string, TuiModelConfigSnapshot>;
 };
 
 /** Lightweight metadata for resume pickers (CLI `--resume`, TUI `/sessions`). */
@@ -497,6 +509,8 @@ export class SessionStore {
       workspaceId: session.workspaceId ?? this.workspaceId,
       cwd: session.cwd,
       origin: session.origin,
+      modelConfig: session.modelConfig,
+      subagentModelConfigs: session.subagentModelConfigs,
     });
     await this.saveLocked(session, updateActivity);
   }
@@ -531,6 +545,8 @@ export class SessionStore {
       todos: session.todos,
       todoVersion: session.todoVersion,
       runState: session.runState ?? null,
+      modelConfig: session.modelConfig,
+      subagentModelConfigs: session.subagentModelConfigs,
       parentSessionId: session.parentSessionId,
       forkedFromMessage: session.forkedFromMessage,
       forkedFromMessageId: session.forkedFromMessageId,
@@ -594,12 +610,15 @@ export class SessionStore {
       messages: session.messages,
       todos: session.todos,
       todoVersion: session.todoVersion,
+      runState: session.runState ?? null,
       parentSessionId: session.parentSessionId,
       forkedFromMessage: session.forkedFromMessage,
       forkedFromMessageId: session.forkedFromMessageId,
       workspaceId: session.workspaceId ?? this.workspaceId,
       cwd: session.cwd,
       origin: session.origin,
+      modelConfig: session.modelConfig,
+      subagentModelConfigs: session.subagentModelConfigs,
       // null is intentional: it clears a previously persisted plan.
       currentPlan: session.currentPlan ?? null,
     };
@@ -644,6 +663,8 @@ export class SessionStore {
             workspaceId: parsed.workspaceId,
             cwd: parsed.cwd,
             origin: parsed.origin,
+            modelConfig: parsed.modelConfig,
+            subagentModelConfigs: parsed.subagentModelConfigs,
           };
         } else if (Array.isArray(parsed.messages)) {
           snapshotCount += 1;
@@ -671,6 +692,8 @@ export class SessionStore {
             workspaceId: parsed.workspaceId ?? current?.workspaceId,
             cwd: parsed.cwd ?? current?.cwd,
             origin: parsed.origin ?? current?.origin,
+            modelConfig: parsed.modelConfig ?? current?.modelConfig,
+            subagentModelConfigs: parsed.subagentModelConfigs ?? current?.subagentModelConfigs,
           };
         }
       } catch {
@@ -685,12 +708,14 @@ export class SessionStore {
 
   private async append(event: SessionEvent): Promise<void> {
     const directory = path.join(this.root, event.sessionId);
+    const eventsPath = path.join(directory, "events.jsonl");
     await mkdir(directory, { recursive: true });
     await appendFile(
-      path.join(directory, "events.jsonl"),
+      eventsPath,
       `${JSON.stringify(event)}\n`,
-      "utf8",
+      { encoding: "utf8", mode: 0o600 },
     );
+    await chmod(eventsPath, 0o600).catch(() => {});
   }
 
   private matchesWorkspace(session: { workspaceId?: string }): boolean {
@@ -853,8 +878,9 @@ export class SessionStore {
   private async writeAtomic(filePath: string, contents: string): Promise<void> {
     const tempPath = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
     try {
-      await writeFile(tempPath, contents, "utf8");
+      await writeFile(tempPath, contents, { encoding: "utf8", mode: 0o600 });
       await rename(tempPath, filePath);
+      await chmod(filePath, 0o600).catch(() => {});
     } finally {
       await rm(tempPath, { force: true }).catch(() => {});
     }
