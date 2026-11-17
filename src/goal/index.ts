@@ -7,3 +7,5 @@ export * from "./tools.ts";
 export * from "./display.ts";
 export * from "./steering.ts";
 export * from "./config.ts";
+export * from "./diagnostics.ts";
+export * from "./background.ts";

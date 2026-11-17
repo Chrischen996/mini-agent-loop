@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { getDataRoot } from "../session-store.ts";
@@ -45,6 +45,10 @@ function parseGoal(value: unknown): GoalState | undefined {
     timeUsedSeconds: Math.max(0, Math.floor(record.timeUsedSeconds as number)),
     createdAt: record.createdAt as number,
     updatedAt: record.updatedAt as number,
+    // Background-runner coordinates (optional; absent for foreground goals).
+    ...(typeof record.backgroundTaskId === "string" ? { backgroundTaskId: record.backgroundTaskId } : {}),
+    ...(typeof record.worktreeDir === "string" ? { worktreeDir: record.worktreeDir } : {}),
+    ...(typeof record.worktreeBranch === "string" ? { worktreeBranch: record.worktreeBranch } : {}),
   };
 }
 
@@ -55,10 +59,12 @@ function parseGoal(value: unknown): GoalState | undefined {
  */
 export class GoalStore {
   private readonly root: string;
+  private readonly goalsRoot: string;
   private readonly pending = new Map<string, Promise<unknown>>();
 
   constructor(options: GoalStoreOptions = {}) {
-    this.root = path.join(path.resolve(options.dataDir ?? getDataRoot()), "goals");
+    this.goalsRoot = path.join(path.resolve(options.dataDir ?? getDataRoot()), "goals");
+    this.root = this.goalsRoot;
   }
 
   private file(sessionId: string): string {
@@ -66,6 +72,30 @@ export class GoalStore {
       throw new Error("Invalid session id for goal store");
     }
     return path.join(this.root, `${sessionId}.json`);
+  }
+
+  private async withFileLock<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    await mkdir(this.goalsRoot, { recursive: true, mode: 0o700 });
+    const lockPath = `${this.file(sessionId)}.lock`;
+    const deadline = Date.now() + 10_000;
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    while (!handle) {
+      try {
+        handle = await open(lockPath, "wx", 0o600);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const info = await stat(lockPath).catch(() => undefined);
+        if (info && Date.now() - info.mtimeMs > 30_000) await unlink(lockPath).catch(() => undefined);
+        if (Date.now() >= deadline) throw new Error(`Timed out locking goal ${sessionId}.`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    try {
+      return await operation();
+    } finally {
+      await handle.close().catch(() => undefined);
+      await unlink(lockPath).catch(() => undefined);
+    }
   }
 
   private serialize<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
@@ -101,25 +131,29 @@ export class GoalStore {
   }
 
   async get(sessionId: string): Promise<GoalState | undefined> {
-    return this.readGoal(sessionId);
+    return this.withFileLock(sessionId, () => this.readGoal(sessionId));
   }
 
   async write(goal: GoalState): Promise<GoalState> {
     return this.serialize(goal.sessionId, async () => {
-      await this.writeGoal(goal);
-      return goal;
+      return this.withFileLock(goal.sessionId, async () => {
+        await this.writeGoal(goal);
+        return goal;
+      });
     });
   }
 
   async clear(sessionId: string): Promise<boolean> {
     return this.serialize(sessionId, async () => {
-      try {
-        await rm(this.file(sessionId));
-        return true;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-        throw error;
-      }
+      return this.withFileLock(sessionId, async () => {
+        try {
+          await rm(this.file(sessionId));
+          return true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+          throw error;
+        }
+      });
     });
   }
 
@@ -129,11 +163,13 @@ export class GoalStore {
     mutator: (current: GoalState | undefined) => GoalState | undefined | Promise<GoalState | undefined>,
   ): Promise<GoalState | undefined> {
     return this.serialize(sessionId, async () => {
-      const current = await this.readGoal(sessionId);
-      const next = await mutator(current);
-      if (!next) return current;
-      await this.writeGoal(next);
-      return next;
+      return this.withFileLock(sessionId, async () => {
+        const current = await this.readGoal(sessionId);
+        const next = await mutator(current);
+        if (!next) return current;
+        await this.writeGoal(next);
+        return next;
+      });
     });
   }
 }

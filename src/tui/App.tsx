@@ -146,13 +146,18 @@ import { ThemeDialog } from "./components/ThemeDialog.tsx";
 import { PermissionPanel } from "./components/PermissionPanel.tsx";
 import { PlanApprovalBar } from "./components/PlanApprovalBar.tsx";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
-import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
+import { loadGlobalConcurrencyLimitFromEnv, loadGlobalGoalWorkerLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
 import { isTuiFeatureEnabled } from "./execution-policy.ts";
 import type { StartupSessionRequest } from "./session-serialization.ts";
 import {
+  attachGoalDiagnostics,
+  backgroundGoalNotice,
+  createGoalLog,
   createGoalSession,
   goalNotice,
   goalStatusSegment,
+  isBackgroundGoalActive,
+  launchBackgroundGoal,
   parseGoalCommand,
   resolveGoalConfig,
   type GoalSessionContext,
@@ -722,6 +727,28 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       steering: {
         onGoalSnapshot: (snapshot) => setGoalState(snapshot),
       },
+      // Model-initiated background goals: create_goal(background=true) forks
+      // the same detached worktree worker as `/goal ... --bg`.
+      launchBackground: async ({ objective }) => {
+        const launch = await launchBackgroundGoal({
+          cwd: projectCwd,
+          ownerSessionId: conversationIdRef.current,
+          objective,
+          registry: subagentTaskRegistry,
+          store: session.store,
+          concurrencyLimit: loadGlobalGoalWorkerLimitFromEnv(),
+        });
+        dispatch({ type: "ADD_NOTICE", title: "Goal", text: backgroundGoalNotice(launch) });
+        return launch;
+      },
+    });
+    // Opt-in diagnostics (MINI_AGENT_GOAL_LOG=1). Taps the existing callbacks and
+    // wraps the runtime's steering/continuation methods in place, so the session,
+    // store, and TUI state updates above are all preserved.
+    attachGoalDiagnostics(session, {
+      log: createGoalLog(conversationIdRef.current),
+      onEvent: (event) => setGoalState(event.goal),
+      onGoalSnapshot: (snapshot) => setGoalState(snapshot),
     });
     goalSessionRef.current = session;
     void session.manager.initialize();
@@ -1290,6 +1317,11 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   const handleSubmit = useCallback(async (text: string) => {
     const trimmed = text.trim();
     const goalCommand = parseGoalCommand(trimmed);
+    // `/goal <objective>` registers the goal AND immediately starts a real
+    // agent turn with the objective as the prompt (previously it only set
+    // state and waited for the next message). Pure management subcommands
+    // (status/clear/pause/resume/complete) keep their notice-only behavior.
+    let goalKickoffPrompt: string | undefined;
     const allowEmptyApiKey = acMode === "model-setup" && modelSetup?.field === "apiKey";
     const hasPendingImages = pendingImagesRef.current.length > 0;
     if (state.busy && !trimmed && promptQueueRef.current.length > 0) {
@@ -1331,12 +1363,57 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
               })
             : await goalSession.manager.setFromUser({ status: goalCommand.status });
         dispatch({ type: "ADD_NOTICE", title: "Goal", text: goalNotice(updated) });
+        // `--bg`: hand the goal to a detached worker in an isolated worktree
+        // (bypass permissions). The foreground stays free; the mutex above
+        // keeps this session's loop from double-steering the same goal.
+        if (goalCommand.kind === "set" && goalCommand.background && updated) {
+          try {
+            const launch = await launchBackgroundGoal({
+              cwd: projectCwd,
+              ownerSessionId: conversationIdRef.current,
+              objective: goalCommand.objective,
+              registry: subagentTaskRegistry,
+              store: goalSession.store,
+              concurrencyLimit: loadGlobalGoalWorkerLimitFromEnv(),
+            });
+            dispatch({ type: "ADD_NOTICE", title: "Goal", text: backgroundGoalNotice(launch) });
+          } catch (error) {
+            dispatch({ type: "ADD_NOTICE", title: "Goal", text: error instanceof Error ? error.message : String(error) });
+          }
+          return;
+        }
+        // Kick off execution right away: re-enter the submission path with the
+        // objective as a plain user prompt. `setFromUser` has already armed the
+        // "created"/"edited" steering intent, so the first model call sees the
+        // goal context and goalRuntime drives automatic continuations.
+        //
+        // Guard against self-reference: an objective like "goal fix the bug"
+        // would parse as another /goal command and recurse forever. The bare
+        // word "goal" only counts as a command at the start, so prefixing
+        // "Work on:" (or any non-command word) neutralizes it while keeping
+        // the objective text intact for the model.
+        if (goalCommand.kind === "set" && updated) {
+          goalKickoffPrompt = parseGoalCommand(goalCommand.objective)
+            ? `Work on: ${goalCommand.objective}`
+            : goalCommand.objective;
+        }
       } catch (error) {
         dispatch({ type: "ADD_NOTICE", title: "Goal", text: error instanceof Error ? error.message : String(error) });
       }
-      return;
+      if (goalKickoffPrompt === undefined) return;
     }
     if (state.busy) {
+      // Busy + explicit `/goal <objective>`: the goal is already registered
+      // (the branch above ran setFromUser). Queue the objective as a normal
+      // prompt so it executes when the current turn ends, with goal steering
+      // attached, instead of aborting or overlapping the in-flight turn.
+      if (goalKickoffPrompt !== undefined) {
+        promptQueueRef.current.push(goalKickoffPrompt);
+        setQueuedCount(promptQueueRef.current.length);
+        dispatch({ type: "ADD_NOTICE", title: "Goal", text: "A turn is already running; the goal objective was queued and will start when it finishes." });
+        setInput("");
+        return;
+      }
       if (trimmed) {
         const sendableWait = foregroundCommandWaiting || sendableWaitWaiting;
         if (sendableWait && promptQueueRef.current.length === 0 && !sendNowPendingRef.current) {
@@ -1410,6 +1487,15 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     }
 
     clearAc();
+
+    // Goal kickoff: re-enter the normal submission path with the objective as
+    // a plain prompt. The goal is already registered and its "created"
+    // steering intent armed, so this turn injects goal context and the
+    // goalRuntime drives automatic continuations. Recursion terminates: the
+    // objective is plain text, so parseGoalCommand returns undefined.
+    if (goalKickoffPrompt !== undefined) {
+      return handleSubmitRef.current(goalKickoffPrompt);
+    }
 
     const foreignResume = parseForeignResumeCommand(trimmed);
     if (foreignResume) {
@@ -1931,6 +2017,15 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         });
       }
 
+      // Background-goal mutex: while a detached worker owns the goal
+      // (`/goal ... --bg`), the foreground loop must not attach goalRuntime —
+      // the worker is the single steerer/accountant. Resolved once per
+      // submission; goal tools stay available so /goal status keeps working.
+      const goalSessionForTurn = goalConfig.enabled ? getGoalSession() : null;
+      const backgroundOwnsGoal = goalSessionForTurn
+        ? await isBackgroundGoalActive(goalSessionForTurn.store, conversationId, subagentTaskRegistry).catch(() => false)
+        : false;
+
       // Auto-continue loop: re-invoke runAgentTurn when maxTurns is exceeded.
       while (true) {
         try {
@@ -1939,9 +2034,9 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
             tools: () => [
               ...resolveToolProvider(agentToolsRef.current),
               ...getSubagentTools(turnLlm),
-              ...(goalConfig.enabled ? getGoalSession()?.tools ?? [] : []),
+              ...(goalSessionForTurn ? goalSessionForTurn.tools : []),
             ],
-            ...(goalConfig.enabled && getGoalSession() ? { goalRuntime: getGoalSession()!.runtime } : {}),
+            ...(goalSessionForTurn && !backgroundOwnsGoal ? { goalRuntime: goalSessionForTurn.runtime } : {}),
             autoSubagent,
             preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
             signal: abortRef.current.signal,
@@ -2144,7 +2239,8 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
-    void (async () => {
+    let wakeRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const drainPendingWakeups = () => (async () => {
       const pending = await subagentTaskRegistry.pendingWakeups(conversationId);
       for (const record of pending) {
         const goalLoopActive = stateRef.current.phase === "acting" || stateRef.current.currentPlan?.status === "executing";
@@ -2179,7 +2275,24 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         text: error instanceof Error ? error.message : String(error),
       });
     });
-    return () => { cancelled = true; };
+    void drainPendingWakeups();
+    // Detached workers (including /goal --bg) finish in another process, so
+    // registry disk changes are the completion signal. In-process onChange
+    // cannot see a different process, so poll until the wake is claimed, then
+    // rely on onChange for local subagent events again.
+    const unsubscribe = subagentTaskRegistry.onChange(() => void drainPendingWakeups());
+    const hasPendingGoalWake = async (): Promise<boolean> =>
+      (await subagentTaskRegistry.pendingWakeups(conversationId)).length > 0;
+    wakeRefreshTimer = setTimeout(() => {
+      void hasPendingGoalWake().then((pending) => {
+        if (pending) void drainPendingWakeups();
+      }).catch(() => undefined);
+    }, 1_000);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      if (wakeRefreshTimer !== undefined) clearTimeout(wakeRefreshTimer);
+    };
   }, [active, conversationId, dispatch, state.currentPlan?.status, state.phase, subagentTaskRegistry]);
 
   const initialPromptStartedRef = useRef(false);

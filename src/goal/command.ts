@@ -3,13 +3,15 @@ import type { GoalStatus } from "./types.ts";
 export type GoalCommand =
   | { kind: "status" }
   | { kind: "clear" }
-  | { kind: "set"; objective: string; tokenBudget?: number }
+  | { kind: "set"; objective: string; tokenBudget?: number; background?: boolean }
   | { kind: "status-change"; status: GoalStatus }
   | { kind: "invalid"; message: string };
 
 /**
  * Parse `/goal` (or a bare goal command) into an explicit user intent.
- * The objective is free text; `--token-budget N` is the only option.
+ * The objective is free text; `--token-budget N` and `--bg` are the options.
+ * `--bg` runs the goal as a detached background worker in an isolated git
+ * worktree with bypass permissions; without it the goal runs in the foreground.
  */
 export function parseGoalCommand(input: string): GoalCommand | undefined {
   const trimmed = input.trim();
@@ -33,6 +35,16 @@ export function parseGoalCommand(input: string): GoalCommand | undefined {
     }
     objective = rest.replace(budgetMatch[0], "").trim();
   }
+  // `--bg` / `--background` anywhere in the objective opts into the detached
+  // background runner. Strip the flag so it never reaches the model prompt.
+  const bgMatch = objective.match(/(?:^|\s)--(?:bg|background)(?=\s|$)/i);
+  const background = bgMatch !== null;
+  if (bgMatch) objective = objective.replace(bgMatch[0], " ").trim();
   if (!objective) return { kind: "invalid", message: "Goal objective must not be empty." };
-  return { kind: "set", objective, ...(tokenBudget !== undefined ? { tokenBudget } : {}) };
+  return {
+    kind: "set",
+    objective,
+    ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+    ...(background ? { background: true } : {}),
+  };
 }

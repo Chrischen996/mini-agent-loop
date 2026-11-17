@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -52,6 +52,23 @@ describe("GoalStore", () => {
 
       assert.equal(await store.clear("s1"), true);
       assert.equal(await store.get("s1"), undefined);
+    });
+  });
+
+  it("preserves concurrent field updates made through separate store instances", async () => {
+    await withTempStore(async (store) => {
+      const other = new GoalStore({ dataDir: (store as unknown as { root: string }).root.replace(/\/goals$/, "") });
+      await store.write({
+        sessionId: "s1", goalId: "g1", objective: "x", status: "active",
+        tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, updatedAt: 1,
+      });
+      await Promise.all([
+        store.update("s1", (goal) => goal ? { ...goal, tokensUsed: 42 } : undefined),
+        other.update("s1", (goal) => goal ? { ...goal, objective: "updated from worker" } : undefined),
+      ]);
+      const saved = await store.get("s1");
+      assert.equal(saved?.tokensUsed, 42);
+      assert.equal(saved?.objective, "updated from worker");
     });
   });
 });

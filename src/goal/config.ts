@@ -11,6 +11,16 @@ export type GoalFeatureConfig = {
   dataDir?: string;
 };
 
+/**
+ * Host capabilities that let the model autonomously hand a goal to the
+ * detached background runner (`create_goal` with `background: true`).
+ * Without a launcher the tool rejects background requests with guidance.
+ */
+export type GoalBackgroundLauncher = (request: {
+  objective: string;
+  tokenBudget?: number;
+}) => Promise<{ taskId: string; worktreeDir: string; branch: string }>;
+
 export type GoalSessionContext = {
   sessionId: string;
   store: GoalStore;
@@ -48,6 +58,8 @@ export type CreateGoalSessionOptions = GoalFeatureConfig & {
   steering?: GoalSteeringOptions;
   /** Use an existing store (for example shared with a client) instead of creating one. */
   store?: GoalStore;
+  /** Host-provided detached background runner; enables model-initiated background goals. */
+  launchBackground?: GoalBackgroundLauncher;
 };
 
 /** Build the per-session goal manager, runtime controller, and model tools. */
@@ -68,6 +80,6 @@ export function createGoalSession(options: CreateGoalSessionOptions): GoalSessio
     store,
     manager,
     runtime,
-    tools: createGoalTools(manager),
+    tools: createGoalTools(manager, options.launchBackground ? { launchBackground: options.launchBackground } : {}),
   };
 }

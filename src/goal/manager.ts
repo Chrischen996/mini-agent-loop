@@ -38,7 +38,7 @@ export class GoalManager {
   private readonly store: GoalStore;
   private readonly sessionId: string;
   private readonly maxGoalTokenBudget?: number;
-  private readonly onEvent?: (event: GoalEvent) => void;
+  private onEvent?: (event: GoalEvent) => void;
   private pendingGoalCreated = false;
   /** True when a goal objective was edited in place during this turn. */
   private objectiveEditedDuringTurn = false;
@@ -52,6 +52,15 @@ export class GoalManager {
 
   private emit(goal: GoalState | undefined, reason: GoalEvent["reason"]): void {
     this.onEvent?.({ type: "goal_updated", goal: goal ? goalSnapshot(goal) : null, reason });
+  }
+
+  /**
+   * Replace the event sink after construction. Diagnostics use this to tap the
+   * stream without rebuilding the session (a second session would mean a second
+   * store and manager for the same thread).
+   */
+  setEventSink(sink: ((event: GoalEvent) => void) | undefined): void {
+    this.onEvent = sink;
   }
 
   async get(): Promise<{ raw: GoalState; snapshot: GoalSnapshot } | undefined> {
@@ -116,6 +125,11 @@ export class GoalManager {
           timeUsedSeconds: current?.timeUsedSeconds ?? 0,
           createdAt: current?.createdAt ?? now,
           updatedAt: now,
+          // Preserve background-runner coordinates across objective edits;
+          // dropping them would silently release the foreground mutex.
+          ...(current?.backgroundTaskId !== undefined ? { backgroundTaskId: current.backgroundTaskId } : {}),
+          ...(current?.worktreeDir !== undefined ? { worktreeDir: current.worktreeDir } : {}),
+          ...(current?.worktreeBranch !== undefined ? { worktreeBranch: current.worktreeBranch } : {}),
         };
         if (objectiveEdited) this.objectiveEditedDuringTurn = true;
         else this.pendingGoalCreated = true;

@@ -28,8 +28,8 @@ const GOAL_CONTEXT_MARKER = "<codex_internal_context source=\"goal\">";
 export class GoalRuntimeController {
   private readonly manager: GoalManager;
   private readonly maxContinuations: number;
-  private readonly onBudgetLimited?: (goal: GoalState) => void;
-  private readonly onGoalSnapshot?: (goal: GoalSnapshot | null) => void;
+  private onBudgetLimited?: (goal: GoalState) => void;
+  private onGoalSnapshot?: (goal: GoalSnapshot | null) => void;
   /** Loop clients assign this to forward goal state changes as loop events. */
   onGoalEvent?: GoalSteeringOptions["onGoalEvent"];
   private accountingStartMs = 0;
@@ -64,6 +64,19 @@ export class GoalRuntimeController {
     this.lastPublishedKey = key;
     this.lastPublishedReason = reason;
     this.onGoalEvent?.({ type: "goal_updated", goal: snapshot, reason });
+  }
+
+  /**
+   * Replace the snapshot/budget sinks after construction so diagnostics can tap
+   * them without rebuilding the session. `onGoalEvent` is intentionally left
+   * alone: the loop owns and reassigns it per turn.
+   */
+  setSteeringSinks(sinks: {
+    onGoalSnapshot?: (goal: GoalSnapshot | null) => void;
+    onBudgetLimited?: (goal: GoalState) => void;
+  }): void {
+    this.onGoalSnapshot = sinks.onGoalSnapshot;
+    this.onBudgetLimited = sinks.onBudgetLimited;
   }
 
   /** Reset per-user-submission accounting. */

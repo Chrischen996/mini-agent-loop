@@ -13,6 +13,11 @@ export function loadGlobalConcurrencyLimitFromEnv(): number | undefined {
   return value === 0 ? undefined : value;
 }
 
+export function loadGlobalGoalWorkerLimitFromEnv(): number | undefined {
+  const value = readNonNegativeInt(process.env.MINI_AGENT_GOAL_WORKER_LIMIT);
+  return value === 0 ? undefined : value;
+}
+
 export function loadGlobalSubagentCallBudgetFromEnv(): number | undefined {
   return readNonNegativeInt(process.env.MINI_AGENT_GLOBAL_SUBAGENT_CALL_BUDGET);
 }

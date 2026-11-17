@@ -76,17 +76,27 @@ import type { SubagentTaskRecord } from "./subagent/task-registry.ts";
 import { launchDetachedSubagentBatchWorker, launchDetachedSubagentWorker, waitForDetachedWorkerStart } from "./subagent/worker-host.ts";
 import { resolveToolProvider, type Tool } from "./tools/types.ts";
 import {
+  attachGoalDiagnostics,
+  createGoalLog,
   createGoalSession,
   goalNotice,
   goalSnapshot,
+  GOAL_WORKER_BRANCH_ENV,
+  GOAL_WORKER_OWNER_ENV,
+  GOAL_WORKER_REGISTRY_ROOT_ENV,
+  GOAL_WORKER_WORKTREE_ENV,
+  backgroundGoalNotice,
+  isBackgroundGoalActive,
+  launchBackgroundGoal,
   resolveGoalConfig,
   type GoalSessionContext,
+  type GoalUpdatedEvent,
 } from "./goal/index.ts";
 import type { ContentPart, MessageContent } from "./types.ts";
 import { buildIntenseLlm, parseThinkingCommandMode, parseThinkingIntensityPrompt, withThinkingLevel } from "./think-intensity.ts";
 import { loadThinkingModeFromEnv } from "./thinking-policy.ts";
 import type { RuntimeExecutionContext } from "./runtime/policy-types.ts";
-import { loadGlobalConcurrencyLimitFromEnv, loadGlobalSubagentCallBudgetFromEnv, loadGlobalTokenBudgetFromEnv } from "./runtime/limits.ts";
+import { loadGlobalConcurrencyLimitFromEnv, loadGlobalGoalWorkerLimitFromEnv, loadGlobalSubagentCallBudgetFromEnv, loadGlobalTokenBudgetFromEnv } from "./runtime/limits.ts";
 import {
   PermissionManager,
   isPermissionMode,
@@ -281,7 +291,7 @@ export type ParsedCliArgs = {
   planArchive: boolean;
   sandboxEnabled: boolean;
   /** Explicit goal intent for this CLI invocation. */
-  goal?: { objective?: string; clear?: boolean; status?: "pause" | "resume" | "complete"; tokenBudget?: number };
+  goal?: { objective?: string; clear?: boolean; status?: "pause" | "resume" | "complete"; tokenBudget?: number; background?: boolean };
   /** Resume the most recent session (Claude Code `--continue`). */
   continueSession: boolean;
   /** Resume a specific session id, or list sessions when no id is given. */
@@ -348,7 +358,13 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
       if (value.toLowerCase() === "clear") goal = { clear: true };
       else if (value.toLowerCase() === "pause" || value.toLowerCase() === "resume" || value.toLowerCase() === "complete") {
         goal = { status: value.toLowerCase() as "pause" | "resume" | "complete" };
-      } else if (value) goal = { objective: value };
+      } else if (value) {
+        // `--bg` / `--background` inside the objective opts into the detached
+        // worktree worker; strip it so it never reaches the model prompt.
+        const bgMatch = value.match(/(?:^|\s)--(?:bg|background)(?=\s|$)/i);
+        const objective = bgMatch ? value.replace(bgMatch[0], " ").trim() : value;
+        goal = { ...(objective ? { objective } : {}), ...(bgMatch ? { background: true } : {}) };
+      }
       else goal = {};
       continue;
     }
@@ -580,10 +596,14 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
 
 export function parseCliWorkerArgs(
   argv: string[],
-  worker: { taskId?: string; batchJobId?: string; ownerSessionId?: string; mode?: PermissionMode },
+  worker: { taskId?: string; batchJobId?: string; ownerSessionId?: string; mode?: PermissionMode; goalWorker?: boolean },
 ): ParsedCliArgs {
   if (!worker.taskId && !worker.batchJobId) return parseCliArgs(argv);
   if (!worker.ownerSessionId) throw new Error("Detached worker has no owning session ID.");
+  // Goal workers start a fresh session in their worktree (the owner session
+  // lives in the live checkout's workspace and is not resumable here); the
+  // goal store binding happens via MINI_AGENT_GOAL_WORKER_OWNER instead.
+  if (worker.goalWorker) return parseCliArgs(["--mode", worker.mode ?? "bypass"]);
   return parseCliArgs(["--resume", worker.ownerSessionId, "--mode", worker.mode ?? "plan"]);
 }
 
@@ -646,7 +666,9 @@ async function main(): Promise<void> {
   if (workerTaskId || batchWorkerJobId) {
     await waitForDetachedWorkerStart();
     if (!workerOwnerSessionId) throw new Error("Detached sub-agent worker has no owning session ID.");
-    taskRegistry = new SubagentTaskRegistry(process.cwd());
+    // Goal workers run with cwd inside an isolated worktree, but their task
+    // record lives in the owner's live checkout — point the registry there.
+    taskRegistry = new SubagentTaskRegistry(process.env[GOAL_WORKER_REGISTRY_ROOT_ENV]?.trim() || process.cwd());
     await taskRegistry.initialize();
     if (workerTaskId) {
       workerRecord = await taskRegistry.get(workerTaskId, workerOwnerSessionId);
@@ -663,6 +685,7 @@ async function main(): Promise<void> {
       batchJobId: batchWorkerJobId,
       ownerSessionId: workerOwnerSessionId,
       mode: workerOptions?.mode,
+      goalWorker: Boolean(process.env[GOAL_WORKER_OWNER_ENV]?.trim() && workerTaskId),
     });
   } catch (err) {
     console.error(err instanceof Error ? err.message : err);
@@ -733,7 +756,10 @@ async function main(): Promise<void> {
         }
       : undefined;
   const thinking = parseThinkingIntensityPrompt(rawPrompt);
-  const prompt = thinking.prompt;
+  // `--goal <objective>` with no positional prompt uses the objective as the
+  // turn prompt, so setting a goal starts work immediately (same semantics as
+  // the TUI's `/goal <objective>`). An explicit prompt still wins.
+  const prompt = thinking.prompt || parsed.goal?.objective || "";
   const cwd = process.cwd();
   const discoveredSkills = await discoverWorkspaceSkills(cwd);
   let activeSkillNames = loadSkillNamesFromEnv();
@@ -1044,16 +1070,63 @@ async function main(): Promise<void> {
     workspaceId: cwd,
   };
   const persistenceSessionId = resumedSessionId ?? sessionManager.sessionId;
+  // Background goal worker (`/goal ... --bg`): this detached process is the
+  // single owner of the goal — bind to the owner session's store, arm the
+  // "created" steering so the first model call sees the objective, and report
+  // the worktree/branch in the final output so the user knows what to merge.
+  const goalWorkerOwner = process.env[GOAL_WORKER_OWNER_ENV]?.trim();
+  const isGoalWorker = Boolean(goalWorkerOwner && workerTaskId);
   let goalSession: GoalSessionContext | undefined;
   if (goalConfig.enabled) {
+    const onGoalEvent = (event: GoalUpdatedEvent) => {
+      console.error(`[goal] ${event.reason} ${event.goal ? `status=${event.goal.status} tokens=${event.goal.tokensUsed}` : "cleared"}`);
+    };
     goalSession = createGoalSession({
       ...goalConfig,
-      sessionId: persistenceSessionId,
-      onEvent: (event) => {
-        console.error(`[goal] ${event.reason} ${event.goal ? `status=${event.goal.status} tokens=${event.goal.tokensUsed}` : "cleared"}`);
-      },
+      sessionId: isGoalWorker ? goalWorkerOwner! : persistenceSessionId,
+      onEvent: onGoalEvent,
+      // Model-initiated background goals (create_goal background=true).
+      // Disabled inside a goal worker: it already owns the goal, and nested
+      // background handoffs would fight over the same store record.
+      ...(isGoalWorker ? {} : {
+        launchBackground: async ({ objective }: { objective: string }) => {
+          const launch = await launchBackgroundGoal({
+            cwd,
+            ownerSessionId: persistenceSessionId,
+            objective,
+            registry: taskRegistry ?? new SubagentTaskRegistry(cwd),
+            store: goalSession!.store,
+            concurrencyLimit: loadGlobalGoalWorkerLimitFromEnv(),
+          });
+          console.error(backgroundGoalNotice(launch));
+          return launch;
+        },
+      }),
+    });
+    // Opt-in diagnostics (MINI_AGENT_GOAL_LOG=1). Taps the existing event sink and
+    // wraps the runtime's steering/continuation methods in place, so the sink
+    // above is preserved.
+    attachGoalDiagnostics(goalSession, {
+      log: createGoalLog(isGoalWorker ? goalWorkerOwner! : persistenceSessionId),
+      onEvent: onGoalEvent,
     });
     await goalSession.manager.initialize();
+    if (isGoalWorker) {
+      // Re-arm steering for the worker's first model call: the owner already
+      // consumed nothing (background set does not kick off a foreground turn),
+      // but a fresh manager instance starts with no pending intent.
+      const current = await goalSession.manager.get();
+      if (current?.raw.status === "active") {
+        await goalSession.manager.setFromUser({ objective: current.raw.objective, status: "active" });
+      }
+      // The worker executes inside the isolated worktree (its cwd). Tell the
+      // model where completion lives so the final report names the branch.
+      const worktree = process.env[GOAL_WORKER_WORKTREE_ENV];
+      const branch = process.env[GOAL_WORKER_BRANCH_ENV];
+      if (worktree && branch) {
+        console.error(`[goal-worker] worktree=${worktree} branch=${branch}`);
+      }
+    }
     if (goalIntent) {
       const status = goalIntent.status === "pause" ? "paused"
         : goalIntent.status === "resume" ? "active"
@@ -1072,6 +1145,25 @@ async function main(): Promise<void> {
         ...(goalIntent.tokenBudget !== undefined ? { tokenBudget: goalIntent.tokenBudget } : {}),
       });
       console.error(goalNotice(updated));
+      // `--goal "... --bg"`: hand the goal to a detached worktree worker and
+      // exit; the foreground process never runs the loop for this goal.
+      if (goalIntent.background && goalIntent.objective && updated) {
+        try {
+          const launch = await launchBackgroundGoal({
+            cwd,
+            ownerSessionId: persistenceSessionId,
+            objective: goalIntent.objective,
+            registry: taskRegistry ?? new SubagentTaskRegistry(cwd),
+            store: goalSession.store,
+            concurrencyLimit: loadGlobalGoalWorkerLimitFromEnv(),
+          });
+          console.error(backgroundGoalNotice(launch));
+        } catch (error) {
+          console.error(error instanceof Error ? error.message : String(error));
+          process.exitCode = 1;
+        }
+        return;
+      }
       if (!goalIntent.objective && !parsedPrompt) return;
     }
   } else if (goalIntent) {
@@ -1401,7 +1493,10 @@ async function main(): Promise<void> {
   const activePermissionTurn = permissionManager.beginTurn(persistenceSessionId, onPermissionRequest);
   permissionTurn = activePermissionTurn;
   try {
-    if (workerRecord && cliSubagentTool && taskRegistry) {
+    // Goal workers bypass the subagent-tool wrapper: they run the main agent
+    // loop below with goalRuntime attached (steering + auto-continuation +
+    // usage accounting), which the plain subagent path does not provide.
+    if (workerRecord && cliSubagentTool && taskRegistry && !isGoalWorker) {
       const finishWorkerFailure = async (message: string): Promise<void> => {
         const latest = await taskRegistry!.get(workerRecord!.taskId, persistenceSessionId);
         if (!latest || (latest.status !== "queued" && latest.status !== "running")) return;
@@ -1450,6 +1545,11 @@ async function main(): Promise<void> {
 
     const turnSaved = await persistTurnStart();
     goalSession?.runtime.beginTurn();
+    // Foreground mutex: a detached background worker owns the goal while
+    // backgroundTaskId is set; do not double-steer or double-account it here.
+    const backgroundOwnsGoal = goalSession && !isGoalWorker
+      ? await isBackgroundGoalActive(goalSession.store, goalSession.sessionId, taskRegistry ?? undefined).catch(() => false)
+      : false;
     if (turnSaved && taskRegistry) {
       for (const record of completionWakeRecords) {
         await taskRegistry.markAutoWakeDelivered(record.taskId, persistenceSessionId);
@@ -1462,7 +1562,7 @@ async function main(): Promise<void> {
     messages = await runAgentLoop(turnPrompt, {
       llm: { ...requestLlm, sessionId: persistenceSessionId },
       tools,
-      ...(goalSession ? { goalRuntime: goalSession.runtime } : {}),
+      ...(goalSession && !backgroundOwnsGoal ? { goalRuntime: goalSession.runtime } : {}),
       autoSubagent: loadAutoSubagentOptionsFromEnv(),
       userContent: turnUserContent,
       preprocessors: vision ? [createVisionPreprocessor(vision)] : [],
@@ -1579,6 +1679,33 @@ async function main(): Promise<void> {
   const lastAssistant = [...messages]
     .reverse()
     .find((m) => m.role === "assistant");
+
+  // Goal worker: close out the registry task so subagent_wait/output and the
+  // completion auto-wake fire, and append the worktree/branch merge hint to
+  // the result the owner session sees.
+  if (isGoalWorker && workerRecord && taskRegistry) {
+    const finalGoal = await goalSession?.manager.get().catch(() => undefined);
+    const worktree = process.env[GOAL_WORKER_WORKTREE_ENV];
+    const branch = process.env[GOAL_WORKER_BRANCH_ENV];
+    const answerText = lastAssistant?.role === "assistant" ? lastAssistant.content : "";
+    const mergeHint = worktree && branch
+      ? `\n\n[goal-worker] Changes live in worktree ${worktree} on branch ${branch}. Goal status: ${finalGoal?.raw.status ?? "unknown"}. Review and merge the branch into your main checkout.`
+      : "";
+    const failed = !lastAssistant || finalGoal?.raw.status === "blocked";
+    await taskRegistry.finish(workerRecord.taskId, {
+      status: failed ? "failed" : "completed",
+      result: answerText + mergeHint,
+      isError: Boolean(failed),
+      ...(failed ? { error: `Goal worker ended with status ${finalGoal?.raw.status ?? "no-answer"}` } : {}),
+      messages,
+      runtime: workerRecord.runtime,
+    });
+    // Release the foreground mutex: the worker no longer owns the goal.
+    await goalSession?.store.update(goalWorkerOwner!, (current) =>
+      current ? { ...current, backgroundTaskId: undefined, updatedAt: Date.now() } : undefined).catch(() => undefined);
+    if (answerText) console.log(answerText + mergeHint);
+    return;
+  }
 
   if (lastAssistant && lastAssistant.role === "assistant") {
     // AssistantMessage.content is always a string in the current contract.

@@ -21,6 +21,16 @@ export type GoalState = {
   timeUsedSeconds: number;
   createdAt: number;
   updatedAt: number;
+  /**
+   * Set while a detached background worker owns this goal (`/goal ... --bg`).
+   * Foreground loops must not attach goalRuntime while this is present and
+   * the goal is active — the worker is the single writer/steerer.
+   */
+  backgroundTaskId?: string;
+  /** Isolated worktree the background worker executes in. */
+  worktreeDir?: string;
+  /** Branch the background worker commits to; merge it after completion. */
+  worktreeBranch?: string;
 };
 
 /** Public snapshot returned by get_goal, update_goal and the HTTP API. */

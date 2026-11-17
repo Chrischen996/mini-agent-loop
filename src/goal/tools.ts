@@ -1,5 +1,6 @@
 import type { Tool, ToolResult } from "../tools/types.ts";
 import type { GoalManager } from "./manager.ts";
+import type { GoalBackgroundLauncher } from "./config.ts";
 import { goalSnapshot, type GoalSnapshot } from "./types.ts";
 
 export const GET_GOAL_TOOL_NAME = "get_goal";
@@ -23,7 +24,10 @@ function snapshotResponse(goal: GoalSnapshot | undefined, completionBudgetReport
 }
 
 /** Session-scoped goal tools. All failures become isError tool results, never loop crashes. */
-export function createGoalTools(manager: GoalManager): Tool[] {
+export function createGoalTools(
+  manager: GoalManager,
+  options: { launchBackground?: GoalBackgroundLauncher } = {},
+): Tool[] {
   const getTool: Tool = {
     name: GET_GOAL_TOOL_NAME,
     description: "Get the current goal for this thread, including status, budgets, token and elapsed-time usage, and remaining token budget.",
@@ -46,7 +50,7 @@ export function createGoalTools(manager: GoalManager): Tool[] {
 
   const createTool: Tool = {
     name: CREATE_GOAL_TOOL_NAME,
-    description: "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.\nSet token_budget only when an explicit token budget is requested. Fails if an unfinished goal exists; use update_goal only for status.",
+    description: "Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.\nSet token_budget only when an explicit token budget is requested. Fails if an unfinished goal exists; use update_goal only for status.\nSet background=true to hand the goal to a detached background worker when the user asked for background/parallel execution, or when the objective is a long autonomous job that should not block this conversation. The worker runs fully autonomous (bypass permissions) inside an isolated git worktree on its own branch; this conversation stays free and the result reports the branch to merge. Requires a clean git repository. Omit background (foreground) for interactive or short work.",
     source: { kind: "local" },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     capabilities: {
@@ -66,15 +70,46 @@ export function createGoalTools(manager: GoalManager): Tool[] {
           minimum: 1,
           description: "Positive token budget for the new goal. Omit unless explicitly requested.",
         },
+        background: {
+          type: "boolean",
+          description: "Run the goal as a detached background worker in an isolated git worktree with bypass permissions. Use when the user asked for background execution or the objective is a long autonomous job; the conversation stays free. Requires a clean git repository.",
+        },
       },
       required: ["objective"],
     },
     async execute(args): Promise<ToolResult> {
       try {
-        const goal = await manager.createFromModel(
-          args.objective as string,
-          args.token_budget as number | undefined,
-        );
+        const objective = args.objective as string;
+        const tokenBudget = args.token_budget as number | undefined;
+        const goal = await manager.createFromModel(objective, tokenBudget);
+        // Model-initiated background handoff: the goal is registered first
+        // (so the worker binds to it), then the host launcher forks the
+        // detached worktree worker. On launch failure the goal is marked
+        // blocked so the foreground mutex never strands.
+        if (args.background === true) {
+          if (!options.launchBackground) {
+            await manager.updateFromModel("blocked").catch(() => undefined);
+            return failure("Background goals are not available in this host (no detached runner). The goal was created but marked blocked; continue in the foreground or ask the user to run /goal with --bg.");
+          }
+          try {
+            const launch = await options.launchBackground({
+              objective,
+              ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+            });
+            return result({
+              ...snapshotResponse(goalSnapshot(goal)),
+              background: {
+                taskId: launch.taskId,
+                worktreeDir: launch.worktreeDir,
+                branch: launch.branch,
+              },
+              note: "Goal handed to a detached background worker in an isolated worktree (bypass permissions). Do not keep working on this objective in this conversation; the worker owns it. Inspect with subagent_output/subagent_wait; the completion report names the branch to merge.",
+            });
+          } catch (error) {
+            await manager.updateFromModel("blocked").catch(() => undefined);
+            return failure(`Background launch failed: ${error instanceof Error ? error.message : String(error)}. The goal was marked blocked; retry without background or ask the user to commit/stash first.`);
+          }
+        }
         return result(snapshotResponse(goalSnapshot(goal)));
       } catch (error) {
         return failure(error instanceof Error ? error.message : String(error));
