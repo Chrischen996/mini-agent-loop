@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="360" viewBox="0 0 880 360" role="img" aria-labelledby="title desc">
+  <title id="title">Subagent model isolation and resolution order</title>
+  <desc id="desc">A parent agent dispatches role-specific subagents. Each role resolves its model through a priority chain: explicit model, conversation role, profile, global role, then parent model.</desc>
+  <rect width="880" height="360" fill="#f7faf9"/>
+  <text x="24" y="34" font-family="Segoe UI, Arial, sans-serif" font-size="19" font-weight="700" fill="#17333b">Per-role subagent model isolation</text>
+  <text x="24" y="56" font-family="Segoe UI, Arial, sans-serif" font-size="12.5" fill="#55707a">Conversation-scoped overrides let one session pin a different model per subagent role.</text>
+
+  <!-- Parent agent -->
+  <rect x="24" y="82" width="188" height="92" rx="10" fill="#17333b" stroke="#17333b"/>
+  <text x="118" y="112" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#ffffff">Parent agent</text>
+  <text x="118" y="134" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="11.5" fill="#cfe3de">/model-role &lt;role&gt; &lt;profile&gt;</text>
+  <text x="118" y="154" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="11.5" fill="#cfe3de">sets a session-only binding</text>
+
+  <!-- Role boxes -->
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <rect x="286" y="82" width="170" height="92" rx="10" fill="#e4f1ee" stroke="#9fc9bf"/>
+    <text x="371" y="112" text-anchor="middle" font-size="13.5" font-weight="700" fill="#165d59">researcher</text>
+    <text x="371" y="134" text-anchor="middle" font-size="11" fill="#2f6b64">read-only</text>
+    <text x="371" y="154" text-anchor="middle" font-size="11" fill="#2f6b64">session model A</text>
+
+    <rect x="478" y="82" width="170" height="92" rx="10" fill="#e9eff8" stroke="#b0c5e4"/>
+    <text x="563" y="112" text-anchor="middle" font-size="13.5" font-weight="700" fill="#315f91">coder</text>
+    <text x="563" y="134" text-anchor="middle" font-size="11" fill="#3d6496">writes allowed</text>
+    <text x="563" y="154" text-anchor="middle" font-size="11" fill="#3d6496">session model B</text>
+
+    <rect x="670" y="82" width="186" height="92" rx="10" fill="#fff0df" stroke="#e7c29a"/>
+    <text x="763" y="112" text-anchor="middle" font-size="13.5" font-weight="700" fill="#a8542d">reviewer</text>
+    <text x="763" y="134" text-anchor="middle" font-size="11" fill="#9a5a37">read-only</text>
+    <text x="763" y="154" text-anchor="middle" font-size="11" fill="#9a5a37">inherits parent model</text>
+  </g>
+
+  <!-- arrows -->
+  <g stroke="#94a9ad" stroke-width="1.6" fill="none" marker-end="url(#arrow)">
+    <path d="M212 128 L280 128"/>
+    <path d="M212 128 L472 128"/>
+    <path d="M212 128 L664 128"/>
+  </g>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#94a9ad"/>
+    </marker>
+  </defs>
+
+  <!-- resolution order -->
+  <text x="24" y="216" font-family="Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="700" fill="#17333b">Model resolution order (highest priority first)</text>
+  <g font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#315f91">
+    <rect x="24" y="232" width="154" height="38" rx="8" fill="#e9eff8" stroke="#b0c5e4"/>
+    <text x="101" y="256" text-anchor="middle">explicit model arg</text>
+    <rect x="190" y="232" width="176" height="38" rx="8" fill="#e4f1ee" stroke="#9fc9bf"/>
+    <text x="278" y="256" text-anchor="middle">session role binding</text>
+    <rect x="378" y="232" width="128" height="38" rx="8" fill="#ffffff" stroke="#a9c9c3"/>
+    <text x="442" y="256" text-anchor="middle" fill="#165d59">profile.llm</text>
+    <rect x="518" y="232" width="148" height="38" rx="8" fill="#ffffff" stroke="#b3c7e1"/>
+    <text x="592" y="256" text-anchor="middle">global role config</text>
+    <rect x="678" y="232" width="178" height="38" rx="8" fill="#ffffff" stroke="#dfc17e"/>
+    <text x="767" y="256" text-anchor="middle" fill="#8d6a14">parent model (fallback)</text>
+  </g>
+  <g stroke="#94a9ad" stroke-width="1.4" fill="none" marker-end="url(#arrow)">
+    <path d="M178 251 L188 251"/>
+    <path d="M366 251 L376 251"/>
+    <path d="M506 251 L516 251"/>
+    <path d="M666 251 L676 251"/>
+  </g>
+
+  <text x="24" y="308" font-family="Segoe UI, Arial, sans-serif" font-size="12" fill="#55707a">Bindings and full model connections persist in session snapshots and restore on resume; unknown models fall back with a notice.</text>
+</svg>

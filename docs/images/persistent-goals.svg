@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="300" viewBox="0 0 880 300" role="img" aria-labelledby="title desc">
+  <title id="title">Persistent thread goal lifecycle</title>
+  <desc id="desc">One goal per session moves through active, paused, blocked, budget-limited and complete states, with automatic continuation steering while active.</desc>
+  <rect width="880" height="300" fill="#f7faf9"/>
+  <text x="24" y="34" font-family="Segoe UI, Arial, sans-serif" font-size="19" font-weight="700" fill="#17333b">Persistent thread goals</text>
+  <text x="24" y="56" font-family="Segoe UI, Arial, sans-serif" font-size="12.5" fill="#55707a">One bounded goal per session survives compaction and resume; the loop steers itself toward completion.</text>
+
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <!-- create -->
+    <rect x="24" y="88" width="132" height="52" rx="9" fill="#e4f1ee" stroke="#9fc9bf"/>
+    <text x="90" y="112" text-anchor="middle" font-size="13" font-weight="700" fill="#165d59">create_goal</text>
+    <text x="90" y="130" text-anchor="middle" font-size="10.5" fill="#2f6b64">objective + budget</text>
+
+    <!-- active hub -->
+    <rect x="206" y="82" width="150" height="64" rx="10" fill="#17333b" stroke="#17333b"/>
+    <text x="281" y="110" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">active</text>
+    <text x="281" y="130" text-anchor="middle" font-size="10.5" fill="#cfe3de">auto-continue turns</text>
+
+    <!-- paused -->
+    <rect x="416" y="82" width="132" height="52" rx="9" fill="#e9eff8" stroke="#b0c5e4"/>
+    <text x="482" y="106" text-anchor="middle" font-size="13" font-weight="700" fill="#315f91">paused</text>
+    <text x="482" y="124" text-anchor="middle" font-size="10.5" fill="#3d6496">user request</text>
+
+    <!-- blocked -->
+    <rect x="416" y="170" width="132" height="52" rx="9" fill="#fff0df" stroke="#e7c29a"/>
+    <text x="482" y="194" text-anchor="middle" font-size="13" font-weight="700" fill="#a8542d">blocked</text>
+    <text x="482" y="212" text-anchor="middle" font-size="10.5" fill="#9a5a37">completion audit</text>
+
+    <!-- budget limited -->
+    <rect x="596" y="170" width="150" height="52" rx="9" fill="#fff6e6" stroke="#dfc17e"/>
+    <text x="671" y="194" text-anchor="middle" font-size="13" font-weight="700" fill="#8d6a14">budget_limited</text>
+    <text x="671" y="212" text-anchor="middle" font-size="10.5" fill="#8d6a14">wrap-up steering</text>
+
+    <!-- complete -->
+    <rect x="596" y="82" width="150" height="64" rx="10" fill="#e4f1ee" stroke="#9fc9bf"/>
+    <text x="671" y="110" text-anchor="middle" font-size="14" font-weight="700" fill="#165d59">complete</text>
+    <text x="671" y="130" text-anchor="middle" font-size="10.5" fill="#2f6b64">terminal state</text>
+  </g>
+
+  <g stroke="#94a9ad" stroke-width="1.5" fill="none" marker-end="url(#arrow2)">
+    <path d="M156 114 L204 114"/>
+    <path d="M356 108 L414 108"/>
+    <path d="M356 130 Q386 160 414 194"/>
+    <path d="M356 122 Q480 260 594 196"/>
+    <path d="M356 100 Q480 60 594 112"/>
+    <path d="M548 196 L594 196"/>
+  </g>
+  <defs>
+    <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#94a9ad"/>
+    </marker>
+  </defs>
+
+  <text x="24" y="262" font-family="Segoe UI, Arial, sans-serif" font-size="11.5" fill="#55707a">While active, the loop re-enters with a bounded continuation budget; each turn injects an objective/budget steering message.</text>
+  <text x="24" y="282" font-family="Segoe UI, Arial, sans-serif" font-size="11.5" fill="#55707a">Goals persist under the shared data dir and are checked in the CLI, TUI status bar, and HTTP API.</text>
+</svg>

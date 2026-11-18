@@ -547,9 +547,7 @@ export function buildTerminalRenderLines(
 - 渲染器（`IncrementalTerminalRenderer`）在 inline / document 模式下维护只向下移动的帧锚点 `frameTopRow`：静态突发写在锚点处并推进锚点，动态帧从锚点向下重绘；帧超出屏幕底部时先在底行发出差额滚动（deficit scroll），把先前内容推入 scrollback 再重绘。document 模式复用同一锚点管线，只是帧内容缩小为“未提交尾部 + chrome”，帧根不再固定为整屏高（`height=undefined`）。
 - 静态突发由 App 在 layout effect 中发射（`writeStaticBurst` prop → `emitStaticBurst`），绕过 Ink 的写入管线——Ink 的 log-update 给每个动态帧追加尾随换行，使得按写入形状分类静态/动态不可靠。发射位置按会话代际（transcript generation）追踪：数组追加式增长沿用，RESET / 恢复会话 / 回滚则从头重发。
 - **resize 重打（gemini-cli 同款）**：终端宽度变化时，App 用 `collectResizeRefreshRows` 从新到旧收集最近定型行（至少覆盖一屏，字符预算 `RESIZE_REFRESH_MAX_CHARS = 1000`），按新宽度重新 burst 进流；更早的旧副本留在 scrollback 里保持原换行。document 模式还会重打当前流式消息已提交前缀的新宽度尾部。非活动会话不打印，激活后若宽度已变会补发一次。
-- **首帧锚定（DSR 实验，已回滚）**：flow 布局曾尝试在 `render()` 前用 DSR（`CSI 6 n`）查询光标行并 `setInitialAnchor(row)`，让首帧从提示行处流动打印，消除"shell 提示行与贴底帧之间的大片空白"。**该实验已撤除**：探测在启动关键路径上独占 stdin（raw mode 切换 + 自挂 data 监听 + `pause()`），与 Ink/adapter 的接管存在竞态——Node 对被显式 pause 的流**不会因挂 `data` 监听而自动 resume**，处理不当即"启动后无法输入"；慢终端的 DSR 响应还会超时漏进输入框。`renderer.setInitialAnchor` API 与测试保留，将来若由 `TerminalStdinAdapter`（接管生命周期的正主）发起查询可安全重启此特性。当前首帧仍是底部锚定。
-- **adapter 的 `source.resume()`（输入健壮性修复）**：`TerminalStdinAdapter` 构造时显式 `source.resume()`——attach `data` listener 不会唤醒已 paused 的 stdin，任何上游 pause（历史探测、信号处理）都可能让提示框永久失聪，这行保证接管即恢复读取。
-
+- **首帧锚定（DSR 光标查询）**：flow 布局（inline/document）若首帧直接贴屏幕底部锚定，shell 提示行与帧之间会留下一大片空白（启动时"满屏黑空白"的来源）。`src/tui/cursor-probe.ts` 的 `queryCursorRow()` 在 `render()` 之前向终端发 `CSI 6 n` 查询光标实际行（300ms 超时），拿到结果后 `renderer.setInitialAnchor(row)` 让首帧从提示行处流动打印；不支持查询的终端自动回退底部锚定。prime 同时预设 `lastTerminalRows` 基准，避免首帧把 0→N 的行数变化误判成 resize 而冲掉锚点。注意：**查询必须在 render() 之前 await**——DSR 响应回调与首帧 paint 争抢同一事件循环，render 之后再查会把 paint 压后数秒（实测 9s）。探针临时接管 stdin 后必须恢复原来的 flowing/raw 状态；Ink 注入的是 `TerminalStdinAdapter`，它只调用适配器的 `ref()`/`setRawMode()`，不会替我们恢复真实 `process.stdin` 的暂停状态。查询期间到达的非 DSR 字节会作为 `leftover` 回放到适配器，避免用户启动时敲的字符被吞掉。
 - **启动诊断（`MINI_AGENT_BOOT_TRACE`）**：`src/tui/boot-trace.ts` 提供 `bootProbe()`，在 App/AgentSessionApp/MessageFeed 渲染入口、renderer anchor/burst/scroll、ink-main 各启动阶段打时间戳，写 `MINI_AGENT_BOOT_TRACE_FILE`（默认 `/tmp/mini-agent-boot-trace.log`；写文件而非 stderr 是因为 stderr 和帧共用 pty 会被重绘覆盖）。`MINI_AGENT_BOOT_TRACE=profile` 额外用 node:inspector Session 做 20s 采样 CPU profile 并自己落盘 `.cpuprofile`（绕开 process.exit 丢 `--cpu-prof` 的问题）。未开启时零开销。
 
 - 定型行的视口排除由 `selectMessageViewport({ historyStartIndex })` 完成：滚动核算、history hint 与渲染都只覆盖未定型尾部，行级缓存在定型/动态两侧共享，滚动簿记不再计入已进入 scrollback 的行。
@@ -854,7 +852,9 @@ describe("PromptInput", () => {
   持久化、Esc 恢复到打开前的主题）；`/theme <name>` 直接切换并持久化。两种提交路径都
   借用 resize-refresh 通道（`resizeRefreshRef = NaN`）把最近一屏历史按新配色重打——更早
   冻结进 scrollback 的行保持旧色（与 gemini 静态历史同行为）。Esc 取消不持久化，下次
-  启动会再次询问。
+  启动会再次询问。首次启动弹窗期间键盘由 ThemeDialog 接管，输入框仍会显示但
+  `PromptInput.focus=false`，普通字符不会进入草稿；Enter 提交或 Esc 取消后恢复输入。
+  `MINI_AGENT_THEME_PROMPT=never` 可跳过这个启动选择界面。
 - **兼容**：`claude-dark` 下背景发原 256 色码（`48;5;236/24/178`，渲染器测试锚定）；
   其他主题背景由槽位换算（truecolor `48;2;…` 或基本背景 `40-47/100-107`）。
 - **代码高亮（gemini hljs 语义移植）**：`src/tui/code-highlight.ts` 是无依赖的按行

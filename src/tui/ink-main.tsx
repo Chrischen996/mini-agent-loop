@@ -12,6 +12,7 @@ import { createIncrementalStdoutHandle } from "./incremental-renderer.ts";
 import { createTerminalStdin } from "./terminal-stdin.ts";
 import { disableMouseTracking, enableMouseTracking } from "./mouse-tracking.ts";
 import { resolveTuiLayoutMode } from "./layout-mode.ts";
+import { queryCursorRow } from "./cursor-probe.ts";
 import { initTheme } from "./theme.ts";
 import { bootProbe } from "./boot-trace.ts";
 import {
@@ -39,18 +40,6 @@ const disposeRenderStatsReport = installRenderStatsReporting();
 function bootTrace(step: string): void {
   bootProbe(step, ` rows=${process.stdout.rows} cols=${process.stdout.columns}`);
 }
-
-/**
- * NOTE: A DSR cursor probe (CSI 6n) used to run before render() to place the
- * first frame at the prompt row instead of bottom-anchoring it. It was
- * removed after shipping: toggling stdin raw mode, owning the data listener,
- * and pausing the stream on the boot critical path raced Ink's stdin
- * takeover — an explicitly paused stream is NOT auto-resumed by attaching a
- * `data` listener, and any windowing mistake left the prompt deaf or leaked
- * `[row;colR` bytes into it. Renderer.setInitialAnchor remains available for
- * a future re-introduction through a safe path (e.g. a query issued by the
- * stdin adapter itself, which already owns the takeover lifecycle).
- */
 
 // Keep Ink's frequent redraws isolated from the shell's main screen. This is
 // also what prevents a completed TUI session from leaving its frame in the
@@ -173,13 +162,22 @@ async function runMain(): Promise<void> {
     }
     const { facade: incrementalStdout, renderer: incrementalRenderer } =
       createIncrementalStdoutHandle(process.stdout, { mode: layoutMode });
-    bootTrace("after-stdout-handle");
-    // NOTE: the startup DSR cursor probe was removed here (see note near the
-    // top of this file): stdin raw-mode/pause toggles before Ink's takeover
-    // raced the prompt input path. Bottom-anchored first paint restored.
+    // Flow layouts: anchor the first frame at the prompt's actual row so the
+    // screen between prompt and bottom is not left as dead space. The probe
+    // owns stdin until it restores its flowing/raw state; replay any keys it
+    // saw into Ink's adapter so early typing is not swallowed by startup.
+    const cursorProbe = await queryCursorRow({
+      stdin: process.stdin,
+      stdout: process.stdout,
+      layoutMode,
+    });
+    if (cursorProbe.row !== undefined) incrementalRenderer.setInitialAnchor(cursorProbe.row);
+    bootTrace("after-cursor-probe");
     // Frame stdin before Ink: concatenated/split mouse reports must reach
     // useInput as atomic reads instead of leaking into the prompt as text.
+    // Creating the adapter after the probe keeps DSR bytes out of useInput.
     const terminalStdin = createTerminalStdin(process.stdin);
+    if (cursorProbe.leftover) terminalStdin.write(cursorProbe.leftover);
     bootTrace("before-render");
     const app = render(
       <App

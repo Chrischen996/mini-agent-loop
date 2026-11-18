@@ -3,20 +3,31 @@
 [![npm version](https://img.shields.io/npm/v/%40krischen99999%2Fmini-agent-loop)](https://www.npmjs.com/package/@krischen99999/mini-agent-loop)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.19-43853d)](https://nodejs.org/)
 
+[English](README.md) · [简体中文](README.zh-CN.md)
+
 An extensible TypeScript runtime for building and running coding agents. Use
 the same agent core from an interactive terminal, a one-shot CLI, or a local
 Web UI, then extend it with your own models, tools, skills, and workflows.
 
 ## Recent Updates
 
-Recent updates make long tasks easier to manage and recover:
+The latest releases focus on long-running focus, terminal polish, and per-role
+model control:
 
-- Background shell and subagent tasks can be inspected, continued, or stopped.
-- Web and TUI runs checkpoint partial work and support budget-aware continuation.
-- The TUI has richer task controls, alongside a ready-to-select model catalog.
+- **Persistent thread goals** — one bounded goal per session that survives
+  compaction and resume, with automatic continuation steering and CLI/TUI/Web
+  controls. Now enabled by default (`MINI_AGENT_GOALS=0` to opt out).
+- **Gemini-style themes & highlighting** — a first-run theme dialog, 19 ported
+  palettes, a `/theme` command, startup-dialog policy, and theme-driven syntax
+  highlighting for fenced code with zero dependencies.
+- **Richer terminal controls** — an Effort slider, inline/document layout modes,
+  a performance monitor, resize refresh, and `Ctrl+L` clear in the Ink TUI.
+- **Per-role subagent models** — pin a different model for each subagent role in
+  a single conversation with `/model-role`, with full connections persisted in
+  session snapshots and restored on resume.
 
-See [Web UI](#web-ui), [Terminal TUI](#terminal-tui), and
-[Configuration](#configuration) for details.
+See [Persistent thread goals](#persistent-thread-goals),
+[Terminal TUI](#terminal-tui), and [Configuration](#configuration) for details.
 
 ## What You Get
 
@@ -238,7 +249,7 @@ settings are optional; a live run needs a credential for the selected provider.
 | `MINI_AGENT_AUTO_SUBAGENT_MAX_TURNS` | no | profile/default |
 | `MINI_AGENT_AUTO_SUBAGENT_ALLOW_WRITES` | no | disabled; automatic preflight stays read-only |
 | `MINI_AGENT_SUBAGENT_AWAIT_BUDGET_MS` | no | `600000`; foreground sub-agents continue in background after this wait budget (`0` disables auto-backgrounding) |
-| `MINI_AGENT_GOALS` | no | `0`; set `1` to enable the persistent thread goal (`get_goal` / `create_goal` / `update_goal` tools) |
+| `MINI_AGENT_GOALS` | no | enabled; set `0`/`false`/`no`/`off` to disable the persistent thread goal (`get_goal` / `create_goal` / `update_goal` tools) |
 | `MINI_AGENT_GOAL_MAX_TOKEN_BUDGET` | no | unlimited ceiling for goal token budgets |
 | `MINI_AGENT_GOAL_MAX_CONTINUATIONS` | no | `50` automatic goal continuations per user submission |
 | `MINI_AGENT_GOAL_LOG` | no | `0`; set `1` to append a JSONL goal diagnostic log (steering injection, continuation decisions, budget-limit steering) |
@@ -268,12 +279,14 @@ choose whether to retry or simplify the task.
 
 ### Persistent thread goals
 
-Set `MINI_AGENT_GOALS=1` to enable the opt-in goal feature across the CLI,
-TUI, and Web server. Each session carries at most one goal: a concrete
+The goal feature is enabled by default across the CLI, TUI, and Web server.
+Set `MINI_AGENT_GOALS=0` to disable it. Each session carries at most one goal: a concrete
 objective, a status (`active`, `paused`, `blocked`, `usage_limited`,
 `budget_limited`, `complete`), an optional token budget, and accumulated
 token/time usage. Goals persist in the shared `AGENT_DATA_DIR` under
 `goals/<session-id>.json` and are restored when the session resumes.
+
+![Persistent thread goal lifecycle](docs/images/persistent-goals.svg)
 
 - **Model tools**: `get_goal` reads status and remaining budget;
   `create_goal` starts a goal (failing while an unfinished goal exists);
@@ -412,6 +425,19 @@ waves inherit savings from earlier ones. Provider rate-limit failures (429 /
 When the inner loop stops at a bounded stop (safety cap or run budget), the
 subagent recovers its partial tool progress and returns it to the parent with a
 `[Partial]` marker instead of discarding the work.
+
+#### Per-role model bindings
+
+![Subagent model isolation and resolution order](docs/images/subagent-model-isolation.svg)
+
+A conversation can pin a different model for each subagent role. In the TUI,
+`/model-role <role> <profile>` binds a saved model profile to a role such as
+`researcher` or `coder` for this session only; `/model-role <role> clear` removes
+the binding. The effective model is resolved in this order: explicit `model`
+argument → conversation role binding → profile model → global role config →
+parent model. Bindings and full model connections are saved in session
+snapshots, so they survive resume; an unavailable model falls back to the
+current one with a notice instead of breaking the session.
 
 Set `MINI_AGENT_AUTO_SUBAGENT=0` to skip preflight and leave delegation to the
 model:
@@ -732,7 +758,7 @@ npm start -- --resume
 # resume into a new fork without changing the source session
 npm start -- --resume <session-id> --fork-session "Start a new branch here"
 
-# persistent thread goal (requires MINI_AGENT_GOALS=1)
+# persistent thread goal (enabled by default; MINI_AGENT_GOALS=0 disables)
 npm start -- --goal "finish the migration" "then run the tests"
 npm start -- --goal "finish the migration" --goal-token-budget 50000 "then run the tests"
 npm start -- --goal clear "inspect current state"
@@ -1058,6 +1084,19 @@ project's own client, not Anthropic's `claude` CLI. There is no pi-tui, legacy,
 or standalone ANSI terminal entrypoint and no `--renderer` switch. The Ink
 client uses the shared Agent Core, reducer, tool registry, permissions, and
 session persistence.
+
+![Terminal UI themes and task controls](docs/images/tui-theme-and-controls.svg)
+
+Recent terminal additions include a first-run `/theme` dialog with 19 ported
+palettes and live highlight preview, theme-driven syntax highlighting for
+fenced code (zero dependencies), an Effort slider (`/effort`), inline and
+document scrollback layouts, a performance monitor, resize refresh, and `Ctrl+L`
+clear. The startup dialog policy is controlled by `MINI_AGENT_THEME_PROMPT`
+(`always` / `first-run` / `never`); the selected palette and effort level persist
+across restarts. On a first run, the theme picker owns keyboard input until you
+commit with `Enter` or dismiss it with `Esc`: ordinary typing is intentionally
+disabled while it is open, even though the prompt row remains visible. Set
+`MINI_AGENT_THEME_PROMPT=never` to skip the startup picker.
 
 Use `/model`, `/profiles`, `/sessions`, `/resume [id]` (or `resume [id]`), `/clear`, `/quit`, or `Ctrl+C`
 inside the TUI. Typing `/sessions` or `/resume` opens the saved-session
