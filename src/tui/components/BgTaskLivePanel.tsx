@@ -6,6 +6,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Box, Text, useInput } from "ink";
 import type { BgTaskSummary, LogChunk } from "../../bg-tasks/manager.js";
 import { TUI_COLORS as C } from "../theme.ts";
+import { panelBorderStyle } from "../pixel-glyphs.ts";
 import { bgTaskStatusColor, bgTaskStatusGlyph, isBgTaskActive } from "../bg-task-status-color.ts";
 
 export type BgTaskLivePanelProps = {
@@ -280,7 +281,7 @@ export function BgTaskLivePanel({ manager, width = 80, maxLogLines = 8, onClose 
   const logLines = logText.split("\n").slice(-maxLogLines);
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={C.info} paddingX={1} width={width} minWidth={0}>
+    <Box flexDirection="column" borderStyle={panelBorderStyle()} borderColor={C.info} paddingX={1} width={width} minWidth={0}>
       <Text bold color={C.info}>▣ Background task dashboard</Text>
       <Text dimColor>{runningCount} running · {finishedCount} finished · {view === "actions" ? "↑↓ select action · Enter run · Esc back" : "Select a task · ↑↓ navigate · Enter actions · x stop · r refresh · Esc close"}</Text>
       {refreshError && <Text color={C.error}>⚠ Refresh failed: {refreshError}</Text>}

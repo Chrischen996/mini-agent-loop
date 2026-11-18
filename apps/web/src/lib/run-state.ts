@@ -15,6 +15,7 @@ export function runStopText(state: {
     budget_exhausted: "The run budget was exhausted; progress was saved.",
     safety_cap_reached: "The emergency iteration cap was reached; check for an unexpected loop before continuing.",
     context_exhausted: "The context compaction limit was reached; progress was saved.",
+    iteration_limit_reached: `Execution limit reached (${String(state.maxSteps ?? "unknown")} steps); progress saved.`,
     step_limit: `Execution limit reached (${String(state.maxSteps ?? "unknown")} steps); progress saved.`,
     server_restart: "The previous run was interrupted by a server restart; progress was saved.",
   };

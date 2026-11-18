@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { BgTaskSummary } from "../../../src/bg-tasks/manager.js";
+import type { BgTaskSummary } from "../types/api.ts";
 import type { WorkspacePanelScope } from "../lib/workspace-scope.ts";
 
 type Props = WorkspacePanelScope & { active?: boolean };
@@ -115,7 +115,7 @@ export default function BackgroundTasksPanel({ active = true, ...scope }: Props)
         <button type="button" className="bg-task__select" onClick={() => { setLogs(""); setLogOffset(0); void loadLogs(task.taskId, true); }}>
           <span className="bg-task__title">{task.name || task.command}</span>
           <span className={`bg-task__status bg-task__status--${task.status}`}>{task.status.replaceAll("_", " ")}</span>
-          <span className="bg-task__meta">{task.taskId.slice(0, 12)} · {Math.round(task.durationMs / 1000)}s</span>
+          <span className="bg-task__meta">{task.taskId.slice(0, 12)} · {Math.round((task.durationMs ?? 0) / 1000)}s</span>
         </button>
         <div className="bg-task__actions">
           {task.status === "running" && <button type="button" title="Terminate task" aria-label="Terminate task" onClick={() => void mutate(task.taskId, "kill")}>Stop</button>}

@@ -144,6 +144,11 @@ export async function activateSavedModelProfile(
   const newLlm = loadLlmConfigFromEnv();
   setLlm(newLlm);
   dispatch({ type: "MODEL_CHANGED", modelName: newLlm.model });
+  dispatch({
+    type: "ADD_NOTICE",
+    title: "Model",
+    text: `Activated saved profile "${profileName}" (${newLlm.baseUrl}); using its saved API key.`,
+  });
   if (historyRef.current.length > 1) {
     historyRef.current = adaptHistoryForModel(historyRef.current, {
       targetCapabilities: newLlm.capabilities,

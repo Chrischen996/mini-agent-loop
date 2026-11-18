@@ -76,8 +76,8 @@ describe("server turn continuation", () => {
       },
     }), (error: unknown) => {
       assert.ok(error instanceof RunStoppedError);
-      assert.equal(error.stopReason, "safety_cap_reached");
-      assert.match(error.message, /Safety cap reached \(4 steps\)/);
+      assert.equal(error.stopReason, "iteration_limit_reached");
+      assert.match(error.message, /Execution limit reached \(4 steps\)/);
       assert.equal(error.messages.filter((message) => message.role === "tool").length, 4);
       return true;
     });
@@ -86,7 +86,7 @@ describe("server turn continuation", () => {
     assert.equal(events.some((event) => event.type === "done" || event.type === "error"), false);
     assert.equal(snapshot.at(-1)?.role, "tool");
     assert.equal(lastState?.status, "paused");
-    assert.equal(lastState?.reason, "safety_cap_reached");
+    assert.equal(lastState?.reason, "iteration_limit_reached");
   });
 
   it("does not repeat automatic preflight delegation on a continuation block", async () => {

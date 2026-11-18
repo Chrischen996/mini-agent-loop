@@ -9,7 +9,9 @@ import { StatusBar } from "./components/StatusBar.tsx";
 import { TodoPanel } from "./components/TodoPanel.tsx";
 import { getTodoPanelRows } from "./todo-format.ts";
 import { SLASH_COMMANDS } from "./components/FileAutocomplete.tsx";
-import { parseBackgroundTaskCommand, parseSlashCommand } from "./slash-commands.ts";
+import { parseBackgroundTaskCommand, parseSlashCommand, parseUnknownSlashCommand } from "./slash-commands.ts";
+import { parseInitCommand } from "./init-command.ts";
+import { initAgentMd } from "../init-agent-md.ts";
 import { isExactSlashCommand } from "./autocomplete.ts";
 
 /** Human-readable message for an LlmTimeoutError, with partial-response preview. */
@@ -81,12 +83,13 @@ import {
 } from "../permissions.ts";
 import { TurnEventBuffer } from "./stream-buffer.ts";
 import { getTuiViewportHeight, getMessageFeedHeight, getPickerLayout } from "./layout.ts";
+import { getWelcomeHeaderHeight } from "./welcome-panel.ts";
 import { inputContainerBorderColor, usesInputBorder } from "./input-container.ts";
 import { estimateViewportContentHeight, buildSealedStaticItems, streamingAssistantRows, MessageHeightCache } from "./message-viewport.ts";
 import { resolveTuiLayoutMode, type TuiLayoutMode } from "./layout-mode.ts";
 import { bootProbe } from "./boot-trace.ts";
 import { applyTheme, persistThemeName, formatThemeListText, activeThemeName, shouldPromptForThemeAtStartup } from "./theme.ts";
-import { computeCommitBoundary, rowTexts, rowCountledCommitted, collectResizeRefreshRows } from "./stream-commit.ts";
+import { computeCommitBoundary, rowTexts, assistantSealOverlap, collectResizeRefreshRows } from "./stream-commit.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
@@ -155,7 +158,7 @@ import {
   createGoalLog,
   createGoalSession,
   goalNotice,
-  goalStatusSegment,
+  goalStatusSegmentElapsed,
   isBackgroundGoalActive,
   launchBackgroundGoal,
   parseGoalCommand,
@@ -378,6 +381,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   }, [cwd, bgManagerForCwd]);
   const [bgTaskCount, setBgTaskCount] = useState(0);
   const [bgPanelOpen, setBgPanelOpen] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const [pendingTodoRunPlan, setPendingTodoRunPlan] = useState<import("./state.ts").PendingTodoRunPlan | undefined>(undefined);
   const confirmedTodoRunRef = useRef<import("./state.ts").PendingTodoRunPlan | undefined>(undefined);
   const refreshBgTaskCount = useCallback(async () => {
@@ -401,7 +405,6 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     const timer = setInterval(() => void refreshBgTaskCount(), 1000);
     return () => clearInterval(timer);
   }, [bgTaskCount, getBgManager, refreshBgTaskCount]);
-
   // Create the subagent tool — dispatches SubagentEvents to the TUI reducer
   const subagentFactory = useLazyRef(() => new SubagentToolsFactory()).current;
   const subagentTaskRegistry = useLazyRef(() => new SubagentTaskRegistry(projectCwd)).current;
@@ -421,13 +424,6 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
             task: event.task,
             ...(event.ownerSessionId ? { ownerSessionId: event.ownerSessionId } : {}),
           });
-          if (!event.ownerSessionId || event.ownerSessionId === conversationIdRef.current) {
-            dispatch({
-              type: "ADD_NOTICE",
-              title: "Sub-agent running in background",
-              text: `${event.task}\nTask ID: ${event.id}`,
-            });
-          }
           return;
         }
         const background = backgroundSubagentsRef.current.get(event.id);
@@ -508,6 +504,12 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   }, [getBgManager, getSubagentTools, subagentFactory]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
+  useEffect(() => {
+    if (goalState?.status !== "active" || !state.busy) return;
+    setNowMs(Date.now());
+    const timer = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [goalState?.status, state.busy]);
   const [foregroundCommandWaiting, setForegroundCommandWaiting] = useState(false);
   const [sendableWaitWaiting, setSendableWaitWaiting] = useState(false);
   const handleSubmitRef = useRef<(text: string) => Promise<void>>(async () => undefined);
@@ -583,6 +585,8 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   const pendingImagesRef = useRef<ImageAttachment[]>([]);
   pendingImagesRef.current = state.pendingImages;
   const promptQueueRef = useRef<string[]>([]);
+  const diffFilesRef = useRef<string[]>([]);
+  const [diffFileCandidates, setDiffFileCandidates] = useState<string[]>([]);
   const pendingSubagentPromptsRef = useRef(new Map<string, string[]>());
   const sendNowPendingRef = useRef(false);
   const sendNowWaitToolIdsRef = useRef(new Set<string>());
@@ -639,6 +643,9 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     if (!goalConfig.enabled) return;
     void getGoalSession()?.manager.get().then((current) => {
       setGoalState(current ? current.snapshot : null);
+    }).catch(() => {
+      // The workspace may disappear (session switch, test teardown) while the
+      // goal store lock is still being acquired; a missing goal is not fatal.
     });
   }, [conversationId, goalConfig.enabled]);
 
@@ -751,7 +758,10 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       onGoalSnapshot: (snapshot) => setGoalState(snapshot),
     });
     goalSessionRef.current = session;
-    void session.manager.initialize();
+    void session.manager.initialize().catch(() => {
+      // Initialization races workspace teardown in short-lived sessions; the
+      // next goal operation recreates the store on demand.
+    });
     return session;
   }, [goalConfig]);
 
@@ -1145,6 +1155,9 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     setAcMode(null);
   }, [setAcMode, llm, setAcIndex, setProfileListState, setModelSetup, setInput, historyRef, modelSetup]);
 
+  // While a picker overlay is open the welcome panel yields its rows so the
+  // picker, prompt, and status chrome all stay visible.
+  const showWelcome = state.messages.length === 0 && !state.busy && !state.pendingPermission && !acMode;
   const requestedPickerItems =
     acMode === "command" ? Math.min(6, cmdCandidates.length)
       : acMode === "file" ? Math.min(8, fileCandidates.length)
@@ -1178,6 +1191,8 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     termRows: terminalSize.rows,
     requestedItems: requestedPickerItems,
     inputRows: promptRows,
+    hasHeader: !isDocumentLayout,
+    headerRows: showWelcome ? getWelcomeHeaderHeight(termWidth, true) : undefined,
     hasPendingImages: state.pendingImages.length > 0,
     todoRows,
     extraRows: acMode === "model-picker" ? 4 : acMode === "model" || acMode === "file" ? 3 : 2,
@@ -1188,6 +1203,8 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   const feedHeight = getMessageFeedHeight({
     termRows: terminalSize.rows,
     inputRows: promptRows,
+    hasHeader: !isDocumentLayout,
+    headerRows: showWelcome ? getWelcomeHeaderHeight(termWidth, true) : undefined,
     hasPendingImages: state.pendingImages.length > 0,
     todoRows,
     pickerRows: pickerLayout.totalRows,
@@ -1858,6 +1875,62 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       return;
     }
 
+    // /diff opens a picker over the workspace's changed files; Enter shows
+    // the selected file's Git diff as a local notice (no model turn).
+    if (/^\/diff$/i.test(trimmed)) {
+      setInput("");
+      try {
+        const files = await new GitWorkflow(cwd).changedFiles();
+        if (files.length === 0) {
+          dispatch({ type: "ADD_NOTICE", title: "Git diff", text: "No changed files in this workspace." });
+          return;
+        }
+        diffFilesRef.current = files.map((file) => file.path);
+        setDiffFileCandidates(diffFilesRef.current);
+        setAcIndex(0);
+        setAcMode("workspace-diff-files");
+      } catch (error) {
+        dispatch({ type: "ADD_NOTICE", title: "Git diff", text: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
+
+    // /init uses the bounded LLM project snapshot from initAgentMd. --print
+    // previews the deterministic template without calling the model or writing.
+    const initCommand = parseInitCommand(trimmed);
+    if (initCommand) {
+      setInput("");
+      if (initCommand.kind === "error") {
+        dispatch({ type: "ADD_NOTICE", title: "Init", text: initCommand.message });
+        return;
+      }
+      try {
+        const result = await initAgentMd({
+          cwd,
+          force: initCommand.force,
+          print: initCommand.print,
+          llm: !initCommand.print,
+          llmConfig: llm,
+        });
+        if (initCommand.print) {
+          dispatch({ type: "ADD_NOTICE", title: "AGENT.MD Template Preview", text: result.content });
+          return;
+        }
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "AGENT.MD",
+          text: `${result.overwritten ? "Overwrote" : "Created"} AGENT.MD. Instructions are now active for subsequent turns.${result.llmFallback ? " Model generation failed; used the template instead." : ""}`,
+        });
+      } catch (error) {
+        dispatch({
+          type: "ADD_NOTICE",
+          title: "Init Failed",
+          text: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return;
+    }
+
     // Slash commands → direct tool
     const slashCmd = parseSlashCommand(trimmed);
     if (slashCmd) {
@@ -1875,6 +1948,19 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         case "grep": await runDirectToolRef("grep", { pattern: slashCmd.pattern, path: slashCmd.path }); break;
       }
       dispatch({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
+      return;
+    }
+
+    // A leading "/" that is not a known command is a typo, not a prompt.
+    // Sending it to the model wasted a turn and produced a confusing answer.
+    const unknownCommand = parseUnknownSlashCommand(trimmed);
+    if (unknownCommand && !planTurnOverride) {
+      setInput("");
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "Unknown command",
+        text: `${unknownCommand} is not a command. Use /help to list the available commands.`,
+      });
       return;
     }
 
@@ -2393,10 +2479,12 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   // commit effect performs, so the frame tail and the stream never overlap.
   // Without the burst channel (tests render App directly) nothing may be
   // sliced out of the frame or the streamed rows would vanish.
+  const streamRetryBaseline = state.streamRetryCommittedText;
   const committedStreamingRows = isDocumentLayout && writeStaticBurst && state.streamingText
-    ? streamingAssistantRows(state.streamingText.slice(0, computeCommitBoundary(state.streamingText)), {
+    ? streamingAssistantRows(state.streamingText.slice(0, streamRetryBaseline ? 0 : computeCommitBoundary(state.streamingText)), {
       width: termWidth,
       thinkingMode: state.thinkingMode,
+      cache: heightCacheRef.current,
     }).length
     : 0;
 
@@ -2417,6 +2505,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   // effects run synchronously after the commit but before Ink's throttled
   // frame render, so the burst lands above the frame that follows it.
   const emittedStaticRef = useRef({ generation: -1, count: 0 });
+  const sealedRetryBaselineRef = useRef<string | undefined>(undefined);
   useLayoutEffect(() => {
     if (!usesStreamChannel || !writeStaticBurst) return;
     const tracked = emittedStaticRef.current;
@@ -2429,21 +2518,38 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     const pending = sealedStatic.items.slice(tracked.count);
     tracked.count = sealedStatic.items.length;
     const ledger = streamLedgerRef.current;
+    let activeRetryBaseline = sealedRetryBaselineRef.current;
+    const nextRetryBaseline = state.streamRetryCommittedText;
     for (const item of pending) {
       let rows = item.rows;
-      if (isDocumentLayout && item.kind === "assistant" && ledger.texts.length > 0) {
+      if (isDocumentLayout && item.kind === "assistant") {
         // The streamed prefix is already frozen in the scrollback; skip it.
-        const overlap = rowCountledCommitted(rowTexts(rows), ledger.texts);
-        if (overlap > 0) rows = rows.slice(overlap);
+        const committedTexts = [
+          ...rowTexts(activeRetryBaseline ? streamingAssistantRows(activeRetryBaseline, {
+            width: termWidth,
+            thinkingMode: state.thinkingMode,
+            cache: heightCacheRef.current,
+          }) : []),
+          ...ledger.texts,
+        ];
+        if (committedTexts.length > 0) {
+          const overlap = assistantSealOverlap(rows, committedTexts);
+          if (overlap > 0) rows = rows.slice(overlap);
+        }
         ledger.offset = 0;
         ledger.rowCount = 0;
         ledger.texts = [];
         ledger.lastText = "";
+        activeRetryBaseline = undefined;
       }
       const burst = formatSealedRowsText(rows);
       if (burst) writeStaticBurst(burst);
     }
-  }, [usesStreamChannel, isDocumentLayout, writeStaticBurst, sealedStatic]);
+    sealedRetryBaselineRef.current = nextRetryBaseline;
+    if (isDocumentLayout && nextRetryBaseline) {
+      dispatchRef.current({ type: "CLEAR_STREAM_RETRY_BASELINE" });
+    }
+  }, [usesStreamChannel, isDocumentLayout, writeStaticBurst, sealedStatic, termWidth, state.thinkingMode, state.streamRetryCommittedText]);
 
   // Document layout: append closed streaming paragraphs into the terminal
   // stream as they complete (fences/tables held back by computeCommitBoundary
@@ -2451,6 +2557,15 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   useLayoutEffect(() => {
     if (!isDocumentLayout || !writeStaticBurst) return;
     const ledger = streamLedgerRef.current;
+    if (state.streamRetryCommittedText) {
+      // The prefix before this retry is already frozen. Keep it for seal dedup,
+      // but never append the regenerated stream until the turn is final.
+      ledger.lastText = "";
+      ledger.offset = 0;
+      ledger.rowCount = 0;
+      ledger.width = termWidth;
+      return;
+    }
     const text = state.streamingText;
     if (!text) return;
     if (!text.startsWith(ledger.lastText)) {
@@ -2462,7 +2577,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     }
     ledger.lastText = text;
     const project = (upto: number) =>
-      streamingAssistantRows(text.slice(0, upto), { width: termWidth, thinkingMode: state.thinkingMode });
+      streamingAssistantRows(text.slice(0, upto), { width: termWidth, thinkingMode: state.thinkingMode, cache: heightCacheRef.current });
     if (ledger.width !== termWidth) {
       // Width flip mid-stream: rows already frozen keep their old wrap;
       // rebaseline the ledger so the live floor and dedup stay aligned.
@@ -2508,6 +2623,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         const rows = streamingAssistantRows(state.streamingText.slice(0, boundary), {
           width: termWidth,
           thinkingMode: state.thinkingMode,
+          cache: heightCacheRef.current,
         });
         const tail = rows.slice(Math.max(0, rows.length - termHeight));
         if (tail.length > 0) writeStaticBurst(formatSealedRowsText(tail));
@@ -2586,15 +2702,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           renderer's static-burst channel (see writeStaticBurst); the dynamic
           frame never re-renders them. Document layout additionally streams
           the header once, so nothing above the tail is pinned. */}
-      {isDocumentLayout ? null : <Header modelName={state.modelName} cwd={cwd} dashboardOpen={dashboardOpen} />}
-
-      {(state.todoPlan || state.todoItems) && (
-        <TodoPanel
-          plan={state.todoPlan}
-          todos={state.todoItems}
-          viewMode={state.todoViewMode}
-        />
-      )}
+      {isDocumentLayout ? null : <Header modelName={state.modelName} cwd={cwd} showWelcome={showWelcome} dashboardOpen={dashboardOpen} />}
 
       <Box flexDirection="column" flexGrow={1} flexShrink={1} minHeight={0} overflow="hidden">
         <MessageFeed
@@ -2645,7 +2753,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           input={input}
           acIndex={acIndex}
           cmdCandidates={cmdCandidates}
-          fileCandidates={fileCandidates}
+          fileCandidates={acMode === "workspace-diff-files" ? diffFileCandidates : fileCandidates}
           fileFragment={fileFragment}
           modelCandidates={modelCandidates}
           configuredModelCandidates={configuredModelCandidates}
@@ -2695,6 +2803,18 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
             ))}
           </Box>
         )}
+
+        {/* Todos live in the pinned tail directly above the input row so the
+            loading spinner (⟳) and the active step stay side by side while
+            the agent is working. Rows are reserved in the feed-height budget. */}
+        {(state.todoPlan || state.todoItems) && (
+          <TodoPanel
+            plan={state.todoPlan}
+            todos={state.todoItems}
+            viewMode={state.todoViewMode}
+          />
+        )}
+
         <Box
           borderStyle={useClaudeStyleInputBorder ? "round" : undefined}
           borderColor={useClaudeStyleInputBorder
@@ -2733,6 +2853,18 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {
                 if (acMode === "session-list") return;
+                if (acMode === "workspace-diff-files") {
+                  const selected = diffFilesRef.current[acIndex];
+                  setAcMode(null);
+                  setInput("");
+                  if (!selected) return;
+                  void new GitWorkflow(cwd).diffPath(selected).then((diff) => {
+                    dispatch({ type: "ADD_NOTICE", title: `Git diff: ${selected}`, text: diff });
+                  }).catch((error) => {
+                    dispatch({ type: "ADD_NOTICE", title: "Git diff", text: error instanceof Error ? error.message : String(error) });
+                  });
+                  return;
+                }
                 if (shouldAcceptAutocompleteOnEnter(acMode)) {
                   if (acMode === "command") {
                     const selectedCommand = cmdCandidates[acIndex];
@@ -2789,7 +2921,9 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           queuedCount={queuedCount}
           bgTaskCount={bgTaskCount}
           mcpStatus={mcpStatus}
-          goalStatus={goalState && goalConfig.enabled ? goalStatusSegment(goalState) : undefined}
+          goalStatus={goalState && goalConfig.enabled
+            ? goalStatusSegmentElapsed(goalState, state.busy ? nowMs : Date.now(), state.taskStartedAt)
+            : undefined}
           permissionMode={state.permissionMode}
           thinkingLevel={llm.thinkingLevel ?? (llm.reasoning ? "medium" : "off")}
           cacheReadTokens={state.cacheReadTokens}

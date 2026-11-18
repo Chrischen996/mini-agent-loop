@@ -55,13 +55,15 @@ export const MINIMAX_MODELS = {
 		contextWindow: 1000000,
 		maxTokens: 128000,
 	} satisfies Model<"anthropic-messages">,
-	"MiniMax-M3.1-flash": {
-		id: "MiniMax-M3.1-flash",
-		name: "MiniMax-M3.1-flash",
+	"MiniMax-M3.1-Flash": {
+		id: "MiniMax-M3.1-Flash",
+		name: "MiniMax-M3.1-Flash",
 		api: "anthropic-messages",
 		provider: "minimax",
 		baseUrl: "https://api.minimax.io/anthropic",
+		compat: {"forceAdaptiveThinking":true},
 		reasoning: true,
+		thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"},
 		input: ["text", "image"],
 		cost: {
 			input: 0.15,
@@ -69,7 +71,7 @@ export const MINIMAX_MODELS = {
 			cacheRead: 0.015,
 			cacheWrite: 0,
 		},
-		contextWindow: 1048576,
+		contextWindow: 1000000,
 		maxTokens: 524288,
 	} satisfies Model<"anthropic-messages">,
 } as const;

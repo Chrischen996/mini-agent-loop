@@ -111,7 +111,12 @@ describe("durable Web policy stops", () => {
         persistCheckpoint: async (_messages, state) => { states.push(structuredClone(state)); },
       }), stopped(reason));
       assert.equal(states.filter((s) => s.status === "paused").length, 1);
-      assert.equal(states.some((s) => s.status === "failed" || s.reason === "model_error" || s.reason === "step_limit"), false);
+      assert.equal(states.some((s) =>
+        s.status === "failed" ||
+        s.reason === "model_error" ||
+        s.reason === "iteration_limit_reached" ||
+        s.reason === "step_limit"
+      ), false);
       assert.equal(events.filter((e) => e.type === "run_stopped").length, 1);
       assert.equal(events.some((e) => e.type === "done" || e.type === "error" || e.type === "max_turns"), false);
       const final = states.at(-1)!;

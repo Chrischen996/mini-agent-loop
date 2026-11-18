@@ -2,6 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import type { TuiState } from "../state.ts";
 import { TUI_COLORS as C } from "../theme.ts";
+import { panelBorderStyle } from "../pixel-glyphs.ts";
 import { STATUS_DONE, STATUS_ERROR, STATUS_PENDING, STATUS_RUNNING } from "../render-lines.ts";
 import { toolVisualName } from "../tool-lines.ts";
 
@@ -23,7 +24,7 @@ export function WorkflowPanel({ state }: { state: Pick<TuiState, "goal" | "steps
   if (!getWorkflowPanelRows(state)) return null;
 
   return (
-    <Box flexDirection="column" paddingX={1} flexShrink={0} borderStyle="round" borderColor={C.border}>
+    <Box flexDirection="column" paddingX={1} flexShrink={0} borderStyle={panelBorderStyle()} borderColor={C.border}>
       <Text color={C.running} bold>Workspace activity</Text>
       {state.goal.trim() && <Text color={C.muted} dimColor wrap="truncate-end">Task: {state.goal.trim().replace(/\s+/g, " ").slice(0, 100)}</Text>}
       {steps.length > 0 && <>

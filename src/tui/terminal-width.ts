@@ -49,7 +49,7 @@ export function graphemeWidth(grapheme: string): number {
   const cached = graphemeWidthCache.get(grapheme);
   if (cached !== undefined) return cached;
   const width = computeGraphemeWidth(grapheme);
-  if (graphemeWidthCache.size >= GRAPHEME_WIDTH_CACHE_CAP) graphemeWidthCache.clear();
+  if (graphemeWidthCache.size >= GRAPHEME_WIDTH_CACHE_CAP) evictOldestHalf(graphemeWidthCache);
   graphemeWidthCache.set(grapheme, width);
   return width;
 }
@@ -100,7 +100,7 @@ export function terminalStringWidth(value: string): number {
   for (const grapheme of splitGraphemes(stripAnsi(value))) {
     width += graphemeWidth(grapheme);
   }
-  if (lineWidthCache.size >= LINE_WIDTH_CACHE_CAP) lineWidthCache.clear();
+  if (lineWidthCache.size >= LINE_WIDTH_CACHE_CAP) evictOldestHalf(lineWidthCache);
   lineWidthCache.set(value, width);
   return width;
 }
@@ -109,6 +109,21 @@ export function terminalStringWidth(value: string): number {
 export function clearTerminalWidthCaches(): void {
   graphemeWidthCache.clear();
   lineWidthCache.clear();
+}
+
+/**
+ * Evict the oldest half of a width cache (Map preserves insertion order).
+ * A wholesale `clear()` on overflow would re-measure every cached history
+ * row on the next frame — a periodic hitch in long sessions; FIFO-evicting
+ * half keeps the hot rows (recent transcript lines) while still bounding memory.
+ */
+function evictOldestHalf(cache: Map<string, number>): void {
+  let remaining = Math.ceil(cache.size / 2);
+  for (const key of cache.keys()) {
+    if (remaining <= 0) break;
+    cache.delete(key);
+    remaining -= 1;
+  }
 }
 
 export function countTerminalRows(value: string, columns: number): number {

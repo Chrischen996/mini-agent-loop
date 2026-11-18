@@ -1,5 +1,6 @@
 import { resolveTranscriptMessage, type ChatMessage, type ThinkingDisplayMode } from "./state.ts";
-import { messagePhysicalRows, streamingPhysicalRows, type PhysicalRow } from "./message-rows.ts";
+import { messagePhysicalRows, projectAssistantBodyRows, streamingGapRow, streamingPhysicalRows, type PhysicalRow } from "./message-rows.ts";
+import { computeCommitBoundary } from "./stream-commit.ts";
 
 type RawViewportItem =
   | { kind: "message"; index: number; message: ChatMessage }
@@ -93,6 +94,38 @@ const ARRAY_ENTRIES_CAP = 8;
  * repair for dynamic subagent/tool overlays as before. While streaming,
  * `state.messages` is unchanged, so the App estimates stay O(1).
  */
+// Key prefix shared by every streaming projection: `messagePhysicalRows`
+// for index -1 keys rows as `message--1-...`.
+const STREAMING_KEY_PREFIX = "message--1";
+
+/**
+ * Incremental projection of streaming assistant text. The settled prefix
+ * (per `computeCommitBoundary`) is projected once and cached; later calls
+ * project only the newly settled lines plus the growing tail. The entry
+ * is dropped when the text stops extending the cached prefix (new stream
+ * generation or the bounded-preview reset), which costs one full
+ * re-projection.
+ */
+type StreamingProjectionEntry = {
+  width: number;
+  thinkingMode: ThinkingDisplayMode;
+  /** Settled prefix; always ends at a commit boundary (a line end). */
+  text: string;
+  /** Rows for the settled prefix, including the leading gap row. */
+  rows: PhysicalRow[];
+  fence: { open: boolean; lang: string };
+  /** Source lines inside `text`; drives `lineIndexOffset` of the tail. */
+  lineCount: number;
+};
+
+/** Source lines in a settled fragment (char scan — no string allocation). */
+function countSettledLines(settled: string): number {
+  if (!settled) return 0;
+  let count = 0;
+  for (let i = 0; i < settled.length; i += 1) if (settled.charCodeAt(i) === 10) count += 1;
+  return count;
+}
+
 export class MessageHeightCache {
   private entries = new WeakMap<ChatMessage, PerMessageEntry>();
   private arrayEntries: ArrayBlocksEntry[] = [];
@@ -111,6 +144,7 @@ export class MessageHeightCache {
       items: SealedStaticItem[];
     }
     | undefined;
+  private streamingEntry: StreamingProjectionEntry | undefined;
 
   get(
     message: ChatMessage,
@@ -297,11 +331,81 @@ export class MessageHeightCache {
     return result;
   }
 
+  /**
+   * Incremental streaming projection (document layout hot path).
+   *
+   * Re-projects only the lines that settled since the last call plus the
+   * growing tail; the settled prefix rows are cached. Cold start, width /
+   * thinking-mode changes, and new stream generations (text no longer
+   * extends the cached prefix) fall back to one full projection.
+   */
+  getStreamingAssistantRows(text: string, options: { width: number; thinkingMode: ThinkingDisplayMode }): PhysicalRow[] {
+    if (!text) return [];
+    const { width, thinkingMode } = options;
+    const entry = this.streamingEntry;
+    if (entry && entry.width === width && entry.thinkingMode === thinkingMode && text.startsWith(entry.text)) {
+      const settledEnd = computeCommitBoundary(text);
+      if (settledEnd >= entry.text.length) {
+        let settledRows = entry.rows;
+        let fence = entry.fence;
+        let settledText = entry.text;
+        let lineCount = entry.lineCount;
+        if (settledEnd > settledText.length) {
+          const newlySettled = text.slice(settledText.length, settledEnd);
+          const projected = projectAssistantBodyRows(newlySettled, {
+            keyPrefix: STREAMING_KEY_PREFIX,
+            width,
+            initialFence: fence,
+            lineIndexOffset: lineCount,
+          });
+          settledRows = [...settledRows, ...projected.rows];
+          fence = projected.fence;
+          settledText = text.slice(0, settledEnd);
+          lineCount += countSettledLines(newlySettled);
+        }
+        this.streamingEntry = { width, thinkingMode, text: settledText, rows: settledRows, fence, lineCount };
+        const tail = text.slice(settledEnd);
+        if (!tail) return settledRows;
+        const tailRows = projectAssistantBodyRows(tail, {
+          keyPrefix: STREAMING_KEY_PREFIX,
+          width,
+          initialFence: fence,
+          lineIndexOffset: lineCount,
+        }).rows;
+        return [...settledRows, ...tailRows];
+      }
+    }
+    // Cold start or invalidated prefix: one full projection, cache the settled part.
+    const boundary = computeCommitBoundary(text);
+    const prefixText = text.slice(0, boundary);
+    const projected = projectAssistantBodyRows(prefixText, { keyPrefix: STREAMING_KEY_PREFIX, width });
+    const prefixRows = [streamingGapRow(), ...projected.rows];
+    const prefixLineCount = countSettledLines(prefixText);
+    this.streamingEntry = {
+      width,
+      thinkingMode,
+      text: prefixText,
+      rows: prefixRows,
+      fence: projected.fence,
+      lineCount: prefixLineCount,
+    };
+    const tailText = text.slice(boundary);
+    if (!tailText) return prefixRows;
+    const tailRows = projectAssistantBodyRows(tailText, {
+      keyPrefix: STREAMING_KEY_PREFIX,
+      width,
+      initialFence: projected.fence,
+      lineIndexOffset: prefixLineCount,
+    }).rows;
+    return [...prefixRows, ...tailRows];
+  }
+
   clear(): void {
     this.entries = new WeakMap();
     this.arrayEntries = [];
     this.liveEntry = undefined;
     this.sealedEntry = undefined;
+    this.streamingEntry = undefined;
   }
 }
 
@@ -347,8 +451,11 @@ export function sealedTranscriptCount(messages: readonly ChatMessage[], overlays
 
 export function streamingAssistantRows(
   streamingText: string,
-  options: { width: number; thinkingMode: ThinkingDisplayMode },
+  options: { width: number; thinkingMode: ThinkingDisplayMode; cache?: MessageHeightCache },
 ): PhysicalRow[] {
+  if (options.cache) {
+    return options.cache.getStreamingAssistantRows(streamingText, { width: options.width, thinkingMode: options.thinkingMode });
+  }
   return messagePhysicalRows({ kind: "assistant", text: streamingText }, -1, {
     width: options.width,
     thinkingMode: options.thinkingMode,
@@ -498,6 +605,7 @@ function buildBlocks(options: {
         const allRows = streamingAssistantRows(options.streamingText, {
           width: options.width,
           thinkingMode: options.thinkingMode,
+          cache: options.cache,
         });
         const floor = Math.min(options.committedStreamingRows ?? 0, allRows.length);
         const rows = allRows.slice(floor);

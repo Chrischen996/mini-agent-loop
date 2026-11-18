@@ -3,6 +3,7 @@ import React, { useRef, useState } from "react";
 import { GEMINI_BUILTIN_COLORS } from "../gemini-palettes.ts";
 import { codeTokenAttrs, codeTokenColor, highlightCodeLine } from "../code-highlight.ts";
 import { THEME_NAMES, TUI_COLORS as C, activeThemeName, applyTheme } from "../theme.ts";
+import { isPixelTheme, panelBorderStyle, pixelGlyphs } from "../pixel-glyphs.ts";
 
 /**
  * First-run / `/theme` theme picker, modeled on gemini-cli's ThemeDialog:
@@ -72,7 +73,7 @@ export function ThemeDialog({ onSelect, onCancel }: ThemeDialogProps): React.Rea
             );
           })}
         </Box>
-        <Box flexDirection="column" borderStyle="single" borderColor={C.border} paddingX={1}>
+        <Box flexDirection="column" borderStyle={panelBorderStyle("single")} borderColor={C.border} paddingX={1}>
           <Text color={C.user} bold>{"❯ How do I sort a list in Python?"}</Text>
           <Text color={C.assistant}>
             {"Use "}
@@ -91,13 +92,25 @@ export function ThemeDialog({ onSelect, onCancel }: ThemeDialogProps): React.Rea
             ))}
           </Text>
           <Text>
-            <Text color={C.success}>✓ done</Text>
-            {"  "}
-            <Text color={C.running}>⟳ running</Text>
-            {"  "}
-            <Text color={C.error}>✗ failed</Text>
-            {"  "}
-            <Text color={C.muted}>⎿ muted metadata</Text>
+            {isPixelTheme()
+              ? <>
+                  <Text color={C.success}>{pixelGlyphs()?.done ?? "★"} done</Text>
+                  {"  "}
+                  <Text color={C.running}>{pixelGlyphs()?.running ?? "◉"} running</Text>
+                  {"  "}
+                  <Text color={C.error}>{pixelGlyphs()?.error ?? "✕"} failed</Text>
+                  {"  "}
+                  <Text color={C.muted}>{pixelGlyphs()?.pending ?? "□"} muted metadata</Text>
+                </>
+              : <>
+                  <Text color={C.success}>✓ done</Text>
+                  {"  "}
+                  <Text color={C.running}>⟳ running</Text>
+                  {"  "}
+                  <Text color={C.error}>✗ failed</Text>
+                  {"  "}
+                  <Text color={C.muted}>⎿ muted metadata</Text>
+                </>}
           </Text>
         </Box>
       </Box>

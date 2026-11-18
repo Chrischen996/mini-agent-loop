@@ -78,6 +78,8 @@ export type HistoryMessage = {
 
 export type WebRunStatus = "running" | "completed" | "paused" | "interrupted" | "failed";
 export type WebRunReason =
+  | "iteration_limit_reached"
+  /** @deprecated Use `iteration_limit_reached`; retained while old sessions are still read. */
   | "step_limit"
   | "budget_exhausted"
   | "safety_cap_reached"
@@ -281,4 +283,29 @@ export type PlanSummary = {
   missingPlannedFiles?: string[];
   unplannedFiles?: string[];
   auditReport?: string;
+};
+
+/** Wire shape of BgTaskSummary from src/bg-tasks/manager.ts (server-side module). */
+export type BgTaskSummary = {
+  taskId: string;
+  name: string;
+  command: string;
+  cwd: string;
+  status: string;
+  createdAt: string;
+  startedAt?: string;
+  endedAt?: string;
+  durationMs?: number;
+  exitCode?: number | null;
+  signal?: string | null;
+  ownedByCurrentInstance: boolean;
+  sessionName: string;
+  socketName: string;
+  logPath: string;
+  backend: "tmux" | "process";
+  pid?: number;
+  attachCommand?: string;
+  reason?: string;
+  tags?: string[];
+  ownerSessionId?: string;
 };

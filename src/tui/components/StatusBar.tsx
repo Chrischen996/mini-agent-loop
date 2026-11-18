@@ -2,6 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import type { PermissionMode } from "../state.ts";
 import { TUI_COLORS as C } from "../theme.ts";
+import { panelBorderStyle } from "../pixel-glyphs.ts";
 import { buildStatusSegments, type StatusLineInput } from "../status-line.ts";
 import type { ModelThinkingLevel } from "../../pi-ai/types.ts";
 
@@ -46,7 +47,7 @@ export function StatusBar({ modelName, tokenEstimate, contextWindow, busy, statu
 
   return (
     <Box
-      borderStyle="round"
+      borderStyle={panelBorderStyle()}
       borderColor={C.border}
       paddingX={1}
       flexDirection="column"

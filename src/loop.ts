@@ -95,6 +95,7 @@ export type StopReason =
   | "completed"
   | "cancelled"
   | "budget_exhausted"
+  | "iteration_limit_reached"
   | "safety_cap_reached"
   | "context_exhausted"
   | "stalled"
@@ -1196,6 +1197,7 @@ async function runAgentTurnInternal(
   };
 
   const emitHistoryCapCompaction = async (turn: number, tools: Tool[], capped: AgentMessage[]): Promise<void> => {
+    compactionsCount += 1;
     const beforeMessages = messages;
     messages.splice(0, messages.length, ...capped);
     await triggerCheckpoint("context_compacted", { turn: turn - 1 });
@@ -1267,9 +1269,14 @@ async function runAgentTurnInternal(
     }
     onEvent?.({ type: "assistant", message, ...(usage ? { usage } : {}) });
     if (goalRuntime) {
-      const budgetReached = await goalRuntime.chargeTokens(usage);
-      if (budgetReached) {
-        await goalRuntime.chargeElapsed();
+      try {
+        const budgetReached = await goalRuntime.chargeTokens(usage);
+        if (budgetReached) {
+          await goalRuntime.chargeElapsed();
+        }
+      } catch {
+        // Goal accounting is best-effort: a disappearing data directory (for
+        // example workspace teardown) must not fail the model turn itself.
       }
     }
     if (exceeded) throw new Error(`Global agent token budget exceeded (${budget?.limit}).`);

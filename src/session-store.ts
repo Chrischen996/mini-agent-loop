@@ -24,6 +24,8 @@ export type PersistedTodoItem = {
 
 export type WebRunStatus = "running" | "completed" | "paused" | "interrupted" | "failed";
 export type WebRunReason =
+  | "iteration_limit_reached"
+  /** @deprecated Use `iteration_limit_reached`; retained while old sessions are still read. */
   | "step_limit"
   | "budget_exhausted"
   | "safety_cap_reached"
@@ -258,10 +260,12 @@ export function isValidSessionId(sessionId: string): boolean {
 /**
  * Shared data root for persisted state (sessions, memory, documents).
  * Resolution: AGENT_DATA_DIR env → ~/.mini-agent. Mirrors the server default.
+ * `env` is injectable so tests and embedded callers can isolate the root without
+ * mutating `process.env`; existing zero-arg callers are unaffected.
  */
-export function getDataRoot(): string {
+export function getDataRoot(env: NodeJS.ProcessEnv = process.env): string {
   return path.resolve(
-    process.env.AGENT_DATA_DIR ?? path.join(os.homedir(), ".mini-agent"),
+    env.AGENT_DATA_DIR ?? path.join(os.homedir(), ".mini-agent"),
   );
 }
 

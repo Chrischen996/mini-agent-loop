@@ -13,7 +13,7 @@ import {
   profileRowText,
 } from "../picker-window.ts";
 import type { ModelSetupState, PendingProfileSetup, ProfileListState, ProfileSummary } from "../types.ts";
-import type { ModelPickerSection } from "../model-picker.ts";
+import { configuredModelRowText, type ModelPickerSection } from "../model-picker.ts";
 import type { CommandDef } from "./FileAutocomplete.tsx";
 import type { AcMode } from "../input-utils.ts";
 import { TodoEditor } from "./TodoEditor.tsx";
@@ -167,6 +167,28 @@ export function Overlays({
     );
   }
 
+  if (acMode === "workspace-diff-files") {
+    const { visible, start } = pickerVisibleWindow(fileCandidates, acIndex, pickerItemRows);
+    return (
+      <Box flexDirection="column" paddingX={2} width={width} minWidth={0} overflow="hidden">
+        <Text dimColor wrap="truncate-end">{PICKER_HEADING_PREFIX}Select a changed file</Text>
+        {visible.map((candidate, visibleIndex) => {
+          const index = start + visibleIndex;
+          return (
+            <Box key={`${candidate}-${index}`} gap={1} minWidth={0}>
+              <Text color={index === acIndex ? C.running : undefined} bold={index === acIndex}>{index === acIndex ? PICKER_SELECTED_MARKER : PICKER_UNSELECTED_MARKER}</Text>
+              <Text color={index === acIndex ? C.assistant : C.muted} bold={index === acIndex} wrap="truncate-end">{candidate}</Text>
+            </Box>
+          );
+        })}
+        {fileCandidates.length > visible.length && (
+          <Text dimColor wrap="truncate-end">{pickerRangeText(start, visible.length, fileCandidates.length)}</Text>
+        )}
+        <Text dimColor wrap="truncate-end">Enter show diff  ↑↓ navigate  Esc close</Text>
+      </Box>
+    );
+  }
+
   if (acMode === "file") {
     return (
       <FileAutocomplete
@@ -202,7 +224,7 @@ export function Overlays({
         <Text color={C.primary} bold wrap="truncate-end">⚙ Configure model</Text>
         <Text wrap="truncate-end">Model: {modelSetup.model.provider}/{modelSetup.model.id}</Text>
         <Text dimColor wrap="truncate-end">Base URL: {modelSetup.field === "baseUrl" ? "editing" : modelSetup.baseUrl}</Text>
-        <Text dimColor wrap="truncate-end">API key: {modelSetup.field === "apiKey" ? "editing" : "set"}</Text>
+        <Text dimColor wrap="truncate-end">API key: {modelSetup.field === "apiKey" ? "editing" : modelSetup.apiKey ? "saved" : "missing"}</Text>
         {modelSetup.error && <Text color={C.error} wrap="truncate-end">{modelSetup.error}</Text>}
         <Text dimColor wrap="truncate-end">Enter confirm field  ·  Esc cancel</Text>
       </Box>

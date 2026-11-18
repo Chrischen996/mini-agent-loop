@@ -7,7 +7,7 @@ import { PICKER_SELECTED_MARKER, PICKER_UNSELECTED_MARKER } from "../claude-styl
 import { PICKER_HEADING_PREFIX } from "../render-lines.ts";
 import { formatContextWindow as formatContextWindowShared } from "../status-line.ts";
 import type { ProfileSummary } from "../types.ts";
-import { configuredModelRowText, type ModelPickerSection } from "../model-picker.ts";
+import { configuredModelDetailText, configuredModelRowText, type ModelPickerSection } from "../model-picker.ts";
 
 // ─── Command palette ─────────────────────────────────────────────────────────
 
@@ -175,7 +175,7 @@ export function ModelPicker({ candidates, configuredModels, section, showSection
     ? configuredModels.map((profile) => ({
       key: profile.name,
       label: configuredModelRowText(profile),
-      detail: "",
+      detail: configuredModelDetailText(profile),
     }))
     : candidates.map((model) => ({
       key: model,
@@ -184,7 +184,7 @@ export function ModelPicker({ candidates, configuredModels, section, showSection
     }));
   const { visible, start } = pickerVisibleWindow(items, selectedIndex, maxVisible);
   // Fixed name column keeps model context sizes aligned.
-  const nameColumn = configured ? 0 : modelNameColumn(visible.map((item) => item.key));
+  const nameColumn = modelNameColumn(visible.map((item) => item.key));
   return (
     <Box flexDirection="column" paddingX={2} width={width} minWidth={0} overflow="hidden">
       <Text dimColor wrap="truncate-end">{PICKER_HEADING_PREFIX}{pickerTitleText("model", { query })}</Text>
@@ -200,9 +200,7 @@ export function ModelPicker({ candidates, configuredModels, section, showSection
       {visible.map((item, i) => {
         const index = start + i;
         const selected = index === selectedIndex;
-        const label = configured
-          ? item.label
-          : item.label.padEnd(Math.max(1, Math.max(nameColumn, item.key.length + 4) - 1));
+        const label = item.label.padEnd(Math.max(1, Math.max(nameColumn, item.key.length + 4) - 1));
         return (
           <Box key={item.key} gap={1} minWidth={0}>
             <Text color={selected ? C.running : undefined} bold={selected}>
@@ -211,9 +209,7 @@ export function ModelPicker({ candidates, configuredModels, section, showSection
             <Text color={selected ? C.assistant : C.muted} bold={selected} wrap="truncate-end">
               {label}
             </Text>
-            {!configured && (
-              <Text dimColor wrap="truncate-end">{item.detail}</Text>
-            )}
+            {item.detail && <Text dimColor wrap="truncate-end">{item.detail}</Text>}
           </Box>
         );
       })}

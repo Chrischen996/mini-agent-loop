@@ -9,6 +9,6 @@
     "test/**",
     "node_modules/**"
   ],
-  "reporter": ["text", "lcov"],
+  "reporter": ["text", "lcov", "text-summary"],
   "report-dir": "coverage"
 }

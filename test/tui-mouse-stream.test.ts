@@ -160,5 +160,21 @@ describe("terminal stdin adapter", () => {
     await done;
     assert.deepEqual(reads, ["a", WHEEL_UP, "b"]);
   });
+
+  it("resumes a source paused before the adapter took over", async () => {
+    // The supervisor pauses stdin around spawn, and a startup cursor probe may
+    // pause it too. An explicitly paused stream is NOT resumed by attaching a
+    // `data` listener, so without an explicit resume the prompt stays deaf.
+    const stdin = fakeStdin();
+    stdin.pause();
+    assert.equal(stdin.readableFlowing, false);
+    const adapter = createTerminalStdin(stdin);
+    assert.equal(stdin.readableFlowing, true);
+    const { reads, done } = collect(adapter);
+    stdin.write("hi");
+    adapter.dispose();
+    await done;
+    assert.equal(reads.join(""), "hi");
+  });
 });
 

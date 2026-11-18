@@ -295,5 +295,71 @@
 		},
 		"contextWindow": 1048576,
 		"maxTokens": 943718
+	},
+	"glm-5.3-highspeed": {
+		"id": "glm-5.3-highspeed",
+		"name": "GLM-5.3 Highspeed",
+		"api": "openai-completions",
+		"provider": "zai-coding-cn",
+		"baseUrl": "https://open.bigmodel.cn/api/coding/paas/v4",
+		"compat": {
+			"supportsStore": false,
+			"supportsDeveloperRole": false,
+			"supportsReasoningEffort": true,
+			"maxTokensField": "max_tokens",
+			"thinkingFormat": "zai",
+			"supportsStrictMode": true,
+			"zaiToolStream": true
+		},
+		"reasoning": true,
+		"thinkingLevelMap": {
+			"off": null,
+			"minimal": null,
+			"low": "low",
+			"medium": null,
+			"high": "high",
+			"xhigh": null,
+			"max": "max"
+		},
+		"input": [
+			"text"
+		],
+		"cost": {
+			"input": 0,
+			"output": 0,
+			"cacheRead": 0,
+			"cacheWrite": 0
+		},
+		"contextWindow": 1000000,
+		"maxTokens": 131072
+	},
+	"glm-4.6v": {
+		"id": "glm-4.6v",
+		"name": "GLM-4.6V",
+		"api": "openai-completions",
+		"provider": "zai-coding-cn",
+		"baseUrl": "https://open.bigmodel.cn/api/coding/paas/v4",
+		"compat": {
+			"supportsStore": false,
+			"supportsDeveloperRole": false,
+			"supportsReasoningEffort": false,
+			"maxTokensField": "max_tokens",
+			"thinkingFormat": "zai",
+			"supportsStrictMode": true,
+			"zaiToolStream": true
+		},
+		"reasoning": true,
+		"input": [
+			"text",
+			"image"
+		],
+		"cost": {
+			"input": 0.3,
+			"output": 0.9,
+			"cacheRead": 0.05,
+			"cacheWrite": 0
+		},
+		"contextWindow": 128000,
+		"maxTokens": 32768
 	}
 }

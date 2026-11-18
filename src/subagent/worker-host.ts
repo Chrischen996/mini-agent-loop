@@ -3,6 +3,8 @@ import type { SubagentTaskRegistry } from "./task-registry.ts";
 
 export type DetachedSubagentWorkerOptions = {
   entryPoint: string;
+  /** Explicit module args; defaults to [] (fork re-runs the parent main module). */
+  args?: string[];
   cwd: string;
   execArgv: string[];
   env: NodeJS.ProcessEnv;
@@ -17,7 +19,7 @@ export type DetachedSubagentBatchWorkerOptions = Omit<DetachedSubagentWorkerOpti
 
 /** Start a detached CLI worker after its PID is durably attached to the task. */
 export async function launchDetachedSubagentWorker(options: DetachedSubagentWorkerOptions): Promise<void> {
-  const child = fork(options.entryPoint, [], {
+  const child = fork(options.entryPoint, options.args ?? [], {
     cwd: options.cwd,
     env: options.env,
     execArgv: options.execArgv,

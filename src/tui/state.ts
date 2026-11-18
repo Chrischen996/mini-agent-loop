@@ -13,6 +13,7 @@ import { toolArgumentSummary } from "./claude-style.ts";
 import { toolVisualName } from "./tool-lines.ts";
 import { STATUS_DONE, STATUS_ERROR } from "./render-lines.ts";
 import { compactText } from "./text-utils.ts";
+import { computeCommitBoundary } from "./stream-commit.ts";
 
 export type { PermissionMode } from "../permissions.ts";
 export type { SessionPhase } from "../plan-act/types.ts";
@@ -112,6 +113,12 @@ export type TuiState = {
   streamingReasoning: string;
   streamingTextParts: string[];
   streamingReasoningParts: string[];
+  /**
+   * Answer text already frozen into the document stream before an automatic
+   * retry. The renderer keeps it as the seal-dedup baseline instead of
+   * freezing the regenerated stream again.
+   */
+  streamRetryCommittedText?: string;
   /** Wall-clock start of the active user turn; presentation-only. */
   turnStartedAt?: number;
   /** Last streamed reasoning/answer delta; used to surface a stalled stream. */
@@ -212,7 +219,8 @@ export type TuiAction =
   | { type: "SCROLL_BY"; delta: number }
   | { type: "SCROLL_TO"; offset: number }
   | { type: "SCROLL_TO_BOTTOM" }
-  | { type: "SET_MAX_SCROLL_OFFSET"; offset: number };
+  | { type: "SET_MAX_SCROLL_OFFSET"; offset: number }
+  | { type: "CLEAR_STREAM_RETRY_BASELINE" };
 
 function toolTarget(args: Record<string, unknown>): string | undefined {
   for (const key of ["path", "file", "pattern", "command", "cmd"]) {
@@ -310,6 +318,7 @@ export function createInitialState(modelName: string): TuiState {
     streamingReasoning: "",
     streamingTextParts: [],
     streamingReasoningParts: [],
+    streamRetryCommittedText: undefined,
     turnStartedAt: undefined,
     lastStreamAt: undefined,
     busy: false,
@@ -676,6 +685,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         streamingReasoning: "",
         streamingTextParts: [],
         streamingReasoningParts: [],
+        streamRetryCommittedText: undefined,
         turnStartedAt: Date.now(),
         lastStreamAt: undefined,
         spinnerMessage: undefined,
@@ -785,6 +795,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         streamingReasoning: "",
         streamingTextParts: [],
         streamingReasoningParts: [],
+        streamRetryCommittedText: undefined,
         turnStartedAt: undefined,
         lastStreamAt: undefined,
         spinnerMessage: undefined,
@@ -805,6 +816,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         streamingReasoning: "",
         streamingTextParts: [],
         streamingReasoningParts: [],
+        streamRetryCommittedText: undefined,
         lastStreamAt: undefined,
         pendingPermission: undefined,
         spinnerMessage: undefined,
@@ -982,6 +994,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: "",
             streamingTextParts: [],
             streamingReasoningParts: [],
+            streamRetryCommittedText: undefined,
           };
           const assistantMsg: ChatMessage = { kind: "assistant", text: text || "", ...(reasoning ? { reasoning } : {}) };
           const newMessages: ChatMessage[] = (text || reasoning)
@@ -997,6 +1010,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: "",
             streamingTextParts: [],
             streamingReasoningParts: [],
+            streamRetryCommittedText: undefined,
             status: hasTools ? "Running tool…" : "Finalizing response…",
             usedTokens,
             taskTokens: state.taskTokens + (event.usage?.totalTokens ?? 0),
@@ -1020,6 +1034,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: "",
             streamingTextParts: [],
             streamingReasoningParts: [],
+            streamRetryCommittedText: undefined,
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
@@ -1032,12 +1047,16 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         }
 
         case "attempt_reset":
+          // A retried stream may reproduce the answer prefix that has already
+          // been frozen into document-mode scrollback. Preserve that prefix
+          // for seal dedup and stop incremental commits until sealing.
           return {
             ...state,
             streamingText: "",
             streamingReasoning: "",
             streamingTextParts: [],
             streamingReasoningParts: [],
+            streamRetryCommittedText: state.streamingText.slice(0, computeCommitBoundary(state.streamingText)) || undefined,
             lastStreamAt: undefined,
             status: event.reason === "stream_truncated"
               ? `Connection lost, retrying (${event.attempt})…`
@@ -1051,6 +1070,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: "",
             streamingTextParts: [],
             streamingReasoningParts: [],
+            streamRetryCommittedText: state.streamingText.slice(0, computeCommitBoundary(state.streamingText)) || undefined,
             lastStreamAt: undefined,
             status: event.errorType === "timeout"
               ? `Request timed out, retrying (${event.attempt}/${event.maxRetries})…`
@@ -1080,6 +1100,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: "",
             streamingTextParts: [],
             streamingReasoningParts: [],
+            streamRetryCommittedText: undefined,
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
@@ -1257,6 +1278,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: "",
             streamingTextParts: [],
             streamingReasoningParts: [],
+            streamRetryCommittedText: undefined,
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
@@ -1274,6 +1296,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: "",
             streamingTextParts: [],
             streamingReasoningParts: [],
+            streamRetryCommittedText: undefined,
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
@@ -1563,6 +1586,12 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           : Math.max(0, Math.min(action.offset, state.scrollOffset));
       return { ...state, maxScrollOffset: action.offset, scrollOffset: clamped };
     }
+
+    case "CLEAR_STREAM_RETRY_BASELINE":
+      return state.streamRetryCommittedText === undefined
+        ? state
+        : { ...state, streamRetryCommittedText: undefined };
+
     default:
       return state;
   }

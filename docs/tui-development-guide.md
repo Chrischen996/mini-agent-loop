@@ -547,7 +547,9 @@ export function buildTerminalRenderLines(
 - 渲染器（`IncrementalTerminalRenderer`）在 inline / document 模式下维护只向下移动的帧锚点 `frameTopRow`：静态突发写在锚点处并推进锚点，动态帧从锚点向下重绘；帧超出屏幕底部时先在底行发出差额滚动（deficit scroll），把先前内容推入 scrollback 再重绘。document 模式复用同一锚点管线，只是帧内容缩小为“未提交尾部 + chrome”，帧根不再固定为整屏高（`height=undefined`）。
 - 静态突发由 App 在 layout effect 中发射（`writeStaticBurst` prop → `emitStaticBurst`），绕过 Ink 的写入管线——Ink 的 log-update 给每个动态帧追加尾随换行，使得按写入形状分类静态/动态不可靠。发射位置按会话代际（transcript generation）追踪：数组追加式增长沿用，RESET / 恢复会话 / 回滚则从头重发。
 - **resize 重打（gemini-cli 同款）**：终端宽度变化时，App 用 `collectResizeRefreshRows` 从新到旧收集最近定型行（至少覆盖一屏，字符预算 `RESIZE_REFRESH_MAX_CHARS = 1000`），按新宽度重新 burst 进流；更早的旧副本留在 scrollback 里保持原换行。document 模式还会重打当前流式消息已提交前缀的新宽度尾部。非活动会话不打印，激活后若宽度已变会补发一次。
-- **首帧锚定（DSR 光标查询）**：flow 布局（inline/document）若首帧直接贴屏幕底部锚定，shell 提示行与帧之间会留下一大片空白（启动时"满屏黑空白"的来源）。`ink-main.queryCursorRow()` 在 `render()` 之前向终端发 `CSI 6 n` 查询光标实际行（300ms 超时），拿到结果后 `renderer.setInitialAnchor(row)` 让首帧从提示行处流动打印；不支持查询的终端自动回退底部锚定。prime 同时预设 `lastTerminalRows` 基准，避免首帧把 0→N 的行数变化误判成 resize 而冲掉锚点。注意：**查询必须在 render() 之前 await**——DSR 响应回调与首帧 paint 争抢同一事件循环，render 之后再查会把 paint 压后数秒（实测 9s）。
+- **首帧锚定（DSR 实验，已回滚）**：flow 布局曾尝试在 `render()` 前用 DSR（`CSI 6 n`）查询光标行并 `setInitialAnchor(row)`，让首帧从提示行处流动打印，消除"shell 提示行与贴底帧之间的大片空白"。**该实验已撤除**：探测在启动关键路径上独占 stdin（raw mode 切换 + 自挂 data 监听 + `pause()`），与 Ink/adapter 的接管存在竞态——Node 对被显式 pause 的流**不会因挂 `data` 监听而自动 resume**，处理不当即"启动后无法输入"；慢终端的 DSR 响应还会超时漏进输入框。`renderer.setInitialAnchor` API 与测试保留，将来若由 `TerminalStdinAdapter`（接管生命周期的正主）发起查询可安全重启此特性。当前首帧仍是底部锚定。
+- **adapter 的 `source.resume()`（输入健壮性修复）**：`TerminalStdinAdapter` 构造时显式 `source.resume()`——attach `data` listener 不会唤醒已 paused 的 stdin，任何上游 pause（历史探测、信号处理）都可能让提示框永久失聪，这行保证接管即恢复读取。
+
 - **启动诊断（`MINI_AGENT_BOOT_TRACE`）**：`src/tui/boot-trace.ts` 提供 `bootProbe()`，在 App/AgentSessionApp/MessageFeed 渲染入口、renderer anchor/burst/scroll、ink-main 各启动阶段打时间戳，写 `MINI_AGENT_BOOT_TRACE_FILE`（默认 `/tmp/mini-agent-boot-trace.log`；写文件而非 stderr 是因为 stderr 和帧共用 pty 会被重绘覆盖）。`MINI_AGENT_BOOT_TRACE=profile` 额外用 node:inspector Session 做 20s 采样 CPU profile 并自己落盘 `.cpuprofile`（绕开 process.exit 丢 `--cpu-prof` 的问题）。未开启时零开销。
 
 - 定型行的视口排除由 `selectMessageViewport({ historyStartIndex })` 完成：滚动核算、history hint 与渲染都只覆盖未定型尾部，行级缓存在定型/动态两侧共享，滚动簿记不再计入已进入 scrollback 的行。
@@ -819,6 +821,28 @@ describe("PromptInput", () => {
   dracula-dark / atom-one-dark / ayu-dark / ayu-light / github-dark / github-light /
   github-*-colorblind / holiday-dark / shades-of-purple-dark / googlecode-light /
   xcode-light / ansi-dark / ansi-light`。ColorsTheme → 语义槽位映射在 `derivePalette()`。
+  另有两个手写 8-bit 像素主题 `mario-classic` / `mario-underwater`（NES 配色，定义在
+  `theme.ts` 而非 `gemini-palettes.ts`，因为后者是脚本生成的）。
+- **像素字形**：`TUI_COLORS` 只有颜色槽位，换不了字形；`render-lines.ts` 的 `STATUS_*`
+  是模块级常量，同样不可切换。因此像素字形放在零依赖的 `pixel-glyphs.ts`：字段全部可选，
+  **缺省即回落到框架默认字形**，`applyTheme()` 顺带调用 `applyPixelGlyphs()`。默认主题的
+  字形逐字节不变（不会污染既有快照/一致性测试），只有像素主题会改写状态标记
+  （`★/◉/◐/✕/□`）、todo 进度条（`◉◉◉□□□` 金币）、spinner（四帧转金币 `◉◎○◎`）与
+  welcome 像素画。消费方一律 `pixelGlyphs()?.done ?? STATUS_DONE` 形式读取。
+  所有替换字形必须是**单宽字符**，否则行宽断言与截断计算会错位。
+- **像素面板边框**：Ink 的 `borderStyle` 除了预设名（`"round"`/`"single"`/`"bold"`）
+  还接受自定义八字符对象（cli-boxes `BoxStyle`），几何仍由 Yoga 计算。像素主题下
+  `panelBorderStyle()` 返回方块字符集（`▛▀▜▐▟▄▙▌`），否则回落传入的预设名，
+  全部 12 处 `borderStyle=` 调用点（`App.tsx` 输入容器、StatusBar、PermissionPanel、
+  PlanApprovalBar、TodoEditor、TodoRunPanel、BgTaskLivePanel、EffortPicker、
+  WorkflowPanel、AgentDashboard×2、ThemeDialog）统一走该访问器，默认主题渲染输出
+  逐字节不变。headless ANSI 投影（`terminal-overlay-lines.ts` 的 `panelTopLine` /
+  `panelContentLine` / `panelBottomLine`）通过 `panelBorderGlyphs()` 同步换边框，
+  但 `width === undefined` 分支的三个前缀（`╭─ ` / `│  ` / `╰─ ` → 像素 `▛▀ ` / `▌  ` /
+  `▙▄ `）显示宽度必须保持 **3**，顶/底边框各占 1 行的行数预算也不能变
+  （`App.tsx` 的 `permissionRows` / `planApprovalRows` 是手写魔法数字）——
+  `test/tui-panel-border.test.ts` 守这两条不变式（两主题行数相等 + 每行恰好
+  `width` 列宽 + 默认主题输出与硬编码原值逐字节一致）。
 - **颜色格式**：hex（`#rrggbb`/`#rgb`）走 truecolor；ANSI 色名（`"blue"`、`"bluebright"`）
   发基本 16 色 SGR；空串（`ansi-*` 的 Foreground、no-color 语义）跳过颜色序列。
 - **选择顺序**（`initTheme()`，由 `ink-main.tsx` 在首帧前调用）：

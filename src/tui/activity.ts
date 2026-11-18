@@ -3,6 +3,10 @@ import { statusLabel } from "./claude-style.ts";
 import { toolVisualName } from "./tool-lines.ts";
 import { CLAUDE_SPINNER_FRAMES, SPINNER_INTERVAL_MS, getSpinnerFrame, spinnerTipLabel } from "./loading.ts";
 
+/** Breathing-light period + color helpers, re-exported so components and the
+ *  headless renderer can read them from one place. */
+export { activityRowColor, BREATHING_PERIOD_MS, breathingPhase, breathingColor, mixHexColor } from "./loading.ts";
+
 /**
  * One spinner for the Ink terminal client.
  *

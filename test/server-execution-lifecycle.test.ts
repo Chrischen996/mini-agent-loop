@@ -59,11 +59,11 @@ describe("server execution lifecycle and resume", () => {
         .send({ prompt: "do a 3-step task" });
       assert.equal(runRes.status, 200);
 
-      // 2. Query session state: must be persisted as paused with step_limit
+      // 2. Query session state: must be persisted as paused with iteration_limit_reached
       const detailRes = await request(app).get(`/api/sessions/${sessionId}`);
       assert.equal(detailRes.status, 200);
       assert.equal(detailRes.body.runState?.status, "paused");
-      assert.equal(detailRes.body.runState?.reason, "step_limit");
+      assert.equal(detailRes.body.runState?.reason, "iteration_limit_reached");
       assert.equal(detailRes.body.runState?.stepsUsed, 2);
 
       // 3. Trigger continue -> completes remaining work

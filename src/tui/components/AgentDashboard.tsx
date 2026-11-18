@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { compactText } from "../text-utils.ts";
 import { TUI_COLORS as C } from "../theme.ts";
+import { panelBorderStyle } from "../pixel-glyphs.ts";
 import { PromptInput } from "./PromptInput.tsx";
 import { agentStatusColor, agentStatusGlyph } from "../bg-task-status-color.ts";
 
@@ -96,7 +97,7 @@ export function AgentDashboard({ agents, activeAgentId, width, height, onClose, 
       minHeight={0}
       width={width}
       height={height}
-      borderStyle="round"
+      borderStyle={panelBorderStyle()}
       borderColor={C.info}
       paddingX={1}
       overflow="hidden"
@@ -125,7 +126,7 @@ export function AgentDashboard({ agents, activeAgentId, width, height, onClose, 
           {selected.setupError && <Text color={C.error} wrap="truncate-end">Setup failed: {compactText(selected.setupError, Math.max(12, width - 15), "…", { maxIncludesEllipsis: true })}</Text>}
         </Box>
       )}
-      <Box borderStyle="round" borderColor={C.border} paddingX={1} flexShrink={0}>
+      <Box borderStyle={panelBorderStyle()} borderColor={C.border} paddingX={1} flexShrink={0}>
         <Text color={C.user} bold>❯ </Text>
         <PromptInput
           value={draft}

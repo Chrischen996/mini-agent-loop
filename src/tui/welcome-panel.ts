@@ -1,6 +1,7 @@
 import type { RenderLine } from "./render-lines.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { TUI_BRAND_NAME, TUI_BRAND_VERSION, TUI_WELCOME_PANEL_HEIGHT } from "./brand.ts";
+import { pixelGlyphs } from "./pixel-glyphs.ts";
 
 export type WelcomePanelData = {
   title?: string;
@@ -36,6 +37,15 @@ const BRAND_ART = [
   "  ▘▘ ▝▝  ",
 ] as const;
 
+/**
+ * Welcome art for the active theme. Pixel themes swap the brand mark for a
+ * `?` block; both are three single-width rows so the panel height budget
+ * (`TUI_WELCOME_PANEL_HEIGHT`) and the per-row width assertions stay valid.
+ */
+function brandArt(): readonly string[] {
+  return pixelGlyphs()?.brandArt ?? BRAND_ART;
+}
+
 /** Blank columns kept between panel text and its `│` borders. */
 const CELL_PADDING = 1;
 
@@ -60,14 +70,17 @@ export function buildWelcomePanelRows(width: number, data: WelcomePanelData = {}
   const modelLine = [data.model, data.billing ?? "API Usage Billing"].filter(Boolean).join(" · ");
   const tips = [...(data.tips ?? DEFAULT_TIPS), ""].slice(0, 2);
   const updates = [...(data.updates ?? DEFAULT_UPDATES), "", ""].slice(0, 3);
+  // Snapshot once so all three art rows come from the same theme even if the
+  // user switches themes between renders.
+  const art = brandArt();
 
   const rows: WelcomePanelRow[] = [
     { text: frameTop(safeWidth, title), kind: "border" },
     { text: frameBody(center("Welcome back!", leftWidth), right("Tips for getting started", rightWidth), leftWidth), kind: "heading" },
     { text: frameBody(center("", leftWidth), right(tips[0]!, rightWidth), leftWidth), kind: "body" },
-    { text: frameBody(center(BRAND_ART[0], leftWidth), right(tips[1]!, rightWidth), leftWidth), kind: "art" },
-    { text: frameBody(center(BRAND_ART[1], leftWidth), "─".repeat(rightWidth), leftWidth), kind: "art" },
-    { text: frameBody(center(BRAND_ART[2], leftWidth), right("What's new", rightWidth), leftWidth), kind: "art" },
+    { text: frameBody(center(art[0] ?? "", leftWidth), right(tips[1]!, rightWidth), leftWidth), kind: "art" },
+    { text: frameBody(center(art[1] ?? "", leftWidth), "─".repeat(rightWidth), leftWidth), kind: "art" },
+    { text: frameBody(center(art[2] ?? "", leftWidth), right("What's new", rightWidth), leftWidth), kind: "art" },
     { text: frameBody(center("", leftWidth), right(updates[0]!, rightWidth), leftWidth), kind: "body" },
     { text: frameBody(center(modelLine, leftWidth), right(updates[1]!, rightWidth), leftWidth), kind: "body" },
     { text: frameBody(center(data.cwd ?? "", leftWidth), right(updates[2]!, rightWidth), leftWidth), kind: "body" },

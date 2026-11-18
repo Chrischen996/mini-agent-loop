@@ -50,6 +50,28 @@ export function goalStatusSegment(goal: GoalState): string {
   return `Goal ${goalStatusLabel(goal.status)}`;
 }
 
+/**
+ * Compact status-line segment for an active goal. When the client supplies the
+ * current turn's start time, it adds live wall-clock time to persisted usage.
+ */
+export function goalStatusSegmentElapsed(
+  goal: GoalState,
+  nowMs: number,
+  turnStartedMs?: number,
+): string {
+  if (goal.status === "active") {
+    const tokens = goal.tokenBudget === undefined
+      ? ""
+      : ` ${formatTokens(goal.tokensUsed)}/${formatTokens(goal.tokenBudget)}`;
+    const turnSeconds = turnStartedMs === undefined
+      ? 0
+      : Math.floor(Math.max(0, nowMs - turnStartedMs) / 1_000);
+    const elapsed = goal.timeUsedSeconds + turnSeconds;
+    return `Goal ${formatElapsed(elapsed)}${tokens}`;
+  }
+  return goalStatusSegment(goal);
+}
+
 export function goalUsageSummary(goal: GoalState): string {
   const parts = [`Objective: ${goal.objective}`];
   if (goal.timeUsedSeconds > 0) parts.push(`Time: ${formatElapsed(goal.timeUsedSeconds)}.`);

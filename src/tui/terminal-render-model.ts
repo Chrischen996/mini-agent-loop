@@ -18,7 +18,7 @@ import { noticeText, noticeTitle, toolArgumentSummary } from "./claude-style.ts"
 import { buildStatusSegments } from "./status-line.ts";
 import type { ModelThinkingLevel } from "../pi-ai/types.ts";
 import { isSubagentProtocolText, isSubagentToolName, subagentRenderLines } from "./subagent-lines.ts";
-import { activityPresentation, formatActivity, loadingGlyph, loadingMarkerBright } from "./activity.ts";
+import { activityPresentation, activityRowColor, formatActivity, loadingGlyph } from "./activity.ts";
 import { TUI_BRAND_NAME } from "./brand.ts";
 import { welcomePanelRenderLines, type WelcomePanelData } from "./welcome-panel.ts";
 import { compactStreamingText, stripLeadingBlankLines } from "./text-utils.ts";
@@ -247,12 +247,17 @@ export function buildTerminalRenderLines(
   }, { now, queuedCount: options.queuedCount });
   if (activity) {
     const activityPrefix = `${loadingGlyph(now, state.turnStartedAt)} `;
+    const activityText = formatActivity(activity);
     const activityWidth = width === undefined ? undefined : Math.max(1, width - terminalStringWidth(activityPrefix));
+    const bodyText = activityWidth === undefined ? activityText : truncateEnd(activityText, activityWidth);
+    const activityColor = activityRowColor(C.running, C.muted, now, activity.stalled, C.error);
     footer.push({
       key: "activity",
-      text: activityWidth === undefined ? formatActivity(activity) : truncateEnd(formatActivity(activity), activityWidth),
-      prefix: activityPrefix,
-      prefixTone: activity.stalled ? "error" : loadingMarkerBright(now, state.turnStartedAt) ? "running" : "default",
+      text: bodyText,
+      segments: [
+        { text: activityPrefix, color: activityColor },
+        { text: bodyText, color: activityColor },
+      ],
       style: "muted",
       tone: activity.stalled ? "error" : "running",
       bold: true,

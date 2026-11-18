@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { computeCommitBoundary, rowCountledCommitted, rowTexts, collectResizeRefreshRows } from "../src/tui/stream-commit.ts";
+import {
+  assistantSealOverlap,
+  computeCommitBoundary,
+  rowCountledCommitted,
+  rowTexts,
+  collectResizeRefreshRows,
+} from "../src/tui/stream-commit.ts";
 import { selectMessageViewport, streamingAssistantRows } from "../src/tui/message-viewport.ts";
 import { IncrementalTerminalRenderer } from "../src/tui/incremental-renderer.ts";
 import { resolveTuiLayoutMode } from "../src/tui/layout-mode.ts";
@@ -61,6 +67,18 @@ describe("rowCountledCommitted (seal dedup)", () => {
     assert.equal(rowCountledCommitted(["a", "b", "c"], ["a", "b"]), 2);
     assert.equal(rowCountledCommitted(["a", "b"], ["x", "b", "a"]), 0);
     assert.equal(rowCountledCommitted([], ["a"]), 0);
+  });
+});
+
+describe("assistantSealOverlap (reasoning-prefixed seal dedup)", () => {
+  it("skips finalized thinking rows before comparing streamed body rows", () => {
+    const rows = [
+      { key: "message-0-thinking-header", text: "∴ Thinking…" },
+      { key: "message-0-think-1", text: "The user asked for identity." },
+      { key: "message-0-md-0", text: "I am mini-agent." },
+      { key: "message-0-md-1", text: "How can I help?" },
+    ];
+    assert.equal(assistantSealOverlap(rows, ["I am mini-agent.", "How can I help?"]), 2);
   });
 });
 

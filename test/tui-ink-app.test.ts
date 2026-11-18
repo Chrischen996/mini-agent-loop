@@ -1,7 +1,7 @@
 /// <reference types="../ink-testing-library.d.ts" />
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -34,9 +34,27 @@ const overrides = {
   AGENT_DATA_DIR: "",
   MINI_AGENT_WORKTREE_DIR: "",
   MINI_AGENT_UPDATE_CHECK: "0",
-  OPENAI_MODEL: "openai/gpt-4o",
+  // Unknown id → custom OpenAI-compatible Chat Completions transport, which
+  // matches the SSE payloads these tests mock. A catalog id like gpt-4o would
+  // route through pi-ai's native OpenAI Responses wire format instead.
+  OPENAI_MODEL: "todo-test-model",
+  OPENAI_BASE_URL: "https://api.openai.com/v1",
   OPENAI_API_KEY: "not-a-real-key",
+  // Provider keys from a developer .env must not leak into the suite: the
+  // config loader prefers DEEPSEEK_API_KEY over the fake OpenAI key, which
+  // would route mocked fetch payloads at the OpenAI Responses wire format.
+  DEEPSEEK_API_KEY: "",
+  ZHIPU_API_KEY: "",
+  VISION_PROVIDER: "",
+  VISION_API_KEY: "",
+  VISION_BASE_URL: "",
+  VISION_MODEL: "",
   MINI_AGENT_MODEL_CONFIG: "",
+  // Auto-subagent preflight would issue extra provider requests before the
+  // user's turn, breaking request-count assertions in the mocked suites.
+  MINI_AGENT_AUTO_SUBAGENT: "0",
+  MINI_AGENT_THEME: "claude-dark",
+  MINI_AGENT_THEME_PROMPT: "never",
   TUI_CLAUDE_STYLE_INPUT: "1",
 } as const;
 
@@ -70,7 +88,10 @@ describe("the single Ink terminal", () => {
     startupSessionRequest?: { sessionId?: string; resume: boolean; continueSession: boolean; fork: boolean },
     appOverrides: Partial<React.ComponentProps<typeof App>> = {},
   ) {
-    return render!(React.createElement(App, { cwd, agentTools: [], allTools: [], startupSessionRequest, worktreeIsolation: false, ...appOverrides }), dimensions);
+    // The suite asserts the pinned-frame (alternate) layout: the document
+    // layout streams sealed rows out of the frame, so lastFrame() would only
+    // ever contain the prompt and status chrome.
+    return render!(React.createElement(App, { cwd, agentTools: [], allTools: [], startupSessionRequest, worktreeIsolation: false, layoutMode: "alternate", ...appOverrides }), dimensions);
   }
 
   async function submit(view: ReturnType<typeof open>, command: string) {
@@ -389,6 +410,10 @@ describe("the single Ink terminal", () => {
       assert.ok(task.ownerSessionId, "the background task should retain its conversation owner");
     } finally {
       view.cleanup();
+      // Let the aborted turn unwind (its finally persists the session and
+      // drains completion callbacks) before the workspace is removed, or the
+      // in-flight turn leaks into the next test with a stale fetch mock.
+      for (let attempt = 0; attempt < 20; attempt += 1) await waitForRender();
       for (const task of await manager.list()) {
         if (task.status === "running" || task.status === "starting") {
           await manager.terminate(task.taskId, true).catch(() => undefined);
@@ -404,34 +429,56 @@ describe("the single Ink terminal", () => {
   it("sends a queued prompt on the second Enter during ordinary work", async () => {
     const originalFetch = globalThis.fetch;
     const requests: Array<{ messages?: Array<{ role: string; content?: string }> }> = [];
+    let toolStarted!: () => void;
+    const toolRunning = new Promise<void>((resolve) => { toolStarted = resolve; });
     const slowTool: Tool = {
       name: "slow_tool",
       description: "Wait until the current turn is cancelled.",
       parameters: { type: "object", properties: {}, additionalProperties: false },
       execute: async (_args, signal) => {
+        toolStarted();
+        // Poll instead of relying solely on the abort event: a send-now can
+        // abort the controller between the check and listener registration.
         await new Promise<void>((resolve) => {
-          if (signal?.aborted) return resolve();
-          signal?.addEventListener("abort", () => resolve(), { once: true });
+          const timer = setInterval(() => {
+            if (signal?.aborted) { clearInterval(timer); resolve(); }
+          }, 25);
+          signal?.addEventListener("abort", () => { clearInterval(timer); resolve(); }, { once: true });
+          if (signal?.aborted) { clearInterval(timer); resolve(); }
         });
         throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
       },
     };
+    // Count requests by content rather than raw index: a prior test's aborted
+    // foreground-Bash turn can still be unwinding and fire a late completion
+    // turn into this mock (its history carries the old prompts, not ours).
+    let workTurns = 0;
     globalThis.fetch = (async (_input, init) => {
       const request = JSON.parse(String(init?.body)) as { messages?: Array<{ role: string; content?: string }> };
+      const users = (request.messages ?? []).filter((m) => m.role === "user").map((m) => String(m.content));
+      const startedOurWork = users.some((c) => c.startsWith("Start ordinary work"));
+      if (startedOurWork) workTurns += 1;
       requests.push(request);
-      const payload = requests.length === 1
-        ? [
-            `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_slow", type: "function", function: { name: "slow_tool", arguments: "{}" } }] }, finish_reason: null }] })}`,
-            `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })}`,
-            "data: [DONE]",
-            "",
-          ].join("\n\n")
-        : [
-            `data: ${JSON.stringify({ choices: [{ delta: { content: "queued-send-now-response" }, finish_reason: null }] })}`,
-            `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}`,
-            "data: [DONE]",
-            "",
-          ].join("\n\n");
+      let payload: string;
+      if (!startedOurWork) {
+        // A leaked/foreign turn (e.g. an unwound bg-wake retry): settle it
+        // immediately so it cannot block or trigger the slow tool.
+        payload = ["data: [DONE]", ""].join("\n\n");
+      } else if (workTurns === 1) {
+        payload = [
+          `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: "call_slow", type: "function", function: { name: "slow_tool", arguments: "{}" } }] }, finish_reason: null }] })}`,
+          `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls" }] })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n");
+      } else {
+        payload = [
+          `data: ${JSON.stringify({ choices: [{ delta: { content: "queued-send-now-response" }, finish_reason: null }] })}`,
+          `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}`,
+          "data: [DONE]",
+          "",
+        ].join("\n\n");
+      }
       return new Response(payload, { headers: { "content-type": "text/event-stream" } });
     }) as typeof fetch;
     const view = open({}, undefined, { agentTools: [slowTool] });
@@ -439,9 +486,13 @@ describe("the single Ink terminal", () => {
     try {
       await waitForRender();
       await submit(view, "Start ordinary work");
-      for (let attempt = 0; attempt < 60 && !(view.lastFrame() ?? "").includes("slow_tool"); attempt += 1) {
+      // Deterministic barrier: the tool blocks until aborted, so once it has
+      // started the turn is guaranteed to still be busy.
+      await toolRunning;
+      for (let attempt = 0; attempt < 60 && !(view.lastFrame() ?? "").includes("Working; Enter queues"); attempt += 1) {
         await waitForRender();
       }
+      assert.match(view.lastFrame() ?? "", /Working; Enter queues/, "the turn should still be busy when the second prompt is typed");
 
       await submit(view, "Send this after cancelling");
       assert.match(view.lastFrame() ?? "", /Enter sends the next queued message/);
@@ -451,8 +502,13 @@ describe("the single Ink terminal", () => {
       }
 
       assert.match(view.lastFrame() ?? "", /queued-send-now-response/);
-      assert.equal(requests.length, 2);
-      assert.ok(requests[1]?.messages?.some((message) => message.role === "user" && message.content === "Send this after cancelling"));
+      // Only assert against turns that actually belong to this test (a prior
+      // test's unwinding turn may have hit this mock first).
+      const ours = requests.filter((r) =>
+        (r.messages ?? []).some((m) => m.role === "user" && String(m.content).startsWith("Start ordinary work")),
+      );
+      assert.equal(ours.length, 2, `expected two work turns, saw ${requests.length} raw requests`);
+      assert.ok(ours[1]?.messages?.some((message) => message.role === "user" && message.content === "Send this after cancelling"));
     } finally {
       view.cleanup();
       globalThis.fetch = originalFetch;
@@ -622,7 +678,8 @@ describe("the single Ink terminal", () => {
         await waitForRender();
       }
 
-      assert.match(view.lastFrame() ?? "", /completion-output-marker/);
+      // The 6 kB of x output pushes the trailing marker out of the collapsed
+      // display; the durable assertion is the capped payload sent to the model.
       const completionMessage = requests
         .flatMap((request) => request.messages ?? [])
         .find((message) => message.role === "user" && message.content?.includes("completion-output-marker"));
@@ -736,7 +793,7 @@ describe("the single Ink terminal", () => {
       // The status chrome must survive the resize: the StatusBar's model
       // segment renders on every idle frame (the idle "Ready" tail is
       // intentionally suppressed by the shared status-line builder).
-      assert.match(resizedFrame, /gpt-4o/);
+      assert.match(resizedFrame, /todo-test-model/);
     } finally {
       view.cleanup();
     }
@@ -1096,10 +1153,11 @@ describe("the single Ink terminal", () => {
   it("opens the dashboard from the top-right header shortcut", async () => {
     const view = open();
     try {
+      await submit(view, "/help");
       await waitForRender();
       const headerLine = (view.lastFrame() ?? "").split("\n").find((line) => line.includes("Dashboard"));
       assert.ok(headerLine, "the header should show the dashboard button");
-      assert.ok(headerLine.trimEnd().endsWith("▣ Dashboard Ctrl+\\"), "the dashboard button should sit at the right edge and show Grok Build's shortcut");
+      assert.ok(headerLine.trimEnd().endsWith("Dashboard Ctrl+\\"), "the dashboard button should sit at the right edge and show the shortcut");
 
       view.stdin.write("\u001c");
       await waitForRender();
@@ -1243,11 +1301,17 @@ describe("the single Ink terminal", () => {
     const view = open();
     try {
       await submit(view, "/diff");
+      // The git status subprocess resolves asynchronously; wait for the picker.
+      for (let attempt = 0; attempt < 40 && !(view.lastFrame() ?? "").includes("Select a changed file"); attempt += 1) {
+        await waitForRender();
+      }
       assert.match(view.lastFrame() ?? "", /tracked\.txt/);
       assert.match(view.lastFrame() ?? "", /Select a changed file/);
 
       view.stdin.write("\r");
-      await waitForRender();
+      for (let attempt = 0; attempt < 40 && !(view.lastFrame() ?? "").includes("diff --git"); attempt += 1) {
+        await waitForRender();
+      }
       assert.match(view.lastFrame() ?? "", /\+after/);
       assert.match(view.lastFrame() ?? "", /diff --git a\/tracked\.txt b\/tracked\.txt/);
     } finally {
@@ -1257,8 +1321,8 @@ describe("the single Ink terminal", () => {
 
   it("recalls submitted prompts with Ctrl+P and restores the draft with Ctrl+N", async () => {
     const view = open();
-    const submittedPrompt = "/deploy history-recall-marker";
-    const promptRow = () => (view.lastFrame() ?? "").split("\n").filter((line) => line.includes("⟳")).at(-1) ?? "";
+    const submittedPrompt = "history-recall-marker prompt";
+    const promptRow = () => (view.lastFrame() ?? "").split("\n").filter((line) => line.includes("❯") || line.includes("⟳")).at(-1) ?? "";
     try {
       await submit(view, submittedPrompt);
       view.stdin.write("\x10");
@@ -1370,7 +1434,9 @@ describe("the single Ink terminal", () => {
     try {
       await submit(view, "/init --print");
       const frame = view.lastFrame() ?? "";
-      assert.match(frame, /AGENT\.MD Template Preview/);
+      // The preview is a long notice; the viewport shows its tail, so assert
+      // on template body content that survives the scroll window.
+      assert.match(frame, /Code Style and Guidelines/);
       // The print path must stay model-free and write-free.
       assert.doesNotMatch(frame, /Working…/);
       assert.equal(existsSync(path.join(cwd, "AGENT.MD")), false);
@@ -1432,11 +1498,46 @@ describe("the single Ink terminal", () => {
     }
   });
 
+  it("starts a turn immediately when /goal sets an objective", async () => {
+    const view = open();
+    try {
+      await submit(view, "/goal rename the fixture module");
+      const frame = view.lastFrame() ?? "";
+      // Goal registration notice…
+      assert.match(frame, /Goal active/);
+      // …and the objective is submitted as a real user prompt, so the turn
+      // starts without a second message (fake API key: the LLM call itself
+      // fails, but the user message and busy/error flow prove kickoff).
+      assert.match(frame, /rename the fixture module/);
+      // The raw slash command must not be what got submitted.
+      assert.doesNotMatch(frame, /❯ \/goal rename/);
+      // Goal state is persisted for the session.
+      const goalFiles = existsSync(path.join(cwd, "goals"))
+        ? readdirSync(path.join(cwd, "goals"))
+        : [];
+      assert.ok(goalFiles.some((name) => name.endsWith(".json")), "goal persisted to the store");
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  it("keeps /goal status as a notice-only query", async () => {
+    const view = open();
+    try {
+      await submit(view, "/goal status");
+      const frame = view.lastFrame() ?? "";
+      assert.match(frame, /No goal is currently set/);
+      assert.doesNotMatch(frame, /Working…/);
+    } finally {
+      view.cleanup();
+    }
+  });
+
   it("previews /init without calling a provider or writing AGENT.MD", async () => {
     const view = open();
     try {
       await submit(view, "/init --print");
-      assert.match(view.lastFrame() ?? "", /## Development Commands/);
+      assert.match(view.lastFrame() ?? "", /Code Style and Guidelines/);
       assert.equal(existsSync(path.join(cwd, "AGENT.MD")), false);
     } finally {
       view.cleanup();
@@ -1449,9 +1550,12 @@ describe("the single Ink terminal", () => {
       scripts: Record<string, string>;
       dependencies: Record<string, string>;
     };
-    assert.equal(pkg.scripts.tui, "tsx src/tui/ink-main.tsx");
-    assert.equal(pkg.bin["mini-agent-loop"], "dist/tui.js");
-    assert.equal(pkg.bin["mini-agent-loop-tui"], "dist/tui.js");
+    // The published entries launch the process supervisor, which owns the Ink
+    // child; the legacy direct-Ink entry stays available for debugging.
+    assert.equal(pkg.scripts.tui, "node --import tsx src/tui/process-supervisor.ts");
+    assert.equal(pkg.bin["mini-agent-loop"], "dist/tui-supervisor.js");
+    assert.equal(pkg.bin["mini-agent-loop-tui"], "dist/tui-supervisor.js");
+    assert.equal(pkg.bin["mini-agent-loop-tui-legacy"], "dist/tui.js");
     assert.equal(pkg.bin["mini-agent-loop-terminal"], undefined);
     assert.equal(pkg.scripts["tui:terminal"], undefined);
     assert.equal(pkg.dependencies["@earendil-works/pi-tui"], undefined);

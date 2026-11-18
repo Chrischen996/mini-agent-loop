@@ -145,11 +145,28 @@ function isTableRow(line: string, headerPipeLed: boolean): boolean {
   return headerPipeLed ? trimmed.startsWith("|") : true;
 }
 
-/** Parse Markdown one source line at a time without creating React nodes. */
-export function parseMarkdownLines(source: string): MarkdownLine[] {
+/**
+ * Recognize one row of a Markdown table.
+ *
+ * `headerPipeLed` keeps the table's own style: when the header starts with `|`
+ * a following prose line that merely mentions a pipe (`use a | b`) ends the
+ * table instead of being absorbed into it as another cell.
+ */
+
+/** Parse Markdown one source line at a time without creating React nodes.
+ *
+ * `initial.fenceOpen` carries the open-fence state across a projection cut
+ * (streaming tail): the fragment then starts INSIDE a code block, and the
+ * first fence line met is a closing one.
+ */
+export function parseMarkdownLines(source: string, initial?: { fenceOpen?: boolean }): MarkdownLine[] {
   const lines = source.split("\n");
+  // A source ending in "\n" splits into a trailing "" artifact. That is not a
+  // source line: inside an open fence it would render a spurious "▌ " row, and
+  // it would make full-text and incremental (piece-wise) projections diverge.
+  if (source.endsWith("\n")) lines.pop();
   const parsed: MarkdownLine[] = [];
-  let inCodeBlock: boolean = false;
+  let inCodeBlock = initial?.fenceOpen ?? false;
   let index = 0;
   while (index < lines.length) {
     const line = lines[index]!;

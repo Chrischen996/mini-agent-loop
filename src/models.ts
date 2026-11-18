@@ -584,6 +584,9 @@ const LEGACY_MODEL_ALIASES: Record<string, string> = {
   "claude-fable-5.1": "anthropic/claude-fable-5-1",
   "anthropic/claude-fable-5.1": "anthropic/claude-fable-5-1",
   "fable-5.1": "anthropic/claude-fable-5-1",
+  "claude-fable-5.2": "anthropic/claude-fable-5-2",
+  "anthropic/claude-fable-5.2": "anthropic/claude-fable-5-2",
+  "fable-5.2": "anthropic/claude-fable-5-2",
 };
 
 export function resolveModel(modelId: string, baseUrl?: string, protocol?: LlmGatewayProtocol): ModelRef {

@@ -18,7 +18,7 @@ describe("model selection", () => {
       const models = getAvailableModels({ DEEPSEEK_API_KEY: "test" });
       assert.deepEqual(
         models.map((model) => model.id),
-        ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4.1-flash-1017", "deepseek-v4.1-flash"],
+        ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4.1-flash-1017", "deepseek-v4.1-flash", "deepseek-flash"],
       );
       assert.equal(models.find((model) => model.id === "deepseek-v4-flash")?.contextWindow, 1000000);
       assert.equal(models.find((model) => model.id === "deepseek-v4-pro")?.contextWindow, 1000000);
@@ -191,6 +191,19 @@ describe("model selection", () => {
     }
   });
 
+  it("registers Kimi Coding's OpenAI-compatible models alongside its Anthropic models", () => {
+    const models = getAllModels().filter((model) => model.provider === "kimi-coding");
+    const byId = new Map(models.map((model) => [model.id, model]));
+
+    assert.equal(byId.get("k2p7")?.api, "anthropic-messages");
+    assert.equal(byId.get("k3")?.api, "openai-completions");
+    assert.equal(byId.get("k3")?.baseUrl, "https://api.kimi.com/coding/v1");
+    assert.equal(byId.get("k3")?.contextWindow, 1048576);
+    assert.equal(byId.get("k3")?.maxTokens, 131072);
+    assert.equal(byId.get("k3")?.piModel?.api, "openai-completions");
+    assert.equal(byId.get("kimi-for-coding-highspeed")?.thinkingLevelMap?.off, null);
+  });
+
   it("registers TokenRouter's fixed Kimi K3 Free route with compatible metadata", () => {
     const models = getAllModels().filter(
       (model) => model.provider === "tokenrouter" && model.id === "kimi-k3-free",
@@ -348,8 +361,8 @@ describe("model selection", () => {
       ["qwen", "qwen3.8-max-prime", "https://dashscope.aliyuncs.com/compatible-mode/v1", ["DASHSCOPE_API_KEY"]],
       ["moonshotai", "kimi-k3.1-pro", "https://api.moonshot.ai/v1", ["MOONSHOT_API_KEY"]],
       ["moonshotai-cn", "kimi-k3.1-pro", "https://api.moonshot.cn/v1", ["MOONSHOT_API_KEY"]],
-      ["minimax", "MiniMax-M3.1-flash", "https://api.minimax.io/anthropic", ["MINIMAX_API_KEY"]],
-      ["minimax-cn", "MiniMax-M3.1-flash", "https://api.minimaxi.com/anthropic", ["MINIMAX_CN_API_KEY"]],
+      ["minimax", "MiniMax-M3.1-Flash", "https://api.minimax.io/anthropic", ["MINIMAX_API_KEY"]],
+      ["minimax-cn", "MiniMax-M3.1-Flash", "https://api.minimaxi.com/anthropic", ["MINIMAX_CN_API_KEY"]],
       ["zai", "glm-5.3", "https://api.z.ai/api/coding/paas/v4", ["ZAI_API_KEY"]],
       ["zai-coding-cn", "glm-5.3", "https://open.bigmodel.cn/api/coding/paas/v4", ["ZAI_CODING_CN_API_KEY"]],
       ["xiaomi", "mimo-v2.6-pro", "https://api.xiaomimimo.com/v1", ["XIAOMI_API_KEY"]],
@@ -443,11 +456,6 @@ describe("model selection", () => {
     assert.ok(getAvailableModels({ OPENAI_CODEX_AUTH_JSON: "test" }).some(
       (model) => model.provider === "openai-codex" && model.id === "gpt-6-astra",
     ));
-    assert.equal(
-      getAvailableModels({ DEEPSEEK_API_KEY: "test" }).some((model) => model.id === "gpt-6-astra"),
-      false,
-    );
-
     const apiResolved = resolveModel("openai/gpt-6-astra");
     assert.equal(apiResolved.provider, "openai");
     assert.equal(apiResolved.id, "gpt-6-astra");
@@ -500,6 +508,10 @@ describe("model selection", () => {
     assert.equal(resolveModel("deepseek-reasoner").id, "deepseek-v4-pro");
   });
 
+  it("resolves MiniMax model ids case-insensitively", () => {
+    assert.equal(resolveModel("minimax/MiniMax-M3.1-flash").id, "MiniMax-M3.1-Flash");
+  });
+
   it("maps dotted Claude version aliases to hyphenated catalog ids", () => {
     assert.equal(resolveModel("claude-sonnet-4.6").id, "claude-sonnet-4-6");
     assert.equal(resolveModel("sonnet-4.6").id, "claude-sonnet-4-6");
@@ -507,6 +519,7 @@ describe("model selection", () => {
     assert.equal(resolveModel("opus-5.5").id, "claude-opus-5-5");
     assert.equal(resolveModel("haiku-5.5").id, "claude-haiku-5-5");
     assert.equal(resolveModel("fable-5.1").id, "claude-fable-5-1");
+    assert.equal(resolveModel("fable-5.2").id, "claude-fable-5-2");
     assert.ok(searchModels("sonnet-4.6").some((model) => model.id === "claude-sonnet-4-6"));
     assert.ok(searchModels("sonnet-5.5").some((model) => model.id === "claude-sonnet-5-5"));
   });

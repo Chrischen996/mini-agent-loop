@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import { PromptInput } from "./PromptInput.tsx";
 import type { TodoEditorState } from "../todo-editor.ts";
 import { TUI_COLORS as C } from "../theme.ts";
+import { panelBorderStyle } from "../pixel-glyphs.ts";
 import { todoIcon } from "../todo-format.ts";
 import { terminalStringWidth } from "../terminal-width.ts";
 import { PICKER_SELECTED_MARKER, PICKER_UNSELECTED_MARKER, TODO_EDITOR_DRAFT_HINT, TODO_EDITOR_SELECT_HINT } from "../claude-style.ts";
@@ -25,7 +26,7 @@ export function TodoEditor({ state, onCancel, onStateChange, onConfirm, width }:
   const rowWidth = width === undefined ? undefined : Math.max(1, width - 6);
 
   return (
-    <Box flexDirection="column" paddingX={2} borderStyle="round" borderColor={C.primary} width={width} minWidth={0} overflow="hidden">
+    <Box flexDirection="column" paddingX={2} borderStyle={panelBorderStyle()} borderColor={C.primary} width={width} minWidth={0} overflow="hidden">
       <Text color={C.primary} bold>── Todo editor ──</Text>
       {state.todos.length === 0 && <Text dimColor>No todos yet — press a to add one.</Text>}
       {state.todos.map((todo, index) => {

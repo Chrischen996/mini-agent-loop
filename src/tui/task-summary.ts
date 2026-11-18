@@ -3,6 +3,7 @@ import { formatTokenCount } from "./status-line.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { todoText } from "./todo-format.ts";
 import { RESULT_GUTTER, STATUS_DONE, STATUS_ERROR, STATUS_PENDING, STATUS_RUNNING, STATUS_SKIPPED } from "./render-lines.ts";
+import { pixelGlyphs } from "./pixel-glyphs.ts";
 import type { RenderLine } from "./render-lines.ts";
 
 export type TaskSummaryStatus = "running" | "completed" | "failed" | "cancelled" | "paused";
@@ -79,12 +80,13 @@ export function taskSummaryViewMode(status: TaskSummaryStatus, viewMode: TodoVie
 }
 
 function todoStatusIcon(status: TodoStatus): string {
+  const pixel = pixelGlyphs();
   switch (status) {
-    case "completed": return STATUS_DONE;
-    case "skipped": return STATUS_SKIPPED;
-    case "failed": return STATUS_ERROR;
-    case "in_progress": return STATUS_RUNNING;
-    default: return STATUS_PENDING;
+    case "completed": return pixel?.done ?? STATUS_DONE;
+    case "skipped": return pixel?.skipped ?? STATUS_SKIPPED;
+    case "failed": return pixel?.error ?? STATUS_ERROR;
+    case "in_progress": return pixel?.running ?? STATUS_RUNNING;
+    default: return pixel?.pending ?? STATUS_PENDING;
   }
 }
 

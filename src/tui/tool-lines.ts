@@ -1,10 +1,14 @@
 import type { ToolState } from "./state.ts";
+import { pixelGlyphs } from "./pixel-glyphs.ts";
 import { STATUS_DONE, STATUS_ERROR, STATUS_PARTIAL, STATUS_RUNNING } from "./render-lines.ts";
 
 export function toolStatusIcon(status: ToolState): string {
-  if (status === "running") return STATUS_RUNNING;
-  if (status === "partial") return STATUS_PARTIAL;
-  return status === "error" ? STATUS_ERROR : STATUS_DONE;
+  const pixel = pixelGlyphs();
+  if (status === "running") return pixel?.running ?? STATUS_RUNNING;
+  if (status === "partial") return pixel?.partial ?? STATUS_PARTIAL;
+  return status === "error"
+    ? (pixel?.error ?? STATUS_ERROR)
+    : (pixel?.done ?? STATUS_DONE);
 }
 
 export function toolDisplayName(name: string): string {

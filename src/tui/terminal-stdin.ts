@@ -35,6 +35,11 @@ export class TerminalStdinAdapter extends PassThrough {
     // The adapter, not the source, feeds Ink; stop forwarding if the source
     // closes underneath us (Ctrl+D at an empty prompt).
     source.on("close", () => this.end());
+    // Attaching a `data` listener does NOT resume a stream that was explicitly
+    // paused (see `Readable.pause()`), and Ink never calls `resume()` on the
+    // stream it is handed. Any upstream pause therefore left the prompt deaf
+    // forever; the adapter owns the takeover, so it must un-pause the source.
+    source.resume();
   }
 
   private readonly onData = (chunk: Buffer | string): void => {

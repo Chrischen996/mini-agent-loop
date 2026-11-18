@@ -33,6 +33,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - CLI: `--goal <objective> [--goal-token-budget N]`, `--goal clear`,
     `--goal pause|resume|complete`, and `--goal-status`.
 
+### Performance
+
+- TUI (document layout, the default): streaming assistant projection is now
+  incremental. Each 80 ms delta flush projects only the newly settled lines
+  plus the growing tail; the settled prefix is cached per width/thinking mode
+  via `MessageHeightCache.getStreamingAssistantRows`. A 15.7k-char
+  code-heavy response drops from ~1.06 ms to ~0.05 ms of projection work
+  per flush (~20x) — see `scripts/bench-streaming-projection.ts`.
+- `highlightCodeLine` is a linear single-pass scan (the previous version
+  took `line.slice(i)` per character and ran token regexes against that
+  suffix — O(line²)). Token boundaries are unchanged.
+- `parseMarkdownLines` no longer treats the trailing split artifact of a
+  source ending in `"\n"` as a line (a spurious empty `▌` code row
+  appeared at the end of streaming messages while a fence was open).
+- Terminal width caches evict their oldest half on overflow instead of
+  clearing wholesale, removing periodic re-measure hitches in long sessions.
+- TUI startup: MCP runtime, sandbox spawn, bg-task suite and
+  system-prompt load now run in parallel instead of serializing on the
+  first-frame path.
+
 ## [0.3.0] - 2026-08-20
 
 ### Changed

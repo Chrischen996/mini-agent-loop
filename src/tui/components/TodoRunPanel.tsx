@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { TUI_COLORS as C } from "../theme.ts";
+import { panelBorderStyle } from "../pixel-glyphs.ts";
 import type { PendingTodoRunPlan } from "../state.ts";
 
 type TodoRunPanelProps = {
@@ -18,7 +19,7 @@ export function TodoRunPanel({ plan, width = 80, onConfirm, onCancel }: TodoRunP
   const running = plan.plan.tasks.some((t) => t.status === "running" || t.status === "completed" || t.status === "failed");
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={C.info} paddingX={1} width={width} minWidth={0} overflow="hidden">
+    <Box flexDirection="column" borderStyle={panelBorderStyle()} borderColor={C.info} paddingX={1} width={width} minWidth={0} overflow="hidden">
       <Text bold color={C.info}>▣ Todo Run — {plan.plan.tasks.length} tasks</Text>
       {plan.plan.batches.map((batch, i) => (
         <Box key={i} gap={1}>

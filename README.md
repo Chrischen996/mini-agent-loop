@@ -229,6 +229,7 @@ settings are optional; a live run needs a credential for the selected provider.
 | `MINI_AGENT_TUI_EMERGENCY_ITERATION_CAP` | no | `2000` (safety fallback) |
 | `MINI_AGENT_GLOBAL_TOKEN_BUDGET` | no | unlimited; shared by parent and nested subagents |
 | `MINI_AGENT_GLOBAL_CONCURRENCY_LIMIT` | no | unlimited; applies across overlapping batches |
+| `MINI_AGENT_GOAL_WORKER_LIMIT` | no | unlimited; maximum detached persistent-goal workers (`0` disables the cap) |
 | `MINI_AGENT_GLOBAL_SUBAGENT_CALL_BUDGET` | no | unlimited; shared by parent and nested subagents |
 | `MINI_AGENT_AUTO_SUBAGENT` | no | enabled by default; set `0`/`false`/`off` to disable |
 | `MINI_AGENT_AUTO_SUBAGENT_MIN_SCORE` | no | `2` |
@@ -240,6 +241,8 @@ settings are optional; a live run needs a credential for the selected provider.
 | `MINI_AGENT_GOALS` | no | `0`; set `1` to enable the persistent thread goal (`get_goal` / `create_goal` / `update_goal` tools) |
 | `MINI_AGENT_GOAL_MAX_TOKEN_BUDGET` | no | unlimited ceiling for goal token budgets |
 | `MINI_AGENT_GOAL_MAX_CONTINUATIONS` | no | `50` automatic goal continuations per user submission |
+| `MINI_AGENT_GOAL_LOG` | no | `0`; set `1` to append a JSONL goal diagnostic log (steering injection, continuation decisions, budget-limit steering) |
+| `MINI_AGENT_GOAL_LOG_PATH` | no | default `<data-dir>/goal-logs/<session-id>.jsonl`; overrides the goal diagnostic log file |
 
 \* Configure a key for the provider selected for a live model call. The model
 picker can show catalog entries before their provider key is set. Vision
@@ -284,10 +287,18 @@ token/time usage. Goals persist in the shared `AGENT_DATA_DIR` under
 - **Token budget**: when a budgeted goal's accumulated usage reaches the
   budget it is marked `budget_limited` and a wrap-up steering message is
   injected instead of starting new substantive work.
+- **Background workers**: `/goal <objective> --bg` runs the objective in a
+  detached CLI process inside a clean git worktree and reports completion as a
+  background sub-agent task. `MINI_AGENT_GOAL_WORKER_LIMIT` bounds detached
+  goal workers across sessions; when the limit is full, new launches queue.
 - **TUI**: `/goal` inspects the goal; `/goal <objective> [--token-budget N]`
   creates or edits it; `clear`, `pause`, `resume`, `complete` control its
-  status. The status bar shows a compact goal segment, and goal state
-  changes stream as `goal_updated` loop events.
+  status. Add `--bg` to run the goal in a detached bypass-permission worker on
+  an isolated git worktree; the foreground session stays free and is woken
+  when the worker finishes. The worktree prevents accidental writes to the
+  live checkout, but it is directory isolation, not a process sandbox; the
+  worker inherits normal shell/network reach. The status bar shows a compact
+  goal segment, and goal state changes stream as `goal_updated` loop events.
 - **HTTP**: `GET/PUT/DELETE /api/sessions/:id/goal` mirror the TUI actions;
   `/api/config` reports `goals.enabled`.
 
@@ -548,6 +559,13 @@ Models are shown even when their provider credential is not configured. Selectin
 one does not persist the key; the provider validates credentials when the next
 request is sent. `--api-key VALUE` is also supported for a temporary in-memory
 override, but `--api-key-env ENV_NAME` is preferred.
+
+The picker opens on **Configured models** when saved profiles exist. Choosing a
+saved profile activates its stored base URL and API key immediately, so no
+setup form appears. Choose **All models** with the right arrow to select a
+catalog model, or pass `/model <provider>/<id> --base-url URL --api-key KEY`
+to configure a gateway explicitly. The setup overlay shows the effective base
+URL and whether the API key is already available.
 
 For a new model or private OpenAI-compatible gateway, add it without changing
 source code:

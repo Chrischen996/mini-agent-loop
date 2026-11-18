@@ -28,3 +28,7 @@ export function filterConfiguredModelProfiles(
 export function configuredModelRowText(profile: ProfileSummary): string {
   return `${profile.active ? "✓ " : ""}${profile.name} (${profile.model}) · ${profile.baseUrl}`;
 }
+
+export function configuredModelDetailText(profile: ProfileSummary): string {
+  return `${profile.baseUrl} · key saved`;
+}

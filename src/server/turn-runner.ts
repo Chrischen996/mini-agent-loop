@@ -51,7 +51,7 @@ function usage(value?: WebRunBudgetUsage): AgentBudgetUsage {
 function stopReason(reason?: StopReason): WebRunReason {
   if (reason === "cancelled") return "user_stop";
   if (reason === "failed") return "model_error";
-  if (!reason || reason === "completed") return "step_limit";
+  if (!reason || reason === "completed") return "iteration_limit_reached";
   return reason;
 }
 
@@ -212,11 +212,19 @@ export async function runServerAgentTurn(
         return partial;
       }
       if (attempt === maxAutoContinues) {
-        const details = `Safety cap reached (${totalMaxSteps} steps); progress saved. Use Continue to resume.`;
-        await saveState(partial, "paused", "safety_cap_reached", 0, details);
-        const stopped = new RunStoppedError(partial, "safety_cap_reached", details);
+        // An explicit maxTurns budget is a deliberate execution limit. The
+        // emergency safety cap label is reserved for policy-mode runs and for
+        // legacy callers that never configured a limit themselves.
+        const explicitLimit = !runPolicy &&
+          (options.maxAutoContinues !== undefined || options.loop.maxTurns !== undefined);
+        const reason: WebRunReason = explicitLimit ? "iteration_limit_reached" : "safety_cap_reached";
+        const details = explicitLimit
+          ? `Execution limit reached (${totalMaxSteps} steps); progress saved. Use Continue to resume.`
+          : `Safety cap reached (${totalMaxSteps} steps); progress saved. Use Continue to resume.`;
+        await saveState(partial, "paused", reason, 0, details);
+        const stopped = new RunStoppedError(partial, reason, details);
         loop.onEvent?.({
-          type: "run_stopped", stopReason: "safety_cap_reached", details, message: details, messages: partial,
+          type: "run_stopped", stopReason: reason, details, message: details, messages: partial,
         });
         throw stopped;
       }

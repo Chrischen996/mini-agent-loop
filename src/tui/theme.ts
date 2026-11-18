@@ -17,6 +17,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { GEMINI_BUILTIN_COLORS, type GeminiColorsTheme } from "./gemini-palettes.ts";
+import { applyPixelGlyphs } from "./pixel-glyphs.ts";
 
 export type TuiPalette = {
   primary: string;       // identity accent for assistant headings / branding
@@ -59,6 +60,55 @@ const CLAUDE_DARK: TuiPalette = {
   inlineCodeBg: "#3a4149",
 };
 
+/**
+ * 8-bit Super Mario palette: NES-derived accents on a dark terminal.
+ *
+ * `TuiPalette` carries no background slot (the terminal owns the canvas), so
+ * both Mario palettes keep light body text and stay legible on the dark
+ * default. The bright saturated accents plus the coin/star glyph set
+ * (`pixel-glyphs.ts`) carry the 8-bit read.
+ */
+const MARIO_CLASSIC: TuiPalette = {
+  primary: "#f83800",       // Mario red / fireball
+  info: "#5c94fc",          // sky blue
+  planMode: "#00d800",      // warp-pipe green
+  user: "#3cbcfc",          // ice / water blue
+  assistant: "#ffffff",
+  muted: "#b0b0b0",         // grey brick
+  border: "#505050",
+  inputBorder: "#909090",
+  selection: "#3c2a00",     // coin glow
+  thinking: "#ac7dde",      // purple coin
+  running: "#fcdc00",       // coin yellow
+  success: "#00d800",       // 1-UP green
+  error: "#f83800",         // fireball red
+  badgeText: "#000000",
+  userBg: "#1a1a1a",
+  gutter: "#505050",
+  inlineCodeBg: "#262626",
+};
+
+/** Slider / underwater-world variant: cyan-teal accents, same pixel glyphs. */
+const MARIO_UNDERWATER: TuiPalette = {
+  primary: "#00fcfc",       // water sparkle
+  info: "#3cbcfc",          // dolphin cyan
+  planMode: "#00d800",
+  user: "#5c94fc",          // deep water blue
+  assistant: "#ffffff",
+  muted: "#a0b8c8",         // lit sea foam
+  border: "#3c5060",
+  inputBorder: "#6c8ca4",
+  selection: "#003c50",     // torchlit water
+  thinking: "#ac7dde",
+  running: "#fcdc00",       // bubble coin
+  success: "#00e8a0",       // coral green
+  error: "#f83800",
+  badgeText: "#000000",
+  userBg: "#102028",
+  gutter: "#3c5060",
+  inlineCodeBg: "#182830",
+};
+
 function first(...values: Array<string | undefined>): string {
   for (const value of values) {
     if (value) return value;
@@ -89,7 +139,11 @@ export function derivePalette(colors: GeminiColorsTheme): TuiPalette {
   };
 }
 
-const PALETTES: Record<string, TuiPalette> = { "claude-dark": CLAUDE_DARK };
+const PALETTES: Record<string, TuiPalette> = {
+  "claude-dark": CLAUDE_DARK,
+  "mario-classic": MARIO_CLASSIC,
+  "mario-underwater": MARIO_UNDERWATER,
+};
 for (const [name, colors] of Object.entries(GEMINI_BUILTIN_COLORS)) {
   PALETTES[name] = derivePalette(colors);
 }
@@ -108,13 +162,18 @@ export function activeThemeName(): string {
   return activeTheme;
 }
 
-/** Switch the live palette. Returns false (no change) for unknown names. */
+/**
+ * Switch the live palette and the pixel-glyph overrides in place.
+ * Returns false (no change) for unknown names.
+ */
 export function applyTheme(name: string | undefined): boolean {
   if (!name) return false;
-  const palette = PALETTES[name.toLowerCase()];
+  const resolved = name.toLowerCase();
+  const palette = PALETTES[resolved];
   if (!palette) return false;
   Object.assign(TUI_COLORS, palette);
-  activeTheme = name.toLowerCase();
+  applyPixelGlyphs(resolved);
+  activeTheme = resolved;
   return true;
 }
 

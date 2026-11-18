@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { TUI_COLORS as C } from "../theme.ts";
+import { panelBorderStyle } from "../pixel-glyphs.ts";
 import type { PendingPermissionState } from "../state.ts";
 import { permissionRiskLabel, toolArgumentSummary } from "../claude-style.ts";
 import { toolVisualName } from "../tool-lines.ts";
@@ -28,7 +29,7 @@ export function PermissionPanel({ request, width }: PermissionPanelProps): React
   const accent = riskColor(request.risk);
   const argument = toolArgumentSummary(request.tool, request.arguments ?? {});
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={accent} paddingX={1} width={width} minWidth={0} overflow="hidden">
+    <Box flexDirection="column" borderStyle={panelBorderStyle()} borderColor={accent} paddingX={1} width={width} minWidth={0} overflow="hidden">
       <Box gap={1} minWidth={0}>
         <Text color={accent} bold wrap="truncate-end">⚠ Permission required</Text>
         <Text color={C.assistant} bold wrap="truncate-end">{toolVisualName(request.tool)}</Text>

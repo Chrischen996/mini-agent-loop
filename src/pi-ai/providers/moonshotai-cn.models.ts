@@ -187,4 +187,23 @@ export const MOONSHOTAI_CN_MODELS = {
 		contextWindow: 1048576,
 		maxTokens: 943718,
 	} satisfies Model<"openai-completions">,
+	"kimi-k3.1-pro-highspeed": {
+		id: "kimi-k3.1-pro-highspeed",
+		name: "Kimi K3.1 Pro Highspeed",
+		api: "openai-completions",
+		provider: "moonshotai-cn",
+		baseUrl: "https://api.moonshot.cn/v1",
+		compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false,"thinkingFormat":"openai","requiresReasoningContentOnAssistantMessages":true},
+		reasoning: true,
+		thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
+		input: ["text", "image"],
+		cost: {
+			input: 3.8874,
+			output: 20.3342,
+			cacheRead: 0.1944,
+			cacheWrite: 0,
+		},
+		contextWindow: 1048576,
+		maxTokens: 1048576,
+	} satisfies Model<"openai-completions">,
 } as const;

@@ -461,5 +461,33 @@
 		},
 		"contextWindow": 1000000,
 		"maxTokens": 128000
+	},
+	"claude-fable-5-2": {
+		"id": "claude-fable-5-2",
+		"name": "Claude Fable 5.2",
+		"api": "anthropic-messages",
+		"provider": "anthropic",
+		"baseUrl": "https://api.anthropic.com",
+		"compat": {
+			"forceAdaptiveThinking": true
+		},
+		"reasoning": true,
+		"thinkingLevelMap": {
+			"off": null,
+			"xhigh": "xhigh",
+			"max": "max"
+		},
+		"input": [
+			"text",
+			"image"
+		],
+		"cost": {
+			"input": 8,
+			"output": 40,
+			"cacheRead": 0.2,
+			"cacheWrite": 10
+		},
+		"contextWindow": 1000000,
+		"maxTokens": 128000
 	}
 }

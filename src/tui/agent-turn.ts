@@ -57,7 +57,7 @@ export function resolveTuiRunOptions(
 }
 
 export type TuiTurnStop = {
-  reason: StopReason | "step_limit";
+  reason: StopReason | "iteration_limit_reached";
   details: string;
   budgetUsage?: AgentBudgetUsage;
 };
@@ -78,7 +78,7 @@ export async function runTuiAgentTurn(
       return { history: error.messages, stop: { reason: error.stopReason, details: error.message, budgetUsage: error.budgetUsage } };
     }
     if (error instanceof MaxTurnsExceededError) {
-      return { history: error.messages, stop: { reason: "step_limit", details: error.message } };
+      return { history: error.messages, stop: { reason: "iteration_limit_reached", details: error.message } };
     }
     throw error;
   }

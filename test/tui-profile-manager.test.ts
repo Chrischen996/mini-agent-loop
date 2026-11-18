@@ -5,13 +5,16 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { makeLlmConfig } from "../src/llm/config.ts";
-import { getAllModels, resolveModel } from "../src/models.ts";
-import { loadProfileStore } from "../src/profile-store.ts";
+import { getAllModels } from "../src/models.ts";
 import {
+  activateSavedModelProfile,
   commitModelSetup,
   startModelSetup,
   type ProfileManagerDeps,
 } from "../src/tui/profile-manager.ts";
+import { loadProfileStore } from "../src/profile-store.ts";
+import { saveProfile } from "../src/profile-store.ts";
+import { resolveModel } from "../src/models.ts";
 
 describe("model setup reuses configured provider credentials", () => {
   let storeDir = "";
@@ -63,6 +66,36 @@ describe("model setup reuses configured provider credentials", () => {
     assert.equal(applied.apiKey, "sk-test-xai");
     assert.equal(setupOpened, false);
     assert.equal(existsSync(storePath), false);
+  });
+
+  it("explains that a saved profile supplies the base URL and key", async () => {
+    await saveProfile("saved-gateway", {
+      model: "xai/grok-build-0.1",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "sk-saved",
+    });
+    const base = makeLlmConfig({ apiKey: "sk-old", baseUrl: "https://old.example/v1", model: "gpt-4o-mini" });
+    const actions: Array<{ type: string; [key: string]: unknown }> = [];
+    const deps: ProfileManagerDeps = {
+      llm: base,
+      setLlm: () => undefined,
+      setModelSetup: () => undefined,
+      setAcMode: () => undefined,
+      setInput: () => undefined,
+      setAcIndex: () => undefined,
+      setProfileListState: () => undefined,
+      dispatch: (action) => { actions.push(action as { type: string }); },
+      historyRef: { current: [] },
+    };
+
+    await activateSavedModelProfile("saved-gateway", deps);
+
+    const notice = actions.find((action) => action.type === "ADD_NOTICE");
+    assert.deepEqual(notice, {
+      type: "ADD_NOTICE",
+      title: "Model",
+      text: 'Activated saved profile "saved-gateway" (https://gateway.example/v1); using its saved API key.',
+    });
   });
 });
 

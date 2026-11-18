@@ -4,7 +4,7 @@ import { resolveSubagentMessage, type ChatMessage, type PendingPermissionState, 
 import { TUI_COLORS as C } from "../theme.ts";
 import { selectMessageViewport, type MessageHeightCache, type ViewportItem } from "../message-viewport.ts";
 import type { PhysicalRow } from "../message-rows.ts";
-import { activityPresentation, formatActivity, loadingGlyph, loadingMarkerBright, LOADING_FRAME_MS } from "../activity.ts";
+import { activityPresentation, activityRowColor, formatActivity, loadingGlyph, LOADING_FRAME_MS } from "../activity.ts";
 import { statusLabel } from "../claude-style.ts";
 import { bootProbe } from "../boot-trace.ts";
 import { hexToAnsi } from "../render-line-format.ts";
@@ -117,18 +117,14 @@ function ActivityRow({
     spinnerMessage,
     todoPanelVisible,
   }, { now });
-  const markerColor = activity?.stalled
-    ? C.error
-    : loadingMarkerBright(now, turnStartedAt)
-      ? C.running
-      : C.muted;
+  const activityColor = activityRowColor(C.running, C.muted, now, activity?.stalled ?? false, C.error);
 
   return (
     <Box marginBottom={0} gap={1} flexWrap="nowrap" minWidth={0}>
-      <Text color={markerColor} bold>
+      <Text color={activityColor} bold>
         {loadingGlyph(now, turnStartedAt)}
       </Text>
-      <Text color={activity?.stalled ? C.error : C.running} dimColor wrap="truncate-end">
+      <Text color={activityColor} dimColor wrap="truncate-end">
         {activity ? formatActivity(activity) : statusLabel(status, true)}
       </Text>
     </Box>

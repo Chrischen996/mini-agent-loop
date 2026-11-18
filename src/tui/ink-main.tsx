@@ -41,55 +41,16 @@ function bootTrace(step: string): void {
 }
 
 /**
- * Ask the terminal where the cursor currently sits (DSR `CSI 6 n`). Flow
- * layouts start the frame at the prompt line instead of jumping to the
- * screen bottom, which would strand the whole gap in between as dead space.
- *
- * MUST be awaited BEFORE `render()`: the DSR response bytes arrive on stdin,
- * and pausing (rather than destroying) the stream between the query and
- * Ink's own reader keeps them buffered for Ink to discard. Awaiting after
- * render() would sit behind React's first-paint work in the macrotask queue
- * and delay the very frame this function is meant to place.
- * Resolves undefined on non-TTYs, on the alternate layout, or on timeout.
+ * NOTE: A DSR cursor probe (CSI 6n) used to run before render() to place the
+ * first frame at the prompt row instead of bottom-anchoring it. It was
+ * removed after shipping: toggling stdin raw mode, owning the data listener,
+ * and pausing the stream on the boot critical path raced Ink's stdin
+ * takeover — an explicitly paused stream is NOT auto-resumed by attaching a
+ * `data` listener, and any windowing mistake left the prompt deaf or leaked
+ * `[row;colR` bytes into it. Renderer.setInitialAnchor remains available for
+ * a future re-introduction through a safe path (e.g. a query issued by the
+ * stdin adapter itself, which already owns the takeover lifecycle).
  */
-async function queryCursorRow(timeoutMs = 300): Promise<number | undefined> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) return undefined;
-  if (layoutMode === "alternate") return undefined;
-  return await new Promise((resolve) => {
-    let buffer = "";
-    let settled = false;
-    const stdin = process.stdin;
-    const finish = (value: number | undefined) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      stdin.off("data", onData);
-      try {
-        stdin.setRawMode(false);
-      } catch {
-        // already restored or unsupported
-      }
-      stdin.pause();
-      resolve(value);
-    };
-    const onData = (chunk: Buffer | string) => {
-      buffer += chunk.toString("utf8");
-      // Response shape: ESC [ row ; col R — tolerate splits and noise.
-      const match = buffer.match(/\x1b\[(\d{1,4});\d{1,4}R/);
-      if (match) finish(Number(match[1]) || undefined);
-      else if (buffer.length > 64) finish(undefined);
-    };
-    const timer = setTimeout(() => finish(undefined), timeoutMs);
-    try {
-      stdin.setRawMode(true);
-      stdin.on("data", onData);
-      stdin.resume();
-      process.stdout.write("\x1b[6n");
-    } catch {
-      finish(undefined);
-    }
-  });
-}
 
 // Keep Ink's frequent redraws isolated from the shell's main screen. This is
 // also what prevents a completed TUI session from leaving its frame in the
@@ -111,48 +72,60 @@ async function runMain(): Promise<void> {
 
   bootTrace("stdin-guard-done");
   const codebaseRuntime = createCodebaseRuntimeFromEnv();
-  const mcpRuntime = await createMcpRuntimeFromEnv(cwd).catch(async (error) => {
+  // Kick off every independent startup task at once so the slowest one
+  // (usually the sandbox spawn or the MCP handshake) overlaps with the others
+  // instead of serializing on the first-frame path. Awaiting them below in the
+  // original order preserves the original error semantics: an MCP failure
+  // still closes the codebase runtime and aborts startup, while sandbox /
+  // bg-task failures are only logged and non-fatal.
+  const mcpRuntimePromise = createMcpRuntimeFromEnv(cwd).catch(async (error) => {
     await codebaseRuntime.close();
     throw error;
   });
-
-  // Initialize sandbox runner if enabled
-  let sandboxRunner: Awaited<ReturnType<typeof createSandboxRunner>> | undefined;
   const sandboxEnabled = process.env.MINI_AGENT_SANDBOX !== "0" && process.env.MINI_AGENT_SANDBOX !== "false";
-  if (sandboxEnabled) {
-    try {
-      sandboxRunner = await createSandboxRunner({
-        enabled: true,
-        type: (process.env.MINI_AGENT_SANDBOX_TYPE as "auto" | "docker" | "node" | "none" | undefined) ?? "auto",
-        dockerImage: process.env.MINI_AGENT_SANDBOX_IMAGE,
-        allowNetwork: process.env.MINI_AGENT_SANDBOX_NETWORK === "true",
-        cpuLimit: process.env.MINI_AGENT_SANDBOX_CPUS ? parseFloat(process.env.MINI_AGENT_SANDBOX_CPUS) : undefined,
-        memoryLimit: process.env.MINI_AGENT_SANDBOX_MEMORY,
-        timeout: process.env.MINI_AGENT_SANDBOX_TIMEOUT ? parseInt(process.env.MINI_AGENT_SANDBOX_TIMEOUT, 10) : undefined,
-      });
-      console.error(`[sandbox] initialized type=${sandboxRunner.type}`);
-    } catch (error) {
-      console.error(`[sandbox] failed to initialize: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
+  const sandboxRunnerPromise: Promise<Awaited<ReturnType<typeof createSandboxRunner>> | undefined> =
+    sandboxEnabled
+      ? (async (): Promise<Awaited<ReturnType<typeof createSandboxRunner>> | undefined> => {
+          try {
+            const runner = await createSandboxRunner({
+              enabled: true,
+              type: (process.env.MINI_AGENT_SANDBOX_TYPE as "auto" | "docker" | "node" | "none" | undefined) ?? "auto",
+              dockerImage: process.env.MINI_AGENT_SANDBOX_IMAGE,
+              allowNetwork: process.env.MINI_AGENT_SANDBOX_NETWORK === "true",
+              cpuLimit: process.env.MINI_AGENT_SANDBOX_CPUS ? parseFloat(process.env.MINI_AGENT_SANDBOX_CPUS) : undefined,
+              memoryLimit: process.env.MINI_AGENT_SANDBOX_MEMORY,
+              timeout: process.env.MINI_AGENT_SANDBOX_TIMEOUT ? parseInt(process.env.MINI_AGENT_SANDBOX_TIMEOUT, 10) : undefined,
+            });
+            console.error(`[sandbox] initialized type=${runner.type}`);
+            return runner;
+          } catch (error) {
+            console.error(`[sandbox] failed to initialize: ${error instanceof Error ? error.message : String(error)}`);
+            return undefined;
+          }
+        })()
+      : Promise.resolve(undefined);
+  const bgEnabled = process.env.MINI_AGENT_BG_TASKS !== "0" && process.env.MINI_AGENT_BG_TASKS !== "false";
+  const bgSuitePromise = bgEnabled
+    ? createBgTaskSuite(cwd).catch((bgError: unknown) => {
+        console.error(`[bg-tasks] failed to initialize: ${bgError instanceof Error ? bgError.message : String(bgError)}\n`);
+        return null;
+      })
+    : Promise.resolve(null);
+  const systemPromptPromise = loadTuiSystemPromptContext(cwd);
+
+  const mcpRuntime = await mcpRuntimePromise;
+  const sandboxRunner = await sandboxRunnerPromise;
+  const bgSuite = await bgSuitePromise;
 
   try {
     let bgTaskDispose: (() => void) | undefined;
-    let bgTools: import("../tools/types.ts").Tool[] = [];
     const bgToolsByCwd = new Map<string, import("../tools/types.ts").Tool[]>();
     const bgManagersByCwd = new Map<string, BgTaskManager>();
     const childBgManagers = new Map<string, BgTaskManager>();
-    const bgEnabled = process.env.MINI_AGENT_BG_TASKS !== "0" && process.env.MINI_AGENT_BG_TASKS !== "false";
-    if (bgEnabled) {
-      try {
-        const bg = await createBgTaskSuite(cwd);
-        bgTools = bg.tools;
-        bgToolsByCwd.set(path.resolve(cwd), bgTools);
-        bgManagersByCwd.set(path.resolve(cwd), bg.manager);
-        bgTaskDispose = bg.dispose;
-      } catch (bgError) {
-        console.error(`[bg-tasks] failed to initialize: ${bgError instanceof Error ? bgError.message : String(bgError)}\n`);
-      }
+    if (bgSuite) {
+      bgToolsByCwd.set(path.resolve(cwd), bgSuite.tools);
+      bgManagersByCwd.set(path.resolve(cwd), bgSuite.manager);
+      bgTaskDispose = bgSuite.dispose;
     }
     const bgManagerForCwd = (workspaceCwd: string): BgTaskManager | undefined => {
       if (!bgEnabled) return undefined;
@@ -189,7 +162,8 @@ async function runMain(): Promise<void> {
       ...bgToolsForCwd(workspaceCwd),
     ]);
     bootTrace("after-mcp-sandbox-bg");
-    const systemPromptContext = await loadTuiSystemPromptContext(cwd);
+    const systemPromptContext = await systemPromptPromise;
+    bootTrace("after-system-prompt");
     // Alternate screen + mouse tracking only apply to the alternate layout.
     // Inline mode keeps mouse tracking off so the wheel scrolls the terminal's
     // native scrollback (where the sealed transcript lives).
@@ -199,11 +173,10 @@ async function runMain(): Promise<void> {
     }
     const { facade: incrementalStdout, renderer: incrementalRenderer } =
       createIncrementalStdoutHandle(process.stdout, { mode: layoutMode });
-    // Flow layouts: anchor the first frame at the prompt's actual row so the
-    // screen between prompt and bottom is not left as dead space.
-    const initialCursorRow = await queryCursorRow();
-    if (initialCursorRow !== undefined) incrementalRenderer.setInitialAnchor(initialCursorRow);
-    bootTrace("after-cursor-probe");
+    bootTrace("after-stdout-handle");
+    // NOTE: the startup DSR cursor probe was removed here (see note near the
+    // top of this file): stdin raw-mode/pause toggles before Ink's takeover
+    // raced the prompt input path. Bottom-anchored first paint restored.
     // Frame stdin before Ink: concatenated/split mouse reports must reach
     // useInput as atomic reads instead of leaking into the prompt as text.
     const terminalStdin = createTerminalStdin(process.stdin);

@@ -394,11 +394,14 @@ describe("standalone terminal render model", () => {
     // Messages are rendered compactly: no inter-message blank rows are emitted.
     assert.equal(lines.some((line) => line.key.startsWith("message-gap-")), false);
     assert.equal(lines.find((line) => line.key === "prompt-rule")?.text.length, 100);
-    // The activity row animates with the single shared spinner, so assert the
-    // glyph comes from that set instead of pinning one time-dependent frame.
-    const activityPrefix = lines.find((line) => line.key === "activity")?.prefix ?? "";
+    // The activity row animates with the single shared spinner. Marker and
+    // label share one breathing color sample and are emitted as segments.
+    const activity = lines.find((line) => line.key === "activity");
+    const activityPrefix = activity?.segments?.[0]?.text ?? "";
     assert.equal(activityPrefix.endsWith(" "), true);
     assert.ok((LOADING_GLYPHS as readonly string[]).includes(activityPrefix.trim()));
+    assert.equal(activity?.segments?.[1]?.text, activity?.text);
+    assert.equal(activity?.segments?.[0]?.color, activity?.segments?.[1]?.color);
     assert.match(lines.find((line) => line.key === "activity")?.text ?? "", /Finalizing response/);
     // The status row carries its own colored segments (marker included), which
     // is what lets the ANSI footer match the Ink StatusBar segment for segment.

@@ -80,4 +80,23 @@ export const DEEPSEEK_MODELS = {
 		contextWindow: 1048576,
 		maxTokens: 131072,
 	} satisfies Model<"openai-completions">,
+	"deepseek-flash": {
+		id: "deepseek-flash",
+		name: "DeepSeek V4.1 Flash",
+		api: "openai-completions",
+		provider: "deepseek",
+		baseUrl: "https://api.deepseek.com",
+		compat: {"supportsStore":false,"supportsDeveloperRole":false,"maxTokensField":"max_tokens","requiresReasoningContentOnAssistantMessages":true,"thinkingFormat":"deepseek","supportsStrictMode":true},
+		reasoning: true,
+		thinkingLevelMap: {"minimal":null,"low":"low","medium":null,"high":"high","max":"max"},
+		input: ["text", "image"],
+		cost: {
+			input: 0.3,
+			output: 1.2,
+			cacheRead: 0.006,
+			cacheWrite: 0,
+		},
+		contextWindow: 1000000,
+		maxTokens: 384000,
+	} satisfies Model<"openai-completions">,
 } as const;

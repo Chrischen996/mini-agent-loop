@@ -7,6 +7,8 @@ import type { TodoEditorState } from "./todo-editor.ts";
 import { PICKER_SELECTED_MARKER, PICKER_UNSELECTED_MARKER, TODO_EDITOR_DRAFT_HINT, TODO_EDITOR_SELECT_HINT, permissionRiskLabel, toolArgumentSummary } from "./claude-style.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { toolVisualName } from "./tool-lines.ts";
+import { configuredModelDetailText, configuredModelRowText } from "./model-picker.ts";
+import { panelBorderGlyphs } from "./pixel-glyphs.ts";
 import { executionStepStatusToTodoStatus, todoIcon } from "./todo-format.ts";
 import { SESSION_PICKER_HINT } from "./session-serialization.ts";
 import { commandUsageColumn } from "./slash-commands.ts";
@@ -23,7 +25,6 @@ import {
   sessionRowContent,
 } from "./picker-window.ts";
 import { formatContextWindow } from "./status-line.ts";
-import { configuredModelRowText } from "./model-picker.ts";
 
 type PanelTone = RenderLine["tone"];
 
@@ -40,13 +41,20 @@ function clipPanelText(value: string, width: number): string {
   return `${result}…`;
 }
 
-/** Shared full-width card rows used by permission, plan, and tool panels. */
+/**
+ * Shared full-width card rows used by permission, plan, and tool panels.
+ * The border glyphs come from the live theme registry: the default theme keeps
+ * the `╭ ╮ ╰ ╯ │ ─` card, while a pixel theme swaps in the block set. All
+ * glyphs are single-width, so the width-undefined prefixes (`╭─ `, `│  `,
+ * `╰─ `) keep their display width of 3 and every row stays `safeWidth` wide.
+ */
 export function panelTopLine(key: string, title: string, width?: number, tone?: PanelTone): RenderLine {
-  if (width === undefined) return { key, text: title, prefix: "╭─ ", style: "border", tone, bold: true };
+  const b = panelBorderGlyphs();
+  if (width === undefined) return { key, text: title, prefix: `${b.topCorner}${b.topMid} `, style: "border", tone, bold: true };
   const safeWidth = Math.max(12, width);
-  const caption = `─ ${clipPanelText(title, safeWidth - 6)} `;
+  const caption = `${b.topMid} ${clipPanelText(title, safeWidth - 6)} `;
   const fill = Math.max(1, safeWidth - 2 - terminalStringWidth(caption));
-  return { key, text: `╭${caption}${"─".repeat(fill)}╮`, style: "border", tone, bold: true };
+  return { key, text: `${b.topCorner}${caption}${b.topMid.repeat(fill)}${b.topRightCorner}`, style: "border", tone, bold: true };
 }
 
 export function panelContentLine(
@@ -55,11 +63,12 @@ export function panelContentLine(
   style: RenderLine["style"],
   options: { width?: number; tone?: PanelTone; dim?: boolean; bold?: boolean; strikethrough?: boolean; background?: RenderLine["background"] } = {},
 ): RenderLine {
+  const b = panelBorderGlyphs();
   if (options.width === undefined) {
     return {
       key,
       text,
-      prefix: "│  ",
+      prefix: `${b.side}  `,
       style,
       tone: options.tone,
       dim: options.dim,
@@ -74,8 +83,8 @@ export function panelContentLine(
   const padding = " ".repeat(Math.max(0, payloadWidth - terminalStringWidth(clipped)));
   return {
     key,
-    text: `${clipped}${padding} │`,
-    prefix: "│ ",
+    text: `${clipped}${padding} ${b.sideEnd}`,
+    prefix: `${b.side} `,
     style,
     tone: options.tone,
     dim: options.dim,
@@ -86,9 +95,10 @@ export function panelContentLine(
 }
 
 export function panelBottomLine(key: string, width?: number): RenderLine {
-  if (width === undefined) return { key, text: "", prefix: "╰─ ", style: "border", dim: true };
+  const b = panelBorderGlyphs();
+  if (width === undefined) return { key, text: "", prefix: `${b.bottomCorner}${b.bottomMid} `, style: "border", dim: true };
   const safeWidth = Math.max(12, width);
-  return { key, text: `╰${"─".repeat(safeWidth - 2)}╯`, style: "border", dim: true };
+  return { key, text: `${b.bottomCorner}${b.bottomMid.repeat(safeWidth - 2)}${b.bottomRightCorner}`, style: "border", dim: true };
 }
 
 /**
@@ -311,7 +321,7 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState, conte
     const configuredModels = state.configuredModels ?? [];
     const configured = state.modelPickerSection === "configured";
     const items = configured
-      ? configuredModels.map((profile) => ({ key: profile.name, label: configuredModelRowText(profile), detail: "" }))
+      ? configuredModels.map((profile) => ({ key: profile.name, label: configuredModelRowText(profile), detail: configuredModelDetailText(profile) }))
       : state.models.map((model) => ({
         key: model,
         label: modelNameLabel(model, model === context?.currentModel),

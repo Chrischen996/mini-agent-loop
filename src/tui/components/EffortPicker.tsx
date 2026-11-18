@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text, useInput } from "ink";
 import { TUI_COLORS as C } from "../theme.ts";
+import { panelBorderStyle } from "../pixel-glyphs.ts";
 import type { ModelThinkingLevel } from "../../pi-ai/types.ts";
 
 /**
@@ -105,7 +106,7 @@ export function EffortPicker({
     : "This model exposes a single effort level · Enter apply · Esc cancel";
 
   return (
-    <Box flexDirection="column" paddingX={2} borderStyle="round" borderColor={accent} width={width} minWidth={0} overflow="hidden">
+    <Box flexDirection="column" paddingX={2} borderStyle={panelBorderStyle()} borderColor={accent} width={width} minWidth={0} overflow="hidden">
       {/* Row 1 — title, left arrow, track, right arrow. */}
       <Box flexDirection="row" minWidth={0}>
         <Box flexShrink={0} marginRight={1}>

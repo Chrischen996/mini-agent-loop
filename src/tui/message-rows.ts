@@ -103,77 +103,108 @@ function assistantBodyRows(
     }
   }
   if (message.text) {
-    let fenceLang = "";
-    parseMarkdownLines(message.text).forEach((line, lineIndex) => {
-      const key = `message-${index}-md-${lineIndex}`;
-      switch (line.kind) {
-        case "code-fence": {
-          // Fence marker rows: keep the gutter + optional language label,
-          // and remember the language for the body rows that follow.
-          const fenceText = markdownRowText(line);
-          fenceLang = line.opening ? line.lang : "";
-          rows.push({
-            key: `${key}-0`,
-            text: fenceText,
-            style: "thinking",
-            dim: true,
-            spans: [{ text: fenceText, kind: "gutter" }],
-          });
-          break;
-        }
-        case "code": {
-          const body = line.text;
-          const spans: CodeSpan[] = [{ text: `${CODE_GUTTER} `, kind: "gutter" }, ...highlightCodeLine(body, fenceLang)];
-          rows.push({ key: `${key}-0`, text: `${CODE_GUTTER} ${body}`, style: "thinking", spans });
-          break;
-        }
-        case "heading":
-          wrapTerminalLine(stripInlineMarkdown(line.text), budget).forEach((text, rowIndex) => {
-            rows.push({
-              key: `${key}-${rowIndex}`,
-              text: `${line.level <= 2 ? "▸" : "·"} ${text}`,
-              style: "assistant",
-              bold: true,
-            });
-          });
-          break;
-        case "rule":
-          rows.push({ key: `${key}-0`, text: markdownRuleText(options.width), style: "border", dim: true });
-          break;
-        case "quote":
-          wrapTerminalLine(stripInlineMarkdown(line.text), Math.max(1, budget - 2)).forEach((text, rowIndex) => {
-            rows.push({ key: `${key}-${rowIndex}`, text: `│ ${text}`, style: "assistant", dim: true });
-          });
-          break;
-        case "table":
-          rows.push({ key: `${key}-0`, text: line.text, style: "assistant", dim: line.role === "rule" });
-          break;
-        case "list": {
-          const marker = line.ordered ? line.marker : "•";
-          const gutter = `${" ".repeat(line.indent * 2)}${marker} `;
-          const available = Math.max(1, budget - terminalStringWidth(gutter));
-          wrapTerminalLine(stripInlineMarkdown(line.text), available).forEach((text, rowIndex) => {
-            rows.push({
-              key: `${key}-${rowIndex}`,
-              text: rowIndex === 0 ? `${gutter}${text}` : `${" ".repeat(terminalStringWidth(gutter))}${text}`,
-              style: "assistant",
-            });
-          });
-          break;
-        }
-        default: {
-          const plain = stripInlineMarkdown(line.text);
-          // Ink renders an empty <Text> as zero rows; keep the projection
-          // consistent so blank markdown lines cost nothing.
-          if (!plain) return;
-          wrapTerminalLine(plain, budget).forEach((text, rowIndex) => {
-            rows.push({ key: `${key}-${rowIndex}`, text, style: "assistant" });
-          });
-        }
-      }
-    });
+    rows.push(...projectAssistantBodyRows(message.text, { keyPrefix: `message-${index}`, width: options.width }).rows);
   }
   return rows;
+}
+
+/**
+ * Project one assistant markdown body fragment into physical rows.
+ *
+ * `initialFence` carries open-fence state across a projection cut, and
+ * `lineIndexOffset` keeps row keys unique when the fragment is only the
+ * tail of a longer document. The returned `fence` is the state at the
+ * fragment's end so callers can carry it into the next fragment (streaming
+ * projection cache).
+ */
+export function projectAssistantBodyRows(
+  text: string,
+  options: {
+    keyPrefix: string;
+    width: number;
+    initialFence?: { open: boolean; lang: string };
+    lineIndexOffset?: number;
+  },
+): { rows: PhysicalRow[]; fence: { open: boolean; lang: string } } {
+  const rows: PhysicalRow[] = [];
+  const budget = bodyWidth(options.width);
+  const lineIndexOffset = options.lineIndexOffset ?? 0;
+  const fence = { open: options.initialFence?.open ?? false, lang: options.initialFence?.lang ?? "" };
+  parseMarkdownLines(text, fence.open ? { fenceOpen: true } : undefined).forEach((line, lineIndex) => {
+    const key = `${options.keyPrefix}-md-${lineIndex + lineIndexOffset}`;
+    switch (line.kind) {
+      case "code-fence": {
+        // Fence marker rows: keep the gutter + optional language label,
+        // and remember the language for the body rows that follow.
+        const fenceText = markdownRowText(line);
+        fence.open = line.opening;
+        fence.lang = line.opening ? line.lang : "";
+        rows.push({
+          key: `${key}-0`,
+          text: fenceText,
+          style: "thinking",
+          dim: true,
+          spans: [{ text: fenceText, kind: "gutter" }],
+        });
+        break;
+      }
+      case "code": {
+        const body = line.text;
+        const spans: CodeSpan[] = [{ text: `${CODE_GUTTER} `, kind: "gutter" }, ...highlightCodeLine(body, fence.lang)];
+        rows.push({ key: `${key}-0`, text: `${CODE_GUTTER} ${body}`, style: "thinking", spans });
+        break;
+      }
+      case "heading":
+        wrapTerminalLine(stripInlineMarkdown(line.text), budget).forEach((text, rowIndex) => {
+          rows.push({
+            key: `${key}-${rowIndex}`,
+            text: `${line.level <= 2 ? "▸" : "·"} ${text}`,
+            style: "assistant",
+            bold: true,
+          });
+        });
+        break;
+      case "rule":
+        rows.push({ key: `${key}-0`, text: markdownRuleText(options.width), style: "border", dim: true });
+        break;
+      case "quote":
+        wrapTerminalLine(stripInlineMarkdown(line.text), Math.max(1, budget - 2)).forEach((text, rowIndex) => {
+          rows.push({ key: `${key}-${rowIndex}`, text: `│ ${text}`, style: "assistant", dim: true });
+        });
+        break;
+      case "table":
+        rows.push({ key: `${key}-0`, text: line.text, style: "assistant", dim: line.role === "rule" });
+        break;
+      case "list": {
+        const marker = line.ordered ? line.marker : "•";
+        const gutter = `${" ".repeat(line.indent * 2)}${marker} `;
+        const available = Math.max(1, budget - terminalStringWidth(gutter));
+        wrapTerminalLine(stripInlineMarkdown(line.text), available).forEach((text, rowIndex) => {
+          rows.push({
+            key: `${key}-${rowIndex}`,
+            text: rowIndex === 0 ? `${gutter}${text}` : `${" ".repeat(terminalStringWidth(gutter))}${text}`,
+            style: "assistant",
+          });
+        });
+        break;
+      }
+      default: {
+        const plain = stripInlineMarkdown(line.text);
+        // Ink renders an empty <Text> as zero rows; keep the projection
+        // consistent so blank markdown lines cost nothing.
+        if (!plain) return;
+        wrapTerminalLine(plain, budget).forEach((text, rowIndex) => {
+          rows.push({ key: `${key}-${rowIndex}`, text, style: "assistant" });
+        });
+      }
+    }
+  });
+  return { rows, fence };
+}
+
+/** Leading gap row that `messagePhysicalRows` prepends for index -1 (streaming). */
+export function streamingGapRow(): PhysicalRow {
+  return { key: "message--1-gap", text: "", style: "assistant" };
 }
 
 /**

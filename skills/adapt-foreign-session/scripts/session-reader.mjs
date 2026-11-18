@@ -4,7 +4,7 @@
  * stdout is always one JSON object. Exit 0 = result, 2 = ambiguous, 1 = error.
  */
 import { spawnSync } from "node:child_process";
-import { createReadStream } from "node:fs";
+import { createReadStream, realpathSync } from "node:fs";
 import { lstat, readdir, readFile, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -24,7 +24,13 @@ export function slugify(cwd) {
 export function samePath(left, right) {
   if (typeof left !== "string" || typeof right !== "string" || !left || !right) return false;
   const normalize = (value) => {
-    const resolved = path.resolve(value);
+    let resolved = path.resolve(value);
+    // Resolve symlinks so /var/... and /private/var/... (macOS) compare equal.
+    try {
+      resolved = realpathSync(resolved);
+    } catch {
+      // Missing paths fall back to plain resolution.
+    }
     return process.platform === "win32" ? resolved.toLowerCase() : resolved;
   };
   try {
@@ -525,11 +531,20 @@ async function claudeHead(target) {
 export async function listClaude(configDir, cwd) {
   const projects = path.join(configDir, "projects");
   const files = await walkFiles(projects, (name) => name.endsWith(".jsonl") && UUID_RE.test(path.basename(name, ".jsonl")));
+  // Claude names project directories after the workspace's canonical path, so
+  // compare slugs against the symlink-resolved cwd as well (macOS /var vs /private/var).
+  let canonicalCwd = cwd;
+  try {
+    canonicalCwd = realpathSync(cwd);
+  } catch {
+    // Keep the unresolved cwd when the directory no longer exists.
+  }
+  const expectedSlugs = new Set([slugify(cwd), slugify(canonicalCwd)]);
   const sessions = [];
   for (const file of files) {
     if (await isSymlink(file)) continue;
     const head = await claudeHead(file);
-    const inExpected = path.basename(path.dirname(file)) === slugify(cwd);
+    const inExpected = expectedSlugs.has(path.basename(path.dirname(file)));
     if (head.cwd && !samePath(head.cwd, cwd)) continue;
     if (!head.cwd && !inExpected) continue;
     const info = await stat(file);

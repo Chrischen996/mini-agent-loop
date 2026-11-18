@@ -98,3 +98,15 @@ export function rowCountledCommitted(finalTexts: readonly string[], committedTex
   while (count < finalTexts.length && count < committedTexts.length && finalTexts[count] === committedTexts[count]) count += 1;
   return count;
 }
+
+/**
+ * Count finalized assistant rows already committed during streaming.
+ *
+ * The stream ledger contains only assistant body rows. Reasoning rows are not
+ * part of that ledger, but finalized messages project reasoning before text;
+ * skip the thinking prefix before comparing the two row sequences.
+ */
+export function assistantSealOverlap(rows: readonly { key: string; text: string }[], committedTexts: readonly string[]): number {
+  const bodyRows = rows.filter((row) => !row.key.includes("-thinking") && !row.key.includes("-think-"));
+  return rowCountledCommitted(rowTexts(bodyRows), committedTexts);
+}

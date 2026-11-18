@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { TUI_COLORS as C } from "../theme.ts";
+import { panelBorderStyle } from "../pixel-glyphs.ts";
 import type { ExecutionPlan } from "../../plan-act/types.ts";
 import { executionStepStatusToTodoStatus, todoIcon } from "../todo-format.ts";
 
@@ -31,7 +32,7 @@ function countRisks(plan: ExecutionPlan): { high: number; medium: number; total:
 export function PlanApprovalBar({ plan, width }: PlanApprovalBarProps): React.ReactElement {
   const risks = countRisks(plan);
   return (
-    <Box flexDirection="column" paddingX={1} borderStyle="round" borderColor={C.primary} width={width} minWidth={0} overflow="hidden">
+    <Box flexDirection="column" paddingX={1} borderStyle={panelBorderStyle()} borderColor={C.primary} width={width} minWidth={0} overflow="hidden">
       <Box gap={1} minWidth={0}>
         <Text color={C.primary} bold wrap="truncate-end">▣ Plan approval</Text>
       </Box>

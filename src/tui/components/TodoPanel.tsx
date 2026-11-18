@@ -12,7 +12,7 @@ import {
   TODO_PANEL_MAX_VISIBLE_ITEMS,
   TODO_PLAN_STATUS_LABELS,
 } from "../todo-format.ts";
-import { LOADING_FRAME_MS, loadingGlyph, loadingMarkerBright } from "../activity.ts";
+import { LOADING_FRAME_MS, breathingColor, loadingGlyph } from "../activity.ts";
 
 // ─── Single shared loading marker for in-progress items ────────────────────
 
@@ -36,8 +36,8 @@ function TodoRow({ item, index, showIndex, now }: TodoRowProps): React.ReactElem
   if (item.status === "in_progress") {
     return (
       <Box gap={1} minWidth={0}>
-        <Text color={C.running} dimColor={!loadingMarkerBright(now, 0)} bold>{loadingGlyph(now, 0)}</Text>
-        <Text color={C.running} wrap="truncate-end">{label}</Text>
+        <Text color={breathingColor(C.running, C.muted, now)} bold>{loadingGlyph(now, 0)}</Text>
+        <Text color={breathingColor(C.running, C.muted, now)} wrap="truncate-end">{label}</Text>
       </Box>
     );
   }
@@ -141,8 +141,8 @@ export function TodoPanelStatic({
         {active ? (
           <>
             <Text color={C.muted}>{headerText}  ▸  ·  </Text>
-            <Text color={C.running} dimColor={!loadingMarkerBright(now, 0)}>{loadingGlyph(now, 0)} </Text>
-            <Text color={C.running} wrap="truncate-end">{todoText(activeLabel, labelBudget)}</Text>
+            <Text color={breathingColor(C.running, C.muted, now)}>{loadingGlyph(now, 0)} </Text>
+            <Text color={breathingColor(C.running, C.muted, now)} wrap="truncate-end">{todoText(activeLabel, labelBudget)}</Text>
           </>
         ) : (
           <Text color={C.muted} dimColor wrap="truncate-end">

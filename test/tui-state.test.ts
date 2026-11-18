@@ -447,8 +447,30 @@ describe("TUI sidebar state", () => {
 
     assert.equal(state.streamingText, "");
     assert.equal(state.streamingReasoning, "");
+    assert.equal(state.streamRetryCommittedText, undefined);
     assert.equal(state.status, "Incomplete reasoning, retrying (1)…");
     assert.equal(state.busy, true);
+  });
+
+  it("preserves the committed answer prefix for document-stream retries", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Answer this" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "answer", text: "committed prefix\nopen tail" },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "attempt_reset", reason: "stream_truncated", attempt: 1 },
+    });
+
+    assert.equal(state.streamingText, "");
+    assert.equal(state.streamingReasoning, "");
+    assert.equal(state.streamRetryCommittedText, "committed prefix\n");
+    assert.equal(state.busy, true);
+
+    state = tuiReducer(state, { type: "CLEAR_STREAM_RETRY_BASELINE" });
+    assert.equal(state.streamRetryCommittedText, undefined);
   });
 
   it("clears transient output and shows timeout retry status", () => {
@@ -456,7 +478,7 @@ describe("TUI sidebar state", () => {
     state = tuiReducer(state, { type: "USER_MESSAGE", text: "Answer this" });
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
-      event: { type: "assistant_delta", kind: "answer", text: "stale" },
+      event: { type: "assistant_delta", kind: "answer", text: "committed prefix\nopen tail" },
     });
     state = tuiReducer(state, {
       type: "LOOP_EVENT",
@@ -472,6 +494,7 @@ describe("TUI sidebar state", () => {
 
     assert.equal(state.streamingText, "");
     assert.equal(state.streamingReasoning, "");
+    assert.equal(state.streamRetryCommittedText, "committed prefix\n");
     assert.equal(state.status, "Request timed out, retrying (1/1)…");
     assert.equal(state.busy, true);
   });

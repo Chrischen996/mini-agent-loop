@@ -8,6 +8,7 @@ import {
   STATUS_SKIPPED,
 } from "./render-lines.ts";
 import { normalizeTodoText, type TodoItem, type TodoStatus, type TodoViewMode } from "../todo.ts";
+import { pixelGlyphs } from "./pixel-glyphs.ts";
 
 export const TODO_PANEL_MAX_VISIBLE_ITEMS = 8;
 
@@ -77,12 +78,13 @@ export function resolveTodoItems(source: TodoSource): TodoItem[] {
 }
 
 export function todoIcon(status: TodoStatus): string {
+  const pixel = pixelGlyphs();
   switch (status) {
-    case "completed": return STATUS_DONE;
-    case "in_progress": return STATUS_RUNNING;
-    case "failed": return STATUS_ERROR;
-    case "skipped": return STATUS_SKIPPED;
-    default: return STATUS_PENDING;
+    case "completed": return pixel?.done ?? STATUS_DONE;
+    case "in_progress": return pixel?.running ?? STATUS_RUNNING;
+    case "failed": return pixel?.error ?? STATUS_ERROR;
+    case "skipped": return pixel?.skipped ?? STATUS_SKIPPED;
+    default: return pixel?.pending ?? STATUS_PENDING;
   }
 }
 
@@ -100,12 +102,20 @@ export function todoText(value: string, max = 100): string {
   return normalized.length > max ? `${normalized.slice(0, Math.max(1, max - 3))}...` : normalized;
 }
 
-/** Compact progress meter kept inline with the Todo header to avoid adding rows. */
+/**
+ * Compact progress meter kept inline with the Todo header to avoid adding rows.
+ *
+ * Pixel themes render it as coins collected out of bricks (`◉◉◉□□□`) so the bar
+ * reads as an 8-bit HUD; every other theme keeps the paired-block meter.
+ */
 export function todoProgressMeter(completed: number, total: number, width = 6): string {
   const slots = Math.max(1, width);
   if (total <= 0) return "·".repeat(slots);
   const filled = Math.max(0, Math.min(slots, Math.round((completed / total) * slots)));
-  return `${"▰".repeat(filled)}${"▱".repeat(slots - filled)}`;
+  const pixel = pixelGlyphs();
+  const filledCell = pixel?.progressFilled ?? "▰";
+  const emptyCell = pixel?.progressEmpty ?? "▱";
+  return `${filledCell.repeat(filled)}${emptyCell.repeat(slots - filled)}`;
 }
 
 export function getTodoPanelRows(

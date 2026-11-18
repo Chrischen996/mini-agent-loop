@@ -33,8 +33,8 @@ export function isTruncatedTurn(result: TuiAgentTurnResult, error?: Error): bool
     );
   }
 
-  // Check if stop reason indicates truncation
-  if (result.stop?.reason === "step_limit") return false;
+  // Iteration limits are a deliberate pause, not output truncation.
+  if (result.stop?.reason === "iteration_limit_reached") return false;
 
   const details = result.stop?.details ?? "";
   return /max_tokens|output reached|OutputTruncatedError|finish_reason/i.test(details);
