@@ -409,8 +409,23 @@ export function autocompleteRenderLines(state?: TerminalAutocompleteState, conte
       { key: "autocomplete-model-setup-model", text: `Model: ${setup.model.provider}/${setup.model.id}`, style: "muted" },
       { key: "autocomplete-model-setup-url", text: `Base URL: ${setup.field === "baseUrl" ? "editing" : setup.baseUrl}`, style: "muted", dim: true },
       { key: "autocomplete-model-setup-key", text: `API key: ${setup.field === "apiKey" ? "editing" : "set"}`, style: "muted", dim: true },
+      {
+        key: "autocomplete-model-setup-delete",
+        text: setup.field === "deleteConfirm"
+          ? `Delete ${setup.model.provider}/${setup.model.id}? This cannot be undone.`
+          : "Delete",
+        style: setup.field === "deleteConfirm" ? "error" as const : "muted" as const,
+        tone: setup.field === "deleteConfirm" ? "error" as const : "default" as const,
+      },
       ...(setup.error ? [{ key: "autocomplete-model-setup-error", text: setup.error, style: "error" as const, tone: "error" as const }] : []),
-      { key: "autocomplete-model-setup-hint", text: "Enter confirm field  ·  Esc cancel", style: "muted", dim: true },
+      {
+        key: "autocomplete-model-setup-hint",
+        text: setup.field === "deleteConfirm"
+          ? "y confirm  ·  n or Esc cancel"
+          : "Enter confirm field  ·  type delete to remove  ·  Esc cancel",
+        style: "muted",
+        dim: true,
+      },
     ];
   }
   if (state.mode === "profile-name" && state.pendingProfileSetup) {

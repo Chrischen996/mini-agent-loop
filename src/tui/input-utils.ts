@@ -106,6 +106,7 @@ export function promptPlaceholder(context: PromptPlaceholderContext = {}): strin
     case "model-picker":
       return "Search models";
     case "model-setup":
+      if (context.modelSetupField === "deleteConfirm") return "y to delete this model, n to cancel";
       return context.modelSetupField === "baseUrl"
         ? "Enter Base URL"
         : "Enter API key (or leave blank for env)";

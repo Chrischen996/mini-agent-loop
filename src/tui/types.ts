@@ -5,11 +5,13 @@ export type ModelSetupState = {
   model: ModelRef;
   baseUrl: string;
   apiKey: string;
-  field: "baseUrl" | "apiKey" | "effort";
+  field: "baseUrl" | "apiKey" | "effort" | "deleteConfirm";
   /** All models must use the key typed in this form, never a saved fallback. */
   requireExplicitApiKey?: boolean;
   /** Preserve `/model --protocol` across the Base URL / API key overlay. */
   protocol?: LlmGatewayProtocol;
+  /** Field to restore when the user declines the delete confirmation. */
+  resumeField?: "baseUrl" | "apiKey";
   error?: string;
 };
 

@@ -9,6 +9,8 @@ import { getAllModels } from "../src/models.ts";
 import {
   activateSavedModelProfile,
   commitModelSetup,
+  deleteConfiguredModelProfile,
+  resolveModelDeleteConfirmation,
   startModelSetup,
   type ProfileManagerDeps,
 } from "../src/tui/profile-manager.ts";
@@ -75,7 +77,7 @@ describe("model setup reuses configured provider credentials", () => {
 
     const base = makeLlmConfig({ apiKey: "sk-old", baseUrl: "https://old.example/v1", model: "gpt-4o-mini" });
     let applied = base;
-    let openedField: "baseUrl" | "apiKey" | "effort" | undefined;
+    let openedField: "baseUrl" | "apiKey" | "effort" | "deleteConfirm" | undefined;
     let openedApiKey = "";
     const deps: ProfileManagerDeps = {
       llm: base,
@@ -235,6 +237,63 @@ describe("commitModelSetup profile persistence", () => {
       assert.ok(saved, `saved profiles: ${Object.keys(store.profiles).join(", ")}`);
       assert.equal(saved.apiKey, persistedConfig.apiKey);
       assert.equal(saved.baseUrl, persistedConfig.baseUrl);
+    } finally {
+      if (originalStorePath === undefined) delete process.env.MINI_AGENT_MODEL_CONFIG;
+      else process.env.MINI_AGENT_MODEL_CONFIG = originalStorePath;
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("configure model delete confirmation", () => {
+  const model = resolveModel("openai/gpt-4o-mini");
+  const setup: ModelSetupState = {
+    model,
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: "sk-test",
+    field: "baseUrl",
+  };
+
+  it("asks before deleting and only accepts an explicit yes", () => {
+    assert.equal(resolveModelDeleteConfirmation(setup, "delete").action, "confirm");
+    assert.equal(resolveModelDeleteConfirmation(setup, "d").action, "confirm");
+    assert.equal(resolveModelDeleteConfirmation(setup, "https://gateway.example/v1").action, "continue");
+
+    const confirming: ModelSetupState = { ...setup, field: "deleteConfirm" };
+    assert.deepEqual(resolveModelDeleteConfirmation(confirming, "y"), {
+      action: "delete",
+      profileName: "openai-gpt-4o-mini",
+    });
+    assert.equal(resolveModelDeleteConfirmation(confirming, "yes").action, "delete");
+    assert.equal(resolveModelDeleteConfirmation(confirming, "n").action, "cancel");
+    assert.equal(resolveModelDeleteConfirmation(confirming, "no").action, "cancel");
+    assert.equal(resolveModelDeleteConfirmation(confirming, "").action, "continue");
+  });
+
+  it("deletes the saved profile only after confirmation, and reports a missing profile", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "mini-agent-model-delete-"));
+    const storePath = path.join(directory, "models.json");
+    const originalStorePath = process.env.MINI_AGENT_MODEL_CONFIG;
+    process.env.MINI_AGENT_MODEL_CONFIG = storePath;
+    try {
+      await saveProfile("openai-gpt-4o-mini", {
+        model: "openai/gpt-4o-mini",
+        baseUrl: "https://api.openai.com/v1",
+        apiKey: "sk-test",
+      });
+      assert.equal(resolveModelDeleteConfirmation(setup, "n").action, "continue");
+      const kept = await loadProfileStore(storePath);
+      assert.ok(kept.profiles["openai-gpt-4o-mini"]);
+
+      const deleted = await deleteConfiguredModelProfile({ ...setup, field: "deleteConfirm" });
+      assert.equal(deleted.profileName, "openai-gpt-4o-mini");
+      const store = await loadProfileStore(storePath);
+      assert.equal(store.profiles["openai-gpt-4o-mini"], undefined);
+
+      await assert.rejects(
+        () => deleteConfiguredModelProfile({ ...setup, field: "deleteConfirm" }),
+        /does not exist/,
+      );
     } finally {
       if (originalStorePath === undefined) delete process.env.MINI_AGENT_MODEL_CONFIG;
       else process.env.MINI_AGENT_MODEL_CONFIG = originalStorePath;

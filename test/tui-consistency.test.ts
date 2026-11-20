@@ -254,6 +254,34 @@ describe("shared TUI presentation", () => {
     assert.equal(rows.at(-1)?.text, pickerHintText("model"));
   });
 
+  it("asks for confirmation before the configure-model delete option removes a model", () => {
+    const model = { provider: "openai", id: "gpt-4o-mini", baseUrl: "https://api.openai.com/v1", apiKeyEnv: [] };
+    const rows = autocompleteRenderLines({
+      mode: "model-setup",
+      index: 0,
+      commands: [],
+      files: [],
+      models: [],
+      modelSetup: { model, baseUrl: model.baseUrl, apiKey: "", field: "baseUrl" },
+    } as never);
+    assert.equal(rows.some((row) => row.text === "Delete"), true);
+    assert.match(rows.at(-1)?.text ?? "", /type delete to remove/);
+
+    const confirming = autocompleteRenderLines({
+      mode: "model-setup",
+      index: 0,
+      commands: [],
+      files: [],
+      models: [],
+      modelSetup: { model, baseUrl: model.baseUrl, apiKey: "", field: "deleteConfirm" },
+    } as never);
+    assert.equal(
+      confirming.some((row) => row.text === "Delete openai/gpt-4o-mini? This cannot be undone."),
+      true,
+    );
+    assert.equal(confirming.at(-1)?.text, "y confirm  \u00b7  n or Esc cancel");
+  });
+
   it("keeps configured profiles in their own model-picker section", () => {
     const rows = autocompleteRenderLines({
       mode: "model-picker",
@@ -333,6 +361,7 @@ describe("shared TUI presentation", () => {
     assert.equal(promptPlaceholder({ acMode: "model-picker" }), "Search models");
     assert.equal(promptPlaceholder({ acMode: "model-setup", modelSetupField: "baseUrl" }), "Enter Base URL");
     assert.equal(promptPlaceholder({ acMode: "model-setup", modelSetupField: "apiKey" }), "Enter API key (or leave blank for env)");
+    assert.equal(promptPlaceholder({ acMode: "model-setup", modelSetupField: "deleteConfirm" }), "y to delete this model, n to cancel");
     assert.equal(promptPlaceholder({ acMode: "profile-name" }), "Enter a profile name (for example coding-fast)");
     assert.equal(promptPlaceholder({ acMode: "profile-list" }), "↑↓ select profile, Enter activate");
     // Busy outranks every overlay, matching Ink's cascade.

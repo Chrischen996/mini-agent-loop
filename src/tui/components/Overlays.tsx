@@ -225,8 +225,17 @@ export function Overlays({
         <Text wrap="truncate-end">Model: {modelSetup.model.provider}/{modelSetup.model.id}</Text>
         <Text dimColor wrap="truncate-end">Base URL: {modelSetup.field === "baseUrl" ? "editing" : modelSetup.baseUrl}</Text>
         <Text dimColor wrap="truncate-end">API key: {modelSetup.field === "apiKey" ? "editing" : modelSetup.apiKey ? "saved" : "missing"}</Text>
+        <Text color={modelSetup.field === "deleteConfirm" ? C.error : C.muted} wrap="truncate-end">
+          {modelSetup.field === "deleteConfirm"
+            ? `Delete ${modelSetup.model.provider}/${modelSetup.model.id}? This cannot be undone.`
+            : "Delete"}
+        </Text>
         {modelSetup.error && <Text color={C.error} wrap="truncate-end">{modelSetup.error}</Text>}
-        <Text dimColor wrap="truncate-end">Enter confirm field  ·  Esc cancel</Text>
+        <Text dimColor wrap="truncate-end">
+          {modelSetup.field === "deleteConfirm"
+            ? "y confirm  ·  n or Esc cancel"
+            : "Enter confirm field  ·  type delete to remove  ·  Esc cancel"}
+        </Text>
       </Box>
     );
   }

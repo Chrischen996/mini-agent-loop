@@ -3,7 +3,7 @@ import type { TuiAction } from "./state.ts";
 import type { LlmConfig, ModelSwitchOverrides } from "../llm/index.ts";
 import type { ModelRef } from "../models.ts";
 import type { ModelSetupState } from "./types.ts";
-import { activateProfile, saveProfile, listProfiles, loadProfileStore } from "../profile-store.ts";
+import { activateProfile, saveProfile, listProfiles, loadProfileStore, removeProfile } from "../profile-store.ts";
 import { switchLlmModel, loadLlmConfigFromEnv } from "../llm/index.ts";
 import { adaptHistoryForModel } from "../message-adapter.ts";
 import { withThinkingLevel } from "../think-intensity.ts";
@@ -87,6 +87,49 @@ export function startModelSetup(
   setAcIndex(0);
 }
 
+/** Saved-profile name produced when Configure model commits this model. */
+export function savedModelProfileName(model: { provider: string; id: string }): string {
+  return `${model.provider}-${model.id}`
+    .replace(/[^a-zA-Z0-9_-]/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 40);
+}
+
+export type ModelDeleteConfirmation =
+  | { action: "confirm" }
+  | { action: "cancel" }
+  | { action: "delete"; profileName: string }
+  | { action: "missing" }
+  | { action: "continue" };
+
+/**
+ * Decide what a Configure model submission does with the delete option.
+ * Typing `delete` (or `d`) only asks for confirmation; `y` deletes the saved
+ * profile and anything else leaves the form unchanged.
+ */
+export function resolveModelDeleteConfirmation(
+  setup: ModelSetupState,
+  input: string,
+): ModelDeleteConfirmation {
+  const answer = input.trim().toLowerCase();
+  if (setup.field === "deleteConfirm") {
+    if (answer === "y" || answer === "yes") return { action: "delete", profileName: savedModelProfileName(setup.model) };
+    if (answer === "n" || answer === "no") return { action: "cancel" };
+    return { action: "continue" };
+  }
+  if (answer === "delete" || answer === "d") return { action: "confirm" };
+  return { action: "continue" };
+}
+
+/** Remove the saved profile for the model being configured. */
+export async function deleteConfiguredModelProfile(
+  setup: ModelSetupState,
+): Promise<{ profileName: string }> {
+  const profileName = savedModelProfileName(setup.model);
+  await removeProfile(profileName);
+  return { profileName };
+}
+
 /**
  * Complete the model setup by applying the configuration and adapting history.
  */
@@ -140,10 +183,7 @@ export async function commitModelSetup(
     setInput("");
     if (options.persistProfile !== false) {
       // Auto-save as a named profile (fire-and-forget, non-fatal)
-      const defaultName = `${setup.model.provider}-${setup.model.id}`
-        .replace(/[^a-zA-Z0-9_-]/g, "-")
-        .replace(/-+/g, "-")
-        .slice(0, 40);
+      const defaultName = savedModelProfileName(setup.model);
       try {
         await saveProfile(defaultName, {
           model: `${setup.model.provider}/${setup.model.id}`,
