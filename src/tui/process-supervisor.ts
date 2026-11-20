@@ -16,6 +16,8 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import process from "node:process";
 
+import { BOOT_FRAME_ENV, paintBootFrame } from "./boot-frame.ts";
+import { resolveTuiLayoutMode } from "./layout-mode.ts";
 import { RELAUNCH_EXIT_CODE } from "./relaunch-constants.ts";
 
 /** Re-export for callers that import from the supervisor module. */
@@ -175,7 +177,17 @@ async function run(): Promise<void> {
 
   const scriptArgs = process.argv.slice(2);
   const memoryArgs = getMemoryNodeArgs();
+  // Give the terminal something to show while the child loads ink + React. The
+  // child erases the line itself right before its first frame.
+  const paintedBootFrame = paintBootFrame({
+    env: process.env,
+    stdout: process.stdout,
+    layoutMode: resolveTuiLayoutMode(),
+  });
+  if (paintedBootFrame) process.env[BOOT_FRAME_ENV] = "1";
   const { spawnArgs, env } = getSpawnConfig(memoryArgs, scriptArgs);
+  // Only the first child may erase; a relaunch child would eat a real line.
+  delete process.env[BOOT_FRAME_ENV];
 
   const runner = (): Promise<number> => {
     process.stdin.pause();
@@ -184,6 +196,8 @@ async function run(): Promise<void> {
       stdio: ["inherit", "inherit", "inherit"],
       env,
     });
+    // Relaunch iterations must not erase a transcript line.
+    delete env[BOOT_FRAME_ENV];
 
     const removeForwarders = setupSignalForwarding(child);
 

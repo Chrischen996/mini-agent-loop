@@ -1556,7 +1556,9 @@ describe("the single Ink terminal", () => {
     };
     // The published entries launch the process supervisor, which owns the Ink
     // child; the legacy direct-Ink entry stays available for debugging.
-    assert.equal(pkg.scripts.tui, "node --import tsx src/tui/process-supervisor.ts");
+    // `npm run tui` goes through the dev-bundle launcher, which supervises the
+    // same Ink entry (prebuilt when the source stamp is fresh, tsx otherwise).
+    assert.equal(pkg.scripts.tui, "node src/tui/dev-launch.ts");
     assert.equal(pkg.bin["mini-agent-loop"], "dist/tui-supervisor.js");
     assert.equal(pkg.bin["mini-agent-loop-tui"], "dist/tui-supervisor.js");
     assert.equal(pkg.bin["mini-agent-loop-tui-legacy"], "dist/tui.js");

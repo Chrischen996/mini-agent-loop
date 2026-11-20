@@ -12,6 +12,7 @@
  * the test runner, or with `MINI_AGENT_CURSOR_PROBE_MS=0` no probe is started
  * and the caller falls back to its own query (which no-ops in those cases).
  */
+import { clearBootFrame } from "./boot-frame.ts";
 import {
   queryCursorRow,
   resolveCursorProbeTimeoutFromEnv,
@@ -34,6 +35,11 @@ function startProbe(): Promise<CursorProbeResult> | undefined {
     timeoutMs,
   });
 }
+
+// Erase the launcher's "starting up" line BEFORE the probe measures the
+// cursor, so the frame is anchored to the row the boot line occupied. No-op
+// unless the parent says it painted one (see boot-frame.ts).
+clearBootFrame({ env: process.env, stdout: process.stdout });
 
 const earlyProbe = startProbe();
 
