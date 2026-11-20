@@ -44,6 +44,8 @@ import {
   DEV_BUNDLE_CACHE_VERSION,
   type DevBundlePaths,
 } from "./dev-bundle-cache.ts";
+import { BOOT_FRAME_ENV, paintBootFrame } from "./boot-frame.ts";
+import { resolveTuiLayoutMode } from "./layout-mode.ts";
 import { getMemoryNodeArgs, RELAUNCH_EXIT_CODE } from "./process-supervisor.ts";
 
 const CACHE_ENV = "MINI_AGENT_TUI_DEV_CACHE";
@@ -106,11 +108,16 @@ function superviseOnce(nodeArgs: string[], env: NodeJS.ProcessEnv): Promise<numb
 
 /** Mirrors the supervisor: restart on RELAUNCH_EXIT_CODE, otherwise propagate. */
 async function superviseLoop(nodeArgs: string[], env: NodeJS.ProcessEnv): Promise<never> {
+  let childProcessEnv = env;
   for (;;) {
-    const exitCode = await superviseOnce(nodeArgs, env);
+    const exitCode = await superviseOnce(nodeArgs, childProcessEnv);
     if (exitCode !== RELAUNCH_EXIT_CODE) {
       process.exit(exitCode);
     }
+    // Relaunch: the boot line was erased minutes ago, so the next child must
+    // not erase a line of the transcript.
+    const { [BOOT_FRAME_ENV]: _paintedBootFrame, ...withoutBootFrame } = childProcessEnv;
+    childProcessEnv = withoutBootFrame;
   }
 }
 
@@ -124,6 +131,22 @@ function childEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 }
 
 /**
+ * Print the boot line, then supervise the child with the marker that lets it
+ * erase that line. Returns only by exiting.
+ */
+function runSupervised(nodeArgs: string[], extraEnv: NodeJS.ProcessEnv): Promise<never> {
+  const painted = paintBootFrame({
+    env: process.env,
+    stdout: process.stdout,
+    layoutMode: resolveTuiLayoutMode(),
+  });
+  const env = childEnv({ ...extraEnv, ...(painted ? { [BOOT_FRAME_ENV]: "1" } : {}) });
+  // Only the child spawned below may erase; see superviseLoop's relaunch path.
+  if (painted) delete process.env[BOOT_FRAME_ENV];
+  return superviseLoop(nodeArgs, env);
+}
+
+/**
  * Source path: same child the supervisor would spawn (`node --import tsx
  * ink-main.tsx`), but spawned straight from here. That skips the extra
  * node+tsx process `process-supervisor.ts` used to add (~200 ms of the blank
@@ -131,16 +154,16 @@ function childEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
  * RELAUNCH loop that supervisor provided.
  */
 function runFromSource(scriptArgs: string[]): Promise<never> {
-  return superviseLoop(
+  return runSupervised(
     [...getMemoryNodeArgs(), "--import", "tsx", entryPath, ...scriptArgs],
-    childEnv({ MINI_AGENT_CHILD: "1" }),
+    { MINI_AGENT_CHILD: "1" },
   );
 }
 
 function runBundle(paths: DevBundlePaths, scriptArgs: string[]): Promise<never> {
-  return superviseLoop(
+  return runSupervised(
     [...getMemoryNodeArgs(), paths.bundlePath, ...scriptArgs],
-    childEnv({ MINI_AGENT_CHILD: "1" }),
+    { MINI_AGENT_CHILD: "1" },
   );
 }
 

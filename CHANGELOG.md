@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Boot line for the TUI startup window: the launcher (and
+  `dist/tui-supervisor.js`) prints `◇ mini-agent · 启动中…` the moment it
+  owns the terminal, and the child erases exactly that line right before its
+  cursor probe, so the first frame takes its row. First visible pixel drops
+  from ~1.1 s to ~0.3 s while the terminal no longer sits blank. Skipped
+  without a TTY, in the alternate layout (the alt-screen switch clears anyway)
+  and under the test runner; `MINI_AGENT_BOOT_FRAME=0` opts out. Only the
+  first child may erase (`MINI_AGENT_BOOT_FRAME=1` is consumed), so a
+  RELAUNCH child never eats a transcript line.
 - `npm run tui` dev bundle cache: the launcher (`src/tui/dev-launch.ts`)
   keeps one Vite/SSR prebuilt bundle of the TUI graph in `.cache/tui-dev/`,
   stamped with a content hash of `src/` plus `package.json`, and runs

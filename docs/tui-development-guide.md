@@ -559,6 +559,10 @@ export function buildTerminalRenderLines(
     - `O_EXCL` 锁保证同时只有一个构建在跑（锁超过 120s 可被接管；进程被杀不会永久卡住缓存）；后台构建输出写 `.cache/tui-dev-build.log`，构建失败时下一次启动会看到"源码变了"并重试。
     - 开关：`MINI_AGENT_TUI_DEV_CACHE=0` 完全关掉（总是走 tsx）、`=refresh` 阻塞重建后再启动、`MINI_AGENT_TUI_DEV_CACHE_QUIET=1` 不打印 `[tui]` 提示。
     - 改了 bundler 配方（externals、target 等）必须把 `DEV_BUNDLE_CACHE_VERSION` +1，否则旧包会被判成"新鲜"。
+  - **首帧之前的空白（boot-frame，`src/tui/boot-frame.ts`）**：即使命中缓存，从 launcher 拿到终端到 Ink 画出第一帧仍有约 0.5s —— 拆开实测（同一台机器、`NODE_COMPILE_CACHE` 已热）：裸 `node` 31ms、**加载 ink 372ms**（react 只有 64ms，ink 的依赖才是大头）、我们自己的模块图约 150ms、首帧渲染约 80ms。这段谁也删不掉，所以改成"别让用户盯着空白"：launcher（以及 `dist/tui-supervisor.js`）在拿到终端的 ~200ms 内先打一行 `◇ mini-agent · 启动中…`，子进程在**测光标之前**（`early-cursor-probe.ts` 顶层）把这一行擦掉，于是首帧正好落在那一行上、不留垃圾行。
+    - 契约：只有**真的画了**这一行的父进程才给子进程 `MINI_AGENT_BOOT_FRAME=1`；子进程只擦一行且擦完就删掉这个变量，所以 RELAUNCH 出来的第二个子进程绝不会吃掉一行真实对话。
+    - 自动跳过：非 TTY、测试运行器（`NODE_TEST_CONTEXT`）、`MINI_AGENT_TUI_LAYOUT=alternate`（切换备用屏本身就会清屏）。`MINI_AGENT_BOOT_FRAME=0` 手动关掉。
+    - 实测：首个可见像素从 ~1140ms 提前到 **307ms**（`npm run tui`），首帧仍在 ~0.85s。
   - `npm run build` 后的 `dist/tui.js`（单包）首帧约 **0.5s**，是发布路径（`npm run tui:prod` 一键 build + 跑打包产物）。
   - 排查顺序：`MINI_AGENT_BOOT_TRACE=1` 拿到 `runMain-enter`／`after-mcp-sandbox-bg`／`after-system-prompt`／`after-cursor-probe`／`before-render`／`after-render-call` 时间戳；`runMain-enter` 之前占大头就是模块加载（dev 下已被 dev 包缓存消除）；卡在 `after-mcp-sandbox-bg` 则是 `MINI_AGENT_MCP_CONFIG` 里某个 MCP server 的握手（`McpRuntime.create()` 在首帧前逐个 `await` 连接，`timeoutMs` 最长 60s，uvx/npx 首次拉包尤其慢）。
 - 慢帧/闪烁监控（`src/tui/perf-monitor.ts`）：渲染器逐帧上报耗时与重绘行；`MINI_AGENT_SLOW_FRAME_MS`（默认 200）定义慢帧阈值，同一物理行 1 秒内重绘 ≥12 次记为闪烁嫌疑；`MINI_AGENT_RENDER_STATS=1` 在进程退出时向 stderr 打印汇总。
