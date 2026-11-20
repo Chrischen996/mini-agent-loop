@@ -33,8 +33,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - CLI: `--goal <objective> [--goal-token-budget N]`, `--goal clear`,
     `--goal pause|resume|complete`, and `--goal-status`.
 
+### Fixed
+
+- TUI supervisor: the packaged bin (`dist/tui-supervisor.js`) resolved its
+  child entry with `dir.includes("/dist/")`, which never matches a directory
+  that *is* `.../dist`. Every `mini-agent-loop` launch therefore spawned the
+  non-existent `dist/ink-main.tsx` (MODULE_NOT_FOUND) and, when it did start,
+  forced the tsx loader onto an already-bundled entry. Entry resolution is now
+  extension-based (`needsTsxLoader`), so the bundle starts directly.
+
 ### Performance
 
+- TUI startup: the cursor probe (DSR `CSI 6 n`) is now issued from
+  `early-cursor-probe.ts`, evaluated before the rest of the UI module graph, so
+  its wait overlaps module loading, MCP handshake and the other startup tasks
+  instead of adding to the first-frame path. On terminals that never answer
+  DSR, `npm run tui` reaches its first frame in ~1.22 s instead of ~1.46 s.
+  The wait is tunable with `MINI_AGENT_CURSOR_PROBE_MS` (`0` disables it).
 - TUI (document layout, the default): streaming assistant projection is now
   incremental. Each 80 ms delta flush projects only the newly settled lines
   plus the growing tail; the settled prefix is cached per width/thinking mode

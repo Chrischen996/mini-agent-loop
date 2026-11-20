@@ -22,6 +22,31 @@ export type CursorProbeResult = {
   leftover: string;
 };
 
+/** Env override for the DSR wait: `MINI_AGENT_CURSOR_PROBE_MS`. */
+export const CURSOR_PROBE_TIMEOUT_ENV = "MINI_AGENT_CURSOR_PROBE_MS";
+
+/** Default DSR wait: generous enough for a slow SSH round trip. */
+export const DEFAULT_CURSOR_PROBE_TIMEOUT_MS = 300;
+
+/**
+ * Resolve the probe timeout. A terminal that does not answer `CSI 6 n` burns
+ * the whole timeout on the startup path, so a slow-but-present link can be
+ * traded for a faster first frame with `MINI_AGENT_CURSOR_PROBE_MS`; `0`
+ * skips the probe entirely (pure bottom anchoring, for terminals that garble
+ * the query). Keep the default generous: a report that arrives *after* the
+ * probe gave up is no longer absorbed and would surface as stray input.
+ */
+export function resolveCursorProbeTimeoutFromEnv(
+  env: Record<string, string | undefined> = process.env,
+  fallbackMs: number = DEFAULT_CURSOR_PROBE_TIMEOUT_MS,
+): number {
+  const raw = (env[CURSOR_PROBE_TIMEOUT_ENV] ?? "").trim();
+  if (raw === "") return fallbackMs;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallbackMs;
+  return Math.min(parsed, 5000);
+}
+
 /**
  * Locate the initial cursor row with DSR `CSI 6 n` before Ink renders its
  * first frame. Flow layouts use this row to anchor the frame instead of
@@ -33,9 +58,12 @@ export type CursorProbeResult = {
  * typed while the UI was still booting and must never be silently dropped.
  */
 export async function queryCursorRow(options: CursorProbeOptions): Promise<CursorProbeResult> {
-  const { stdin, stdout, layoutMode, timeoutMs = 300 } = options;
+  const { stdin, stdout, layoutMode, timeoutMs = DEFAULT_CURSOR_PROBE_TIMEOUT_MS } = options;
   const empty: CursorProbeResult = { leftover: "" };
   if (!stdin.isTTY || !stdout.isTTY || layoutMode === "alternate") return empty;
+  // `MINI_AGENT_CURSOR_PROBE_MS=0`: never take stdin over or write to the
+  // terminal; the frame simply anchors at the screen bottom.
+  if (timeoutMs <= 0) return empty;
 
   // A paused source would keep TerminalStdinAdapter's `data` listener from
   // receiving any bytes after render. Remember the exact state we borrowed.

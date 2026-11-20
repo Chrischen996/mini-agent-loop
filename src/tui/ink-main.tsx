@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+// Must stay the FIRST import: evaluating it issues the DSR cursor query before
+// the rest of the module graph (ink, React, App, MCP, tools) is parsed, so the
+// terminal round trip overlaps that load instead of delaying the first frame.
+import { takeEarlyCursorProbe } from "./early-cursor-probe.ts";
 import React from "react";
 import { render } from "ink";
 import path from "node:path";
@@ -12,7 +16,7 @@ import { createIncrementalStdoutHandle } from "./incremental-renderer.ts";
 import { createTerminalStdin } from "./terminal-stdin.ts";
 import { disableMouseTracking, enableMouseTracking } from "./mouse-tracking.ts";
 import { resolveTuiLayoutMode } from "./layout-mode.ts";
-import { queryCursorRow } from "./cursor-probe.ts";
+import { queryCursorRow, resolveCursorProbeTimeoutFromEnv } from "./cursor-probe.ts";
 import { initTheme } from "./theme.ts";
 import { bootProbe } from "./boot-trace.ts";
 import {
@@ -60,6 +64,18 @@ async function runMain(): Promise<void> {
   }
 
   bootTrace("stdin-guard-done");
+  // The probe normally started at import time (see early-cursor-probe.ts) and
+  // has been waiting through the module load, so the await below is already
+  // resolved. Start one here only when that module declined (no TTY, alternate
+  // layout, disabled probe); this still keeps the query before render(), as
+  // required — a DSR callback racing the first paint delays the frame by
+  // seconds (see docs/tui-development-guide.md).
+  const cursorProbePromise = takeEarlyCursorProbe() ?? queryCursorRow({
+    stdin: process.stdin,
+    stdout: process.stdout,
+    layoutMode,
+    timeoutMs: resolveCursorProbeTimeoutFromEnv(),
+  });
   const codebaseRuntime = createCodebaseRuntimeFromEnv();
   // Kick off every independent startup task at once so the slowest one
   // (usually the sandbox spawn or the MCP handshake) overlaps with the others
@@ -166,11 +182,7 @@ async function runMain(): Promise<void> {
     // screen between prompt and bottom is not left as dead space. The probe
     // owns stdin until it restores its flowing/raw state; replay any keys it
     // saw into Ink's adapter so early typing is not swallowed by startup.
-    const cursorProbe = await queryCursorRow({
-      stdin: process.stdin,
-      stdout: process.stdout,
-      layoutMode,
-    });
+    const cursorProbe = await cursorProbePromise;
     if (cursorProbe.row !== undefined) incrementalRenderer.setInitialAnchor(cursorProbe.row);
     bootTrace("after-cursor-probe");
     // Frame stdin before Ink: concatenated/split mouse reports must reach
