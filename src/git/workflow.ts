@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, readFile, readlink, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
@@ -305,6 +305,152 @@ export class GitWorkflow {
     ]);
     return entries.includes(targetPath);
   }
+
+  /**
+   * Best-effort re-attach a previously created worktree at `target` from
+   * `branch` (subagent resume/restart). Returns false when the worktree can
+   * no longer be rehydrated so the caller falls back to the shared workspace.
+   */
+  async rehydrateWorktree(target: string, branch: string): Promise<boolean> {
+    try {
+      if (await this.isRegisteredWorktree(target)) return true;
+      await runGit(this.cwd, ["worktree", "prune"]);
+      const absolute = path.resolve(target);
+      if ((await stat(absolute).catch(() => undefined))?.isDirectory()) {
+        throw new Error("worktree directory exists but is not registered");
+      }
+      await runGit(this.cwd, ["worktree", "add", absolute, branch]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Remove a registered subagent worktree directory, keeping its branch so
+   * the changes stay mergeable (or can be re-added later). Returns false
+   * when the worktree is not registered under this repository.
+   */
+  async removeWorktree(target: string): Promise<boolean> {
+    try {
+      if (!await this.isRegisteredWorktree(target)) return false;
+      const root = await repositoryRoot(this.cwd);
+      const absolute = path.resolve(target);
+      if ((await stat(absolute).catch(() => undefined))?.isDirectory()) {
+        await runGit(root, ["worktree", "remove", "--force", absolute]);
+      }
+      // Covers both stale registrations (directory already gone) and cleanup
+      // of the registration after a successful removal.
+      await runGit(root, ["worktree", "prune"]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Pin a worktree's HEAD to a durable snapshot ref (Grok Build-style
+   * `refs/mini-agent/subagents/<id>`), so the changes stay recoverable after
+   * the worktree directory is reclaimed. Returns the snapshot head.
+   */
+  async snapshotWorktreeToRef(worktreePath: string, ref: string): Promise<string> {
+    const head = (await runGit(worktreePath, ["rev-parse", "HEAD"])).trim();
+    await runGit(worktreePath, ["update-ref", ref, head]);
+    return head;
+  }
+
+  /**
+   * Pin `branch`'s HEAD to a durable snapshot ref from the repository root,
+   * so reclamation works even when the worktree directory is already gone.
+   * Returns the snapshot head.
+   */
+  async snapshotBranchToRef(branch: string, ref: string): Promise<string> {
+    const root = await repositoryRoot(this.cwd);
+    const head = (await runGit(root, ["rev-parse", `refs/heads/${branch}`])).trim();
+    await runGit(root, ["update-ref", ref, head]);
+    return head;
+  }
+
+  private static readonly GIT_IDENTITY_ENV = {
+    GIT_AUTHOR_NAME: "mini-agent",
+    GIT_AUTHOR_EMAIL: "mini-agent@localhost",
+    GIT_COMMITTER_NAME: "mini-agent",
+    GIT_COMMITTER_EMAIL: "mini-agent@localhost",
+  };
+
+  /**
+   * Commit any uncommitted changes inside a subagent worktree so the branch
+   * is a faithful snapshot before merge or reclamation. Returns the worktree
+   * HEAD; `changed` is false when nothing needed committing.
+   */
+  async commitWorktreeChanges(worktreePath: string, message: string): Promise<{ changed: boolean; head: string }> {
+    const dirty = (await runGit(worktreePath, ["status", "--porcelain"])).trim();
+    const head = (await runGit(worktreePath, ["rev-parse", "HEAD"])).trim();
+    if (!dirty) return { changed: false, head };
+    await runGit(worktreePath, ["add", "-A"], { env: GitWorkflow.GIT_IDENTITY_ENV });
+    await runGit(worktreePath, ["commit", "-m", message], { env: GitWorkflow.GIT_IDENTITY_ENV });
+    return { changed: true, head: (await runGit(worktreePath, ["rev-parse", "HEAD"])).trim() };
+  }
+
+  /**
+   * Merge `branch` into the repository's current HEAD (the live checkout's
+   * branch). Best-effort: on conflict or a dirty live tree the merge is
+   * aborted and the conflicting files (when any) are reported so the caller
+   * can resolve manually. The worktree is left untouched either way.
+   */
+  async mergeBranchIntoCurrent(
+    branch: string,
+  ): Promise<{ merged: boolean; head?: string; commits?: number; conflicts: string[]; error?: string }> {
+    const root = await repositoryRoot(this.cwd);
+    try {
+      await runGit(root, ["rev-parse", "--verify", `refs/heads/${branch}`]);
+    } catch {
+      return { merged: false, conflicts: [], error: `Branch ${branch} does not exist.` };
+    }
+    const before = (await runGit(root, ["rev-parse", "--verify", "HEAD"])).trim();
+    try {
+      await runGit(root, ["merge", "--no-ff", branch], { env: GitWorkflow.GIT_IDENTITY_ENV });
+      const after = (await runGit(root, ["rev-parse", "HEAD"])).trim();
+      const commits = Number((await runGit(root, ["rev-list", "--count", `${before}..${after}`])).trim()) || 0;
+      return { merged: true, head: after, commits, conflicts: [] };
+    } catch (error) {
+      const conflicts = (await runGit(root, ["diff", "--name-only", "--diff-filter=U"]).catch(() => ""))
+        .split("\n").filter(Boolean);
+      await runGit(root, ["merge", "--abort"]).catch(() => undefined);
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        merged: false,
+        conflicts,
+        error: conflicts.length
+          ? `Merge conflict in: ${conflicts.join(", ")} (aborted). Resolve manually with: git merge ${branch}`
+          : `Merge into the current branch was refused (the live checkout may have uncommitted changes): ${message}`,
+      };
+    }
+  }
+}
+
+/**
+ * Prepare a freshly created isolated worktree for running a worker inside it
+ * (shared by goal workers and subagent worktree isolation): link the source
+ * checkout's `node_modules` when present and copy its `.env`. Best-effort;
+ * neither source file is required.
+ */
+export async function setupIsolatedWorktreeEnvironment(sourceCwd: string, worktreeCwd: string): Promise<void> {
+  const sourceNodeModules = path.join(sourceCwd, "node_modules");
+  const targetNodeModules = path.join(worktreeCwd, "node_modules");
+  const sourceStat = await lstat(sourceNodeModules).catch(() => undefined);
+  if (sourceStat?.isDirectory() && !sourceStat.isSymbolicLink()) {
+    const sourceRealPath = await realpath(sourceNodeModules);
+    const worktreeRealPath = await realpath(worktreeCwd);
+    const relativePath = path.relative(worktreeRealPath, sourceRealPath);
+    if (relativePath && !relativePath.startsWith("..") && !path.isAbsolute(relativePath)) {
+      await symlink(relativePath, targetNodeModules, "dir").catch(() => undefined);
+    }
+  }
+  await copyFile(path.join(sourceCwd, ".env"), path.join(worktreeCwd, ".env"))
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
 }
 
 const MAX_UNTRACKED_DIFF_BYTES = 512 * 1024;

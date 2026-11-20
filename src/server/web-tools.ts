@@ -82,6 +82,8 @@ export type WebSubagentConfig = {
   onToolExecutionAudit?: (event: ToolExecutionAuditEvent) => void;
   globalTokenBudget?: number;
   globalConcurrencyLimit?: number;
+  /** Per-session subagent concurrency cap (Grok Build coordinator admission, session scope). */
+  sessionConcurrencyLimit?: number;
   onSubagentEvent?: (event: SubagentEvent) => void;
   taskRegistry?: SubagentTaskRegistry;
   subagentEnabled?: boolean;
@@ -194,6 +196,7 @@ export function createWebSubagentToolSet(input: WebSubagentConfig): {
     onToolExecutionAudit: input.onToolExecutionAudit,
     globalTokenBudget: input.globalTokenBudget,
     globalConcurrencyLimit: input.globalConcurrencyLimit,
+    ...(input.sessionConcurrencyLimit ? { sessionConcurrencyLimit: input.sessionConcurrencyLimit } : {}),
   });
 
   const baseTools = resolveToolProvider(input.parentTools);
@@ -234,6 +237,7 @@ export type WebToolSuiteOptions = {
   onToolExecutionAudit?: (event: ToolExecutionAuditEvent) => void;
   globalTokenBudget?: number;
   globalConcurrencyLimit?: number;
+  sessionConcurrencyLimit?: number;
 };
 
 /**
@@ -353,6 +357,7 @@ export class WebToolSuite {
       onToolExecutionAudit: this.options.onToolExecutionAudit,
       globalTokenBudget: this.options.globalTokenBudget,
       globalConcurrencyLimit: this.options.globalConcurrencyLimit,
+      ...(this.options.sessionConcurrencyLimit ? { sessionConcurrencyLimit: this.options.sessionConcurrencyLimit } : {}),
       onSubagentEvent: config.onSubagentEvent,
       taskRegistry,
       subagentEnabled: this.options.subagentEnabled,

@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import type { AgentMessage } from "../types.ts";
-import type { SubagentArgs, SubagentRuntimeInfo } from "./types.ts";
+import type { SubagentArgs, SubagentIsolationMode, SubagentRuntimeInfo } from "./types.ts";
 
 export type SubagentTaskStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 
@@ -26,6 +26,16 @@ export type SubagentTaskRecord = {
   error?: string;
   messages?: AgentMessage[];
   runtime?: SubagentRuntimeInfo;
+  /** Isolation mode requested at spawn ("none" is implicit when absent). */
+  isolation?: SubagentIsolationMode;
+  /** Dedicated git worktree the child executed in (worktree isolation). */
+  worktreePath?: string;
+  /** Branch of the isolated worktree; merge it to bring changes into the main checkout. */
+  worktreeBranch?: string;
+  /** Set by `subagent_merge` once the branch has been merged into the live checkout. */
+  worktreeMerged?: boolean;
+  /** Set by GC after the worktree directory was reclaimed (branch + snapshot ref remain). */
+  worktreeReclaimed?: boolean;
   killed: boolean;
   blockWaited: boolean;
   completionConsumed: boolean;
@@ -202,6 +212,30 @@ export class SubagentTaskRegistry {
     if (!record) return;
     record.workerOptions = structuredClone(workerOptions);
     await this.persist(taskId);
+  }
+
+  /** Record that a task's worktree branch was merged into the live checkout. */
+  async markWorktreeMerged(taskId: string, ownerSessionId?: string): Promise<void> {
+    await this.initialize();
+    await this.refreshFromDisk();
+    if (!validTaskId(taskId)) return;
+    const record = this.records.get(taskId);
+    if (!record || (ownerSessionId !== undefined && record.ownerSessionId !== ownerSessionId)) return;
+    record.worktreeMerged = true;
+    await this.persist(taskId);
+    this.notify();
+  }
+
+  /** Record that GC reclaimed a task's worktree directory (branch + snapshot ref remain). */
+  async markWorktreeReclaimed(taskId: string, ownerSessionId?: string): Promise<void> {
+    await this.initialize();
+    await this.refreshFromDisk();
+    if (!validTaskId(taskId)) return;
+    const record = this.records.get(taskId);
+    if (!record || (ownerSessionId !== undefined && record.ownerSessionId !== ownerSessionId)) return;
+    record.worktreeReclaimed = true;
+    await this.persist(taskId);
+    this.notify();
   }
 
   async claimInterruptedForRestart(taskId: string, ownerSessionId?: string): Promise<SubagentTaskRecord | undefined> {
@@ -430,6 +464,101 @@ export class SubagentTaskRegistry {
     }
   }
 
+  /**
+   * Per-session concurrency slots (Grok Build coordinator admission, session
+   * scope): lease files track live PIDs per owning session, so several
+   * conversations can run subagents in parallel while each conversation is
+   * capped independently. `acquireSessionConcurrencySlot` waits (queue
+   * admission); `tryAcquireSessionConcurrencySlot` returns false instead of
+   * waiting when the session is at its limit (reject admission).
+   */
+  private sessionConcurrencyKey(sessionId: string): string | undefined {
+    return /^[a-f0-9-]{36}$/i.test(sessionId)
+      ? createHash("sha256").update(sessionId).digest("hex").slice(0, 16)
+      : undefined;
+  }
+
+  private sessionConcurrencyFile(sessionId: string): string | undefined {
+    const key = this.sessionConcurrencyKey(sessionId);
+    return key ? join(this.storageRoot ?? "", `concurrency_session_${key}.json`) : undefined;
+  }
+
+  async acquireSessionConcurrencySlot(sessionId: string, taskId: string, limit: number, signal?: AbortSignal): Promise<void> {
+    const file = this.sessionConcurrencyFile(sessionId);
+    if (!file || !Number.isSafeInteger(limit) || limit < 1) return;
+    await this.initialize();
+    while (true) {
+      if (signal?.aborted) throw Object.assign(new Error("Operation aborted"), { name: "AbortError" });
+      if (await this.tryAcquireSessionConcurrencySlot(sessionId, taskId, limit)) return;
+      await new Promise<void>((resolve, reject) => {
+        const finish = (error?: Error) => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
+          if (error) reject(error);
+          else resolve();
+        };
+        const onAbort = () => finish(Object.assign(new Error("Operation aborted"), { name: "AbortError" }));
+        const timer = setTimeout(() => finish(), 50);
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+  }
+
+  /**
+   * Reject-admission variant: true when a session slot is free (or already
+   * held by this task), false when the session is at its limit. No cap
+   * (or an invalid one) always admits.
+   */
+  async tryAcquireSessionConcurrencySlot(sessionId: string, taskId: string, limit: number): Promise<boolean> {
+    const file = this.sessionConcurrencyFile(sessionId);
+    if (!file || !Number.isSafeInteger(limit) || limit < 1) return true;
+    await this.initialize();
+    const lockPath = `${file}.lock`;
+    const lock = await this.acquireInboxLock(lockPath, `concurrency_session`);
+    try {
+      const saved = await this.readJsonFile<{ leases?: Array<{ taskId: string; pid: number }> }>(file) ?? {};
+      const leases = (saved.leases ?? []).filter((lease) => isProcessAlive(lease.pid));
+      if (leases.some((lease) => lease.taskId === taskId)) return true;
+      if (leases.length >= limit) return false;
+      leases.push({ taskId, pid: process.pid });
+      await this.writeJsonAtomic(file, { leases });
+      return true;
+    } finally {
+      await lock.close().catch(() => undefined);
+      await unlink(lockPath).catch(() => undefined);
+    }
+  }
+
+  async releaseSessionConcurrencySlot(sessionId: string, taskId: string): Promise<void> {
+    const file = this.sessionConcurrencyFile(sessionId);
+    if (!file) return;
+    await this.initialize();
+    const lockPath = `${file}.lock`;
+    const lock = await this.acquireInboxLock(lockPath, `concurrency_session`);
+    try {
+      const saved = await this.readJsonFile<{ leases?: Array<{ taskId: string; pid: number }> }>(file);
+      const leases = (saved?.leases ?? []).filter((lease) => lease.taskId !== taskId && isProcessAlive(lease.pid));
+      await this.writeJsonAtomic(file, { leases });
+    } finally {
+      await lock.close().catch(() => undefined);
+      await unlink(lockPath).catch(() => undefined);
+    }
+  }
+
+  /** Backfill a task's persisted worktree reference (worker restart, older records). */
+  async attachWorktree(taskId: string, worktreePath: string, worktreeBranch: string, ownerSessionId?: string): Promise<void> {
+    await this.initialize();
+    await this.refreshFromDisk();
+    if (!validTaskId(taskId)) return;
+    const record = this.records.get(taskId);
+    if (!record || (ownerSessionId !== undefined && record.ownerSessionId !== ownerSessionId)) return;
+    record.isolation = "worktree";
+    record.worktreePath = worktreePath;
+    record.worktreeBranch = worktreeBranch;
+    await this.persist(taskId);
+    this.notify();
+  }
+
   async get(taskId: string, ownerSessionId?: string): Promise<SubagentTaskRecord | undefined> {
     await this.initialize();
     await this.refreshFromDisk();
@@ -444,6 +573,16 @@ export class SubagentTaskRegistry {
     return [...this.records.values()]
       .filter((record) => record.ownerSessionId === ownerSessionId)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map(cloneRecord);
+  }
+
+  /** All worktree-isolated records across sessions (GC / reclamation input). */
+  async listAllWorktreeRecords(): Promise<SubagentTaskRecord[]> {
+    await this.initialize();
+    await this.refreshFromDisk();
+    return [...this.records.values()]
+      .filter((record) => Boolean(record.worktreePath && record.worktreeBranch))
+      .sort((a, b) => (a.endedAt ?? a.startedAt).localeCompare(b.endedAt ?? b.startedAt))
       .map(cloneRecord);
   }
 

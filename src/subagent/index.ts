@@ -36,6 +36,10 @@ export { claimAsyncBatchWorker, getAsyncBatchWorkerOptions, pendingAsyncBatchJob
 export { SubagentTaskRegistry, createSubagentTaskId } from "./task-registry.ts";
 export type { SubagentTaskRecord, SubagentTaskStatus, SubagentWaitResult } from "./task-registry.ts";
 export { createSubagentTaskTools } from "./task-tools.ts";
+export { resolveSubagentWorktree, subagentWorktreeHint } from "./worktree.ts";
+export type { SubagentWorktreeOutcome, ResolveSubagentWorktreeOptions } from "./worktree.ts";
+export { gcSubagentWorktrees } from "./worktree-gc.ts";
+export type { SubagentWorktreeGcResult, GcSubagentWorktreesOptions } from "./worktree-gc.ts";
 
 export {
   buildCoordinatorPromptFragment,

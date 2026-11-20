@@ -6,6 +6,8 @@ import {
   type ModelRef,
 } from "../models.ts";
 import type { ModelSwitchOverrides } from "../llm/index.ts";
+import type { AcMode } from "./input-utils.ts";
+import type { ModelPickerSection } from "./model-picker.ts";
 
 function parseGatewayProtocol(value: string | undefined): LlmGatewayProtocol | undefined {
   if (value === "openai-compatible" || value === "openai" || value === "chat") return "openai-compatible";
@@ -117,6 +119,27 @@ export function modelCommandFromPickerInput(rawInput: string): string {
   const value = rawInput.trim();
   if (!value) return value;
   return /^\/model(?:\s|$)/i.test(value) ? value : `/model ${value}`;
+}
+
+/**
+ * Decide whether a submitted `/model ref` must force the credential form.
+ *
+ * Any `/model ref` that reaches the submit handler is treated as a catalog-side
+ * selection and forces re-entering the API key, EXCEPT when it was explicitly
+ * submitted while the model picker was showing the configured side. The
+ * configured side normally short-circuits before submission (its Enter path
+ * activates a saved profile directly), but a catalog Tab-completion clears the
+ * picker before Enter, so the submit handler can no longer tell
+ * "Tab-completed from the catalog" apart from "typed at the idle prompt" - both
+ * re-enter the key. Only a live configured-section picker submission keeps
+ * saved-profile reuse.
+ *
+ * @param acMode        Live autocomplete mode at submit time (null after Tab).
+ * @param pickerSection Current picker section ("configured" | "catalog").
+ */
+export function modelSubmitNeedsSetup(acMode: AcMode, pickerSection: ModelPickerSection): boolean {
+  const fromConfigured = acMode === "model-picker" && pickerSection === "configured";
+  return !fromConfigured;
 }
 
 /** Search model-picker candidates using the shared catalog search semantics. */

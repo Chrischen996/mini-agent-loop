@@ -241,9 +241,13 @@ export class BgTaskManager extends EventEmitter {
   }
 
   private async checkTaskHealth(): Promise<void> {
+    if (this.disposed) return;
     for (const taskId of await this.store.listOwnTaskIds()) {
       const paths = await this.store.findTask(taskId);
       if (!paths) continue;
+      // A terminal result is authoritative: the task is settled, so a dead
+      // pid must not be misread as a crash.
+      if (await this.store.readResult(paths)) continue;
       const meta = await this.store.readMeta(paths);
       if (meta?.status === "running" && meta.pid) {
         const alive = await this.isProcessAlive(meta.pid);
@@ -337,11 +341,12 @@ export class BgTaskManager extends EventEmitter {
   }
 
   private async handleCrash(taskId: string) {
-    if (this.crashingTasks.has(taskId)) return;
+    if (this.disposed || this.crashingTasks.has(taskId)) return;
     this.crashingTasks.add(taskId);
     try {
       const paths = await this.store.findTask(taskId);
       if (!paths) return;
+      if (await this.store.readResult(paths)) return; // Already settled; do not overwrite state.
       await this.store.updateMeta(paths, (meta) => ({
         ...meta,
         status: "crashed",
@@ -810,15 +815,26 @@ export class BgTaskManager extends EventEmitter {
   }
 
   private async processCompletion(taskId: string): Promise<void> {
+    if (this.disposed) return;
     const paths = this.store.paths(taskId);
     const result = await this.store.readResult(paths);
     if (!result || this.seenCompletions.has(taskId)) return;
     this.seenCompletions.add(taskId);
+    // A disposed manager must not keep rewriting task state: watcher events
+    // queued before dispose can still fire, and their in-flight writes race
+    // with cleanup of the task directories.
+    if (this.disposed) return;
+    // Sync the terminal status into meta so the health checker, orphan
+    // recovery, and manual inspection can distinguish a settled task (whose
+    // runner pid is naturally dead) from a genuine crash.
+    await this.store.updateMeta(paths, (meta) => ({ ...meta, status: result.status })).catch(() => undefined);
+    if (this.disposed) return;
     const timer = this.timeoutTimers.get(taskId);
     if (timer) clearTimeout(timer);
     this.timeoutTimers.delete(taskId);
     const summary = await this.get(taskId);
     if (summary) {
+      if (this.disposed) return;
       let shouldNotify = false;
       await this.store.updateMeta(paths, (meta) => {
         if (!meta.notifyOnCompletion || meta.notifiedAt) return meta;

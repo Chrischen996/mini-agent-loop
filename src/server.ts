@@ -108,7 +108,7 @@ import { GitWorkflow } from "./git/workflow.ts";
 import { formatValidationReport, runValidation, type ValidationStepName } from "./validation.ts";
 import type { RuntimeExecutionContext } from "./runtime/policy-types.ts";
 import type { ToolExecutionAuditEvent, ToolExecutionBroker } from "./runtime/tool-execution-broker.ts";
-import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "./runtime/limits.ts";
+import { loadGlobalConcurrencyLimitFromEnv, loadGlobalTokenBudgetFromEnv, loadSessionSubagentConcurrencyLimitFromEnv } from "./runtime/limits.ts";
 import {
   JobManager,
   JobStore,
@@ -312,6 +312,8 @@ export type AgentServerOptions = {
   globalTokenBudget?: number;
   /** Optional global concurrent subagent limit. */
   globalConcurrencyLimit?: number;
+  /** Per-session subagent concurrency cap (Grok Build coordinator admission, session scope). */
+  sessionConcurrencyLimit?: number;
 };
 
 function safeMessage(message: AgentMessage): Record<string, unknown> {
@@ -905,6 +907,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
   });
   const globalTokenBudget = options.globalTokenBudget ?? loadGlobalTokenBudgetFromEnv();
   const globalConcurrencyLimit = options.globalConcurrencyLimit ?? loadGlobalConcurrencyLimitFromEnv();
+  const sessionConcurrencyLimit = options.sessionConcurrencyLimit ?? loadSessionSubagentConcurrencyLimitFromEnv();
   const subagentProfiles = options.subagentProfiles ?? defaultProfiles;
   const subagentEnabled = Boolean(options.subagentEnabled || options.subagentProfiles?.length);
   const createSessionSubagentToolSet = (input: {
@@ -950,6 +953,7 @@ export function createAgentServer(options: AgentServerOptions): Express {
       onToolExecutionAudit: options.onToolExecutionAudit,
       globalTokenBudget,
       globalConcurrencyLimit,
+      ...(sessionConcurrencyLimit ? { sessionConcurrencyLimit } : {}),
     });
     const subagent = createSubagentTool(createOptions(resolveToolProvider(input.parentTools))) as Tool;
     const tools: ToolProvider = subagentEnabled

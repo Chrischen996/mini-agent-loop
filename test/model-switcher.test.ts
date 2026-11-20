@@ -26,7 +26,7 @@ function callbacks(calls: string[]): ModelSwitcherCallbacks {
     openProfileList: (names) => { calls.push(`profile-list:${names?.join(",") ?? "all"}`); },
     activateSavedProfile: (name) => { calls.push(`activate:${name}`); },
     commitModelSetup: async () => { calls.push("commit"); },
-    startModelSetup: () => { calls.push("setup"); },
+    startModelSetup: (_model, _overrides, options) => { calls.push(options?.forceSetup ? "setup:forced" : "setup"); },
   };
 }
 
@@ -88,5 +88,16 @@ describe("model selection reuses saved profiles", () => {
     selectModel(MODEL, { baseUrl: "https://other-gateway.example/v1" }, callbacks(calls));
 
     assert.deepEqual(calls, ["setup"]);
+  });
+
+  it("opens the forced setup form when forceSetup skips saved-profile reuse", async () => {
+    await writeStore({
+      "grok-build": { model: MODEL, baseUrl: "https://gateway.example/v1", apiKey: "sk-saved" },
+    }, "grok-build");
+    const calls: string[] = [];
+
+    selectModel(MODEL, {}, callbacks(calls), { forceSetup: true });
+
+    assert.deepEqual(calls, ["setup:forced"]);
   });
 });

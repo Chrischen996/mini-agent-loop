@@ -994,7 +994,9 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: "",
             streamingTextParts: [],
             streamingReasoningParts: [],
-            streamRetryCommittedText: undefined,
+            // Keep streamRetryCommittedText: a pending retry seal still needs
+            // the frozen-prefix baseline for dedup; it clears with the next
+            // user turn or terminal event.
           };
           const assistantMsg: ChatMessage = { kind: "assistant", text: text || "", ...(reasoning ? { reasoning } : {}) };
           const newMessages: ChatMessage[] = (text || reasoning)
@@ -1010,7 +1012,10 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: "",
             streamingTextParts: [],
             streamingReasoningParts: [],
-            streamRetryCommittedText: undefined,
+            // Do NOT clear streamRetryCommittedText here: in a pure-text turn
+            // this assistant event seals the retried stream, and the seal
+            // dedup needs the frozen-prefix baseline set by attempt_reset.
+            // USER_MESSAGE / error / run_stopped / max_turns clear it.
             status: hasTools ? "Running tool…" : "Finalizing response…",
             usedTokens,
             taskTokens: state.taskTokens + (event.usage?.totalTokens ?? 0),
@@ -1056,7 +1061,14 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: "",
             streamingTextParts: [],
             streamingReasoningParts: [],
-            streamRetryCommittedText: state.streamingText.slice(0, computeCommitBoundary(state.streamingText)) || undefined,
+            // An existing baseline already tracks everything frozen in the
+            // scrollback (the commit effect is suppressed while it is set),
+            // so a second truncation during the retried stream must keep it
+            // rather than mix uncommitted re-streamed text into the dedup
+            // baseline.
+            streamRetryCommittedText: state.streamRetryCommittedText
+              || state.streamingText.slice(0, computeCommitBoundary(state.streamingText))
+              || undefined,
             lastStreamAt: undefined,
             status: event.reason === "stream_truncated"
               ? `Connection lost, retrying (${event.attempt})…`
@@ -1070,7 +1082,9 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingReasoning: "",
             streamingTextParts: [],
             streamingReasoningParts: [],
-            streamRetryCommittedText: state.streamingText.slice(0, computeCommitBoundary(state.streamingText)) || undefined,
+            streamRetryCommittedText: state.streamRetryCommittedText
+              || state.streamingText.slice(0, computeCommitBoundary(state.streamingText))
+              || undefined,
             lastStreamAt: undefined,
             status: event.errorType === "timeout"
               ? `Request timed out, retrying (${event.attempt}/${event.maxRetries})…`

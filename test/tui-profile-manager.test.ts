@@ -12,6 +12,7 @@ import {
   startModelSetup,
   type ProfileManagerDeps,
 } from "../src/tui/profile-manager.ts";
+import type { ModelSetupState } from "../src/tui/types.ts";
 import { loadProfileStore } from "../src/profile-store.ts";
 import { saveProfile } from "../src/profile-store.ts";
 import { resolveModel } from "../src/models.ts";
@@ -66,6 +67,97 @@ describe("model setup reuses configured provider credentials", () => {
     assert.equal(applied.apiKey, "sk-test-xai");
     assert.equal(setupOpened, false);
     assert.equal(existsSync(storePath), false);
+  });
+
+  it("opens a setup form with an empty API key when forceSetup is requested", async () => {
+    const model = getAllModels().find((candidate) => candidate.provider === "xai" && candidate.id === "grok-build-0.1");
+    assert.ok(model);
+
+    const base = makeLlmConfig({ apiKey: "sk-old", baseUrl: "https://old.example/v1", model: "gpt-4o-mini" });
+    let applied = base;
+    let openedField: "baseUrl" | "apiKey" | "effort" | undefined;
+    let openedApiKey = "";
+    const deps: ProfileManagerDeps = {
+      llm: base,
+      setLlm: (next) => { applied = next; },
+      setModelSetup: (setup) => { if (setup) { openedField = setup.field; openedApiKey = setup.apiKey; } },
+      setAcMode: () => undefined,
+      setInput: () => undefined,
+      setAcIndex: () => undefined,
+      setProfileListState: () => undefined,
+      dispatch: () => undefined,
+      historyRef: { current: [] },
+    };
+
+    await startModelSetup(model, {}, deps, { forceSetup: true });
+
+    // The form is opened instead of silently committing. The API key field is
+    // left empty even though an environment key exists: the All models section
+    // must re-enter the key instead of reusing it silently.
+    assert.equal(openedField, "baseUrl");
+    assert.equal(openedApiKey, "");
+    assert.equal(applied.model, base.model, "model config must not switch until the form is committed");
+  });
+
+  it("honors an explicit --api-key override as the forceSetup prefill", async () => {
+    const model = getAllModels().find((candidate) => candidate.provider === "xai" && candidate.id === "grok-build-0.1");
+    assert.ok(model);
+
+    const base = makeLlmConfig({ apiKey: "sk-old", baseUrl: "https://old.example/v1", model: "gpt-4o-mini" });
+    let openedApiKey = "unset";
+    const deps: ProfileManagerDeps = {
+      llm: base,
+      setLlm: () => undefined,
+      setModelSetup: (setup) => { openedApiKey = setup?.apiKey ?? ""; },
+      setAcMode: () => undefined,
+      setInput: () => undefined,
+      setAcIndex: () => undefined,
+      setProfileListState: () => undefined,
+      dispatch: () => undefined,
+      historyRef: { current: [] },
+    };
+
+    await startModelSetup(model, { apiKey: "sk-explicit" }, deps, { forceSetup: true });
+
+    assert.equal(openedApiKey, "sk-explicit");
+  });
+
+  it("rejects a blank All models API key instead of reusing a saved or environment key", async () => {
+    const model = getAllModels().find((candidate) => candidate.provider === "xai" && candidate.id === "grok-build-0.1");
+    assert.ok(model);
+    await saveProfile("saved-gateway", {
+      model: "xai/grok-build-0.1",
+      baseUrl: "https://gateway.example/v1",
+      apiKey: "sk-saved",
+    });
+
+    const base = makeLlmConfig({ apiKey: "sk-current", baseUrl: model.baseUrl, model: "gpt-4o-mini" });
+    let applied = base;
+    let retained: ModelSetupState | undefined;
+    const deps: ProfileManagerDeps = {
+      llm: base,
+      setLlm: (next) => { applied = next; },
+      setModelSetup: (setup) => { retained = setup; },
+      setAcMode: () => undefined,
+      setInput: () => undefined,
+      setAcIndex: () => undefined,
+      setProfileListState: () => undefined,
+      dispatch: () => undefined,
+      historyRef: { current: [] },
+    };
+
+    await startModelSetup(model, {}, deps, { forceSetup: true });
+    const opened = retained;
+    assert.ok(opened);
+    await commitModelSetup(opened, "   ", deps);
+
+    assert.equal(applied.apiKey, "sk-current");
+    assert.equal(applied.model, base.model);
+    assert.equal(retained?.field, "apiKey");
+    assert.match(retained?.error ?? "", /API key/i);
+    assert.equal(existsSync(storePath), true);
+    const store = await loadProfileStore(storePath);
+    assert.equal(store.profiles["xai-grok-build-0-1"], undefined);
   });
 
   it("explains that a saved profile supplies the base URL and key", async () => {

@@ -38,6 +38,7 @@ import type {
   SubagentCost,
   SubagentEvent,
   SubagentErrorKind,
+  SubagentIsolationMode,
   SubagentProfile,
   SubagentRuntimeInfo,
   SubagentTokenBreakdown,
@@ -47,6 +48,7 @@ import { calculateSubagentCost } from "./cost.ts";
 import { claimAsyncBatchWorker, getAsyncBatchWorkerOptions, readAsyncBatch, resumeAsyncBatches, setAsyncBatchWorkerPid, submitAsyncBatch, validateAsyncDag, waitAsyncBatch } from "./async-batch.ts";
 import { createSubagentTaskId, type SubagentTaskRecord } from "./task-registry.ts";
 import { createSubagentTaskTools } from "./task-tools.ts";
+import { resolveSubagentWorktree, subagentWorktreeHint } from "./worktree.ts";
 import type { PermissionTurnContext } from "../permissions.ts";
 import type { ThinkingMode } from "../thinking-policy.ts";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "../types.ts";
@@ -482,6 +484,9 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
     globalConcurrencyLimit,
     roleLlmConfigs = {},
     sessionRoleLlmConfigs = {},
+    worktreeBaseDir,
+    worktreeSourceCwd,
+    sessionConcurrencyLimit,
   } = options;
   const foregroundAwaitBudgetMs = resolveSubagentAwaitBudgetMs(configuredAwaitBudgetMs);
   const configuredGlobalBudgetState = resolveSharedGlobalBudgetState(options);
@@ -598,6 +603,12 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
           minimum: 1,
           description: "Maximum token budget for this sub-agent loop.",
         },
+        isolation: {
+          type: "string",
+          enum: ["none", "worktree"],
+          description:
+            "Filesystem isolation for this sub-agent. \"none\" (default) shares the parent workspace; \"worktree\" runs the sub-agent in a dedicated git worktree so its edits do not touch the parent workspace until the branch is merged. Ignored when resuming a task that had no worktree; creation failures fall back to the shared workspace.",
+        },
       },
       required: ["task"],
       additionalProperties: false,
@@ -666,6 +677,39 @@ ${args.sharedContext}
       const effectiveParentMaxEscalations = parentRuntime?.maxThinkingEscalations ?? parentMaxEscalations;
       const effectiveContextPolicy = args.contextPolicy ?? parentRuntime?.context;
       const effectiveRuntimeContext = parentRuntime?.executionContext ?? runtimeContext;
+      // ── Worktree isolation (Grok Build-style task isolation) ─────
+      // A worktree-isolated child runs its tool calls inside a dedicated
+      // git worktree so its edits do not touch the parent workspace until
+      // the branch is merged. Resuming inherits the source task's actual
+      // environment (reused/rehydrated worktree, or the original shared
+      // workspace when the source had none); creation failures fall back
+      // to the shared workspace instead of hard-failing.
+      let isolatedWorktree: { worktreePath: string; worktreeBranch: string } | undefined;
+      let worktreeNote: string | undefined;
+      if (args.isolation === "worktree") {
+        const sourceCwd = worktreeSourceCwd ?? effectiveRuntimeContext?.cwd ?? process.cwd();
+        const resumeWorktree = resumeRecord?.worktreePath && resumeRecord.worktreeBranch
+          ? { worktreePath: resumeRecord.worktreePath, worktreeBranch: resumeRecord.worktreeBranch }
+          : undefined;
+        if (resumeRecord) {
+          if (resumeWorktree) {
+            const outcome = await resolveSubagentWorktree({ sourceCwd, taskId: invocationId, worktreeBaseDir, resume: resumeWorktree });
+            if (outcome.kind === "isolated") isolatedWorktree = outcome;
+            else worktreeNote = outcome.reason;
+          } else {
+            // Grok Build semantics: a resumed source without a worktree keeps
+            // its original shared workspace; the override is ignored.
+            worktreeNote = "The resumed task had no isolated worktree; isolation is ignored and it continues in its original workspace.";
+          }
+        } else {
+          const outcome = await resolveSubagentWorktree({ sourceCwd, taskId: invocationId, worktreeBaseDir });
+          if (outcome.kind === "isolated") isolatedWorktree = outcome;
+          else worktreeNote = outcome.reason;
+        }
+      }
+      const childRuntimeContext = isolatedWorktree
+        ? { ...effectiveRuntimeContext, cwd: isolatedWorktree.worktreePath }
+        : effectiveRuntimeContext;
       const effectiveToolExecutionBroker = parentRuntime?.toolExecutionBroker ?? toolExecutionBroker;
       const effectiveAudit = parentRuntime?.onToolExecutionAudit ?? onToolExecutionAudit;
       const inheritedParentHistory = !resumeRecord && args.inheritContextHistory
@@ -776,6 +820,10 @@ ${args.sharedContext}
       // If the child is allowed to spawn sub-agents itself (depth < maxDepth),
       // add a nested subagent tool with incremented depth.
       if (depth < maxDepth && profile?.readOnly !== true) {
+        // Nested spawns source their worktrees from the original repository
+        // (Grok Build-style reparenting), not from an intermediate worktree.
+        const nestedWorktreeSourceCwd =
+          worktreeSourceCwd ?? (isolatedWorktree ? effectiveRuntimeContext?.cwd : undefined);
         const nestedSubagentTool = createSubagentTool({
           parentLlm: llm,
           parentTools: childTools,
@@ -798,12 +846,15 @@ ${args.sharedContext}
           thinkingMode: effectiveThinkingMode,
           maxThinkingEscalations: effectiveMaxEscalations,
           parentRuntime: childRuntimeRef,
-          runtimeContext: effectiveRuntimeContext,
+          runtimeContext: childRuntimeContext,
           toolExecutionBroker: effectiveToolExecutionBroker,
           onToolExecutionAudit: effectiveAudit,
           globalBudgetState,
           globalConcurrencyLimit,
+        sessionConcurrencyLimit,
           checkGlobalBudget: options.checkGlobalBudget,
+          ...(worktreeBaseDir ? { worktreeBaseDir } : {}),
+          ...(nestedWorktreeSourceCwd ? { worktreeSourceCwd: nestedWorktreeSourceCwd } : {}),
         });
         childTools.push(nestedSubagentTool as Tool);
       }
@@ -820,6 +871,8 @@ ${args.sharedContext}
           runInBackground: effectiveRunInBackground,
           ...(resumeRecord?.workerPid ? { workerPid: resumeRecord.workerPid } : {}),
           ...(resumeRecord?.workerOptions ? { workerOptions: resumeRecord.workerOptions } : {}),
+          ...(args.isolation ? { isolation: args.isolation } : {}),
+          ...(isolatedWorktree ? { worktreePath: isolatedWorktree.worktreePath, worktreeBranch: isolatedWorktree.worktreeBranch } : {}),
           createdAt: resumeRecord?.createdAt ?? now,
           startedAt: now,
           ...(resumeRecord?.messages ? { messages: resumeRecord.messages } : {}),
@@ -874,6 +927,9 @@ ${args.sharedContext}
             runtime: runtimeInfo,
             errors: [{ message, kind: "api" }],
             autoDelegationInherited: false,
+            ...(isolatedWorktree
+              ? { worktreePath: isolatedWorktree.worktreePath, worktreeBranch: isolatedWorktree.worktreeBranch }
+              : {}),
           });
           return { content: `Could not start detached sub-agent worker: ${message}`, isError: true };
         }
@@ -921,6 +977,35 @@ ${args.sharedContext}
         try {
           await taskRegistry.acquireGlobalConcurrencySlot(globalBudgetState.scopeId, invocationId, globalConcurrencyLimit, merged.signal);
           releaseConcurrencySlot = () => taskRegistry!.releaseGlobalConcurrencySlot(globalBudgetState!.scopeId!, invocationId);
+        } catch (error) {
+          if (timeoutId !== undefined) clearTimeout(timeoutId);
+          merged.cleanup();
+          parentSignals.signal.removeEventListener("abort", onParentAbort);
+          parentSignals.cleanup();
+          backgroundPermissionTurn?.close();
+          const message = error instanceof Error ? error.message : String(error);
+          await taskRegistry.finish(invocationId, {
+            status: childController.signal.aborted ? "cancelled" : "failed",
+            result: message,
+            isError: true,
+            error: message,
+            messages: resumeRecord?.messages ?? [],
+            runtime: runtimeInfo,
+          });
+          return { content: message, isError: true };
+        }
+      }
+
+      // Per-session admission (Grok Build coordinator, session scope): the
+      // owning session's own subagents share this cap across processes, so
+      // one busy conversation cannot starve its queued spawns while other
+      // sessions stay idle. No owner session or cap → skip (queue-admission
+      // only makes sense with a durable session key).
+      let releaseSessionSlot = async (): Promise<void> => undefined;
+      if (taskRegistry && ownerSessionId && sessionConcurrencyLimit && sessionConcurrencyLimit > 0) {
+        try {
+          await taskRegistry.acquireSessionConcurrencySlot(ownerSessionId, invocationId, sessionConcurrencyLimit, merged.signal);
+          releaseSessionSlot = () => taskRegistry!.releaseSessionConcurrencySlot(ownerSessionId, invocationId);
         } catch (error) {
           if (timeoutId !== undefined) clearTimeout(timeoutId);
           merged.cleanup();
@@ -1003,7 +1088,7 @@ ${args.sharedContext}
           maxThinkingEscalations: effectiveMaxEscalations,
           // ── Pass through context policy if provided ─────────────
           ...(effectiveContextPolicy ? { context: effectiveContextPolicy } : {}),
-          ...(effectiveRuntimeContext ? { runtimeContext: effectiveRuntimeContext } : {}),
+          ...(childRuntimeContext ? { runtimeContext: childRuntimeContext } : {}),
           ...(effectiveToolExecutionBroker ? { toolExecutionBroker: effectiveToolExecutionBroker } : {}),
           ...(effectiveAudit ? { onToolExecutionAudit: effectiveAudit } : {}),
           ...(resumeRecord?.messages ? { initialMessages: resumeRecord.messages } : {}),
@@ -1172,6 +1257,9 @@ ${args.sharedContext}
             runtime: runtimeInfo,
             errors,
             autoDelegationInherited: false, // auto-delegation is deliberately not inherited
+            ...(isolatedWorktree
+              ? { worktreePath: isolatedWorktree.worktreePath, worktreeBranch: isolatedWorktree.worktreeBranch }
+              : {}),
           });
 
           return {
@@ -1221,6 +1309,9 @@ ${args.sharedContext}
           runtime: runtimeInfo,
           errors: [{ message: timeoutMessage, kind: "timeout" }],
           autoDelegationInherited: false,
+          ...(isolatedWorktree
+            ? { worktreePath: isolatedWorktree.worktreePath, worktreeBranch: isolatedWorktree.worktreeBranch }
+            : {}),
         });
         return {
           content: recovered ? `${partialResult}\n\n${timeoutMessage}` : timeoutMessage,
@@ -1261,6 +1352,9 @@ ${args.sharedContext}
         runtime: runtimeInfo,
         errors: errors.length > 0 ? errors : undefined,
         autoDelegationInherited: false,
+        ...(isolatedWorktree
+          ? { worktreePath: isolatedWorktree.worktreePath, worktreeBranch: isolatedWorktree.worktreeBranch }
+          : {}),
       });
 
       if (!extracted.text) {
@@ -1278,7 +1372,12 @@ ${args.sharedContext}
           ? "[Partial] "
           : "";
 
-      return { content: prefix + extracted.text, partial: partial || undefined };
+      const isolationNote = isolatedWorktree
+        ? subagentWorktreeHint(isolatedWorktree.worktreePath, isolatedWorktree.worktreeBranch)
+        : worktreeNote
+          ? `\n\n${worktreeNote}`
+          : "";
+      return { content: prefix + extracted.text + isolationNote, partial: partial || undefined };
       })().finally(async () => {
         if (timeoutId !== undefined) clearTimeout(timeoutId);
         merged.cleanup();
@@ -1286,6 +1385,7 @@ ${args.sharedContext}
         parentSignals.cleanup();
         backgroundPermissionTurn?.close();
         await releaseConcurrencySlot();
+        await releaseSessionSlot();
       });
 
       const completed = runPromise.then(
@@ -1314,6 +1414,9 @@ ${args.sharedContext}
           runtime: runtimeInfo,
           errors: [{ message, kind: "api" }],
           autoDelegationInherited: false,
+          ...(isolatedWorktree
+            ? { worktreePath: isolatedWorktree.worktreePath, worktreeBranch: isolatedWorktree.worktreeBranch }
+            : {}),
         });
       };
       if (effectiveRunInBackground) {
@@ -1491,6 +1594,11 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
                 type: "boolean",
                 description: "Whether to include the parent's current message history.",
               },
+              isolation: {
+                type: "string",
+                enum: ["none", "worktree"],
+                description: "Filesystem isolation for this task. \"worktree\" runs it in a dedicated git worktree; defaults to the shared workspace.",
+              },
               tokenBudget: {
                 type: "integer",
                 minimum: 1,
@@ -1556,6 +1664,7 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
           contextPolicy: task.contextPolicy,
           skillNames: task.skillNames,
           inheritContextHistory: task.inheritContextHistory,
+          ...(task.isolation ? { isolation: task.isolation } : {}),
           tokenBudget: task.tokenBudget,
         }, execSignal, execution);
       };
@@ -1726,6 +1835,7 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
               contextPolicy: task.contextPolicy,
               skillNames: task.skillNames,
               inheritContextHistory: task.inheritContextHistory,
+              ...(task.isolation ? { isolation: task.isolation } : {}),
               tokenBudget,
             },
             execSignal,

@@ -6,6 +6,8 @@ export type ModelSetupState = {
   baseUrl: string;
   apiKey: string;
   field: "baseUrl" | "apiKey" | "effort";
+  /** All models must use the key typed in this form, never a saved fallback. */
+  requireExplicitApiKey?: boolean;
   /** Preserve `/model --protocol` across the Base URL / API key overlay. */
   protocol?: LlmGatewayProtocol;
   error?: string;

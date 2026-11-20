@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, linkSync, unlinkSync, writeFileSync } from "node:fs";
-import { chmod, mkdir, open, readFile, readdir, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, readdir, rename, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { BgBackendKind } from "./backend.js";
 
@@ -11,7 +11,13 @@ export interface TaskMeta {
   command: string;
   cwd: string;
   shell: string;
-  status: "starting" | "running" | "crashed" | "restarting";
+  /**
+   * Live lifecycle state. Terminal values (`completed` / `failed` / `cancelled` /
+   * `timed_out` / `interrupted`) are synced in from `result.json` by the manager
+   * once a task settles, so consumers can distinguish a settled task from a
+   * running one without reading the result file.
+   */
+  status: "starting" | "running" | "crashed" | "restarting" | "completed" | "failed" | "cancelled" | "timed_out" | "interrupted";
   createdAt: string;
   startedAt?: string;
   timeoutSeconds?: number;
@@ -64,6 +70,40 @@ export class BgTaskStore {
   async initialize(): Promise<void> {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     await chmod(this.root, 0o700).catch(() => undefined);
+    await this.cleanupStaleTmpFiles();
+  }
+
+  /**
+   * Remove abandoned `*.tmp` files left by a manager that died mid-write
+   * (atomic JSON writes use `temp + rename`, so leftovers are only garbage
+   * after their rename/link already completed or never started).
+   * In-flight writes live only for milliseconds, so only files not modified
+   * in the last 10 minutes are removed, which keeps concurrent live manager
+   * instances on the same project from deleting each other's pending writes.
+   */
+  private async cleanupStaleTmpFiles(): Promise<void> {
+    const taskDirs = await listDirectories(this.instanceRoot);
+    const now = Date.now();
+    for (const taskId of taskDirs) {
+      let entries: string[];
+      try {
+        entries = await readdir(join(this.instanceRoot, taskId));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      for (const entry of entries) {
+        if (!entry.endsWith(".tmp")) continue;
+        const tmpPath = join(this.instanceRoot, taskId, entry);
+        try {
+          const mtime = (await stat(tmpPath)).mtimeMs;
+          if (now - mtime > 10 * 60 * 1000) await unlink(tmpPath);
+        } catch {
+          // A temp file that disappears or is unreadable between stat and
+          // unlink is harmless.
+        }
+      }
+    }
   }
 
   paths(taskId: string): TaskPaths {

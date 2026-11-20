@@ -1,5 +1,7 @@
 import type { JsonSchema, Tool } from "../tools/types.ts";
 import type { SubagentTaskRegistry } from "./task-registry.ts";
+import { createGitWorkflow } from "../git/workflow.ts";
+import type { GitWorkflow } from "../git/workflow.ts";
 
 const idListSchema: JsonSchema = {
   type: "object",
@@ -47,7 +49,7 @@ export function createSubagentTaskTools(registry: SubagentTaskRegistry): Tool[] 
       execute: async (_args, signal, execution) => {
         if (signal?.aborted) return { content: "Operation aborted.", isError: true };
         const tasks = await registry.list(execution?.sessionId);
-        return { content: JSON.stringify(tasks.map(({ taskId, task, profile, status, createdAt, endedAt, result, error }) => ({ taskId, task, profile, status, createdAt, endedAt, result, error })), null, 2) };
+        return { content: JSON.stringify(tasks.map(({ taskId, task, profile, status, createdAt, endedAt, result, error, isolation, worktreePath, worktreeBranch }) => ({ taskId, task, profile, status, createdAt, endedAt, result, error, ...(isolation ? { isolation } : {}), ...(worktreePath ? { worktreePath, worktreeBranch } : {}) })), null, 2) };
       },
     },
     {
@@ -64,7 +66,7 @@ export function createSubagentTaskTools(registry: SubagentTaskRegistry): Tool[] 
         const records = await Promise.all(ids.map((id) => registry.readOutput(id, execution?.sessionId)));
         const visible = records.filter((record) => record !== undefined);
         if (visible.length === 0) return { content: "No matching sub-agent tasks were found for this session.", isError: true };
-        return { content: JSON.stringify(visible.map(({ taskId, status, result, error, isError, partial, createdAt, endedAt }) => ({ taskId, status, result, error, isError, partial, createdAt, endedAt })), null, 2) };
+        return { content: JSON.stringify(visible.map(({ taskId, status, result, error, isError, partial, createdAt, endedAt, isolation, worktreePath, worktreeBranch }) => ({ taskId, status, result, error, isError, partial, createdAt, endedAt, ...(isolation ? { isolation } : {}), ...(worktreePath ? { worktreePath, worktreeBranch } : {}) })), null, 2) };
       },
     },
     {
@@ -112,6 +114,77 @@ export function createSubagentTaskTools(registry: SubagentTaskRegistry): Tool[] 
         const visible = records.filter((record) => record !== undefined);
         if (visible.length === 0) return { content: "No matching sub-agent tasks were found for this session.", isError: true };
         return { content: JSON.stringify(visible.map(({ taskId, status, killed }) => ({ taskId, status, killed })), null, 2) };
+      },
+    },
+    {
+      name: "subagent_merge",
+      displayName: "Merge Sub-agent Worktree",
+      description:
+        "Merge the worktree branch of sub-agent tasks into the live checkout's current branch. " +
+        "Pending worktree edits are committed first (mini-agent snapshot commit). On conflict the merge is " +
+        "aborted and the conflicting files are listed for manual resolution. The worktree is kept for review. " +
+        "Tasks that ran without a worktree (or are still active) are reported and skipped.",
+      parameters: idListSchema,
+      execute: async (args, signal, execution) => {
+        if (signal?.aborted) return { content: "Operation aborted.", isError: true };
+        const ids = idsFrom(args);
+        if (ids.length === 0) return { content: "taskIds must contain at least one task ID.", isError: true };
+        const ownerSessionId = execution?.sessionId;
+        const ownership = await Promise.all(ids.map((id) => registry.get(id, ownerSessionId)));
+        if (ownership.some((record) => record === undefined)) {
+          return { content: "One or more task IDs are invalid or do not belong to this session.", isError: true };
+        }
+        const workflowSourceCwd = execution?.cwd;
+        let workflow: GitWorkflow | undefined;
+        const results: Array<Record<string, unknown>> = [];
+        for (let index = 0; index < ids.length; index += 1) {
+          const record = ownership[index];
+          const item: Record<string, unknown> = { taskId: record!.taskId };
+          if (record!.worktreePath && record!.worktreeBranch) {
+            if (record!.status === "queued" || record!.status === "running") {
+              item.merged = false;
+              item.reason = "Task is still active; wait for it to finish before merging.";
+              results.push(item);
+              continue;
+            }
+            try {
+              if (!workflow) {
+                const sourceCwd = workflowSourceCwd ?? process.cwd();
+                workflow = await createGitWorkflow(sourceCwd);
+              }
+              if (!await workflow.isRegisteredWorktree(record!.worktreePath)) {
+                const rehydrated = await workflow.rehydrateWorktree(record!.worktreePath, record!.worktreeBranch);
+                if (!rehydrated) {
+                  item.merged = false;
+                  item.reason = `Worktree ${record!.worktreePath} could not be reattached; merge manually with: git merge ${record!.worktreeBranch}`;
+                  results.push(item);
+                  continue;
+                }
+              }
+              await workflow.commitWorktreeChanges(record!.worktreePath, `subagent ${record!.taskId}: pending worktree changes`);
+              const merge = await workflow.mergeBranchIntoCurrent(record!.worktreeBranch);
+              if (merge.merged) {
+                await registry.markWorktreeMerged(record!.taskId, ownerSessionId);
+                item.merged = true;
+                item.branch = record!.worktreeBranch;
+                item.head = merge.head;
+                item.commits = merge.commits;
+              } else {
+                item.merged = false;
+                item.conflicts = merge.conflicts;
+                item.reason = merge.error ?? "Merge failed.";
+              }
+            } catch (error) {
+              item.merged = false;
+              item.reason = error instanceof Error ? error.message : String(error);
+            }
+          } else {
+            item.merged = false;
+            item.reason = "Task ran without an isolated worktree; nothing to merge.";
+          }
+          results.push(item);
+        }
+        return { content: JSON.stringify({ tasks: results }, null, 2) };
       },
     },
   ];

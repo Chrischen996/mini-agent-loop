@@ -21,3 +21,8 @@ export function loadGlobalGoalWorkerLimitFromEnv(): number | undefined {
 export function loadGlobalSubagentCallBudgetFromEnv(): number | undefined {
   return readNonNegativeInt(process.env.MINI_AGENT_GLOBAL_SUBAGENT_CALL_BUDGET);
 }
+
+export function loadSessionSubagentConcurrencyLimitFromEnv(): number | undefined {
+  const value = readNonNegativeInt(process.env.MINI_AGENT_SESSION_SUBAGENT_LIMIT);
+  return value === 0 ? undefined : value;
+}

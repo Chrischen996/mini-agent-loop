@@ -144,6 +144,24 @@ export type SubagentToolOptions = {
   subagentAwaitBudgetMs?: number;
   /** Pre-defined subagent profiles. */
   profiles?: SubagentProfile[];
+  /**
+   * Base directory for `isolation: "worktree"` subagents: dedicated git
+   * worktrees are created under it (via the parent's GitWorkflow).
+   * Default: `$MINI_AGENT_WORKTREE_DIR` or `~/.mini-agent/worktrees`.
+   */
+  worktreeBaseDir?: string;
+  /**
+   * Directory of the owning git repository that sources `isolation:
+   * "worktree"` worktrees. Defaults to the parent's project cwd.
+   */
+  worktreeSourceCwd?: string;
+  /**
+   * Per-session subagent concurrency cap (Grok Build coordinator admission,
+   * session scope): at most this many subagents of one owning session run
+   * at a time across all processes; extra spawns wait for a free slot.
+   * The global limit (MINI_AGENT_GLOBAL_CONCURRENCY_LIMIT) applies on top.
+   */
+  sessionConcurrencyLimit?: number;
   /** Preprocessors inherited by the subagent. */
   preprocessors?: MessagePreprocessor[];
   /** Cancellation signal propagated to the subagent. */
@@ -252,6 +270,15 @@ export type SubagentArgs = {
    */
   inheritContextHistory?: boolean;
   /**
+   * Filesystem isolation for this subagent: "none" (default, shared
+   * workspace) or "worktree" (the child runs inside a dedicated Git
+   * worktree, so its edits never touch the parent workspace until the
+   * branch is merged). Ignored for nested subagents and when the child
+   * has no git repository to base a worktree on; creation failures
+   * fall back to the shared workspace instead of hard-failing.
+   */
+  isolation?: SubagentIsolationMode;
+  /**
    * Optional parent message history to pass to the subagent when
    * `inheritContextHistory` is true. Used internally by the subagent tool.
    */
@@ -259,6 +286,13 @@ export type SubagentArgs = {
   /** Optional token budget limit for this specific subagent call. */
   tokenBudget?: number;
 };
+
+/**
+ * Filesystem isolation modes for subagents (Grok Build-style task isolation).
+ * "none" keeps the child in the parent workspace; "worktree" gives it a
+ * dedicated git worktree whose branch can be reviewed and merged separately.
+ */
+export type SubagentIsolationMode = "none" | "worktree";
 
 // ─── Parallel subagent batch arguments ───────────────────────────────────────
 
@@ -292,6 +326,8 @@ export type SubagentBatchTask = {
   skillNames?: string[];
   /** Whether to inherit the parent's current message history. */
   inheritContextHistory?: boolean;
+  /** Filesystem isolation override for this batch task ("worktree" = dedicated git worktree). */
+  isolation?: SubagentIsolationMode;
   /** Optional token budget limit for this specific batch task. */
   tokenBudget?: number;
 };
@@ -434,4 +470,8 @@ export type SubagentEvent =
       errors?: Array<{ message: string; kind: SubagentErrorKind }>;
       /** Whether auto-delegation was inherited from the parent (false = deliberate isolation). */
       autoDelegationInherited: boolean;
+      /** Isolated git worktree the sub-agent executed in (worktree isolation). */
+      worktreePath?: string;
+      /** Branch of the isolated worktree; merge it to bring changes into the main checkout. */
+      worktreeBranch?: string;
     };

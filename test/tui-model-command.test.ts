@@ -4,6 +4,7 @@ import {
   filterModelsByQuery,
   hasGatewayOverrides,
   modelSearchQuery,
+  modelSubmitNeedsSetup,
   parseModelCommand,
   shouldSubmitTypedModelCommand,
 } from "../src/tui/model-command.ts";
@@ -110,6 +111,23 @@ describe("parseModelCommand", () => {
     assert.equal(shouldSubmitTypedModelCommand("/model grok"), false);
     assert.equal(hasGatewayOverrides({ baseUrl: "https://gw.example/v1", apiKey: "sk" }), true);
     assert.equal(hasGatewayOverrides({ baseUrl: "https://gw.example/v1" }), false);
+  });
+
+  it("forces setup for every submit-handler /model ref except the configured side", () => {
+    // Catalog-side picker submission: force the credential form.
+    assert.equal(modelSubmitNeedsSetup("model-picker", "catalog"), true);
+    // Inline /model autocomplete: force it too.
+    assert.equal(modelSubmitNeedsSetup("model", "catalog"), true);
+    // Tab completion clears acMode to null BEFORE Enter, so the handler sees
+    // no picker at all - the bug this guards against. It must still force
+    // the credential form instead of silently reusing a saved profile.
+    assert.equal(modelSubmitNeedsSetup(null, "catalog"), true);
+    // A space /model typed at the idle prompt (picker never opened) also
+    // reaches the handler with acMode null and must not reuse a saved key.
+    assert.equal(modelSubmitNeedsSetup(null, "configured"), true);
+    // The ONLY path that keeps saved-profile reuse: the configured side while
+    // the picker is still open (its Enter handling activates the profile).
+    assert.equal(modelSubmitNeedsSetup("model-picker", "configured"), false);
   });
 });
 

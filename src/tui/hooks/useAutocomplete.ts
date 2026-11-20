@@ -152,9 +152,13 @@ export function useAutocomplete({
       setModelCandidates(choices.references);
       setConfiguredModelCandidates(configuredModels);
       setModelContextWindows(choices.contextWindows);
+      // Default to the catalog ("All models") section so Enter on a fresh
+      // picker always re-enters the credential form. Saved profiles are only
+      // activated after explicitly switching to the configured section
+      // (left arrow), keeping reuse an intentional action.
       const nextSection = modelPickerSectionPinnedRef.current
         ? modelPickerSection
-        : configuredModels.length > 0 ? "configured" : "catalog";
+        : "catalog";
       setModelPickerSection(nextSection);
       const activeCandidateCount = nextSection === "configured"
         ? configuredModels.length
@@ -327,7 +331,10 @@ export function useAutocomplete({
         configuredModelsRef.current = profiles;
         const filtered = filterConfiguredModelProfiles(profiles, modelQueryRef.current);
         setConfiguredModelCandidates(filtered);
-        if (!modelPickerSectionPinnedRef.current) setModelPickerSection(filtered.length > 0 ? "configured" : "catalog");
+        // Keep the catalog section as the default (matching the sync branch
+        // above): Enter on a fresh picker must re-enter the credential form;
+        // saved profiles activate only after an explicit left-arrow switch.
+        if (!modelPickerSectionPinnedRef.current) setModelPickerSection("catalog");
         setAcIndex(0);
       });
     },

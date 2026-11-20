@@ -181,9 +181,12 @@ export class TerminalAutocompleteController {
     if (resolution.kind === "model-picker") {
       const choices = modelChoices(resolution.query);
       const configuredModels = filterConfiguredModelProfiles(this.configuredModels, resolution.query);
+      // Default to the catalog ("All models") section so Enter on a fresh
+      // picker always re-enters the credential form; saved profiles activate
+      // only after an explicit left-arrow switch to the configured section.
       const modelPickerSection: ModelPickerSection = this.modelPickerSectionPinned
         ? this.state.modelPickerSection
-        : configuredModels.length > 0 ? "configured" : "catalog";
+        : "catalog";
       const activeCount = modelPickerSection === "configured" ? configuredModels.length : choices.references.length;
       this.setState({ ...EMPTY_STATE, mode: "model-picker", modelQuery: resolution.query, models: choices.references, configuredModels, modelPickerSection, modelContextWindows: choices.contextWindows, index: Math.min(this.state.index, Math.max(0, activeCount - 1)) });
       return;
@@ -242,9 +245,10 @@ export class TerminalAutocompleteController {
       this.setState({
         ...this.state,
         configuredModels,
+        // Keep the catalog default (matching the sync branch above).
         modelPickerSection: this.modelPickerSectionPinned
           ? this.state.modelPickerSection
-          : configuredModels.length > 0 ? "configured" : "catalog",
+          : "catalog",
         index: 0,
       });
     });

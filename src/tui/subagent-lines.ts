@@ -240,7 +240,9 @@ export function subagentRenderLines(
       tone: isError ? "error" : "success",
       dim: !isError,
     });
-    if (!message.result) return lines;
+    // On success, the worker summary duplicates what the parent agent reports
+    // in its final answer. Keep only diagnostic results (error/partial).
+    if (!message.result || message.status === "done") return lines;
     lines.push({
       key: `message-${key}-subagent-result`,
       text: compactResult(message.result),

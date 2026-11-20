@@ -24,11 +24,27 @@ export type ProfileManagerDeps = {
   persistSession?: (history: AgentMessage[], llm: LlmConfig) => Promise<void>;
 };
 
+export type ModelSetupOptions = {
+  /**
+   * Always open the setup form (Base URL → API key → model level) instead of
+   * committing a model whose key is already available. The catalog side of
+   * the model picker uses this so a selection always re-enters its settings.
+   * The API key field is left empty so the key must be re-entered (never
+   * prefilled from env vars, the current config, or saved profiles); only an
+   * explicit `--api-key` override is honored. A blank key is rejected instead
+   * of falling back to a saved profile, the current config, or an environment
+   * variable. Saving the form persists a new profile that then appears on the
+   * configured side.
+   */
+  forceSetup?: boolean;
+};
+
 /** Switch directly when a model has configured credentials; otherwise open setup. */
 export function startModelSetup(
   model: ModelRef,
   overrides: ModelSwitchOverrides,
   deps: ProfileManagerDeps,
+  options: ModelSetupOptions = {},
 ): Promise<void> | void {
   const { llm, setModelSetup, setInput, setAcMode, setAcIndex } = deps;
 
@@ -39,10 +55,11 @@ export function startModelSetup(
   const canReuseCurrentKey = model.provider === llm.provider && model.baseUrl === llm.baseUrl;
   const hasOverrides = Boolean(overrides.baseUrl || overrides.apiKey || overrides.protocol);
   const configuredKey = model.apiKey ?? providerKey ?? (canReuseCurrentKey ? llm.apiKey : undefined);
+  const forceSetup = options.forceSetup === true;
 
   // Catalog models already have a provider endpoint and key source. Use that
   // integration directly; the setup form is for custom gateways or missing keys.
-  if (!hasOverrides && configuredKey) {
+  if (!hasOverrides && !forceSetup && configuredKey) {
     return commitModelSetup({
       model,
       baseUrl: model.baseUrl,
@@ -54,8 +71,13 @@ export function startModelSetup(
   setModelSetup({
     model,
     baseUrl: overrides.baseUrl || model.baseUrl,
-    apiKey: overrides.apiKey ?? (canReuseCurrentKey ? llm.apiKey : providerKey ?? ""),
+    // Forced setup (All models section) must re-enter the key: leave the
+    // field empty unless an explicit --api-key override was provided.
+    apiKey: forceSetup
+      ? (overrides.apiKey ?? "")
+      : (overrides.apiKey ?? (canReuseCurrentKey ? llm.apiKey : providerKey ?? "")),
     field: "baseUrl",
+    ...(forceSetup ? { requireExplicitApiKey: true } : {}),
     ...(overrides.protocol ? { protocol: overrides.protocol } : {}),
   });
   // Keep the default in modelSetup as the fallback, but leave the field empty
@@ -77,11 +99,24 @@ export async function commitModelSetup(
   const { llm, setLlm, setModelSetup, setAcMode, setInput, dispatch, historyRef } = deps;
 
   try {
-    const effectiveApiKey = apiKey.trim() || setup.apiKey.trim();
+    const typedApiKey = apiKey.trim();
+    if (setup.requireExplicitApiKey && !typedApiKey) {
+      setModelSetup({
+        ...setup,
+        apiKey: "",
+        field: "apiKey",
+        error: "Enter an API key. All models does not reuse a saved API key.",
+      });
+      setInput("");
+      setAcMode("model-setup");
+      return;
+    }
+    const effectiveApiKey = typedApiKey || setup.apiKey.trim();
     const switched = switchLlmModel(llm, setup.model, {
       baseUrl: setup.baseUrl,
       apiKey: effectiveApiKey,
       ...(setup.protocol ? { protocol: setup.protocol } : {}),
+      ...(setup.requireExplicitApiKey ? { disallowApiKeyFallback: true } : {}),
     });
     // When the setup flow ends with an Effort-slider pick, bake the chosen
     // reasoning level into the freshly switched config (and the saved profile).

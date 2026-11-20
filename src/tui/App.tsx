@@ -57,6 +57,8 @@ import { findExactModelReferenceMatch, getAllModels } from "../models.ts";
 import {
   parseModelCommand,
   shouldSubmitTypedModelCommand,
+  modelCommandFromPickerInput,
+  modelSubmitNeedsSetup,
 } from "./model-command.ts";
 import {
   activateProfile,
@@ -96,7 +98,7 @@ import { runDirectTool } from "./direct-tool-runner.ts";
 import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
 import { addPendingImage, handlePasteImage } from "./image-handler.ts";
 import { activateSavedModelProfile, startModelSetup, commitModelSetup, openProfileList } from "./profile-manager.ts";
-import { selectModel } from "./model-switcher.ts";
+import { selectModel, type ModelSelectOptions } from "./model-switcher.ts";
 import { SubagentToolsFactory } from "./subagent-tools-factory.ts";
 import { formatAmbiguousSessionNotice, parseForeignResumeCommand, parseResumeCommand, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
 import { resolveSessionByPrefix, SessionManager } from "../session-manager.ts";
@@ -108,6 +110,7 @@ import { BgTaskManager, stableBgTaskInstanceId } from "../bg-tasks/manager.js";
 import type { BgTaskSummary } from "../bg-tasks/manager.js";
 import { GitWorkflow } from "../git/workflow.ts";
 import { BgTaskLivePanel } from "./components/BgTaskLivePanel.tsx";
+import { TasksPane } from "./components/TasksPane.tsx";
 import { AgentDashboard, type DashboardAgent } from "./components/AgentDashboard.tsx";
 import { TodoRunPanel } from "./components/TodoRunPanel.tsx";
 import { useKeyboardHandler } from "./hooks/useKeyboardHandler.ts";
@@ -123,6 +126,7 @@ import { estimatePromptInputRows, PromptInput } from "./components/PromptInput.t
 import {
   sanitizeInput,
   shouldAcceptAutocompleteOnEnter,
+  type AcMode,
 } from "./input-utils.ts";
 import {
   imageAttachmentToPart,
@@ -149,7 +153,7 @@ import { ThemeDialog } from "./components/ThemeDialog.tsx";
 import { PermissionPanel } from "./components/PermissionPanel.tsx";
 import { PlanApprovalBar } from "./components/PlanApprovalBar.tsx";
 import type { RuntimeExecutionContext } from "../runtime/policy-types.ts";
-import { loadGlobalConcurrencyLimitFromEnv, loadGlobalGoalWorkerLimitFromEnv, loadGlobalTokenBudgetFromEnv } from "../runtime/limits.ts";
+import { loadGlobalConcurrencyLimitFromEnv, loadGlobalGoalWorkerLimitFromEnv, loadGlobalTokenBudgetFromEnv, loadSessionSubagentConcurrencyLimitFromEnv } from "../runtime/limits.ts";
 import { isTuiFeatureEnabled } from "./execution-policy.ts";
 import type { StartupSessionRequest } from "./session-serialization.ts";
 import {
@@ -231,9 +235,18 @@ function autoWakeEnabled(): boolean {
   return value !== "0" && value !== "false" && value !== "off";
 }
 
-function makeSubagentCompletionPrompt(taskId: string, task: string, result: string, status: string): string {
+function makeSubagentCompletionPrompt(
+  taskId: string,
+  task: string,
+  result: string,
+  status: string,
+  worktree?: { worktreePath?: string; worktreeBranch?: string },
+): string {
   const output = result.slice(0, COMPLETION_OUTPUT_LIMIT_BYTES);
   const truncatedOutput = result.length > output.length ? `${output}\n[Output truncated]` : output || "(no output)";
+  const worktreeLine = worktree?.worktreePath && worktree.worktreeBranch
+    ? `Its changes live in isolated git worktree ${worktree.worktreePath} on branch ${worktree.worktreeBranch} (merge the branch to apply them).`
+    : undefined;
   return [
     "<system-reminder>",
     `Background sub-agent ${taskId} for task "${escapePromptMarkup(task)}" ${status}.`,
@@ -241,6 +254,7 @@ function makeSubagentCompletionPrompt(taskId: string, task: string, result: stri
     "<task-output>",
     escapePromptMarkup(truncatedOutput),
     "</task-output>",
+    ...(worktreeLine ? [worktreeLine] : []),
     "Review this result and continue the owning session's task if relevant.",
     "</system-reminder>",
   ].join("\n");
@@ -336,6 +350,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   const autoSubagent = useMemo(() => loadAutoSubagentOptionsFromEnv(), []);
   const globalTokenBudget = useMemo(() => loadGlobalTokenBudgetFromEnv(), []);
   const globalConcurrencyLimit = useMemo(() => loadGlobalConcurrencyLimitFromEnv(), []);
+  const sessionConcurrencyLimit = useMemo(() => loadSessionSubagentConcurrencyLimitFromEnv(), []);
   const [skillNames, setSkillNames] = useState<string[]>(() => loadSkillNamesFromEnv());
   const skillNamesRef = useRef(skillNames);
   skillNamesRef.current = skillNames;
@@ -446,7 +461,10 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           const goalLoopActive = stateRef.current.phase === "acting" || stateRef.current.currentPlan?.status === "executing";
           const shouldWake = await subagentTaskRegistry.claimAutoWake(event.id, ownerSessionId, autoWakeEnabled(), goalLoopActive);
           if (!shouldWake) return;
-          const completionPrompt = makeSubagentCompletionPrompt(event.id, background.task, event.result, status);
+          const completionPrompt = makeSubagentCompletionPrompt(event.id, background.task, event.result, status, {
+            worktreePath: event.worktreePath,
+            worktreeBranch: event.worktreeBranch,
+          });
           if (belongsToOtherSession) {
             const queued = pendingSubagentPromptsRef.current.get(ownerSessionId) ?? [];
             queued.push(completionPrompt);
@@ -456,7 +474,12 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           dispatch({
             type: "ADD_NOTICE",
             title: "Background sub-agent completed",
-            text: `${background.task}: ${status}\nTask ID: ${event.id}`,
+            text: [
+              `${background.task}: ${status}\nTask ID: ${event.id}`,
+              ...(event.worktreePath && event.worktreeBranch
+                ? [`Worktree: ${event.worktreePath}\nBranch: ${event.worktreeBranch}`]
+                : []),
+            ].join("\n"),
           });
           if (stateRef.current.busy || stateRef.current.pendingPermission) {
             promptQueueRef.current.push(completionPrompt);
@@ -481,10 +504,12 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       parentRuntime: subagentRuntimeRef.current,
       globalTokenBudget,
       globalConcurrencyLimit,
+      ...(sessionConcurrencyLimit ? { sessionConcurrencyLimit } : {}),
       roleLlmConfigs: globalRoleLlmConfigs,
       sessionRoleLlmConfigs: localRoleLlmConfigsRef.current,
+      worktreeSourceCwd: projectCwd,
     });
-  }, [llm, vision, subagentTaskRegistry]);
+  }, [llm, vision, subagentTaskRegistry, projectCwd, sessionConcurrencyLimit]);
 
   // Executors for `/tasks run --parallel` (subagent + background tasks).
   const todosExecutorsRef = useRef<TodosRunExecutors | null>(null);
@@ -534,6 +559,13 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   const inputHistoryRef = useLazyRef(() => new TerminalInputHistory());
   // Generate a stable conversation session ID on startup
   const [conversationId, setConversationId] = useState(() => initialSessionId || process.env.MINI_AGENT_SESSION_ID || randomUUID());
+  // /tasks-pane: this session's parallel tasks pane (subagents + background
+  // tasks, Grok Build tasks_pane semantics). A conversation switch means a
+  // new session, and the pane's task sets are per-session, so close it.
+  const [tasksPaneOpen, setTasksPaneOpen] = useState(false);
+  useEffect(() => {
+    setTasksPaneOpen(false);
+  }, [conversationId]);
 
   // ── /tasks run /todos run --parallel runner ───────────────────────────────
   const runTodosCommand = useCallback(
@@ -1010,6 +1042,20 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     onResumeSession: resumeSelectedSession,
   });
 
+  // Read live acMode inside callbacks whose dependency arrays omit acMode (notably
+  // handleSubmit). Prevents stale `null` values that skip picker-scoped behavior.
+  const acModeRef = useRef<AcMode>(acMode);
+  acModeRef.current = acMode;
+  // Same for the model-setup form state, which the handleSubmit form-flow
+  // branches (Base URL → API key → effort) read.
+  const modelSetupRef = useRef(modelSetup);
+  modelSetupRef.current = modelSetup;
+  // The model-picker section (configured vs catalog) decides whether catalog
+  // selections must re-enter the API key. handleSubmit omits it from its
+  // dependency array, so read the live value from a ref here.
+  const modelPickerSectionRef = useRef(modelPickerSection);
+  modelPickerSectionRef.current = modelPickerSection;
+
   const resolvePendingPermission = useCallback((decision: PermissionDecision) => {
     const pending = state.pendingPermission;
     const permissionManager = permissionManagerRef.current;
@@ -1033,7 +1079,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
 
   // ── model switching ─────────────────────────────────────────────────────
 
-  const selectModelRef = useCallback((reference: string, overrides: ModelSwitchOverrides = {}) => {
+  const selectModelRef = useCallback((reference: string, overrides: ModelSwitchOverrides = {}, options?: ModelSelectOptions) => {
     return selectModel(reference, overrides, {
       openModelPicker,
       openProfileList: (profileNames) => {
@@ -1055,10 +1101,10 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
         persistSession: persistSessionSnapshot,
       }),
-      startModelSetup: (model, overrides) => startModelSetup(model, overrides, {
+      startModelSetup: (model, modelOverrides, setupOptions) => startModelSetup(model, modelOverrides, {
         llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef,
         persistSession: persistSessionSnapshot,
-      }),
+      }, setupOptions),
     });
   }, [llm, setLlm, setModelSetup, setAcMode, setInput, setAcIndex, setProfileListState, dispatch, historyRef, persistSessionSnapshot]);
 
@@ -1265,6 +1311,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     bgPanelOpen, onCloseBgPanel: () => setBgPanelOpen(false),
     backgroundForegroundTask: async () => getBgManager()?.backgroundForegroundTask(),
     dashboardOpen, onCloseDashboard, onOpenDashboard,
+    tasksPaneOpen, onCloseTasksPane: () => setTasksPaneOpen(false),
     isActive: active,
   });
 
@@ -1339,7 +1386,8 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     // state and waited for the next message). Pure management subcommands
     // (status/clear/pause/resume/complete) keep their notice-only behavior.
     let goalKickoffPrompt: string | undefined;
-    const allowEmptyApiKey = acMode === "model-setup" && modelSetup?.field === "apiKey";
+    const allowEmptyApiKey =
+      acModeRef.current === "model-setup" && modelSetupRef.current?.field === "apiKey";
     const hasPendingImages = pendingImagesRef.current.length > 0;
     if (state.busy && !trimmed && promptQueueRef.current.length > 0) {
       sendNowWhileBusy();
@@ -1487,16 +1535,17 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       return;
     }
 
-    if (acMode === "model-setup" && modelSetup) {
-      if (modelSetup.field === "baseUrl") {
+    if (acModeRef.current === "model-setup" && modelSetupRef.current) {
+      const activeModelSetup = modelSetupRef.current;
+      if (activeModelSetup.field === "baseUrl") {
         const baseUrl = trimmed.replace(/\/$/, "");
-        setModelSetup({ ...modelSetup, baseUrl, field: "apiKey", error: undefined });
-        setInput(modelSetup.apiKey);
+        setModelSetup({ ...activeModelSetup, baseUrl, field: "apiKey", error: undefined });
+        setInput(activeModelSetup.apiKey);
       } else {
         // API key captured: move to the Antigravity-style Effort step so the
         // user picks the reasoning level before the model activates. Enter on
         // the slider commits with the chosen level; Esc commits unchanged.
-        setModelSetup({ ...modelSetup, apiKey: trimmed, field: "effort", error: undefined });
+        setModelSetup({ ...activeModelSetup, apiKey: trimmed, field: "effort", error: undefined });
         setInput("");
         setAcMode("effort-picker");
       }
@@ -1607,6 +1656,14 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           text: error instanceof Error ? error.message : String(error),
         });
       }
+      setInput("");
+      return;
+    }
+    // /tasks-pane opens the per-session tasks pane. /tasks remains the todo
+    // runner (/tasks run --parallel), so the pane command is separate.
+    if (trimmed === "/tasks-pane") {
+      setTasksPaneOpen(true);
+      setAcMode(null);
       setInput("");
       return;
     }
@@ -1846,7 +1903,27 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       } else {
         const match = findExactModelReferenceMatch(parsed.reference, getAllModels());
         if (match?.ambiguous) openModelPicker(parsed.reference);
-        else selectModelRef(parsed.reference, parsed.overrides);
+        else {
+          // Any `/model ref` reaching the submit handler is a catalog-side
+          // selection and forces the credential form. The "Configured models"
+          // side never gets here: its Enter path short-circuits earlier in
+          // onSubmit via activateConfiguredProfileRef, and Tab completion is
+          // blocked there (resolveAutocompleteNav returns "ignore"). Tab
+          // completion on the catalog side clears acMode BEFORE the user hits
+          // Enter, so acMode alone can't distinguish "Tab-completed from the
+          // catalog" from "typed at the idle prompt" - both must re-enter the
+          // API key. Only an explicit configured-section picker submission
+          // (live model-picker on the configured side) keeps saved-profile
+          // reuse. acMode/section are not in this callback's dependency
+          // array, so read the live values from refs.
+          const liveAcMode = acModeRef.current;
+          const livePickerSection = modelPickerSectionRef.current;
+          selectModelRef(
+            parsed.reference,
+            parsed.overrides,
+            modelSubmitNeedsSetup(liveAcMode, livePickerSection) ? { forceSetup: true } : undefined,
+          );
+        }
       }
       return;
     }
@@ -2333,7 +2410,10 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         const shouldWake = await subagentTaskRegistry.claimAutoWake(record.taskId, conversationId, autoWakeEnabled(), goalLoopActive);
         if (!shouldWake) continue;
         const status = record.status === "failed" ? "failed" : record.partial ? "completed with partial results" : "completed";
-        const prompt = makeSubagentCompletionPrompt(record.taskId, record.task, record.result ?? record.error ?? "(no output)", status);
+        const prompt = makeSubagentCompletionPrompt(record.taskId, record.task, record.result ?? record.error ?? "(no output)", status, {
+          worktreePath: record.worktreePath,
+          worktreeBranch: record.worktreeBranch,
+        });
         if (cancelled) {
           const queued = pendingSubagentPromptsRef.current.get(conversationId) ?? [];
           queued.push(prompt);
@@ -2343,7 +2423,12 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         dispatch({
           type: "ADD_NOTICE",
           title: "Background sub-agent completed",
-          text: `${record.task}: ${status}\nTask ID: ${record.taskId}`,
+          text: [
+            `${record.task}: ${status}\nTask ID: ${record.taskId}`,
+            ...(record.worktreePath && record.worktreeBranch
+              ? [`Worktree: ${record.worktreePath}\nBranch: ${record.worktreeBranch}`]
+              : []),
+          ].join("\n"),
         });
         if (stateRef.current.busy || stateRef.current.pendingPermission) {
           promptQueueRef.current.push(prompt);
@@ -2505,7 +2590,6 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   // effects run synchronously after the commit but before Ink's throttled
   // frame render, so the burst lands above the frame that follows it.
   const emittedStaticRef = useRef({ generation: -1, count: 0 });
-  const sealedRetryBaselineRef = useRef<string | undefined>(undefined);
   useLayoutEffect(() => {
     if (!usesStreamChannel || !writeStaticBurst) return;
     const tracked = emittedStaticRef.current;
@@ -2518,8 +2602,14 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     const pending = sealedStatic.items.slice(tracked.count);
     tracked.count = sealedStatic.items.length;
     const ledger = streamLedgerRef.current;
-    let activeRetryBaseline = sealedRetryBaselineRef.current;
-    const nextRetryBaseline = state.streamRetryCommittedText;
+    // Read the baseline straight from state: the reducer keeps it alive
+    // through the assistant seal event (this effect is what clears it),
+    // so a pure-text turn with no intermediate sealed items still dedupes
+    // its retried stream against the frozen prefix. Only the FIRST sealed
+    // assistant item of this batch may use it: later assistant messages
+    // belong to fresh turns whose streams were not committed.
+    let activeRetryBaseline = state.streamRetryCommittedText;
+    const hadRetryBaseline = activeRetryBaseline !== undefined;
     for (const item of pending) {
       let rows = item.rows;
       if (isDocumentLayout && item.kind === "assistant") {
@@ -2545,8 +2635,10 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       const burst = formatSealedRowsText(rows);
       if (burst) writeStaticBurst(burst);
     }
-    sealedRetryBaselineRef.current = nextRetryBaseline;
-    if (isDocumentLayout && nextRetryBaseline) {
+    // Clear the state baseline whenever this batch observed one, even if the
+    // assistant item consumed it: commit suppression must not outlive the
+    // retried stream, or the next turn's streamed rows would be held back.
+    if (isDocumentLayout && hadRetryBaseline) {
       dispatchRef.current({ type: "CLEAR_STREAM_RETRY_BASELINE" });
     }
   }, [usesStreamChannel, isDocumentLayout, writeStaticBurst, sealedStatic, termWidth, state.thinkingMode, state.streamRetryCommittedText]);
@@ -2554,10 +2646,24 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   // Document layout: append closed streaming paragraphs into the terminal
   // stream as they complete (fences/tables held back by computeCommitBoundary
   // until the block closes), so the whole conversation scrolls as one flow.
+  // While a truncated stream is being retried the frozen prefix cannot be
+  // retracted; one dim marker separates it from the regenerated answer so
+  // the two copies read as "kept draft + regeneration" instead of a
+  // duplicated reply.
+  const retryNoteEmittedRef = useRef(false);
   useLayoutEffect(() => {
     if (!isDocumentLayout || !writeStaticBurst) return;
     const ledger = streamLedgerRef.current;
     if (state.streamRetryCommittedText) {
+      if (!retryNoteEmittedRef.current) {
+        retryNoteEmittedRef.current = true;
+        writeStaticBurst(formatSealedRowsText([{
+          key: "stream-retry-note",
+          text: "· Connection lost — the partial answer above is kept while the request retries",
+          style: "muted",
+          dim: true,
+        }]));
+      }
       // The prefix before this retry is already frozen. Keep it for seal dedup,
       // but never append the regenerated stream until the turn is final.
       ledger.lastText = "";
@@ -2566,6 +2672,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       ledger.width = termWidth;
       return;
     }
+    retryNoteEmittedRef.current = false;
     const text = state.streamingText;
     if (!text) return;
     if (!text.startsWith(ledger.lastText)) {
@@ -2849,7 +2956,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
                 return false;
               }}
               pasteEnabled={!state.pendingPermission && !pendingTodoRunPlan}
-              focus={active && !state.pendingPermission && !pendingTodoRunPlan && !bgPanelOpen && !dashboardOpen && acMode !== "effort-picker" && !themeDialogOpen}
+              focus={active && !state.pendingPermission && !pendingTodoRunPlan && !bgPanelOpen && !tasksPaneOpen && !dashboardOpen && acMode !== "effort-picker" && !themeDialogOpen}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {
                 if (acMode === "session-list") return;
@@ -2890,15 +2997,19 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
                   }
                   if ((acMode === "model" || acMode === "model-picker") && shouldSubmitTypedModelCommand(val)) {
                     inputHistoryRef.current.add(val);
-                    void handleSubmit(val);
+                    // The picker holds the bare query; restore the command so
+                    // Enter switches the model (and forces its setup form)
+                    // instead of sending the reference to the model as a prompt.
+                    void handleSubmit(modelCommandFromPickerInput(val));
                     return;
                   }
                   if (acMode === "model-picker" && modelPickerSection === "configured") return;
                   const chosen = modelCandidates[acIndex];
                   if (chosen) {
-                    // Enter selects the model and starts the setup flow. Tab
-                    // remains the completion-only path in useAutocomplete.
-                    selectModelRef(chosen);
+                    // Enter on the catalog side selects the model and forces
+                    // the credential form (Base URL → API key → model level).
+                    // Tab remains the completion-only path in useAutocomplete.
+                    selectModelRef(chosen, {}, { forceSetup: true });
                     return;
                   }
                 }
@@ -2929,6 +3040,21 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           cacheReadTokens={state.cacheReadTokens}
           promptTokens={state.contextTokens}
         />
+        {tasksPaneOpen && (
+          <>
+            <TasksPane
+              sessionId={conversationId}
+              subagentRegistry={subagentTaskRegistry}
+              bgManager={getBgManager()}
+              width={Math.min(80, Math.max(60, termWidth - 4))}
+              height={termHeight}
+              onClose={() => setTasksPaneOpen(false)}
+            />
+            <Box paddingX={1}>
+              <Text dimColor>Esc closes the pane and restores the prompt.</Text>
+            </Box>
+          </>
+        )}
         {bgPanelOpen && (
           <>
             <BgTaskLivePanel

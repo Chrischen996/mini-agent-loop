@@ -30,6 +30,9 @@ export type UseKeyboardHandlerDeps = {
   /** Background live-panel open/close; Esc closes the panel before other work. */
   bgPanelOpen?: boolean;
   onCloseBgPanel?: () => void;
+  /** Per-session tasks-pane open/close; Esc closes the pane before other work. */
+  tasksPaneOpen?: boolean;
+  onCloseTasksPane?: () => void;
   backgroundForegroundTask?: () => Promise<string | undefined>;
   dashboardOpen?: boolean;
   onCloseDashboard?: () => void;
@@ -44,6 +47,7 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
     acMode, state, feedHeight, handleAutocompleteKey,
     suppressInputEchoRef, pendingPermissionRef, bgPanelOpen, onCloseBgPanel,
     backgroundForegroundTask,
+    tasksPaneOpen, onCloseTasksPane,
     dashboardOpen, onCloseDashboard, onOpenDashboard, isActive = true,
   } = deps;
   const requestScroll = scrollBy ?? ((delta: number) => dispatch({ type: "SCROLL_BY", delta }));
@@ -59,6 +63,11 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
     // ESC: close the background live panel (it disables the prompt input)
     if (key.escape && bgPanelOpen) {
       onCloseBgPanel?.();
+      return;
+    }
+    // ESC: close the per-session tasks pane (it disables the prompt input)
+    if (key.escape && tasksPaneOpen) {
+      onCloseTasksPane?.();
       return;
     }
     if (key.escape && dashboardOpen) {

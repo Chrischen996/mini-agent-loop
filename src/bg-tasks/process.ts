@@ -86,7 +86,11 @@ export class BgProcessBackend implements BgTaskBackend {
     if (process.platform === "win32") return true;
     if (!taskDir) return true;
     try {
-      const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "command="], { timeout: 2000 });
+      // `-ww` disables BSD/macOS column truncation of the `command` field.
+      // Without it, a long project path can make the probe miss the taskDir
+      // substring and falsely report a live task as gone (phantom
+      // "interrupted" result). Linux procps accepts `-ww` as a no-op.
+      const { stdout } = await execFileAsync("ps", ["-ww", "-p", String(pid), "-o", "command="], { timeout: 2000 });
       return stdout.includes(taskDir);
     } catch {
       // `ps` may be unavailable or blocked (minimal images, restricted

@@ -751,7 +751,11 @@ describe("standalone terminal render model", () => {
 
     const completedRows = subagentRenderLines({ ...message, expanded: false, result: "review complete" }, "done");
     assert.match(completedRows[1]?.text ?? "", /Done \(1 tool use · 3\.2k tokens · 1\.3s\)/);
-    assert.equal(completedRows[2]?.prefix, "     ");
+    // Successful cards keep one section only: the summary result paragraph is
+    // omitted in the collapsed view; diagnostics survive on partial/error.
+    assert.equal(completedRows.length, 2);
+    const partialRows = subagentRenderLines({ ...message, status: "partial" as const, expanded: false, result: "partial summary" }, "partial");
+    assert.equal(partialRows[2]?.prefix, "     ");
   });
 
   it("keeps a failed subagent title neutral while emphasizing its status", () => {

@@ -98,6 +98,8 @@ export type ModelSwitchOverrides = {
   apiKey?: string;
   /** Force OpenAI-compatible or Anthropic Messages when pointing Claude at a gateway. */
   protocol?: LlmGatewayProtocol;
+  /** Reject saved, environment, and current-config API key fallbacks. */
+  disallowApiKeyFallback?: boolean;
 };
 
 export const DEFAULT_OUTPUT_TOKEN_CAP = 32_768;
@@ -538,10 +540,12 @@ export function switchLlmModel(
     (explicitBaseUrl === undefined || explicitBaseUrl === resolved.baseUrl)
       ? config.apiKey
       : undefined;
-  const effectiveApiKey = requestedApiKey
-    || resolved.apiKey
-    || apiKey
-    || sameBaseUrlKeyFallback;
+  const effectiveApiKey = overrides.disallowApiKeyFallback
+    ? requestedApiKey
+    : requestedApiKey
+      || resolved.apiKey
+      || apiKey
+      || sameBaseUrlKeyFallback;
 
   if (!effectiveApiKey && !resolved.piModel) {
     throw new Error(

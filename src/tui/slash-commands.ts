@@ -69,6 +69,7 @@ export const SLASH_COMMANDS: CommandDef[] = [
   { name: "dashboard", usage: "/dashboard", description: "Show active agents and subagents" },
   { name: "diff", usage: "/diff", description: "Pick a changed file and show its Git diff" },
   { name: "bg-tasks", usage: "/bg-tasks", description: "List background tasks started by this session" },
+  { name: "tasks-pane", usage: "/tasks-pane", description: "Open this session's parallel tasks pane (subagents + background tasks)" },
   { name: "resume", usage: "/resume [id]", description: "Resume a saved session" },
   { name: "resume-claude", usage: "/resume-claude [ref]", description: "Import a Claude Code session" },
   { name: "resume-codex", usage: "/resume-codex [ref]", description: "Import a Codex session" },

@@ -1473,21 +1473,25 @@ describe("the single Ink terminal", () => {
     const view = open();
     try {
       await submit(view, "/model");
-      for (let attempt = 0; attempt < 12 && !(view.lastFrame() ?? "").includes("spark-openai"); attempt += 1) {
+      for (let attempt = 0; attempt < 12 && !(view.lastFrame() ?? "").includes("All models"); attempt += 1) {
         await waitForRender();
       }
+      // The picker defaults to the All models (catalog) section so Enter
+      // re-enters the credential form instead of silently reusing a key;
+      // saved profiles activate only after an explicit left-arrow switch.
       const frame = view.lastFrame() ?? "";
       assert.match(frame, /Configured models/);
-      assert.match(frame, /All models/);
-      assert.match(frame, /spark-openai \(openai\/gpt-4o-mini\)/);
-      assert.doesNotMatch(frame, /not-a-real-key/);
+      assert.match(frame, /\[All models\]/);
 
-      view.stdin.write("\x1b[C");
-      await waitForRender();
-      assert.match(view.lastFrame() ?? "", /\[All models\]/);
       view.stdin.write("\x1b[D");
       await waitForRender();
       assert.match(view.lastFrame() ?? "", /\[Configured models\]/);
+      for (let attempt = 0; attempt < 12 && !(view.lastFrame() ?? "").includes("spark-openai"); attempt += 1) {
+        await waitForRender();
+      }
+      const configuredFrame = view.lastFrame() ?? "";
+      assert.match(configuredFrame, /spark-openai \(openai\/gpt-4o-mini\)/);
+      assert.doesNotMatch(configuredFrame, /not-a-real-key/);
 
       view.stdin.write("\r");
       await waitForRender();

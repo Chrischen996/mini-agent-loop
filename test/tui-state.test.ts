@@ -499,6 +499,65 @@ describe("TUI sidebar state", () => {
     assert.equal(state.busy, true);
   });
 
+  it("keeps the retry dedup baseline through a pure-text assistant seal", () => {
+    // Pure-text turn: no tool card seals between attempt_reset and the
+    // final assistant event. The seal effect reads the baseline from state,
+    // so the reducer must NOT clear it when the retried stream finalizes.
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Answer this" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "answer", text: "frozen first draft\n" },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "attempt_reset", reason: "stream_truncated", attempt: 1 },
+    });
+    assert.equal(state.streamRetryCommittedText, "frozen first draft\n");
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "frozen first draft\ncomplete answer" },
+      },
+    });
+    // Sealed the message but the dedup baseline must survive until the
+    // seal effect consumes and clears it.
+    assert.equal(state.messages.at(-1)?.kind, "assistant");
+    assert.equal(state.streamRetryCommittedText, "frozen first draft\n");
+
+    // Terminal events and the next user turn reset it.
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "done", messages: [] } });
+    assert.equal(state.streamRetryCommittedText, undefined);
+  });
+
+  it("keeps the existing dedup baseline on a second truncation", () => {
+    // While the baseline is set, the commit effect is suppressed, so the
+    // retried stream's text never reaches the scrollback. A second
+    // truncation must keep the original baseline rather than mixing in
+    // uncommitted re-streamed text.
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Answer this" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "answer", text: "frozen first draft\n" },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "attempt_reset", reason: "stream_truncated", attempt: 1 },
+    });
+    assert.equal(state.streamRetryCommittedText, "frozen first draft\n");
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "answer", text: "second draft\nopen tail" },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "attempt_reset", reason: "stream_truncated", attempt: 2 },
+    });
+    assert.equal(state.streamRetryCommittedText, "frozen first draft\n");
+  });
+
   it("reports automatic continuation without resetting context token usage", () => {
     let state = { ...createInitialState("test-model"), usedTokens: 42_000, contextTokens: 40_000, busy: true };
     state = tuiReducer(state, { type: "AUTO_CONTINUE", count: 1, max: 5 });

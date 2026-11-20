@@ -71,6 +71,7 @@ import {
   getAsyncBatchWorkerOptions,
   pendingAsyncBatchJobs,
   setAsyncBatchWorkerPid,
+  gcSubagentWorktrees,
 } from "./subagent/index.ts";
 import type { SubagentTaskRecord } from "./subagent/task-registry.ts";
 import { launchDetachedSubagentBatchWorker, launchDetachedSubagentWorker, waitForDetachedWorkerStart } from "./subagent/worker-host.ts";
@@ -96,7 +97,7 @@ import type { ContentPart, MessageContent } from "./types.ts";
 import { buildIntenseLlm, parseThinkingCommandMode, parseThinkingIntensityPrompt, withThinkingLevel } from "./think-intensity.ts";
 import { loadThinkingModeFromEnv } from "./thinking-policy.ts";
 import type { RuntimeExecutionContext } from "./runtime/policy-types.ts";
-import { loadGlobalConcurrencyLimitFromEnv, loadGlobalGoalWorkerLimitFromEnv, loadGlobalSubagentCallBudgetFromEnv, loadGlobalTokenBudgetFromEnv } from "./runtime/limits.ts";
+import { loadGlobalConcurrencyLimitFromEnv, loadGlobalGoalWorkerLimitFromEnv, loadGlobalSubagentCallBudgetFromEnv, loadGlobalTokenBudgetFromEnv, loadSessionSubagentConcurrencyLimitFromEnv } from "./runtime/limits.ts";
 import {
   PermissionManager,
   isPermissionMode,
@@ -121,6 +122,9 @@ const SUBAGENT_WORKER_TASK_ENV = "MINI_AGENT_SUBAGENT_WORKER_TASK_ID";
 const SUBAGENT_WORKER_OWNER_ENV = "MINI_AGENT_SUBAGENT_WORKER_OWNER_SESSION_ID";
 const SUBAGENT_WORKER_OPTIONS_ENV = "MINI_AGENT_SUBAGENT_WORKER_OPTIONS";
 const SUBAGENT_BATCH_WORKER_JOB_ENV = "MINI_AGENT_SUBAGENT_BATCH_WORKER_JOB_ID";
+/** Carries the task's persisted worktree into its detached worker (goal-worker env pattern). */
+const SUBAGENT_WORKER_WORKTREE_ENV = "MINI_AGENT_SUBAGENT_WORKER_WORKTREE";
+const SUBAGENT_WORKER_WORKTREE_BRANCH_ENV = "MINI_AGENT_SUBAGENT_WORKER_WORKTREE_BRANCH";
 const GLOBAL_BUDGET_ID_ENV = "MINI_AGENT_GLOBAL_BUDGET_ID";
 
 type CliSubagentWorkerOptions = {
@@ -154,6 +158,9 @@ function subagentWakePrompt(record: SubagentTaskRecord): string {
   const output = result.slice(0, SUBAGENT_WAKE_OUTPUT_LIMIT);
   const truncated = result.length > output.length ? `${output}\n[Output truncated]` : output;
   const status = record.status === "failed" ? "failed" : record.partial ? "completed with partial results" : "completed";
+  const worktreeLine = record.worktreePath && record.worktreeBranch
+    ? `Its changes live in isolated git worktree ${record.worktreePath} on branch ${record.worktreeBranch} (merge the branch to apply them).`
+    : undefined;
   return [
     "<system-reminder>",
     `Background sub-agent ${record.taskId} for task "${escapeSubagentWakeMarkup(record.task)}" ${status}.`,
@@ -161,6 +168,7 @@ function subagentWakePrompt(record: SubagentTaskRecord): string {
     "<task-output>",
     escapeSubagentWakeMarkup(truncated),
     "</task-output>",
+    ...(worktreeLine ? [worktreeLine] : []),
     "Review this result and continue the owning session's task if relevant.",
     "</system-reminder>",
   ].join("\n");
@@ -302,6 +310,8 @@ export type ParsedCliArgs = {
   forkSession: boolean;
   /** Run the /init generator and exit without starting the agent loop. */
   init?: { force: boolean; print: boolean };
+  /** Run the subagent worktree GC and exit without starting the agent loop. */
+  gcWorktrees?: { dryRun: boolean };
 };
 
 export function parseCliArgs(argv: string[]): ParsedCliArgs {
@@ -331,6 +341,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
   let forkSession = false;
   let sandboxEnabled = process.env.MINI_AGENT_SANDBOX !== "0";
   let init: ParsedCliArgs["init"] | undefined;
+  let gcWorktrees: ParsedCliArgs["gcWorktrees"] | undefined;
   let goal: ParsedCliArgs["goal"];
   const validTools = new Set<ToolName>([
     "read", "bash", "edit", "write", "grep", "find", "ls",
@@ -467,6 +478,15 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
       init.print = true;
       continue;
     }
+    if (arg === "gc-worktrees") {
+      gcWorktrees = { dryRun: false };
+      continue;
+    }
+    if (arg === "--gc-dry-run") {
+      if (!gcWorktrees) gcWorktrees = { dryRun: true };
+      else gcWorktrees.dryRun = true;
+      continue;
+    }
     if (arg === "--yes") {
       planYes = true;
       continue;
@@ -590,6 +610,7 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     foreignResume,
     forkSession,
     init,
+    gcWorktrees,
     goal,
   };
 }
@@ -622,6 +643,39 @@ async function runInitCommand(options: { force: boolean; print: boolean; cwd: st
     return 0;
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+}
+
+async function runGcWorktreesCommand(options: { dryRun: boolean; cwd: string }): Promise<number> {
+  try {
+    const registry = new SubagentTaskRegistry(options.cwd);
+    await registry.initialize();
+    const retentionDaysRaw = process.env.MINI_AGENT_WORKTREE_RETENTION_DAYS?.trim();
+    const retentionDays = retentionDaysRaw === undefined || retentionDaysRaw === "" ? 7 : Number(retentionDaysRaw);
+    if (!Number.isFinite(retentionDays) || retentionDays < 0) {
+      process.stderr.write("MINI_AGENT_WORKTREE_RETENTION_DAYS must be a non-negative number.\n");
+      return 1;
+    }
+    const result = await gcSubagentWorktrees({
+      sourceCwd: options.cwd,
+      registry,
+      retentionMs: retentionDays * 24 * 60 * 60 * 1000,
+      dryRun: options.dryRun,
+    });
+    if (options.dryRun) {
+      process.stdout.write(
+        `[gc-worktrees] dry run: ${result.wouldReclaim ?? 0} worktree(s) reclaimable of ${result.considered} record(s); ${result.skipped} skipped (active, merged, or within the retention window).\n`,
+      );
+    } else {
+      process.stdout.write(
+        `[gc-worktrees] reclaimed ${result.reclaimed} of ${result.considered} worktree record(s); ${result.skipped} skipped, ${result.failed} failed (those worktrees are kept).\n` +
+        "Branches stay mergeable; snapshots live under refs/mini-agent/subagents/<task-id>.\n",
+      );
+    }
+    return 0;
+  } catch (error) {
+    process.stderr.write(`[gc-worktrees] ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
 }
@@ -740,6 +794,10 @@ async function main(): Promise<void> {
   if (initOptions) {
     const cwd = process.cwd();
     process.exit(await runInitCommand({ ...initOptions, cwd }));
+  }
+  if (parsed.gcWorktrees) {
+    const cwd = process.cwd();
+    process.exit(await runGcWorktreesCommand({ ...parsed.gcWorktrees, cwd }));
   }
   const rawPrompt = workerRecord?.task ?? parsedPrompt ?? "";
   const sandboxConfig: SandboxConfig | undefined = workerOptions
@@ -1068,6 +1126,7 @@ async function main(): Promise<void> {
   const runtimeContext: RuntimeExecutionContext = {
     sessionId: resumedSessionId ?? sessionManager.sessionId,
     workspaceId: cwd,
+    cwd,
   };
   const persistenceSessionId = resumedSessionId ?? sessionManager.sessionId;
   // Background goal worker (`/goal ... --bg`): this detached process is the
@@ -1173,6 +1232,7 @@ async function main(): Promise<void> {
   const globalTokenBudget = loadGlobalTokenBudgetFromEnv();
   const globalConcurrencyLimit = loadGlobalConcurrencyLimitFromEnv();
   const globalSubagentCallBudget = loadGlobalSubagentCallBudgetFromEnv();
+  const sessionSubagentLimit = loadSessionSubagentConcurrencyLimitFromEnv();
   const globalBudgetId = process.env[GLOBAL_BUDGET_ID_ENV] ?? randomUUID();
   process.env[GLOBAL_BUDGET_ID_ENV] = globalBudgetId;
   if (taskRegistry && (globalTokenBudget !== undefined || globalSubagentCallBudget !== undefined || globalConcurrencyLimit !== undefined)) {
@@ -1385,6 +1445,7 @@ async function main(): Promise<void> {
       thinkingMode,
       globalTokenBudget,
       globalConcurrencyLimit,
+      ...(sessionSubagentLimit ? { sessionConcurrencyLimit: sessionSubagentLimit } : {}),
       parentRuntime,
     });
     cliSubagentBatchTool = createSubagentBatchTool({
@@ -1409,6 +1470,7 @@ async function main(): Promise<void> {
       thinkingMode,
       globalTokenBudget,
       globalConcurrencyLimit,
+      ...(sessionSubagentLimit ? { sessionConcurrencyLimit: sessionSubagentLimit } : {}),
       parentRuntime,
     });
     const enrichedTools = [...baseTools, cliSubagentTool as Tool, cliSubagentBatchTool as Tool];

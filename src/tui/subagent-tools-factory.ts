@@ -22,6 +22,8 @@ export type SubagentToolsFactoryDeps = {
   parentRuntime: AgentRuntimeRef;
   globalTokenBudget?: number;
   globalConcurrencyLimit?: number;
+  /** Per-session subagent concurrency cap (Grok Build coordinator admission, session scope). */
+  sessionConcurrencyLimit?: number;
   roleLlmConfigs?: Record<string, import("../llm/index.ts").LlmConfig>;
   sessionRoleLlmConfigs?: Record<string, import("../llm/index.ts").LlmConfig>;
   /** Enable the `search_orchestrate` tool. Default: false. */
@@ -35,6 +37,8 @@ export type SubagentToolsFactoryDeps = {
   orchestratorModelMapping?: Partial<Record<"light" | "standard" | "flagship", string>>;
   /** Structured progress callback for the search orchestrator. */
   onSearchOrchestrationEvent?: (event: SearchOrchestrationEvent) => void;
+  /** Stable project root that `isolation: "worktree"` subagents source their git worktrees from. */
+  worktreeSourceCwd?: string;
 };
 
 /**
@@ -78,8 +82,10 @@ export class SubagentToolsFactory {
         parentRuntime: deps.parentRuntime,
         globalTokenBudget: deps.globalTokenBudget,
         globalConcurrencyLimit: deps.globalConcurrencyLimit,
+        ...(deps.sessionConcurrencyLimit ? { sessionConcurrencyLimit: deps.sessionConcurrencyLimit } : {}),
         roleLlmConfigs: deps.roleLlmConfigs,
         sessionRoleLlmConfigs: deps.sessionRoleLlmConfigs,
+        ...(deps.worktreeSourceCwd ? { worktreeSourceCwd: deps.worktreeSourceCwd } : {}),
       };
       const subagent = createSubagentTool(sharedOptions) as Tool<SubagentArgs>;
       const tools: Tool[] = [

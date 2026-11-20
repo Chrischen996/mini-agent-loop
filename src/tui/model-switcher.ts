@@ -9,7 +9,19 @@ export type ModelSwitcherCallbacks = {
   openProfileList: (profileNames?: string[]) => void;
   activateSavedProfile: (profileName: string) => void;
   commitModelSetup: (setup: { model: ModelRef; baseUrl: string; apiKey: string; field: "apiKey" }, apiKey: string) => Promise<void>;
-  startModelSetup: (model: ModelRef, overrides: ModelSwitchOverrides) => void | Promise<void>;
+  startModelSetup: (model: ModelRef, overrides: ModelSwitchOverrides, options?: ModelSelectOptions) => void | Promise<void>;
+};
+
+export type ModelSelectOptions = {
+  /**
+   * Skip saved-profile reuse: open the credential setup form even when a
+   * saved profile or an environment key already matches the model. The model
+   * picker's catalog ("All models") side uses this so selecting a model
+   * re-enters its Base URL / API key / level with the API key field empty
+   * (the key must be re-entered, never reused silently); saved profiles are
+   * only activated from the configured side.
+   */
+  forceSetup?: boolean;
 };
 
 /**
@@ -19,12 +31,14 @@ export function selectModel(
   reference: string,
   overrides: ModelSwitchOverrides,
   callbacks: ModelSwitcherCallbacks,
+  options: ModelSelectOptions = {},
 ): void {
   const { openModelPicker, openProfileList, activateSavedProfile, commitModelSetup, startModelSetup } = callbacks;
+  const forceSetup = options.forceSetup === true;
 
   const applyModel = (model: ModelRef) => {
     const hasOverrides = Boolean(overrides.baseUrl || overrides.apiKey || overrides.protocol);
-    if (!hasOverrides) {
+    if (!hasOverrides && !forceSetup) {
       const store = loadProfileStoreSync();
       const reference = `${model.provider}/${model.id}`.toLowerCase();
       const savedProfiles = Object.entries(store?.profiles ?? {})
@@ -59,7 +73,7 @@ export function selectModel(
       );
       return;
     }
-    startModelSetup(model, overrides);
+    startModelSetup(model, overrides, forceSetup ? { forceSetup: true } : undefined);
   };
 
   const match = findExactModelReferenceMatch(reference, getAllModels());
