@@ -1143,9 +1143,14 @@ async function runAgentTurnInternal(
     ...(runPolicy ? cappedHistory : boundedHistory),
     ...initialBatch,
   ];
-  // Only policy mode mirrors the cap to the TUI; non-policy mode relies on
+  // Only policy mode mirrors the initial compaction to the TUI and counts it
+  // against the run's compaction allowance; non-policy mode relies on
   // compactHistory's token-based compaction which already handles long runs.
-  let pendingHistoryCapEvent = Boolean(runPolicy) && cappedHistory !== boundedHistory;
+  // `compactedHistory !== history` covers the keep-recent/char-budget
+  // compaction, while `cappedHistory !== boundedHistory` covers the hard
+  // 200-message cap — either one means the initial history was rewritten
+  // before the first model call and must be reported as a compaction.
+  let pendingHistoryCapEvent = Boolean(runPolicy) && (cappedHistory !== boundedHistory || compactedHistory !== history);
   const autocompactState: { consecutiveFailures?: number } = {};
   const appendPendingUserMessages = async (turn: number): Promise<boolean> => {
     const pending = await getPendingUserMessages?.();
@@ -1708,7 +1713,11 @@ async function runAgentTurnInternal(
     const turnTools = [...baseTools, ...skillTools];
     if (pendingHistoryCapEvent) {
       pendingHistoryCapEvent = false;
-      await emitHistoryCapCompaction(turn, turnTools, cappedHistory);
+      // The cap payload replaces only the initial history prefix; keep any
+      // inbox messages injected before this point and the initial user batch.
+      const baseLength = cappedHistory.length + initialBatch.length;
+      const injected = messages.slice(baseLength);
+      await emitHistoryCapCompaction(turn, turnTools, [...cappedHistory, ...initialBatch, ...injected]);
     }
 
     // Optional deterministic preflight + coordinator activation. This happens
