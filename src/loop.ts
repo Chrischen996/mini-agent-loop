@@ -1261,6 +1261,9 @@ async function runAgentTurnInternal(
     await triggerCheckpoint("interrupted");
   };
   const emitAssistantEvent = async (message: AssistantMessage, usage?: StreamChatUsage): Promise<void> => {
+    // Add message to history only once, here in emit
+    messages.push(message);
+    
     const budget = activeRuntimeRef?.globalBudgetState;
     let exceeded = false;
     if (budget && usage?.totalTokens) {
@@ -1428,7 +1431,6 @@ async function runAgentTurnInternal(
         return "continue";
       }
       emptyAssistantResponses = 0;
-      messages.push(assistant);
       await emitAssistantEvent(assistant, usage);
       
       // Check if this is a plan generation in planning phase
@@ -1450,7 +1452,6 @@ async function runAgentTurnInternal(
 
     // ── Has tool calls ─────────────────────────────────────────────
     emptyAssistantResponses = 0;
-    messages.push(assistant);
     await emitAssistantEvent(assistant, usage);
 
     // Checkpoint 2: received full tool calls, before executing tools

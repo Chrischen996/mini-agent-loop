@@ -998,8 +998,16 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             // the frozen-prefix baseline for dedup; it clears with the next
             // user turn or terminal event.
           };
+          
+          // Check if the last message is already an assistant message with the same content
+          // to avoid duplicates when the completed event has empty content but we have streamed text
+          const lastMsg = state.messages[state.messages.length - 1];
+          const isDuplicate = lastMsg?.kind === "assistant" 
+            && lastMsg.text === text 
+            && lastMsg.reasoning === reasoning;
+          
           const assistantMsg: ChatMessage = { kind: "assistant", text: text || "", ...(reasoning ? { reasoning } : {}) };
-          const newMessages: ChatMessage[] = (text || reasoning)
+          const newMessages: ChatMessage[] = (text || reasoning) && !isDuplicate
             ? [...state.messages, assistantMsg]
             : state.messages;
           const usedTokens = event.usage?.totalTokens ?? state.usedTokens;

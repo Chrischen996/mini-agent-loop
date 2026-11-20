@@ -557,7 +557,6 @@ export async function* streamChat(
           : "";
       if (terminalContent && !content) {
         content = terminalContent;
-        yield { type: "answer_delta", text: terminalContent };
       }
       for (const field of [choice.message.reasoning_content, choice.message.reasoning, choice.message.reasoning_text]) {
         if (typeof field === "string" && field.length > 0) {
