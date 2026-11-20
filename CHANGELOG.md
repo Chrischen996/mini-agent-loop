@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `npm run tui` dev bundle cache: the launcher (`src/tui/dev-launch.ts`)
+  keeps one Vite/SSR prebuilt bundle of the TUI graph in `.cache/tui-dev/`,
+  stamped with a content hash of `src/` plus `package.json`, and runs
+  `node .cache/tui-dev/tui.js` when it matches — startup drops from
+  1.15–1.25 s to ~0.84 s (0.66 s without npm's wrapper). When sources
+  changed, that launch still runs the live tsx path (never stale code) and a
+  detached builder refreshes the bundle for the next launch. Builds land in
+  `.cache/tui-dev.tmp` and are swapped in by rename, gated by an `O_EXCL`
+  lock with a 120s stale-lock takeover, and output goes to
+  `.cache/tui-dev-build.log`. Knobs: `MINI_AGENT_TUI_DEV_CACHE=0|refresh`
+  and `MINI_AGENT_TUI_DEV_CACHE_QUIET=1`.
+- `npm run tui` spawns `ink-main.tsx` directly instead of hopping through
+  `process-supervisor.ts` (same memory args, `MINI_AGENT_CHILD` marker, signal
+  forwarding and relaunch loop, ~0.2 s less startup), and runs the launcher
+  under plain `node` (Node ≥ 22.19 type stripping) rather than `tsx`.
 - Persistent thread goals (Codex-style), opt-in via `MINI_AGENT_GOALS=1`
   across CLI, TUI, and Web server:
   - One goal per session: objective, status (`active`, `paused`, `blocked`,
