@@ -31,6 +31,22 @@ import { RELAUNCH_EXIT_CODE } from "./relaunch-constants.ts";
 
 const cwd = process.cwd();
 
+/**
+ * Observe the deferred MCP handshake result for the in-app failure notice.
+ *
+ * The notice resolves only when a required server failed (optional failures
+ * stay visible through `mcpStatuses()`), and only after `whenReady()` has
+ * settled so the first frame is always painted before the failure path runs.
+ */
+function createMcpFailureNotice(
+  mcpRuntimePromise: Promise<Awaited<ReturnType<typeof createMcpRuntimeFromEnv>>>,
+): { promise: Promise<Error | undefined> } {
+  const promise = mcpRuntimePromise
+    .then((runtime) => runtime.whenReady().then(() => undefined))
+    .catch((error) => (error instanceof Error ? error : new Error(String(error))));
+  return { promise };
+}
+
 // Layout selection: `inline` runs the UI on the main screen buffer with sealed
 // transcript history flowing into the terminal's native scrollback via Ink's
 // `<Static>`; `alternate` (default) keeps everything in the alternate screen
@@ -78,15 +94,20 @@ async function runMain(): Promise<void> {
   });
   const codebaseRuntime = createCodebaseRuntimeFromEnv();
   // Kick off every independent startup task at once so the slowest one
-  // (usually the sandbox spawn or the MCP handshake) overlaps with the others
-  // instead of serializing on the first-frame path. Awaiting them below in the
-  // original order preserves the original error semantics: an MCP failure
-  // still closes the codebase runtime and aborts startup, while sandbox /
-  // bg-task failures are only logged and non-fatal.
-  const mcpRuntimePromise = createMcpRuntimeFromEnv(cwd).catch(async (error) => {
-    await codebaseRuntime.close();
+  // (usually the sandbox spawn) overlaps with the others instead of
+  // serializing on the first-frame path. MCP is deferred further: the runtime
+  // object exists immediately (empty snapshot, "connecting" statuses) and its
+  // handshakes run in parallel behind the first frame, so a slow or cold-start
+  // server (uvx downloading packages, remote HTTP, 30s+ timeouts) can never
+  // hold the UI hostage. A required-server failure surfaces as an in-app
+  // notice after the first frame instead of a black-screen abort.
+  const mcpRuntimePromise = createMcpRuntimeFromEnv(cwd, { deferConnect: true }).catch((error) => {
+    // Config parse errors still abort startup (nothing to defer), with the
+    // original cleanup semantics.
+    void codebaseRuntime.close();
     throw error;
   });
+  const mcpFailureNotice = createMcpFailureNotice(mcpRuntimePromise);
   const sandboxEnabled = process.env.MINI_AGENT_SANDBOX !== "0" && process.env.MINI_AGENT_SANDBOX !== "false";
   const sandboxRunnerPromise: Promise<Awaited<ReturnType<typeof createSandboxRunner>> | undefined> =
     sandboxEnabled
@@ -121,6 +142,9 @@ async function runMain(): Promise<void> {
   const mcpRuntime = await mcpRuntimePromise;
   const sandboxRunner = await sandboxRunnerPromise;
   const bgSuite = await bgSuitePromise;
+  // Handshakes are already running (deferConnect); the frame below renders
+  // with "connecting" statuses while they settle in the background.
+  void mcpRuntime.whenReady();
 
   try {
     let bgTaskDispose: (() => void) | undefined;
@@ -201,6 +225,7 @@ async function runMain(): Promise<void> {
         bgManagerForCwd={bgManagerForCwd}
         mcpStatuses={() => mcpRuntime.statuses()}
         mcpTools={() => mcpRuntime.snapshot()}
+        mcpFailure={mcpFailureNotice}
         layoutMode={layoutMode}
         writeStaticBurst={layoutMode === "inline" || layoutMode === "document" ? (text: string) => incrementalRenderer.emitStaticBurst(text) : undefined}
         requestClearScreen={() => incrementalRenderer.clearScreen()}
@@ -208,6 +233,13 @@ async function runMain(): Promise<void> {
       { stdout: incrementalStdout, stdin: terminalStdin },
     );
     bootTrace("after-render-call");
+    // The App subscribes to `mcpFailure` itself: a required-server failure
+    // surfaces as an in-app notice and exits the Ink app after the first
+    // frame; optional failures stay visible through `mcpStatuses()`.
+    void mcpFailureNotice.promise.then((failure) => {
+      if (!failure) return;
+      process.exitCode = 1;
+    }).catch(() => undefined);
     await app.waitUntilExit();
     terminalStdin.dispose();
     bgTaskDispose?.();

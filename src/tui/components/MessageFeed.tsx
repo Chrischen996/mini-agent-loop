@@ -184,10 +184,17 @@ type MessageFeedProps = {
   activeToolId?: string;
 };
 
-export function MessageFeed(props: MessageFeedProps): React.ReactElement {
+/**
+ * Memoized: prompt keystrokes re-render the parent (the input store is still
+ * subscribed at the App level for autocomplete/layout), and this boundary
+ * keeps the transcript/viewport projection — the most expensive subtree —
+ * out of that path. All props are reducer state slices or stable refs, so a
+ * shallow compare is sound.
+ */
+export const MessageFeed = React.memo(function MessageFeed(props: MessageFeedProps): React.ReactElement {
   bootProbe("feed-render");
   return MessageFeedInner(props);
-}
+});
 function MessageFeedInner({
   messages,
   streamingText,

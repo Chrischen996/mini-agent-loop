@@ -25,7 +25,7 @@ function riskColor(risk: PendingPermissionState["risk"]): string {
  * occupies six terminal rows (2 border rows + 4 content rows) so the feed
  * height budget can reserve it deterministically.
  */
-export function PermissionPanel({ request, width }: PermissionPanelProps): React.ReactElement {
+export const PermissionPanel = React.memo(function PermissionPanel({ request, width }: PermissionPanelProps): React.ReactElement {
   const accent = riskColor(request.risk);
   const argument = toolArgumentSummary(request.tool, request.arguments ?? {});
   return (
@@ -50,4 +50,4 @@ export function PermissionPanel({ request, width }: PermissionPanelProps): React
       </Box>
     </Box>
   );
-}
+});

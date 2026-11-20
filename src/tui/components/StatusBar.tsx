@@ -25,7 +25,11 @@ type StatusBarProps = {
   promptTokens?: number;  // Total prompt tokens for accurate cache percentage
 };
 
-export function StatusBar({ modelName, tokenEstimate, contextWindow, busy, status = "Ready", queuedCount = 0, bgTaskCount, mcpStatus, goalStatus, permissionMode, thinkingLevel, cacheReadTokens, promptTokens }: StatusBarProps): React.ReactElement {
+/**
+ * Pure render body, exported for direct-call tests (memo-wrapped components
+ * are not callable as functions).
+ */
+export function StatusBarStatic({ modelName, tokenEstimate, contextWindow, busy, status = "Ready", queuedCount = 0, bgTaskCount, mcpStatus, goalStatus, permissionMode, thinkingLevel, cacheReadTokens, promptTokens }: StatusBarProps): React.ReactElement {
   const segments = buildStatusSegments({
     modelName,
     cwd: undefined,
@@ -67,3 +71,10 @@ export function StatusBar({ modelName, tokenEstimate, contextWindow, busy, statu
     </Box>
   );
 }
+
+/**
+ * Memoized: the status bar re-renders only when one of its segments changes.
+ * During keystrokes and spinner ticks the parent re-renders with identical
+ * props, and this boundary keeps that work off the frame path.
+ */
+export const StatusBar = React.memo(StatusBarStatic);

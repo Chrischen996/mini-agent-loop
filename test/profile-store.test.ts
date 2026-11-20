@@ -7,10 +7,12 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   activateProfile,
+  clearProfileStoreSyncCache,
   deleteProfile,
   getActiveProfile,
   listProfiles,
   loadProfileStore,
+  loadProfileStoreSync,
   normalizeUrl,
   ProfileStoreValidationError,
   removeProfile,
@@ -474,5 +476,61 @@ describe("loadLlmConfigFromEnv — active profile takes precedence", () => {
     assert.equal(config.timeoutMs, 600_000);
     assert.equal(config.firstResponseTimeoutMs, 300_000);
     assert.equal(config.streamIdleTimeoutMs, 180_000);
+  });
+});
+
+// ─── loadProfileStoreSync cache ──────────────────────────────────────────────
+
+describe("loadProfileStoreSync cache", () => {
+  it("caches repeated reads by mtime+size and sees writes after save", async () => {
+    const storePath = tmpStorePath();
+    await mkdir(path.dirname(storePath), { recursive: true });
+    try {
+      clearProfileStoreSyncCache();
+      assert.equal(loadProfileStoreSync(storePath), null, "missing file reads as null");
+
+      const first = makeStore({
+        activeProfile: "a",
+        profiles: { a: SAMPLE_PROFILE },
+      });
+      await saveProfileStore(first, storePath);
+      const afterSave = loadProfileStoreSync(storePath);
+      assert.equal(afterSave?.activeProfile, "a", "save invalidates the cache");
+
+      // Cached hit: identical object identity across repeated calls.
+      assert.equal(loadProfileStoreSync(storePath), afterSave);
+      assert.equal(loadProfileStoreSync(storePath), afterSave);
+
+      // External rewrite with a changed mtime is observed.
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      const second = makeStore({
+        activeProfile: "b",
+        profiles: { b: SAMPLE_PROFILE },
+      });
+      await saveProfileStore(second, storePath);
+      assert.equal(loadProfileStoreSync(storePath)?.activeProfile, "b");
+    } finally {
+      clearProfileStoreSyncCache();
+      await rm(path.dirname(storePath), { recursive: true, force: true });
+    }
+  });
+
+  it("keys the cache per store path", async () => {
+    const firstPath = tmpStorePath();
+    const secondPath = tmpStorePath();
+    await mkdir(path.dirname(firstPath), { recursive: true });
+    await mkdir(path.dirname(secondPath), { recursive: true });
+    try {
+      clearProfileStoreSyncCache();
+      await saveProfileStore(makeStore({ activeProfile: "x" }), firstPath);
+      await saveProfileStore(makeStore({ activeProfile: "y" }), secondPath);
+      assert.equal(loadProfileStoreSync(firstPath)?.activeProfile, "x");
+      assert.equal(loadProfileStoreSync(secondPath)?.activeProfile, "y");
+      assert.equal(loadProfileStoreSync(firstPath)?.activeProfile, "x");
+    } finally {
+      clearProfileStoreSyncCache();
+      await rm(path.dirname(firstPath), { recursive: true, force: true });
+      await rm(path.dirname(secondPath), { recursive: true, force: true });
+    }
   });
 });

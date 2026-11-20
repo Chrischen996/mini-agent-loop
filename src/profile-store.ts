@@ -26,7 +26,7 @@
  */
 
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -388,20 +388,51 @@ export async function loadProfileStore(
 }
 
 /**
- * Synchronous variant used during startup in `loadLlmConfigFromEnv`.
+ * mtime+size key for the sync-load cache. One `statSync` per call is far
+ * cheaper than `readFileSync` + `JSON.parse` + schema validation, and keeps
+ * external edits visible without explicit invalidation.
+ */
+let syncLoadCache: { key: string; store: ModelProfileStore | null } | undefined;
+
+function profileStoreSyncKey(storePath: string): string | undefined {
+  try {
+    const stat = statSync(storePath);
+    return `${storePath}:${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Synchronous variant used during startup in `loadLlmConfigFromEnv` and on
+ * interactive paths (model switching, subagent role configs).
  * Returns `null` when the file is missing or unreadable without throwing.
+ *
+ * Cached by mtime+size: repeated calls within one turn hit the cache and only
+ * pay a single `stat`. `saveProfileStore` invalidates it so the next read
+ * observes the write even when mtime granularity hides it.
  */
 export function loadProfileStoreSync(
   storePath = resolveProfileStorePath()
 ): ModelProfileStore | null {
-  if (!existsSync(storePath)) return null;
+  const key = profileStoreSyncKey(storePath);
+  if (key !== undefined && syncLoadCache?.key === key) return syncLoadCache.store;
+  let store: ModelProfileStore | null;
+  if (key === undefined) return null;
   try {
     const text = readFileSync(storePath, "utf8");
     const parsed: unknown = JSON.parse(text);
-    return validateStore(parsed);
+    store = validateStore(parsed);
   } catch {
-    return null;
+    store = null;
   }
+  syncLoadCache = { key, store };
+  return store;
+}
+
+/** Test/diagnostics hook: drop the sync-load cache (see `saveProfileStore`). */
+export function clearProfileStoreSyncCache(): void {
+  syncLoadCache = undefined;
 }
 
 // ─── Save (Atomic) ────────────────────────────────────────────────────────────
@@ -418,6 +449,10 @@ export async function saveProfileStore(
   await mkdir(dir, { recursive: true });
 
   const content = JSON.stringify(store, null, 2) + "\n";
+  // The rename below changes the file identity; drop the cached read so the
+  // next `loadProfileStoreSync` cannot serve stale profiles (mtime-only
+  // invalidation can miss sub-millisecond write bursts in tests).
+  clearProfileStoreSyncCache();
   const tmpPath = `${storePath}.${randomUUID()}.tmp`;
   try {
     await writeFile(tmpPath, content, { encoding: "utf8" });

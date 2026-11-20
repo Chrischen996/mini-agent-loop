@@ -237,8 +237,12 @@ export function TodoPanelStatic({
 /**
  * Live TodoPanel with built-in spinner animation for `in_progress` items.
  * Use `TodoPanelStatic` in tests.
+ *
+ * Memoized with a shallow prop compare: the reducer passes a new `todos`
+ * array only when the todo set actually changes (see `todoRevision`), so a
+ * parent re-render from keystrokes or spinner ticks skips the whole panel.
  */
-export function TodoPanel(props: TodoPanelProps): React.ReactElement | null {
+export const TodoPanel = React.memo(function TodoPanel(props: TodoPanelProps): React.ReactElement | null {
   const items = resolveTodoItems({ plan: props.plan, todos: props.todos });
   const hasInProgress = items.some((item) => item.status === "in_progress");
 
@@ -251,4 +255,9 @@ export function TodoPanel(props: TodoPanelProps): React.ReactElement | null {
   }, [hasInProgress]);
 
   return <TodoPanelStatic {...props} now={now} />;
-}
+}, (previous, next) =>
+  previous.plan === next.plan
+  && previous.todos === next.todos
+  && previous.viewMode === next.viewMode
+  && previous.maxVisibleItems === next.maxVisibleItems
+  && previous.width === next.width);

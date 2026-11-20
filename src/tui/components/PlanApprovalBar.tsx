@@ -29,7 +29,7 @@ function countRisks(plan: ExecutionPlan): { high: number; medium: number; total:
  * `useKeyboardHandler` and are unchanged. The layout reserves the full
  * bordered card footprint, including up to four step rows.
  */
-export function PlanApprovalBar({ plan, width }: PlanApprovalBarProps): React.ReactElement {
+export const PlanApprovalBar = React.memo(function PlanApprovalBar({ plan, width }: PlanApprovalBarProps): React.ReactElement {
   const risks = countRisks(plan);
   return (
     <Box flexDirection="column" paddingX={1} borderStyle={panelBorderStyle()} borderColor={C.primary} width={width} minWidth={0} overflow="hidden">
@@ -55,4 +55,4 @@ export function PlanApprovalBar({ plan, width }: PlanApprovalBarProps): React.Re
       <Text color={C.muted} dimColor>A approve  ·  R reject</Text>
     </Box>
   );
-}
+});

@@ -75,6 +75,8 @@ export class McpRuntime {
   private readonly assignedToolNames = new Map<string, string>();
   private readonly clientFactory: McpClientFactory;
   private closed = false;
+  /** In-flight initial handshakes when created with `deferConnect`. */
+  private initialConnects: Promise<void>[] = [];
   readonly configPath: string | undefined;
 
   private constructor(configPath: string | undefined, clientFactory: McpClientFactory) {
@@ -84,7 +86,18 @@ export class McpRuntime {
 
   static async create(
     loaded: LoadedMcpConfig | undefined,
-    options: { signal?: AbortSignal; clientFactory?: McpClientFactory } = {},
+    options: {
+      signal?: AbortSignal;
+      clientFactory?: McpClientFactory;
+      /**
+       * Kick off every server handshake in parallel without awaiting it.
+       * The returned runtime is immediately usable (empty tool snapshot,
+       * "connecting" statuses); `whenReady()` resolves once the handshakes
+       * settle and rejects when a required server failed. Callers that need
+       * the old "await everything, fail fast" behavior omit this flag.
+       */
+      deferConnect?: boolean;
+    } = {},
   ): Promise<McpRuntime> {
     const runtime = new McpRuntime(loaded?.path, options.clientFactory ?? (createStdioMcpClient as McpClientFactory));
     if (!loaded) return runtime;
@@ -105,7 +118,20 @@ export class McpRuntime {
         },
       };
       runtime.servers.push(server);
-      if (!config.enabled) continue;
+    }
+
+    if (options.deferConnect) {
+      const connects: Promise<void>[] = [];
+      for (const server of runtime.servers) {
+        if (!server.config.enabled) continue;
+        connects.push(runtime.startConnect(server, true, options.signal));
+      }
+      runtime.beginInitialConnects(connects);
+      return runtime;
+    }
+
+    for (const server of runtime.servers) {
+      if (!server.config.enabled) continue;
       try {
         await runtime.startConnect(server, true, options.signal);
       } catch (error) {
@@ -114,6 +140,26 @@ export class McpRuntime {
       }
     }
     return runtime;
+  }
+
+  private beginInitialConnects(connects: Promise<void>[]): void {
+    this.initialConnects = connects;
+    // Mark rejections handled immediately so a fast required-server failure
+    // cannot fire an unhandledRejection warning before any consumer calls
+    // `whenReady()`; each real consumer still observes the rejection.
+    if (connects.length > 0) void Promise.all(connects).catch(() => undefined);
+  }
+
+  /**
+   * Resolve once the deferred initial handshakes settle. Rejects when a
+   * required server failed; optional failures surface through `statuses()`.
+   * Safe to call any number of times and at any point in the runtime's life.
+   */
+  whenReady(): Promise<void> {
+    const connects = this.initialConnects;
+    return connects.length === 0
+      ? Promise.resolve()
+      : Promise.all(connects).then(() => undefined);
   }
 
   private secrets(config: McpServerConfig): string[] {
@@ -435,6 +481,8 @@ export async function createMcpRuntimeFromEnv(
     environment?: NodeJS.ProcessEnv;
     signal?: AbortSignal;
     clientFactory?: McpClientFactory;
+    /** Hand off to `McpRuntime.create({ deferConnect })` for TUI startup. */
+    deferConnect?: boolean;
   } = {},
 ): Promise<McpRuntime> {
   const loaded = await loadMcpConfigFromEnv(workspace, options.environment);

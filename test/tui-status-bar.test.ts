@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import React from "react";
 import { describe, it } from "node:test";
 import { Box as InkBox, Text as InkText } from "ink";
-import { StatusBar } from "../src/tui/components/StatusBar.tsx";
+import { StatusBarStatic as StatusBar } from "../src/tui/components/StatusBar.tsx";
 
 type ElementWithChildren = React.ReactElement<{ children?: React.ReactNode }>;
 

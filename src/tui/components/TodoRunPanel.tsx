@@ -15,7 +15,7 @@ type TodoRunPanelProps = {
  * Visual confirmation panel for a pending todo run plan.
  * Shows the dispatch plan and awaits user confirmation (A) or cancellation (Esc).
  */
-export function TodoRunPanel({ plan, width = 80, onConfirm, onCancel }: TodoRunPanelProps): React.ReactElement {
+export const TodoRunPanel = React.memo(function TodoRunPanel({ plan, width = 80, onConfirm, onCancel }: TodoRunPanelProps): React.ReactElement {
   const running = plan.plan.tasks.some((t) => t.status === "running" || t.status === "completed" || t.status === "failed");
 
   return (
@@ -46,4 +46,4 @@ export function TodoRunPanel({ plan, width = 80, onConfirm, onCancel }: TodoRunP
       </Box>
     </Box>
   );
-}
+});

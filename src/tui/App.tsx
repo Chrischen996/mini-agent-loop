@@ -1,4 +1,4 @@
-import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect } from "react";
+import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect, useSyncExternalStore } from "react";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
@@ -91,13 +91,13 @@ import { estimateViewportContentHeight, buildSealedStaticItems, streamingAssista
 import { resolveTuiLayoutMode, type TuiLayoutMode } from "./layout-mode.ts";
 import { bootProbe } from "./boot-trace.ts";
 import { applyTheme, persistThemeName, formatThemeListText, activeThemeName, shouldPromptForThemeAtStartup } from "./theme.ts";
-import { computeCommitBoundary, rowTexts, assistantSealOverlap, collectResizeRefreshRows } from "./stream-commit.ts";
+import { computeCommitBoundary, rowTexts, assistantSealRemainingRows, collectResizeRefreshRows } from "./stream-commit.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
 import { resolveAtRefs } from "./at-refs-resolver.ts";
 import { runDirectTool } from "./direct-tool-runner.ts";
 import { parseTodoCommand, todoViewModeForCommand } from "./todo-commands.ts";
 import { addPendingImage, handlePasteImage } from "./image-handler.ts";
-import { activateSavedModelProfile, startModelSetup, commitModelSetup, openProfileList } from "./profile-manager.ts";
+import { activateSavedModelProfile, startModelSetup, commitModelSetup, deleteConfiguredModelProfile, openProfileList, resolveModelDeleteConfirmation } from "./profile-manager.ts";
 import { selectModel, type ModelSelectOptions } from "./model-switcher.ts";
 import { SubagentToolsFactory } from "./subagent-tools-factory.ts";
 import { formatAmbiguousSessionNotice, parseForeignResumeCommand, parseResumeCommand, restoreTuiSession, toPersistedTodos } from "./session-serialization.ts";
@@ -122,6 +122,7 @@ import { restoreTuiLlmConfig, restoreTuiModelConfig, serializeTuiModelConfig } f
 
 import { TUI_COLORS as C } from "./theme.ts";
 import { bgTaskStatusGlyph } from "./bg-task-status-color.ts";
+import { createInputStore, type InputStore } from "./input-store.ts";
 import { estimatePromptInputRows, PromptInput } from "./components/PromptInput.tsx";
 import {
   sanitizeInput,
@@ -187,6 +188,13 @@ type AppProps = {
   mcpStatuses?: () => readonly McpServerStatus[];
   /** Current MCP tool catalog, used by `/mcp <server>` details. */
   mcpTools?: () => readonly Tool[];
+  /**
+   * Resolves after the first frame with the required-MCP failure, if any.
+   * Deferred MCP startup (ink-main) keeps the UI alive during handshakes and
+   * surfaces a required-server failure as an in-app notice instead of a
+   * black-screen abort before the first frame.
+   */
+  mcpFailure?: { promise: Promise<Error | undefined> };
   /**
    * Terminal layout mode. `inline` renders sealed transcript history into the
    * terminal's native scrollback (no alternate screen); `alternate` keeps the
@@ -270,6 +278,23 @@ function useLazyRef<T>(factory: () => T): React.MutableRefObject<T> {
   return ref as React.MutableRefObject<T>;
 }
 
+/**
+ * Wall-clock ticker for the goal status segment, 1 Hz, only while a goal is
+ * active AND a turn is running. Returning a stable timestamp otherwise keeps
+ * the memoized segment string stable so StatusBar's memo boundary holds.
+ */
+function useGoalStatusTicker(goalState: GoalSnapshot | null, busy: boolean): number {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const ticking = goalState?.status === "active" && busy;
+  useEffect(() => {
+    if (!ticking) return;
+    setNowMs(Date.now());
+    const timer = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [ticking]);
+  return nowMs;
+}
+
 async function resolveSessionWorkspaceCwd(projectCwd: string, candidatePath?: string): Promise<string> {
   const root = await realpath(projectCwd).catch(() => path.resolve(projectCwd));
   const requested = path.resolve(candidatePath ?? root);
@@ -302,7 +327,7 @@ async function startupSessionCwd(projectCwd: string, request: StartupSessionRequ
   return resolveSessionWorkspaceCwd(projectCwd, session?.cwd);
 }
 
-function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSessionRequest, agentTools, allTools, agentToolsForCwd, allToolsForCwd, bgManagerForCwd, mcpStatuses, mcpTools, layoutMode, writeStaticBurst, requestClearScreen, agentId, initialSessionId, initialPrompt, active, dashboardOpen, onOpenDashboard, onCloseDashboard, onSnapshot, onWorkspaceChange }: AgentSessionAppProps): React.ReactElement | null {
+function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSessionRequest, agentTools, allTools, agentToolsForCwd, allToolsForCwd, bgManagerForCwd, mcpStatuses, mcpTools, mcpFailure, layoutMode, writeStaticBurst, requestClearScreen, agentId, initialSessionId, initialPrompt, active, dashboardOpen, onOpenDashboard, onCloseDashboard, onSnapshot, onWorkspaceChange }: AgentSessionAppProps): React.ReactElement | null {
   bootProbe("session-render");
   const effectiveLayoutMode = layoutMode ?? resolveTuiLayoutMode();
   // Document layout shares the inline burst pipeline; only its frame policy,
@@ -396,7 +421,6 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   }, [cwd, bgManagerForCwd]);
   const [bgTaskCount, setBgTaskCount] = useState(0);
   const [bgPanelOpen, setBgPanelOpen] = useState(false);
-  const [nowMs, setNowMs] = useState(() => Date.now());
   const [pendingTodoRunPlan, setPendingTodoRunPlan] = useState<import("./state.ts").PendingTodoRunPlan | undefined>(undefined);
   const confirmedTodoRunRef = useRef<import("./state.ts").PendingTodoRunPlan | undefined>(undefined);
   const refreshBgTaskCount = useCallback(async () => {
@@ -529,12 +553,17 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   }, [getBgManager, getSubagentTools, subagentFactory]);
 
   const [state, dispatch] = useReducer(tuiReducer, createInitialState(llm.model));
-  useEffect(() => {
-    if (goalState?.status !== "active" || !state.busy) return;
-    setNowMs(Date.now());
-    const timer = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [goalState?.status, state.busy]);
+  // Goal status-line text with a LOCALIZED 1 Hz tick: only this hook's state
+  // updates every second while a goal is active and a turn is running; the
+  // whole AgentSessionApp tree no longer re-renders on the beat (the tick used
+  // to live in an App-level `nowMs` state).
+  const goalNowMs = useGoalStatusTicker(goalState, state.busy);
+  const goalStatus = useMemo(
+    () => goalState && goalConfig.enabled
+      ? goalStatusSegmentElapsed(goalState, state.busy ? goalNowMs : Date.now(), state.taskStartedAt)
+      : undefined,
+    [goalState, goalConfig.enabled, state.busy, goalNowMs, state.taskStartedAt],
+  );
   const [foregroundCommandWaiting, setForegroundCommandWaiting] = useState(false);
   const [sendableWaitWaiting, setSendableWaitWaiting] = useState(false);
   const handleSubmitRef = useRef<(text: string) => Promise<void>>(async () => undefined);
@@ -623,7 +652,12 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
   const sendNowPendingRef = useRef(false);
   const sendNowWaitToolIdsRef = useRef(new Set<string>());
   const [queuedCount, setQueuedCount] = useState(0);
-  const [input, setInput] = useState("");
+  // The prompt text lives in an external store instead of component state:
+  // a keystroke no longer re-renders the whole AgentSessionApp tree (feed,
+  // status bar, overlays). Only the subscribed PromptInput re-renders.
+  const inputStore = useLazyRef(() => createInputStore()).current;
+  const input = useSyncExternalStore(inputStore.subscribe, inputStore.get, inputStore.get);
+  const setInput = useCallback((value: string) => inputStore.set(value), [inputStore]);
   // Bump to remount the text input so ink-text-input resets cursorOffset to value.length
   // after programmatic completions (Tab @file / slash commands).
   const [inputEpoch, setInputEpoch] = useState(0);
@@ -1001,9 +1035,37 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       }
     };
     refresh();
-    const timer = setInterval(refresh, 5000);
-    return () => clearInterval(timer);
+    // Faster cadence while any server is still connecting: with deferred MCP
+    // startup the status bar flips from "connecting" to ready/error soon after
+    // the first frame, and a 5s wait feels broken for that transition.
+    const timer = setInterval(() => {
+      refresh();
+      const stillConnecting = mcpStatuses().some((status) => status.state === "connecting");
+      if (!stillConnecting) clearInterval(timer);
+    }, 500);
+    const settleTimer = setTimeout(() => clearInterval(timer), 30_000);
+    return () => {
+      clearInterval(timer);
+      clearTimeout(settleTimer);
+    };
   }, [mcpStatuses]);
+
+  // Required-MCP failure after deferred startup: show a notice in the live UI
+  // (never a silent black-screen abort) and exit nonzero after the user sees it.
+  useEffect(() => {
+    if (!mcpFailure) return;
+    let cancelled = false;
+    void mcpFailure.promise.then((failure) => {
+      if (cancelled || !failure) return;
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "MCP unavailable",
+        text: `${failure.message}\nRequired MCP servers must start before the session can run. Fix MINI_AGENT_MCP_CONFIG or mark the server optional, then restart.`,
+      });
+      exit();
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [mcpFailure, dispatch, exit]);
 
   const {
     acMode,
@@ -1215,6 +1277,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
     : state.busy ? "Working; Enter queues · Ctrl+Enter sends now"
     : acMode === "model-picker" ? "Search models"
       : acMode === "model-setup" && modelSetup?.field === "baseUrl" ? "Enter Base URL"
+        : acMode === "model-setup" && modelSetup?.field === "deleteConfirm" ? "y to delete this model, n to cancel"
         : acMode === "model-setup" ? "Enter API key (or leave blank to use an environment variable)"
           : acMode === "profile-name" ? "Enter a profile name (for example coding-fast)"
             : acMode === "profile-list" ? "↑↓ select profile, Enter activate"
@@ -1537,6 +1600,51 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
 
     if (acModeRef.current === "model-setup" && modelSetupRef.current) {
       const activeModelSetup = modelSetupRef.current;
+      const deletion = resolveModelDeleteConfirmation(activeModelSetup, trimmed);
+      if (deletion.action === "confirm") {
+        const resumeField = activeModelSetup.field === "apiKey" ? "apiKey" : "baseUrl";
+        setModelSetup({ ...activeModelSetup, field: "deleteConfirm", resumeField, error: undefined });
+        setInput("");
+        return;
+      }
+      if (deletion.action === "cancel") {
+        const resumeField = activeModelSetup.resumeField ?? "baseUrl";
+        setModelSetup({ ...activeModelSetup, field: resumeField, error: undefined });
+        setInput(resumeField === "apiKey" ? activeModelSetup.apiKey : "");
+        return;
+      }
+      if (deletion.action === "delete") {
+        try {
+          const { profileName } = await deleteConfiguredModelProfile(activeModelSetup);
+          const wasActive = `${llmRef.current.provider}/${llmRef.current.model}` === `${activeModelSetup.model.provider}/${activeModelSetup.model.id}`;
+          if (wasActive) {
+            const nextLlm = loadLlmConfigFromEnv();
+            llmRef.current = nextLlm;
+            setLlm(nextLlm);
+            dispatch({ type: "MODEL_CHANGED", modelName: nextLlm.model });
+            await persistSessionSnapshot(historyRef.current, nextLlm);
+          }
+          dispatch({
+            type: "ADD_NOTICE",
+            title: "Model",
+            text: `Profile "${profileName}" deleted.`,
+          });
+          setModelSetup(undefined);
+          setInput("");
+          setAcMode(null);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const missing = /does not exist/i.test(message);
+          setModelSetup({
+            ...activeModelSetup,
+            field: missing ? (activeModelSetup.resumeField ?? "baseUrl") : "deleteConfirm",
+            error: missing ? "No saved profile to delete." : message,
+          });
+          setInput("");
+        }
+        return;
+      }
+      if (activeModelSetup.field === "deleteConfirm") return;
       if (activeModelSetup.field === "baseUrl") {
         const baseUrl = trimmed.replace(/\/$/, "");
         setModelSetup({ ...activeModelSetup, baseUrl, field: "apiKey", error: undefined });
@@ -2614,17 +2722,21 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
       let rows = item.rows;
       if (isDocumentLayout && item.kind === "assistant") {
         // The streamed prefix is already frozen in the scrollback; skip it.
-        const committedTexts = [
-          ...rowTexts(activeRetryBaseline ? streamingAssistantRows(activeRetryBaseline, {
+        const baselineRows = activeRetryBaseline
+          ? streamingAssistantRows(activeRetryBaseline, {
             width: termWidth,
             thinkingMode: state.thinkingMode,
             cache: heightCacheRef.current,
-          }) : []),
-          ...ledger.texts,
-        ];
+          })
+          : [];
+        const committedTexts: string[] = [...rowTexts(baselineRows), ...ledger.texts];
+        // Each projection starts with the shared blank gap row; drop the seam
+        // gap so the prefix match stays contiguous across a retry boundary.
+        if (baselineRows.length > 0 && ledger.texts.length > 0 && committedTexts[baselineRows.length] === "") {
+          committedTexts.splice(baselineRows.length, 1);
+        }
         if (committedTexts.length > 0) {
-          const overlap = assistantSealOverlap(rows, committedTexts);
-          if (overlap > 0) rows = rows.slice(overlap);
+          rows = assistantSealRemainingRows(rows, committedTexts);
         }
         ledger.offset = 0;
         ledger.rowCount = 0;
@@ -2632,8 +2744,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
         ledger.lastText = "";
         activeRetryBaseline = undefined;
       }
-      const burst = formatSealedRowsText(rows);
-      if (burst) writeStaticBurst(burst);
+      if (rows.length > 0) writeStaticBurst(formatSealedRowsText(rows));
     }
     // Clear the state baseline whenever this batch observed one, even if the
     // assistant item consumed it: commit suppression must not outlive the
@@ -3032,9 +3143,7 @@ function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSes
           queuedCount={queuedCount}
           bgTaskCount={bgTaskCount}
           mcpStatus={mcpStatus}
-          goalStatus={goalState && goalConfig.enabled
-            ? goalStatusSegmentElapsed(goalState, state.busy ? nowMs : Date.now(), state.taskStartedAt)
-            : undefined}
+          goalStatus={goalStatus}
           permissionMode={state.permissionMode}
           thinkingLevel={llm.thinkingLevel ?? (llm.reasoning ? "medium" : "off")}
           cacheReadTokens={state.cacheReadTokens}

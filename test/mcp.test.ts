@@ -595,4 +595,107 @@ describe("MCP runtime", () => {
     };
     assert.throws(() => mergeToolSets([tool], [{ ...tool }]), /Duplicate tool name/);
   });
+
+  it("deferConnect returns a usable runtime immediately and whenReady resolves after handshakes", async () => {
+    let resolveFactory: ((connection: McpClientConnection) => void) | undefined;
+    const factoryCalledAt: number[] = [];
+    const slowFactory: McpClientFactory = () => new Promise<McpClientConnection>((resolve) => {
+      factoryCalledAt.push(Date.now());
+      resolveFactory = resolve;
+    });
+    const runtimePromise = McpRuntime.create({
+      path: "inline",
+      servers: [fixtureServer({ required: false })],
+    }, { clientFactory: slowFactory, deferConnect: true });
+
+    // The runtime object is usable before any handshake completes.
+    const first = await runtimePromise;
+    assert.equal(first.statuses()[0]?.state, "connecting");
+    assert.deepEqual(first.snapshot(), []);
+    // toolProvider is callable pre-ready and returns just the base tools.
+    const localTool: Tool = {
+      name: "local",
+      description: "local",
+      parameters: { type: "object" },
+      execute: async () => ({ content: "local" }),
+    };
+    const tools = first.toolProvider([localTool]);
+    assert.deepEqual(tools().map((tool) => tool.name), ["local"]);
+
+    // Handshakes settle in the background; whenReady tracks them.
+    const ready = first.whenReady();
+    resolveFactory!({
+      listTools: async () => [{ name: "echo", inputSchema: { type: "object" } }],
+      callTool: async () => ({ content: [] }),
+      close: async () => undefined,
+    });
+    await ready;
+    await waitFor(() => first.statuses()[0]?.state === "ready");
+    assert.ok(first.snapshot().some((tool) => tool.name.startsWith("mcp__")));
+    // whenReady is idempotent after settle.
+    await first.whenReady();
+
+    // The factory was invoked immediately (parallel start), not on first use.
+    assert.equal(factoryCalledAt.length, 1);
+    await first.close();
+    await runtimePromise;
+  });
+
+  it("deferConnect rejects whenReady for a required failure but keeps the runtime closeable", async () => {
+    const runtime = await McpRuntime.create({
+      path: "inline",
+      servers: [fixtureServer({ required: true, reconnect: false })],
+    }, {
+      clientFactory: async () => { throw new Error("offline"); },
+      deferConnect: true,
+    });
+    try {
+      await assert.rejects(runtime.whenReady(), /Required MCP server fixture failed: offline/);
+      // The runtime still exposes statuses and a safe empty snapshot.
+      assert.equal(runtime.statuses()[0]?.state, "error");
+      assert.deepEqual(runtime.snapshot(), []);
+    } finally {
+      await runtime.close();
+    }
+    assert.equal(runtime.statuses()[0]?.state, "closed");
+  });
+
+  it("deferConnect starts every enabled server handshake in parallel", async () => {
+    const started: string[] = [];
+    const release: Array<() => void> = [];
+    const runtime = await McpRuntime.create({
+      path: "inline",
+      servers: [
+        fixtureServer({ id: "first", required: false, reconnect: false }),
+        fixtureServer({ id: "second", required: false, reconnect: false }),
+      ],
+    }, {
+      clientFactory: async (config) => {
+        started.push(config.id);
+        await new Promise<void>((resolve) => release.push(resolve));
+        return {
+          listTools: async () => [{ name: "ping", inputSchema: { type: "object" } }],
+          callTool: async () => ({ content: [] }),
+          close: async () => undefined,
+        };
+      },
+      deferConnect: true,
+    });
+    try {
+      // Both handshakes are in flight before either resolves.
+      await waitFor(() => started.length === 2);
+      assert.deepEqual(started.slice().sort(), ["first", "second"]);
+      release.forEach((releaseServer) => releaseServer());
+      await runtime.whenReady();
+      await waitFor(() => runtime.statuses().every((status) => status.state === "ready"));
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("whenReady resolves immediately for a runtime without servers", async () => {
+    const runtime = await McpRuntime.create(undefined, { deferConnect: true });
+    await runtime.whenReady();
+    await runtime.close();
+  });
 });

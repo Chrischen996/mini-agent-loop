@@ -416,14 +416,55 @@ function parseCustomModels(raw: string | undefined): ModelRef[] {
   return models;
 }
 
+/**
+ * Cache for {@link getAllModels}, keyed by the inputs that can change the
+ * result: the `MINI_AGENT_MODELS` raw string, the profile-store stat key
+ * (mtime+size, already cheap), and the explicit-overlay identity.
+ *
+ * The builtin catalog is a constant, so repeated calls on the interactive
+ * path (model autocomplete, reference matching, subagent tool creation) skip
+ * re-parsing custom model definitions and re-deduplicating the large list.
+ * A new object identity from `setPersistedCustomProviderModels` (or
+ * `clearPersistedCustomProviderModelsOverride`) invalidates automatically.
+ */
+let allModelsCache: {
+  modelsSource: string;
+  storeKey: string;
+  overlaySource: unknown;
+  models: ModelRef[];
+} | undefined;
+
+function profileStoreKey(): string {
+  try {
+    const storePath = resolveProfileStorePath();
+    const stat = statSync(storePath);
+    return `${storePath}:${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return "";
+  }
+}
+
 export function getAllModels(env: NodeJS.ProcessEnv = process.env): ModelRef[] {
+  const modelsSource = env.MINI_AGENT_MODELS ?? "";
+  const storeKey = explicitPersistedModels === undefined ? profileStoreKey() : "";
+  const overlaySource = explicitPersistedModels;
+  if (
+    allModelsCache
+    && allModelsCache.modelsSource === modelsSource
+    && allModelsCache.storeKey === storeKey
+    && allModelsCache.overlaySource === overlaySource
+  ) {
+    return allModelsCache.models;
+  }
   const models = [
     ...BUILT_IN_MODELS,
-    ...parseCustomModels(env.MINI_AGENT_MODELS),
+    ...parseCustomModels(modelsSource),
     ...getPersistedCustomProviderModels(),
   ];
   const unique = new Map(models.map((model) => [`${model.provider}/${model.id}`.toLowerCase(), model]));
-  return [...unique.values()];
+  const result = [...unique.values()];
+  allModelsCache = { modelsSource, storeKey, overlaySource, models: result };
+  return result;
 }
 
 /**
