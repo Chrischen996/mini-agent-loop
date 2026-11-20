@@ -34,6 +34,7 @@
   "scripts": {
     "start": "tsx src/cli.ts",
     "tui": "node --import tsx src/tui/process-supervisor.ts",
+    "tui:prod": "npm run build && node dist/tui-supervisor.js",
     "web:start": "tsx src/web-launcher.ts",
     "dev": "tsx watch src/server.ts",
     "dev:server": "tsx watch src/server.ts",

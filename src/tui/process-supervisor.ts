@@ -53,21 +53,33 @@ export function getMemoryNodeArgs(): string[] {
 // Spawn helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * True when `entry` is TypeScript source that only runs behind the tsx loader.
+ *
+ * This is deliberately extension-based instead of a `dist/` path sniff: a
+ * bundled supervisor lives *in* `.../dist`, so its directory never carries a
+ * trailing separator and the old "does the path contain /dist/" test could
+ * never match. That check silently mis-resolved the packaged bin to
+ * `dist/ink-main.tsx` (MODULE_NOT_FOUND) and forced the tsx loader onto an
+ * already-bundled entry.
+ */
+export function needsTsxLoader(entry: string): boolean {
+  return /\.(?:ts|tsx|mts)$/i.test(entry);
+}
+
 /** Resolve the heavy child entry point relative to this supervisor file. */
 export function resolveChildEntry(): string {
   const override = process.env.MINI_AGENT_CHILD_ENTRY;
   if (override) return override;
 
-  const currentDir = path.dirname(fileURLToPath(import.meta.url));
+  const supervisorPath = fileURLToPath(import.meta.url);
+  const currentDir = path.dirname(supervisorPath);
 
   // Production bundle: dist/tui-supervisor.js lives next to dist/tui.js.
-  const prodEntry = path.join(currentDir, "tui.js");
-  if (currentDir.includes(`${path.sep}dist${path.sep}`)) {
-    return prodEntry;
-  }
-
   // Dev mode (tsx): src/tui/ink-main.tsx lives next to this module.
-  return path.join(currentDir, "ink-main.tsx");
+  return needsTsxLoader(supervisorPath)
+    ? path.join(currentDir, "ink-main.tsx")
+    : path.join(currentDir, "tui.js");
 }
 
 /** Build the argv + env for spawning the child process. */
@@ -76,7 +88,7 @@ export function getSpawnConfig(
   scriptArgs: string[],
 ): { spawnArgs: string[]; env: NodeJS.ProcessEnv } {
   const childEntry = resolveChildEntry();
-  const isDev = !childEntry.includes(`${path.sep}dist${path.sep}`);
+  const isDev = needsTsxLoader(childEntry);
 
   const spawnArgs = [
     ...memoryArgs,
@@ -126,7 +138,7 @@ async function run(): Promise<void> {
   // the code path safe across dev (tsx) and production (ESM bundle) layouts.
   if (process.env.MINI_AGENT_NO_RELAUNCH || process.env.MINI_AGENT_CHILD) {
     const childEntry = resolveChildEntry();
-    const isDev = childEntry.includes(`${path.sep}src${path.sep}`);
+    const isDev = needsTsxLoader(childEntry);
     const spawnArgs: string[] = [
       ...(isDev ? ["--import", "tsx"] : []),
       childEntry,

@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
-import { queryCursorRow, type ProbeStdin, type ProbeStdout } from "../src/tui/cursor-probe.ts";
+import {
+  CURSOR_PROBE_TIMEOUT_ENV,
+  DEFAULT_CURSOR_PROBE_TIMEOUT_MS,
+  queryCursorRow,
+  resolveCursorProbeTimeoutFromEnv,
+  type ProbeStdin,
+  type ProbeStdout,
+} from "../src/tui/cursor-probe.ts";
 import { createTerminalStdin } from "../src/tui/terminal-stdin.ts";
 
 type Harness = {
@@ -156,5 +163,39 @@ describe("TUI startup cursor probe", () => {
     assert.equal(result.row, 7);
     assert.equal(adapter.isRaw, false);
     adapter.dispose();
+  });
+});
+
+describe("Cursor probe timeout configuration", () => {
+  it("defaults to the documented timeout", () => {
+    assert.equal(DEFAULT_CURSOR_PROBE_TIMEOUT_MS, 300);
+    assert.equal(resolveCursorProbeTimeoutFromEnv({}), 300);
+  });
+
+  it("reads MINI_AGENT_CURSOR_PROBE_MS and clamps junk", () => {
+    assert.equal(resolveCursorProbeTimeoutFromEnv({ [CURSOR_PROBE_TIMEOUT_ENV]: "120" }), 120);
+    assert.equal(resolveCursorProbeTimeoutFromEnv({ [CURSOR_PROBE_TIMEOUT_ENV]: "0" }), 0, "0 disables the probe");
+    assert.equal(resolveCursorProbeTimeoutFromEnv({ [CURSOR_PROBE_TIMEOUT_ENV]: "-5" }), 300);
+    assert.equal(resolveCursorProbeTimeoutFromEnv({ [CURSOR_PROBE_TIMEOUT_ENV]: "abc" }), 300);
+    assert.equal(resolveCursorProbeTimeoutFromEnv({ [CURSOR_PROBE_TIMEOUT_ENV]: "999999" }), 5000);
+  });
+
+  it("skips the probe without touching stdin when it is disabled", async () => {
+    const h = harness();
+    const result = await queryCursorRow(options(h, "document", 0));
+
+    assert.deepEqual(result, { leftover: "" });
+    assert.deepEqual(h.writes, [], "no DSR query is written");
+    assert.deepEqual(h.rawModes, [], "stdin is never taken over");
+    assert.equal(h.stdin.isPaused(), false);
+  });
+
+  it("gives up after the configured wait", async () => {
+    const h = harness();
+    const startedAt = Date.now();
+    const result = await queryCursorRow(options(h, "document", 20));
+    assert.equal(result.row, undefined);
+    assert.ok(Date.now() - startedAt >= 15, "the timeout is honored");
+    assert.equal(h.stdin.isPaused(), false);
   });
 });
