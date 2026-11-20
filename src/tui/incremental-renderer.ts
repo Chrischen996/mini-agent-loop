@@ -46,6 +46,8 @@ export class IncrementalTerminalRenderer {
   private lastTerminalRows = 0;
   /** Inline mode: absolute 1-based screen row of the dynamic frame's top line. */
   private frameTopRow: number | undefined;
+  /** Inline mode: screen row of the last static burst's final line (undefined once scrolled off). */
+  private lastBurstBottomRow: number | undefined;
   /** Anchor-to-main-screen pipeline flag: true for inline AND document layouts. */
   private readonly inline: boolean;
 
@@ -89,6 +91,20 @@ export class IncrementalTerminalRenderer {
    * scrollback, then blank the screen — the first frame re-anchors bottom on a
    * clean screen with zero overlap risk.
    */
+  /**
+   * Normalize a burst payload so the anchor math stays exact:
+   * every line is clamped to the physical column budget so no line can
+   * autowrap into extra physical rows, and the result always ends with a
+   * newline so the cursor lands past the last emitted row. Without this, an
+   * over-wide line (unwrapped code/table projection) wraps and the dynamic
+   * frame paints over the burst's tail — the "new answer covers the
+   * previous reply" overwrite.
+   */
+  private normalizeBurst(text: string, columns: number): string {
+    const lines = (text.endsWith("\n") ? text : `${text}\n`).slice(0, -1).split("\n");
+    return `${lines.map((line) => safeRowText(line, columns)).join("\n")}\n`;
+  }
+
   emitStaticBurst(text: string): void {
     const startedAt = performance.now();
     const rows = Math.max(1, this.target.rows ?? 24);
@@ -106,9 +122,13 @@ export class IncrementalTerminalRenderer {
       }
       if (erase) this.target.write(erase);
 
-      this.target.write(`\x1b[${anchor};1H${text}`);
-      const emittedLines = text.split("\n").length - 1;
+      const burst = this.normalizeBurst(text, columns);
+      const emittedLines = burst.length === 1 ? 0 : burst.slice(0, -1).split("\n").length;
+      // Autowrap stays disabled around the burst so even a residual over-wide
+      // line cannot wrap and desynchronize the anchor below it.
+      this.target.write(`${DISABLE_AUTOWRAP}\x1b[${anchor};1H${burst}${ENABLE_AUTOWRAP}`);
       this.frameTopRow = Math.min(rows, anchor + Math.max(0, emittedLines));
+      this.lastBurstBottomRow = emittedLines > 0 ? anchor + emittedLines - 1 : undefined;
       bootProbe(`burst lines=${emittedLines} anchor=${anchor} -> top=${this.frameTopRow} rows=${rows}\n`);
       // Repaint the dynamic frame below the burst. Ink may skip the next
       // render entirely (unchanged output), so this repaint is mandatory.
@@ -123,9 +143,10 @@ export class IncrementalTerminalRenderer {
     } else {
       // Anchor unknown: start at the bottom row, let the burst scroll, then
       // clear the screen so the first frame anchors on a clean surface.
-      this.target.write(`\x1b[${rows};1H\n${text}`);
+      this.target.write(`\x1b[${rows};1H\n${this.normalizeBurst(text, columns)}`);
       this.target.write(`\x1b[${rows};1H${"\n".repeat(rows)}`);
       this.previousLines = [];
+      this.lastBurstBottomRow = undefined;
     }
 
     recordFramePaint(performance.now() - startedAt, paintedRows);
@@ -234,17 +255,30 @@ export class IncrementalTerminalRenderer {
       // survive; the approximation only ever overwrites rows at or below the
       // cursor's last known position.
       this.frameTopRow = Math.max(1, rows - visibleHeight + 1);
+      // After a resize the reflowed bottom window may sit inside the last
+      // emitted burst; never start above the burst's bottom row, or the frame
+      // would paint over sealed transcript rows. Pushing the anchor down
+      // hands the overlap to the deficit scroll below, which carries the
+      // burst into native scrollback instead.
+      if (this.lastBurstBottomRow !== undefined && this.lastBurstBottomRow + 1 > this.frameTopRow) {
+        this.frameTopRow = this.lastBurstBottomRow + 1;
+      }
       bootProbe(`anchor-init top=${this.frameTopRow} visible=${visibleHeight} rows=${rows}\n`);
-    } else {
-      // The frame must fit between its anchor and the screen bottom. Whatever
-      // overflows scrolls natively: emit the deficit at the bottom row first,
-      // which pushes the preceding screen content (previous static bursts
-      // included) into scrollback, then repaint against the shifted anchor.
-      const overflow = this.frameTopRow + visibleHeight - 1 - rows;
-      if (overflow > 0) {
-        bootProbe(`anchor-scroll overflow=${overflow} top=${this.frameTopRow} visible=${visibleHeight}\n`);
-        this.target.write(`\x1b[${rows};1H${"\n".repeat(overflow)}`);
-        this.frameTopRow -= overflow;
+    }
+    // The frame must fit between its anchor and the screen bottom. Whatever
+    // overflows scrolls natively: emit the deficit at the bottom row first,
+    // which pushes the preceding screen content (previous static bursts
+    // included) into scrollback, then repaint against the shifted anchor.
+    const overflow = this.frameTopRow + visibleHeight - 1 - rows;
+    if (overflow > 0) {
+      bootProbe(`anchor-scroll overflow=${overflow} top=${this.frameTopRow} visible=${visibleHeight}\n`);
+      this.target.write(`\x1b[${rows};1H${"\n".repeat(overflow)}`);
+      this.frameTopRow -= overflow;
+      if (this.lastBurstBottomRow !== undefined) {
+        // The scroll shifts the burst content up too; drop the marker once
+        // it leaves the visible screen.
+        const shifted = this.lastBurstBottomRow - overflow;
+        this.lastBurstBottomRow = shifted > 0 ? shifted : undefined;
       }
     }
 
@@ -290,6 +324,7 @@ export class IncrementalTerminalRenderer {
     this.target.write(`${ANSI_CLEAR_TERMINAL}\x1b[H`);
     this.previousLines = undefined;
     this.frameTopRow = undefined;
+    this.lastBurstBottomRow = undefined;
     this.lastTerminalRows = 0;
     this.forceRedrawOnNextFrame = false;
     if (previous.length > 0) this.renderRows(previous, true);
@@ -300,6 +335,7 @@ export class IncrementalTerminalRenderer {
     this.forceRedrawOnNextFrame = false;
     this.lastTerminalRows = 0;
     this.frameTopRow = undefined;
+    this.lastBurstBottomRow = undefined;
   }
 
   /**

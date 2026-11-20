@@ -104,9 +104,35 @@ export function rowCountledCommitted(finalTexts: readonly string[], committedTex
  *
  * The stream ledger contains only assistant body rows. Reasoning rows are not
  * part of that ledger, but finalized messages project reasoning before text;
- * skip the thinking prefix before comparing the two row sequences.
+ * skip the thinking prefix before comparing the two row sequences. Callers
+ * that must slice the burst payload should use {@link assistantSealRemainingRows}
+ * instead of applying this count to the unfiltered row sequence.
  */
+function isThinkingRowKey(key: string): boolean {
+  return key.includes("-thinking") || key.includes("-think-");
+}
+
 export function assistantSealOverlap(rows: readonly { key: string; text: string }[], committedTexts: readonly string[]): number {
-  const bodyRows = rows.filter((row) => !row.key.includes("-thinking") && !row.key.includes("-think-"));
+  const bodyRows = rows.filter((row) => !isThinkingRowKey(row.key));
   return rowCountledCommitted(rowTexts(bodyRows), committedTexts);
+}
+
+/**
+ * Finalized rows that still need to reach the terminal stream: the thinking
+ * rows (never part of the streamed ledger) plus the body rows not yet
+ * committed. The overlap is computed on the thinking-filtered sequence, so
+ * the slice must be taken from that same sequence — slicing the full row
+ * array by that count would drop the thinking block from the sealed
+ * transcript and re-emit as many already-committed body rows as thinking
+ * rows exist.
+ */
+export function assistantSealRemainingRows<T extends { key: string; text: string }>(
+  rows: readonly T[],
+  committedTexts: readonly string[],
+): T[] {
+  const overlap = assistantSealOverlap(rows, committedTexts);
+  if (overlap === 0) return [...rows];
+  const thinkingRows = rows.filter((row) => isThinkingRowKey(row.key));
+  const bodyRows = rows.filter((row) => !isThinkingRowKey(row.key));
+  return [...thinkingRows, ...bodyRows.slice(overlap)];
 }

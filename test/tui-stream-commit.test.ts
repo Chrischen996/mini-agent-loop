@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   assistantSealOverlap,
+  assistantSealRemainingRows,
   computeCommitBoundary,
   rowCountledCommitted,
   rowTexts,
@@ -79,6 +80,40 @@ describe("assistantSealOverlap (reasoning-prefixed seal dedup)", () => {
       { key: "message-0-md-1", text: "How can I help?" },
     ];
     assert.equal(assistantSealOverlap(rows, ["I am mini-agent.", "How can I help?"]), 2);
+  });
+});
+
+describe("assistantSealRemainingRows (thinking-aligned seal dedup)", () => {
+  it("keeps thinking rows and drops only the committed body rows", () => {
+    const rows = [
+      { key: "message-0-gap", text: "" },
+      { key: "message-0-thinking-header", text: "∴ Thinking…" },
+      { key: "message-0-think-0-md-0-0", text: "The user asked for a plan." },
+      { key: "message-0-md-0", text: "I am mini-agent." },
+      { key: "message-0-md-1", text: "How can I help?" },
+    ];
+    const committed = ["", "I am mini-agent.", "How can I help?"];
+    assert.deepEqual(
+      assistantSealRemainingRows(rows, committed).map((row) => row.text),
+      ["∴ Thinking…", "The user asked for a plan."],
+      "the burst keeps the thinking block and omits the committed body");
+  });
+
+  it("emits nothing when the whole body was committed and there is no thinking", () => {
+    const rows = [
+      { key: "message-0-gap", text: "" },
+      { key: "message-0-md-0", text: "line one" },
+      { key: "message-0-md-1", text: "line two" },
+    ];
+    assert.deepEqual(assistantSealRemainingRows(rows, ["", "line one", "line two"]), []);
+  });
+
+  it("keeps the full sequence when nothing was committed", () => {
+    const rows = [
+      { key: "message-0-gap", text: "" },
+      { key: "message-0-md-0", text: "line one" },
+    ];
+    assert.deepEqual(assistantSealRemainingRows(rows, []).map((row) => row.text), ["", "line one"]);
   });
 });
 

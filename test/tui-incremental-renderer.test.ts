@@ -350,5 +350,63 @@ describe("incremental renderer inline mode", () => {
     assert.match(painted, /\x1b\[1;1H\x1b\[2Kone/, "alternate mode top-anchors bare writes as frames");
     assert.match(painted, /\x1b\[2;1H\x1b\[2Ktwo/);
   });
+
+  it("clamps over-wide burst rows so the frame never paints over the burst tail", () => {
+    const output = sizedSink(10, 40);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+    renderer.write("a\nb\nc");
+    output.writes.length = 0;
+
+    // A 120-column burst line would autowrap into three physical rows and
+    // desynchronize the anchor; it must be clamped to one physical row.
+    renderer.emitStaticBurst(`${"x".repeat(120)}\n`);
+    const painted = output.writes.join("");
+    assert.ok(output.writes.some((value) => value.includes("\x1b[?7l")), "burst write disables autowrap");
+    assert.ok(output.writes.some((value) => value.includes("…")), "over-wide burst row is truncated");
+    assert.ok(output.writes.some((value) => value.startsWith("\x1b[10;1H\n")), "one-row deficit scroll after the anchor advance");
+    assert.match(painted, /\x1b\[8;1H\x1b\[2Ka/, "frame row one repaints below the burst");
+    assert.match(painted, /\x1b\[9;1H\x1b\[2Kb/);
+    assert.match(painted, /\x1b\[10;1H\x1b\[2Kc/);
+  });
+
+  it("advances the anchor past a burst that lacks a trailing newline", () => {
+    const output = sizedSink(10, 40);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+    renderer.write("a\nb\nc");
+    output.writes.length = 0;
+
+    renderer.emitStaticBurst("hello");
+    const painted = output.writes.join("");
+    assert.ok(painted.includes("\x1b[8;1Hhello\n"), "burst normalized with a trailing newline");
+    assert.ok(output.writes.some((value) => value.startsWith("\x1b[10;1H\n")), "anchor advanced one row, deficit scroll");
+    assert.match(painted, /\x1b\[8;1H\x1b\[2Ka/, "the burst row is no longer overwritten by the frame");
+    assert.match(painted, /\x1b\[9;1H\x1b\[2Kb/);
+    assert.match(painted, /\x1b\[10;1H\x1b\[2Kc/);
+  });
+
+  it("re-anchoring after a shrink never paints over the last burst", () => {
+    const writes: string[] = [];
+    const target = {
+      rows: 10,
+      columns: 40,
+      write(value: string) { writes.push(value); return true; },
+    };
+    const renderer = new IncrementalTerminalRenderer(target as never, { mode: "inline" });
+    renderer.write("a\nb\nc\nd");
+    writes.length = 0;
+
+    renderer.emitStaticBurst("s1\ns2\n");
+    // s1/s2 sit at rows 5/6 after the deficit scroll; the frame owns 7..10.
+    writes.length = 0;
+
+    target.rows = 8; // screen shrinks: the bottom-anchored window would land inside the burst
+    renderer.write("a\nb\nc\nd");
+    const painted = writes.join("");
+    assert.ok(writes.some((value) => value === "\x1b[8;1H\n\n"), "deficit scroll keeps the burst clear of the frame");
+    assert.match(painted, /\x1b\[5;1H\x1b\[2Ka/, "frame re-anchors below the burst");
+    assert.match(painted, /\x1b\[6;1H\x1b\[2Kb/);
+    assert.match(painted, /\x1b\[7;1H\x1b\[2Kc/);
+    assert.match(painted, /\x1b\[8;1H\x1b\[2Kd/);
+  });
 });
 
