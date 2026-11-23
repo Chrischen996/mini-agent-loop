@@ -1,6 +1,6 @@
 import { resolveTranscriptMessage, type ChatMessage, type ThinkingDisplayMode } from "./state.ts";
 import { messagePhysicalRows, projectAssistantBodyRows, streamingGapRow, streamingPhysicalRows, type PhysicalRow } from "./message-rows.ts";
-import { computeCommitBoundary } from "./stream-commit.ts";
+import { assistantSealRemainingRows, computeCommitBoundary } from "./stream-commit.ts";
 
 type RawViewportItem =
   | { kind: "message"; index: number; message: ChatMessage }
@@ -64,6 +64,8 @@ type LiveBlocksKey = {
   width: number;
   documentMode: boolean;
   committedStreamingRows: number;
+  sealedAssistantRows?: readonly PhysicalRow[];
+  committedAssistantTexts?: readonly string[];
 };
 
 type LiveBlocksEntry = {
@@ -140,6 +142,7 @@ export class MessageHeightCache {
       toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>;
       subagentRevision: number;
       toolRevision: number;
+      sealedSubagentCards: boolean;
       sealedCount: number;
       items: SealedStaticItem[];
     }
@@ -273,7 +276,9 @@ export class MessageHeightCache {
       previous.thinkingMode === key.thinkingMode &&
       previous.width === key.width &&
       previous.documentMode === key.documentMode &&
-      previous.committedStreamingRows === key.committedStreamingRows
+      previous.committedStreamingRows === key.committedStreamingRows &&
+      previous.sealedAssistantRows === key.sealedAssistantRows &&
+      previous.committedAssistantTexts === key.committedAssistantTexts
     ) return this.liveEntry!.blocks;
     const blocks = build();
     this.liveEntry = { key, blocks };
@@ -296,11 +301,13 @@ export class MessageHeightCache {
       toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>;
       subagentRevision?: number;
       toolRevision?: number;
+      sealedSubagentCards?: boolean;
     },
   ): { sealedCount: number; items: SealedStaticItem[] } {
     const expandedKey = options.expandedThinking.join(",");
     const subagentRevision = options.subagentRevision ?? 0;
     const toolRevision = options.toolRevision ?? 0;
+    const sealedSubagentCards = options.sealedSubagentCards === true;
     const entry = this.sealedEntry;
     if (
       entry &&
@@ -311,7 +318,8 @@ export class MessageHeightCache {
       entry.subagentById === options.subagentById &&
       entry.toolById === options.toolById &&
       entry.subagentRevision === subagentRevision &&
-      entry.toolRevision === toolRevision
+      entry.toolRevision === toolRevision &&
+      entry.sealedSubagentCards === sealedSubagentCards
     ) {
       return { sealedCount: entry.sealedCount, items: entry.items };
     }
@@ -325,6 +333,7 @@ export class MessageHeightCache {
       toolById: options.toolById,
       subagentRevision,
       toolRevision,
+      sealedSubagentCards,
       sealedCount: result.sealedCount,
       items: result.items,
     };
@@ -428,24 +437,43 @@ export type SealOverlays = {
  * - user / assistant / notice / error entries are immutable once appended.
  * - tool cards seal once their lifecycle leaves "running": the result, status
  *   icon and duration are final.
- * - subagent cards never seal: they stay interactive (expand/collapse) and
- *   keep receiving inner-event updates, so they remain in the dynamic region —
- *   mirroring Gemini CLI's "tool_group is never static" rule.
+ * - subagent cards stay interactive in pinned frames (expand/collapse and
+ *   inner-event updates keep them in the dynamic region — mirroring Gemini
+ *   CLI's "tool_group is never static" rule). In burst-channel layouts
+ *   (inline/document, `sealedSubagentCards`), FINISHED cards seal into the
+ *   native scrollback like any other block: without that, one card pins the
+ *   sealed prefix forever and every later streamed answer is re-rendered by
+ *   the frame on top of the rows the commit channel already froze.
  *
  * Note: a sealed block's rows are a frozen snapshot. Thinking-mode switches
  * and thinking-expansion toggles only affect the unsealed tail afterwards.
  */
-export function isSealableTranscriptMessage(message: ChatMessage, overlays: SealOverlays = {}): boolean {
+export type SealOptions = {
+  /** Burst-channel layouts (inline/document) seal finished subagent cards. */
+  sealedSubagentCards?: boolean;
+};
+
+export function isSealableTranscriptMessage(
+  message: ChatMessage,
+  overlays: SealOverlays = {},
+  options: SealOptions = {},
+): boolean {
   const resolved = resolveTranscriptMessage(message, overlays.subagentById ?? {}, overlays.toolById ?? {});
   if (resolved.kind === "tool_call") return resolved.status !== "running";
-  if (resolved.kind === "subagent_call") return false;
+  if (resolved.kind === "subagent_call") {
+    return options.sealedSubagentCards === true && resolved.status !== "running";
+  }
   return true;
 }
 
 /** Longest transcript prefix that has reached its final rendered form. */
-export function sealedTranscriptCount(messages: readonly ChatMessage[], overlays: SealOverlays = {}): number {
+export function sealedTranscriptCount(
+  messages: readonly ChatMessage[],
+  overlays: SealOverlays = {},
+  options: SealOptions = {},
+): number {
   let count = 0;
-  while (count < messages.length && isSealableTranscriptMessage(messages[count]!, overlays)) count += 1;
+  while (count < messages.length && isSealableTranscriptMessage(messages[count]!, overlays, options)) count += 1;
   return count;
 }
 
@@ -472,13 +500,15 @@ function computeSealedStaticItems(
     expandedThinking: number[];
     subagentById?: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>>;
     toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>;
+    /** Burst-channel layouts seal finished subagent cards (see SealOptions). */
+    sealedSubagentCards?: boolean;
   },
   cache?: MessageHeightCache,
 ): { sealedCount: number; items: SealedStaticItem[] } {
   const expanded = new Set(options.expandedThinking);
   const items: SealedStaticItem[] = [];
   let sealedCount = 0;
-  while (sealedCount < messages.length && isSealableTranscriptMessage(messages[sealedCount]!, options)) {
+  while (sealedCount < messages.length && isSealableTranscriptMessage(messages[sealedCount]!, options, { sealedSubagentCards: options.sealedSubagentCards })) {
     const index = sealedCount;
     const resolved = resolveTranscriptMessage(messages[index]!, options.subagentById ?? {}, options.toolById ?? {});
     // Same projection + cache the dynamic viewport uses, so the static copy is
@@ -512,6 +542,8 @@ export function buildSealedStaticItems(options: {
   toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>;
   subagentRevision?: number;
   toolRevision?: number;
+  /** Burst-channel layouts seal finished subagent cards (see SealOptions). */
+  sealedSubagentCards?: boolean;
   cache?: MessageHeightCache;
 }): { sealedCount: number; items: SealedStaticItem[] } {
   if (!options.cache) return computeSealedStaticItems(options.messages, options);
@@ -538,6 +570,58 @@ export function estimateMessageHeight(
   }).length;
 }
 
+/**
+ * Document layout: drop the frozen body rows of the just-finalized streaming
+ * message from its frame copy. The commit channel already printed
+ * [gap, committed body rows...] into the terminal's native scrollback; while
+ * the sealed prefix still stops at an un-sealable entry (a running
+ * subagent card), the finalized message stays in the frame's transcript and
+ * would re-render those rows. Thinking rows are never committed, so they and
+ * the uncommitted tail remain visible.
+ */
+function applyStreamSealSlice(
+  entry: ArrayBlocksEntry,
+  options: Parameters<typeof buildBlocks>[0],
+): { blocks: HistoryBlock[]; prefixHeights: number[]; totalHeight: number } | undefined {
+  const index = options.streamSealPendingIndex;
+  const committedTexts = options.committedAssistantTexts;
+  if (index === undefined || !committedTexts || committedTexts.length === 0) return undefined;
+  const slot = entry.blocks.findIndex(
+    (block) => block.item.kind === "message" && block.item.index === index,
+  );
+  if (slot < 0) return undefined;
+  const block = entry.blocks[slot]!;
+  if (block.item.kind !== "message" || block.item.message.kind !== "assistant") return undefined;
+  const hasMissingEarlierTranscript = entry.blocks.some(
+    (candidate, candidateIndex) =>
+      candidateIndex < slot &&
+      candidate.item.kind === "message" &&
+      candidate.item.index !== undefined &&
+      candidate.item.index < index,
+  );
+  if (hasMissingEarlierTranscript) return undefined;
+  // The frozen projection carries the leading gap row; count body rows only.
+  const committedBody = Math.max(0, committedTexts.length - 1);
+  if (committedBody === 0) return undefined;
+  let thinkingCount = 0;
+  for (const row of block.rows) {
+    if (row.key.includes("-thinking") || row.key.includes("-think-")) thinkingCount += 1;
+  }
+  const bodyStart = 1 + thinkingCount; // rows[0] is the block's gap row
+  const drop = Math.min(committedBody, Math.max(0, block.rows.length - bodyStart));
+  if (drop === 0) return undefined;
+  const rows = [...block.rows.slice(0, bodyStart), ...block.rows.slice(bodyStart + drop)];
+  const blocks = [...entry.blocks];
+  blocks[slot] = { ...block, height: rows.length, rows };
+  const prefixHeights: number[] = [];
+  let totalHeight = 0;
+  for (const next of blocks) {
+    totalHeight += next.height;
+    prefixHeights.push(totalHeight);
+  }
+  return { blocks, prefixHeights, totalHeight };
+}
+
 function buildBlocks(options: {
   messages: ChatMessage[];
   streamingText: string;
@@ -553,6 +637,12 @@ function buildBlocks(options: {
   documentMode?: boolean;
   /** Rows of the streaming assistant projection already appended to the stream. */
   committedStreamingRows?: number;
+  /** Document layout: final assistant rows already frozen before an un-sealable entry. */
+  sealedAssistantRows?: readonly PhysicalRow[];
+  /** Row texts from the streaming projection already frozen into scrollback. */
+  committedAssistantTexts?: readonly string[];
+  /** Transcript index of the just-finalized streaming message whose frozen body rows must not re-render in the frame. */
+  streamSealPendingIndex?: number;
   cache?: MessageHeightCache;
   subagentById?: Readonly<Record<string, Extract<ChatMessage, { kind: "subagent_call" }>>>;
   toolById?: Readonly<Record<string, Extract<ChatMessage, { kind: "tool_call" }>>>;
@@ -598,18 +688,22 @@ function buildBlocks(options: {
     }
     if (options.streamingText) {
       if (options.documentMode) {
-        // Document layout: the live block renders the SAME full-markdown
-        // projection the commit channel appends, minus the rows already
-        // frozen into the stream. Only the growing tail (open paragraph,
-        // unclosed table/fence) stays live in the frame.
-        const allRows = streamingAssistantRows(options.streamingText, {
-          width: options.width,
-          thinkingMode: options.thinkingMode,
-          cache: options.cache,
-        });
-        const floor = Math.min(options.committedStreamingRows ?? 0, allRows.length);
-        const rows = allRows.slice(floor);
-        live.push({ item: { kind: "streaming_text" }, height: Math.max(1, rows.length), rows });
+        if (options.sealedAssistantRows && options.committedAssistantTexts) {
+          const rows = assistantSealRemainingRows(options.sealedAssistantRows, options.committedAssistantTexts);
+          if (rows.length > 0) {
+            live.push({ item: { kind: "streaming_text" }, height: rows.length, rows });
+          }
+        } else {
+          let rows: PhysicalRow[];
+          const allRows = streamingAssistantRows(options.streamingText, {
+            width: options.width,
+            thinkingMode: options.thinkingMode,
+            cache: options.cache,
+          });
+          const floor = Math.min(options.committedStreamingRows ?? 0, allRows.length);
+          rows = allRows.slice(floor);
+          live.push({ item: { kind: "streaming_text" }, height: Math.max(1, rows.length), rows });
+        }
       } else {
         const textRows = streamingPhysicalRows({
           streamingText: options.streamingText,
@@ -639,14 +733,19 @@ function buildBlocks(options: {
       width: options.width,
       documentMode: options.documentMode ?? false,
       committedStreamingRows: options.committedStreamingRows ?? 0,
+      sealedAssistantRows: options.sealedAssistantRows,
+      committedAssistantTexts: options.committedAssistantTexts,
     }, buildLiveBlocks)
     : buildLiveBlocks();
   const liveTotalHeight = liveBlocks.reduce((sum, block) => sum + block.height, 0);
+  // Document layout: drop the frozen body rows of the just-finalized message
+  // from its frame copy (see applyStreamSealSlice).
+  const sealSlice = options.documentMode ? applyStreamSealSlice(entry, options) : undefined;
   return {
-    historyBlocks: entry.blocks,
-    prefixHeights: entry.prefixHeights,
+    historyBlocks: sealSlice ? sealSlice.blocks : entry.blocks,
+    prefixHeights: sealSlice ? sealSlice.prefixHeights : entry.prefixHeights,
     liveBlocks,
-    totalHeight: entry.totalHeight + liveTotalHeight,
+    totalHeight: (sealSlice ? sealSlice.totalHeight : entry.totalHeight) + liveTotalHeight,
   };
 }
 
@@ -730,6 +829,12 @@ export function selectMessageViewport(options: {
   documentMode?: boolean;
   /** Rows of the streaming assistant projection already appended to the stream. */
   committedStreamingRows?: number;
+  /** Document layout: final assistant rows already frozen before an un-sealable entry. */
+  sealedAssistantRows?: readonly PhysicalRow[];
+  /** Row texts from the streaming projection already frozen into scrollback. */
+  committedAssistantTexts?: readonly string[];
+  /** Transcript index of the just-finalized streaming message whose frozen body rows must not re-render in the frame. */
+  streamSealPendingIndex?: number;
   /** Renderers may hide the hint row while retaining scroll accounting. */
   showHistoryHints?: boolean;
   /** Optional per-message height cache for completed history blocks. */

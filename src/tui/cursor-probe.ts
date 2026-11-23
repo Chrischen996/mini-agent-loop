@@ -26,7 +26,7 @@ export type CursorProbeResult = {
 export const CURSOR_PROBE_TIMEOUT_ENV = "MINI_AGENT_CURSOR_PROBE_MS";
 
 /** Default DSR wait: generous enough for a slow SSH round trip. */
-export const DEFAULT_CURSOR_PROBE_TIMEOUT_MS = 150;
+export const DEFAULT_CURSOR_PROBE_TIMEOUT_MS = 300;
 
 /**
  * Resolve the probe timeout. A terminal that does not answer `CSI 6 n` burns

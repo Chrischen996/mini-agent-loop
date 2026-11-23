@@ -241,7 +241,7 @@ describe("incremental renderer inline mode", () => {
     assert.ok(!painted.includes("\x1b[7;1H"), "rows above the anchor stay untouched");
   });
 
-  it("erases the frame region and repaints the frame below a static burst", () => {
+  it("erases the frame region without freezing the old frame into scrollback", () => {
     const output = sizedSink(10);
     const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
     renderer.write("a\nb\nc");
@@ -253,19 +253,19 @@ describe("incremental renderer inline mode", () => {
     assert.match(painted, /\x1b\[8;1H\x1b\[2K/);
     assert.match(painted, /\x1b\[10;1H\x1b\[2K/);
     assert.ok(painted.includes("\x1b[8;1Hhello\n"));
-    // ...and the dynamic frame repainted below the burst (anchor advanced
-    // past one emitted line, then deficit-scrolled by one to fit 3 rows).
-    assert.ok(output.writes.some((value) => value.startsWith("\x1b[10;1H\n")), "deficit scroll at the bottom row");
-    assert.match(painted, /\x1b\[8;1H\x1b\[2Ka/);
-    assert.match(painted, /\x1b\[9;1H\x1b\[2Kb/);
-    assert.match(painted, /\x1b\[10;1H\x1b\[2Kc/);
+    // The old frame must not be repainted before React commits the post-burst
+    // frame; that would scroll the pre-burst composer into native scrollback.
+    assert.ok(!painted.includes("a"), "old frame is not repainted");
+    assert.ok(!painted.includes("b"), "old frame is not repainted");
+    assert.ok(!painted.includes("c"), "old frame is not repainted");
 
-    // A following frame diffs against the repainted baseline.
+    // A following frame force-redraws below the burst.
     output.writes.length = 0;
     renderer.write("a\nb\nx\n");
     const next = output.writes.join("");
+    assert.match(next, /\x1b\[8;1H\x1b\[2Ka/);
+    assert.match(next, /\x1b\[9;1H\x1b\[2Kb/);
     assert.match(next, /\x1b\[10;1H\x1b\[2Kx/);
-    assert.ok(!next.includes("b"), "unchanged rows are not rewritten");
   });
 
   it("scrolls the deficit so an overflowing frame fits below static bursts", () => {
@@ -274,11 +274,10 @@ describe("incremental renderer inline mode", () => {
     renderer.write("a\nb");
     output.writes.length = 0;
 
-    // The burst advances the anchor past the screen bottom; the repaint
-    // deficit-scrolls so the frame stays fully on screen.
+    // The next frame deficit-scrolls so it fits below the burst.
     renderer.emitStaticBurst("s1\ns2\ns3\n");
     assert.ok(output.writes.some((value) => value.includes("s1\ns2\ns3\n")), "burst written raw at the anchor");
-    assert.ok(output.writes.some((value) => value.startsWith("\x1b[4;1H\n")), "repaint deficit scroll");
+    assert.ok(!output.writes.some((value) => value.startsWith("\x1b[4;1H\n")), "old frame is not scrolled into scrollback");
 
     output.writes.length = 0;
     renderer.write("x\ny\nz\n");
@@ -363,10 +362,10 @@ describe("incremental renderer inline mode", () => {
     const painted = output.writes.join("");
     assert.ok(output.writes.some((value) => value.includes("\x1b[?7l")), "burst write disables autowrap");
     assert.ok(output.writes.some((value) => value.includes("…")), "over-wide burst row is truncated");
-    assert.ok(output.writes.some((value) => value.startsWith("\x1b[10;1H\n")), "one-row deficit scroll after the anchor advance");
-    assert.match(painted, /\x1b\[8;1H\x1b\[2Ka/, "frame row one repaints below the burst");
-    assert.match(painted, /\x1b\[9;1H\x1b\[2Kb/);
-    assert.match(painted, /\x1b\[10;1H\x1b\[2Kc/);
+    assert.ok(!output.writes.some((value) => value.startsWith("\x1b[10;1H\n")), "old frame is not scrolled into scrollback");
+    assert.ok(!painted.includes("a"), "old frame is not repainted");
+    assert.ok(!painted.includes("b"), "old frame is not repainted");
+    assert.ok(!painted.includes("c"), "old frame is not repainted");
   });
 
   it("advances the anchor past a burst that lacks a trailing newline", () => {
@@ -378,10 +377,10 @@ describe("incremental renderer inline mode", () => {
     renderer.emitStaticBurst("hello");
     const painted = output.writes.join("");
     assert.ok(painted.includes("\x1b[8;1Hhello\n"), "burst normalized with a trailing newline");
-    assert.ok(output.writes.some((value) => value.startsWith("\x1b[10;1H\n")), "anchor advanced one row, deficit scroll");
-    assert.match(painted, /\x1b\[8;1H\x1b\[2Ka/, "the burst row is no longer overwritten by the frame");
-    assert.match(painted, /\x1b\[9;1H\x1b\[2Kb/);
-    assert.match(painted, /\x1b\[10;1H\x1b\[2Kc/);
+    assert.ok(!output.writes.some((value) => value.startsWith("\x1b[10;1H\n")), "old frame is not scrolled into scrollback");
+    assert.ok(!painted.includes("a"), "old frame is not repainted");
+    assert.ok(!painted.includes("b"), "old frame is not repainted");
+    assert.ok(!painted.includes("c"), "old frame is not repainted");
   });
 
   it("re-anchoring after a shrink never paints over the last burst", () => {
@@ -396,17 +395,16 @@ describe("incremental renderer inline mode", () => {
     writes.length = 0;
 
     renderer.emitStaticBurst("s1\ns2\n");
-    // s1/s2 sit at rows 5/6 after the deficit scroll; the frame owns 7..10.
+    // The burst sits at rows 7/8; the next frame owns 9/10 until resize.
     writes.length = 0;
 
     target.rows = 8; // screen shrinks: the bottom-anchored window would land inside the burst
     renderer.write("a\nb\nc\nd");
     const painted = writes.join("");
-    assert.ok(writes.some((value) => value === "\x1b[8;1H\n\n"), "deficit scroll keeps the burst clear of the frame");
+    assert.ok(writes.some((value) => value === "\x1b[8;1H\n\n\n\n"), "deficit scroll keeps the burst clear of the frame");
     assert.match(painted, /\x1b\[5;1H\x1b\[2Ka/, "frame re-anchors below the burst");
     assert.match(painted, /\x1b\[6;1H\x1b\[2Kb/);
-    assert.match(painted, /\x1b\[7;1H\x1b\[2Kc/);
-    assert.match(painted, /\x1b\[8;1H\x1b\[2Kd/);
+    assert.ok(!painted.includes("\x1b[4;1H"), "frame does not overwrite the burst");
   });
 });
 

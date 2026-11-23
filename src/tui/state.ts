@@ -119,6 +119,19 @@ export type TuiState = {
    * freezing the regenerated stream again.
    */
   streamRetryCommittedText?: string;
+  /**
+   * Document layout: the assistant message that just finished streaming,
+   * together with the source text of the rows already frozen into the
+   * terminal's native scrollback by the commit channel. While an
+   * un-sealable interactive entry (e.g. a subagent card) blocks the sealed
+   * prefix, the frame must drop those frozen body rows so the answer is not
+   * rendered a second time. Survives until the message is actually sealed
+   * or the turn ends / is interrupted.
+   */
+  streamSealPending?: {
+    message: Extract<ChatMessage, { kind: "assistant" }>;
+    committedText: string;
+  };
   /** Wall-clock start of the active user turn; presentation-only. */
   turnStartedAt?: number;
   /** Last streamed reasoning/answer delta; used to surface a stalled stream. */
@@ -319,6 +332,7 @@ export function createInitialState(modelName: string): TuiState {
     streamingTextParts: [],
     streamingReasoningParts: [],
     streamRetryCommittedText: undefined,
+    streamSealPending: undefined,
     turnStartedAt: undefined,
     lastStreamAt: undefined,
     busy: false,
@@ -336,7 +350,7 @@ export function createInitialState(modelName: string): TuiState {
     pendingImages: [],
     contextCompactions: [],
     scrollOffset: 0,
-    // maxScrollOffset is intentionally absent (undefined) until App.tsx
+    // maxScrollOffset is intentionally absent (undefined) until AgentSessionApp.tsx
     // measures the viewport and dispatches SET_MAX_SCROLL_OFFSET. The
     // reducer falls back to no clamp when it is unset.
     phase: "planning",
@@ -382,12 +396,15 @@ export function chatMessagesFromAgentHistory(history: readonly AgentMessage[]): 
     if (message.role === "assistant") {
       const text = contentAsString(message.content);
       const toolCalls = message.toolCalls ?? [];
-      // Emit an assistant message only when it has text. Tool-only turns
-      // (and fully empty turns) draw no marker row in either renderer — the
-      // tool cards emitted below carry the conversation flow after resume,
-      // matching the dense transcript layout.
-      if (text) {
-        messages.push({ kind: "assistant", text });
+      const reasoning = (message.thinking ?? [])
+        .map((part) => part.thinking)
+        .filter((thinking) => thinking.trim().length > 0)
+        .join("\n");
+      // Emit an assistant message when it has text or reasoning. Tool-only
+      // and fully empty turns draw no marker row; the tool cards emitted below
+      // carry the conversation flow after resume.
+      if (text || reasoning) {
+        messages.push({ kind: "assistant", text, ...(reasoning ? { reasoning } : {}) });
       }
       for (const call of toolCalls) {
         const card: Extract<ChatMessage, { kind: "tool_call" }> = {
@@ -527,7 +544,7 @@ function offloadTranscript(messages: readonly ChatMessage[]): ChatMessage[] {
  * transcript message. Never truncates the visible transcript — scrolling must
  * remain available for the full canonical history. Memory is bounded by
  * `offloadTranscript` (offload to disk-backed snapshot) and by `historyRef`
- * compaction in App.tsx, not by deleting UI history.
+ * compaction in AgentSessionApp.tsx, not by deleting UI history.
  */
 function pruneTranscriptAndDictionaries(state: TuiState): TuiState {
   const messages = offloadTranscript(state.messages);
@@ -686,6 +703,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         streamingTextParts: [],
         streamingReasoningParts: [],
         streamRetryCommittedText: undefined,
+        streamSealPending: undefined,
         turnStartedAt: Date.now(),
         lastStreamAt: undefined,
         spinnerMessage: undefined,
@@ -796,6 +814,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         streamingTextParts: [],
         streamingReasoningParts: [],
         streamRetryCommittedText: undefined,
+        streamSealPending: undefined,
         turnStartedAt: undefined,
         lastStreamAt: undefined,
         spinnerMessage: undefined,
@@ -817,6 +836,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         streamingTextParts: [],
         streamingReasoningParts: [],
         streamRetryCommittedText: undefined,
+        streamSealPending: undefined,
         lastStreamAt: undefined,
         pendingPermission: undefined,
         spinnerMessage: undefined,
@@ -833,6 +853,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         streamingReasoning: "",
         streamingTextParts: [],
         streamingReasoningParts: [],
+        streamRetryCommittedText: undefined,
+        streamSealPending: undefined,
         lastStreamAt: undefined,
         autoContinueCount: action.count,
         status: `Continuing… (${action.count}/${action.max})`,
@@ -985,7 +1007,27 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
           const streamedText = state.streamingTextParts.join("") || state.streamingText;
           const streamedReasoning = state.streamingReasoningParts.join("") || state.streamingReasoning;
           const text = contentText || streamedText;
-          const reasoning = streamedReasoning || undefined;
+          let lastUserIndex = -1;
+          for (let index = state.messages.length - 1; index >= 0; index -= 1) {
+            if (state.messages[index]?.kind === "user") {
+              lastUserIndex = index;
+              break;
+            }
+          }
+          let previousAssistant: Extract<ChatMessage, { kind: "assistant" }> | undefined;
+          for (let index = state.messages.length - 1; index > lastUserIndex; index -= 1) {
+            const message = state.messages[index];
+            if (message?.kind === "assistant") {
+              previousAssistant = message;
+              break;
+            }
+          }
+          const previousReasoning = previousAssistant?.reasoning;
+          const completedReasoning = (event.message.thinking ?? [])
+            .map((part) => part.thinking)
+            .filter((thinking) => thinking.trim().length > 0)
+            .join("\n");
+          const reasoning = completedReasoning || streamedReasoning || previousReasoning;
           const hasTools = (event.message.toolCalls?.length ?? 0) > 0;
           // Only skip if we genuinely have nothing to show
           if (!text && !reasoning && !hasTools) return {
@@ -998,24 +1040,42 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             // the frozen-prefix baseline for dedup; it clears with the next
             // user turn or terminal event.
           };
-          
-          // Check if the last message is already an assistant message with the same content
-          // to avoid duplicates when the completed event has empty content but we have streamed text
-          const lastMsg = state.messages[state.messages.length - 1];
-          const isDuplicate = lastMsg?.kind === "assistant" 
-            && lastMsg.text === text 
-            && lastMsg.reasoning === reasoning;
+
+          const isDuplicate = previousAssistant?.text === text
+            && previousAssistant.reasoning === reasoning;
+          const reasoningOnlyAssistant = previousAssistant?.text === ""
+            && previousAssistant.reasoning !== undefined
+            && Boolean(text);
+          const removedAssistantIndex = reasoningOnlyAssistant
+            ? previousAssistant
+              ? state.messages.indexOf(previousAssistant)
+              : -1
+            : -1;
+          const baseMessages = reasoningOnlyAssistant
+            ? state.messages.filter((message) => message !== previousAssistant)
+            : state.messages;
           
           const assistantMsg: ChatMessage = { kind: "assistant", text: text || "", ...(reasoning ? { reasoning } : {}) };
           const newMessages: ChatMessage[] = (text || reasoning) && !isDuplicate
-            ? [...state.messages, assistantMsg]
-            : state.messages;
+            ? [...baseMessages, assistantMsg]
+            : baseMessages;
+          const remapMessageIndex = (index: number): number => {
+            if (removedAssistantIndex < 0 || index < 0) return index;
+            if (index === removedAssistantIndex) return newMessages.length - 1;
+            return index > removedAssistantIndex ? index - 1 : index;
+          };
+          const expandedThinking = state.expandedThinking
+            .map(remapMessageIndex)
+            .sort((a, b) => a - b);
+          const focusedMessageIndex = remapMessageIndex(state.focusedMessageIndex);
           const usedTokens = event.usage?.totalTokens ?? state.usedTokens;
           const contextTokens = event.usage?.promptTokens ?? state.contextTokens;
           const cacheReadTokens = event.usage?.cacheReadTokens ?? state.cacheReadTokens;
           const baseNext: TuiState = {
             ...state,
             messages: newMessages,
+            expandedThinking,
+            focusedMessageIndex,
             streamingText: "",
             streamingReasoning: "",
             streamingTextParts: [],
@@ -1025,6 +1085,21 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             // dedup needs the frozen-prefix baseline set by attempt_reset.
             // USER_MESSAGE / error / run_stopped / max_turns clear it.
             status: hasTools ? "Running tool…" : "Finalizing response…",
+            // Track the frozen streaming prefix of the just-finalized message
+            // so the document-layout frame can drop those rows when the
+            // sealed prefix stops at an un-sealable entry (subagent card).
+            // The retry baseline takes precedence: during a retried stream the
+            // commit channel is suppressed, so only the frozen prefix was
+            // ever committed.
+            streamSealPending:
+              (text || reasoning) && !isDuplicate
+                ? {
+                    message: assistantMsg as Extract<ChatMessage, { kind: "assistant" }>,
+                    committedText:
+                      state.streamRetryCommittedText ??
+                      (state.streamingText.slice(0, computeCommitBoundary(state.streamingText)) || ""),
+                  }
+                : state.streamSealPending,
             usedTokens,
             taskTokens: state.taskTokens + (event.usage?.totalTokens ?? 0),
             contextTokens,
@@ -1048,6 +1123,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingTextParts: [],
             streamingReasoningParts: [],
             streamRetryCommittedText: undefined,
+            streamSealPending: undefined,
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
@@ -1123,6 +1199,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingTextParts: [],
             streamingReasoningParts: [],
             streamRetryCommittedText: undefined,
+            streamSealPending: undefined,
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
@@ -1301,6 +1378,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingTextParts: [],
             streamingReasoningParts: [],
             streamRetryCommittedText: undefined,
+            streamSealPending: undefined,
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,
@@ -1319,6 +1397,7 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
             streamingTextParts: [],
             streamingReasoningParts: [],
             streamRetryCommittedText: undefined,
+            streamSealPending: undefined,
             turnStartedAt: undefined,
             lastStreamAt: undefined,
             pendingPermission: undefined,

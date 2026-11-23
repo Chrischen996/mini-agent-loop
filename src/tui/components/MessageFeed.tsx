@@ -162,6 +162,12 @@ type MessageFeedProps = {
   documentMode?: boolean;
   /** Rows of the streaming assistant projection already appended to the stream. */
   committedStreamingRows?: number;
+  /** Document layout: final assistant rows already frozen before an un-sealable entry. */
+  sealedAssistantRows?: readonly PhysicalRow[];
+  /** Row texts from the streaming projection already frozen into scrollback. */
+  committedAssistantTexts?: readonly string[];
+  /** Transcript index of the just-finalized streaming message whose frozen body rows must not re-render in the frame. */
+  streamSealPendingIndex?: number;
   /** Rows available for the feed after chrome (header/input/status). */
   availableHeight?: number;
   /** Terminal width used for wrap-aware height estimates. */
@@ -214,6 +220,9 @@ function MessageFeedInner({
   historyStartIndex = 0,
   documentMode = false,
   committedStreamingRows = 0,
+  sealedAssistantRows,
+  committedAssistantTexts,
+  streamSealPendingIndex,
   availableHeight = 20,
   width = 80,
   scrollOffset = 0,
@@ -245,6 +254,9 @@ function MessageFeedInner({
     historyStartIndex,
     documentMode,
     committedStreamingRows,
+    sealedAssistantRows,
+    committedAssistantTexts,
+    streamSealPendingIndex,
     showHistoryHints,
     cache: heightCache,
     subagentById,

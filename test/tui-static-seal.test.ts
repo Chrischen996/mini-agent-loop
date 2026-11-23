@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import React from "react";
 import { describe, it } from "node:test";
+import { render } from "ink-testing-library";
+import { App } from "../src/tui/App.tsx";
 import {
   buildSealedStaticItems,
   isSealableTranscriptMessage,
@@ -42,9 +45,9 @@ describe("sealed transcript prefix", () => {
     assert.equal(isSealableTranscriptMessage(tool("t", "running")), false);
   });
 
-  it("never seals subagent cards (interactive expand/collapse)", () => {
+  it("keeps running subagent cards interactive", () => {
     assert.equal(isSealableTranscriptMessage(subagent("s", "running")), false);
-    assert.equal(isSealableTranscriptMessage(subagent("s", "done")), false);
+    assert.equal(isSealableTranscriptMessage(subagent("s", "done"), {}, { sealedSubagentCards: true }), true);
   });
 
   it("honors overlay status when deciding sealability", () => {
@@ -58,6 +61,10 @@ describe("sealed transcript prefix", () => {
     assert.equal(sealedTranscriptCount(messages), 3);
     assert.equal(sealedTranscriptCount([]), 0);
     assert.equal(sealedTranscriptCount([subagent("s", "done")]), 0);
+    assert.equal(
+      sealedTranscriptCount([subagent("s", "done")], {}, { sealedSubagentCards: true }),
+      1,
+    );
   });
 
   it("builds static items for the sealed prefix with stable identity", () => {
@@ -128,5 +135,25 @@ describe("sealed transcript prefix", () => {
     const kinds = excluded.items.filter((item) => item.kind === "message") as Array<{ index: number }>;
     assert.ok(kinds.length > 0);
     for (const item of kinds) assert.ok(item.index >= 2, "dynamic frame only renders unsealed messages");
+  });
+
+  it("seals completed subagent cards in the document-layout App", async () => {
+    const bursts: string[] = [];
+    const view = render(React.createElement(App, {
+      cwd: "/tmp",
+      agentTools: [],
+      allTools: [],
+      worktreeIsolation: false,
+      layoutMode: "document",
+      writeStaticBurst: (text: string) => bursts.push(text),
+    }), { columns: 80, rows: 24 });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const frame = view.lastFrame() ?? "";
+      assert.ok(frame.includes("Message, /command, or @file reference"), "composer remains visible");
+      assert.ok(frame.split("\n").length <= 23, "document frame must fit the terminal viewport");
+    } finally {
+      view.cleanup();
+    }
   });
 });

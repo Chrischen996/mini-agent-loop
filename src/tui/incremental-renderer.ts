@@ -83,9 +83,11 @@ export class IncrementalTerminalRenderer {
    * classification unreliable.
    *
    * With a known anchor: erase the previous frame region, print the burst at
-   * the anchor, advance the anchor past the emitted lines, then repaint the
-   * dynamic frame below it (Ink skips writes for unchanged output, so the
-   * renderer must redraw the frame itself or the region would stay blank).
+   * the anchor, and advance the anchor past the emitted lines. The next Ink
+   * frame repaints the dynamic frame below the burst. Repainting the saved
+   * frame here would freeze the pre-burst composer into native scrollback
+   * whenever the required deficit scroll runs before React commits the new
+   * frame.
    * With an unknown anchor (burst before the first frame, e.g. a resumed
    * session): scroll once at the bottom row, print the burst so it flows into
    * scrollback, then blank the screen — the first frame re-anchors bottom on a
@@ -130,16 +132,11 @@ export class IncrementalTerminalRenderer {
       this.frameTopRow = Math.min(rows, anchor + Math.max(0, emittedLines));
       this.lastBurstBottomRow = emittedLines > 0 ? anchor + emittedLines - 1 : undefined;
       bootProbe(`burst lines=${emittedLines} anchor=${anchor} -> top=${this.frameTopRow} rows=${rows}\n`);
-      // Repaint the dynamic frame below the burst. Ink may skip the next
-      // render entirely (unchanged output), so this repaint is mandatory.
-      if (previous.length > 0) {
-        this.renderRowsInline(previous, [], { rows, columns, forceRedraw: true }, () => {
-          paintedRows += 1;
-        });
-        this.previousLines = [...previous];
-      } else {
-        this.previousLines = [];
-      }
+      // Force the next Ink frame to repaint against an empty baseline. Ink
+      // may consider its output unchanged, but its renderer still receives the
+      // frame after the state change that emitted this burst.
+      this.previousLines = [];
+      this.forceRedrawOnNextFrame = true;
     } else {
       // Anchor unknown: start at the bottom row, let the burst scroll, then
       // clear the screen so the first frame anchors on a clean surface.

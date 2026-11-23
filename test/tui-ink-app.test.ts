@@ -1320,11 +1320,27 @@ describe("the single Ink terminal", () => {
   });
 
   it("recalls submitted prompts with Ctrl+P and restores the draft with Ctrl+N", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ messages?: Array<{ role: string; content?: string }> }> = [];
+    globalThis.fetch = (async (_input, init) => {
+      requests.push(JSON.parse(String(init?.body)) as { messages?: Array<{ role: string; content?: string }> });
+      const payload = [
+        `data: ${JSON.stringify({ choices: [{ delta: { content: "history-recall answer" }, finish_reason: null }] })}`,
+        `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}`,
+        "data: [DONE]",
+        "",
+      ].join("\n\n");
+      return new Response(payload, { headers: { "content-type": "text/event-stream" } });
+    }) as typeof fetch;
+
     const view = open();
     const submittedPrompt = "history-recall-marker prompt";
     const promptRow = () => (view.lastFrame() ?? "").split("\n").filter((line) => line.includes("❯") || line.includes("⟳")).at(-1) ?? "";
     try {
       await submit(view, submittedPrompt);
+      for (let attempt = 0; attempt < 20 && !(view.lastFrame() ?? "").includes("history-recall answer"); attempt += 1) {
+        await waitForRender();
+      }
       view.stdin.write("\x10");
       await waitForRender();
       assert.ok(promptRow().includes(submittedPrompt));
@@ -1334,6 +1350,7 @@ describe("the single Ink terminal", () => {
       assert.ok(!promptRow().includes(submittedPrompt));
     } finally {
       view.cleanup();
+      globalThis.fetch = originalFetch;
     }
   });
 
@@ -1369,6 +1386,9 @@ describe("the single Ink terminal", () => {
       const messages = requests[1]?.messages ?? [];
       assert.ok(messages.some((message) => message.role === "user" && message.content === "remember permission switch context marker"));
       assert.ok(messages.some((message) => message.role === "assistant" && message.content === "first answer context marker"));
+      assert.equal(messages.filter((message) => message.role === "user").length, 2);
+      assert.equal(messages.filter((message) => message.role === "assistant").length, 1);
+      assert.ok(messages.some((message) => message.role === "user" && message.content === "continue after permission switch"));
       const system = messages.find((message) => message.role === "system");
       assert.match(system?.content ?? "", /mode=bypass/);
       assert.doesNotMatch(system?.content ?? "", /mode=plan/);

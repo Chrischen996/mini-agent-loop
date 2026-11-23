@@ -1263,6 +1263,7 @@ async function runAgentTurnInternal(
   const emitAssistantEvent = async (message: AssistantMessage, usage?: StreamChatUsage): Promise<void> => {
     // Add message to history only once, here in emit
     messages.push(message);
+    if (activeRuntimeRef) activeRuntimeRef.history = messages;
     
     const budget = activeRuntimeRef?.globalBudgetState;
     let exceeded = false;
@@ -1649,7 +1650,6 @@ async function runAgentTurnInternal(
       !message.isError && ["write", "edit", "delete", "mkdir", "copy", "move", "patch", "document_edit"].includes(message.name))) {
       const validationCall: ToolCall = { id: `auto_validation_${turn}`, name: "validate_workspace", arguments: {} };
       const validationAssistant: AssistantMessage = { role: "assistant", content: "", toolCalls: [validationCall] };
-      messages.push(validationAssistant);
       await emitAssistantEvent(validationAssistant);
       emitToolStart(validationCall);
       const report = await runValidation({ workspace: validationWorkspace, signal: activeSignal });
@@ -1772,7 +1772,6 @@ async function runAgentTurnInternal(
             content: "",
             toolCalls: [call],
           };
-          messages.push(assistant);
           await emitAssistantEvent(assistant);
           emitToolStart(call);
 
@@ -1909,7 +1908,6 @@ async function runAgentTurnInternal(
           if (isAbortError(err)) {
             if (streamed) {
               assistant = { role: "assistant", content: streamed };
-              messages.push(assistant);
               await emitAssistantEvent(assistant);
             }
             emitAborted(onEvent, messages, permissionTurn);
@@ -1921,7 +1919,6 @@ async function runAgentTurnInternal(
           if (err instanceof LlmTimeoutError) {
             if (streamed) {
               const partial = { role: "assistant" as const, content: streamed };
-              messages.push(partial);
               await emitAssistantEvent(partial);
             }
             // Attach the accumulated messages so the caller can restore history.

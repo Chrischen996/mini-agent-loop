@@ -75,6 +75,39 @@ describe("TUI store adapter", () => {
     assert.deepEqual(messages, [{ kind: "user", text: "hello" }]);
   });
 
+  it("projects persisted thinking into restored assistant reasoning", () => {
+    const messages = chatMessagesFromAgentHistory([
+      { role: "user", content: "explain" },
+      {
+        role: "assistant",
+        content: "answer",
+        thinking: [
+          { type: "thinking", thinking: "inspect first" },
+          { type: "thinking", thinking: "then answer" },
+        ],
+      },
+    ]);
+    const assistant = messages.find((message) => message.kind === "assistant");
+    assert.equal(assistant?.kind === "assistant" ? assistant.reasoning : undefined, "inspect first\nthen answer");
+  });
+
+  it("restores a reasoning-only assistant turn", () => {
+    const messages = chatMessagesFromAgentHistory([
+      { role: "user", content: "explain" },
+      {
+        role: "assistant",
+        content: "",
+        thinking: [{ type: "thinking", thinking: "reasoning without an answer yet" }],
+      },
+    ]);
+    const assistant = messages.find((message) => message.kind === "assistant");
+    assert.equal(assistant?.kind === "assistant" ? assistant.text : undefined, "");
+    assert.equal(
+      assistant?.kind === "assistant" ? assistant.reasoning : undefined,
+      "reasoning without an answer yet",
+    );
+  });
+
   it("draws no lone marker row for tool-only assistant turns after restore", () => {
     const messages = chatMessagesFromAgentHistory([
       { role: "user", content: "inspect" },

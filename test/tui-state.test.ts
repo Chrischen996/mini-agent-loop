@@ -531,6 +531,317 @@ describe("TUI sidebar state", () => {
     assert.equal(state.streamRetryCommittedText, undefined);
   });
 
+  it("does not duplicate a streamed assistant seal after tool activity", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Inspect then answer" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "answer", text: "same answer" },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "", toolCalls: [{ id: "call_1", name: "read", arguments: {} }] },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "tool_start", call: { id: "call_1", name: "read", arguments: {} } },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "tool_end", call: { id: "call_1", name: "read", arguments: {} }, result: { content: "file" } },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "answer", text: "same answer" },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant", message: { role: "assistant", content: "same answer" } },
+    });
+
+    assert.equal(
+      state.messages.filter((message) => message.kind === "assistant" && message.text === "same answer").length,
+      1,
+    );
+  });
+
+  it("replaces a reasoning-only seal with the completed assistant", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Explain the code" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "reasoning", text: "first inspect the architecture" },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant", message: { role: "assistant", content: "" } },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "Here is the architecture" },
+      },
+    });
+
+    const assistants = state.messages.filter((message) => message.kind === "assistant");
+    assert.equal(assistants.length, 1);
+    assert.equal(assistants[0]?.text, "Here is the architecture");
+    assert.equal(
+      assistants[0]?.kind === "assistant" ? assistants[0].reasoning : undefined,
+      "first inspect the architecture",
+    );
+  });
+
+  it("replaces a reasoning-only seal after a subagent card", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Research then answer" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "reasoning", text: "delegate first" },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_1", name: "subagent", arguments: { task: "Research" } }],
+        },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "tool_start",
+        call: { id: "call_1", name: "subagent", arguments: { task: "Research" } },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_start",
+        id: "sub_1",
+        task: "Research",
+        depth: 1,
+        runtime: {
+          model: "test-model",
+          provider: "test",
+          baseUrl: "http://localhost",
+          thinkingMode: "fixed",
+          modelSwitchSucceeded: true,
+        },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_end",
+        id: "sub_1",
+        result: "research result",
+        success: true,
+        depth: 1,
+        turns: 1,
+        totalTokens: 10,
+        runtime: {
+          model: "test-model",
+          provider: "test",
+          baseUrl: "http://localhost",
+          thinkingMode: "fixed",
+          modelSwitchSucceeded: true,
+        },
+        autoDelegationInherited: false,
+      },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "tool_end",
+        call: { id: "call_1", name: "subagent", arguments: { task: "Research" } },
+        result: { content: "research result" },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "Final research answer" },
+      },
+    });
+
+    const assistants = state.messages.filter((message) => message.kind === "assistant");
+    assert.equal(assistants.length, 1);
+    assert.equal(assistants[0]?.kind === "assistant" ? assistants[0].text : undefined, "Final research answer");
+    assert.equal(
+      assistants[0]?.kind === "assistant" ? assistants[0].reasoning : undefined,
+      "delegate first",
+    );
+    assert.ok(state.messages.some((message) => message.kind === "subagent_call" && message.id === "sub_1"));
+  });
+
+  it("shifts reasoning focus when replacing a reasoning-only seal", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Research then answer" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "reasoning", text: "delegate first" },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant", message: { role: "assistant", content: "" } },
+    });
+    state = tuiReducer(state, { type: "TOGGLE_MESSAGE_THINKING", index: 1 });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant", message: { role: "assistant", content: "Final answer" } },
+    });
+
+    assert.equal(state.messages.filter((message) => message.kind === "assistant").length, 1);
+    assert.deepEqual(state.expandedThinking, [1]);
+    assert.equal(state.focusedMessageIndex, 1);
+  });
+
+  it("remaps reasoning focus after removing a placeholder before subagent cards", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Research then answer" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "reasoning", text: "delegate first" },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "" },
+      },
+    });
+    state = tuiReducer(state, { type: "TOGGLE_MESSAGE_THINKING", index: 1 });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "call_1", name: "subagent", arguments: { task: "Research" } }],
+        },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "SUBAGENT_EVENT",
+      event: {
+        type: "subagent_start",
+        id: "sub_1",
+        task: "Research",
+        depth: 1,
+        runtime: {
+          model: "test-model",
+          provider: "test",
+          baseUrl: "http://localhost",
+          thinkingMode: "fixed",
+          modelSwitchSucceeded: true,
+        },
+      },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: {
+        type: "assistant",
+        message: { role: "assistant", content: "Final answer" },
+      },
+    });
+
+    const finalAssistantIndex = state.messages.findIndex(
+      (message) => message.kind === "assistant" && message.text === "Final answer",
+    );
+    assert.ok(finalAssistantIndex > 0);
+    assert.deepEqual(state.expandedThinking, [finalAssistantIndex]);
+    assert.equal(state.focusedMessageIndex, finalAssistantIndex);
+  });
+
+  it("keeps reasoning supplied only by the completed assistant event", () => {
+    const state = tuiReducer(
+      createInitialState("test-model"),
+      {
+        type: "LOOP_EVENT",
+        event: {
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: "Final answer",
+            thinking: [{ type: "thinking", thinking: "provider reasoning" }],
+          },
+        },
+      },
+    );
+
+    const assistant = state.messages.find((message) => message.kind === "assistant");
+    assert.equal(assistant?.kind === "assistant" ? assistant.text : undefined, "Final answer");
+    assert.equal(
+      assistant?.kind === "assistant" ? assistant.reasoning : undefined,
+      "provider reasoning",
+    );
+  });
+
+  it("allows the same assistant text in a later turn", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "First question" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant", message: { role: "assistant", content: "same answer" } },
+    });
+    state = tuiReducer(state, { type: "LOOP_EVENT", event: { type: "done", messages: [] } });
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Repeat it exactly" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant", message: { role: "assistant", content: "same answer" } },
+    });
+
+    assert.equal(
+      state.messages.filter((message) => message.kind === "assistant" && message.text === "same answer").length,
+      2,
+    );
+  });
+
+  it("clears the pending seal on manual cancellation", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Stop this turn" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "answer", text: "partial answer" },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant", message: { role: "assistant", content: "partial answer" } },
+    });
+    state = tuiReducer(state, { type: "CANCEL_GENERATION" });
+
+    assert.equal(state.streamSealPending, undefined);
+  });
+
+  it("clears the pending seal before continuation and automatic continuation", () => {
+    let state = createInitialState("test-model");
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "Continue this turn" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant", message: { role: "assistant", content: "first answer" } },
+    });
+
+    state = tuiReducer(state, { type: "CONTINUE_TURN" });
+    assert.equal(state.streamSealPending, undefined);
+
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant", message: { role: "assistant", content: "second answer" } },
+    });
+    state = tuiReducer(state, { type: "AUTO_CONTINUE", count: 1, max: 2 });
+    assert.equal(state.streamSealPending, undefined);
+  });
+
   it("keeps the existing dedup baseline on a second truncation", () => {
     // While the baseline is set, the commit effect is suppressed, so the
     // retried stream's text never reaches the scrollback. A second

@@ -1312,6 +1312,11 @@ describe("LlmTimeoutError in loop", () => {
             `expected LlmTimeoutError but got ${(err as Error)?.constructor?.name ?? String(err)}`,
           );
           assert.ok(!(err instanceof MaxTurnsExceededError), "must not throw MaxTurnsExceededError");
+          assert.equal(
+            (err as LlmTimeoutError).messages?.filter((message) => message.role === "assistant").length,
+            1,
+            "partial assistant message must be added to history once",
+          );
           return true;
         },
       );
@@ -1319,6 +1324,11 @@ describe("LlmTimeoutError in loop", () => {
       assert.equal(calls, 1, "partial answer timeouts must not be automatically replayed");
       assert.ok(events.some((e) => e.type === "assistant_delta" && e.kind === "answer"), "should have emitted answer delta");
       assert.ok(events.some((e) => e.type === "assistant"), "should have emitted partial assistant message");
+      const assistantMessages = (events.find((event) => event.type === "assistant") as
+        | { type: "assistant"; message: { role: "assistant"; content: string } }
+        | undefined)?.message;
+      assert.ok(assistantMessages, "partial assistant event is missing");
+      assert.equal(assistantMessages.content, "par");
     } finally {
       globalThis.fetch = originalFetch;
     }

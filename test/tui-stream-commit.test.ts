@@ -9,6 +9,7 @@ import {
   collectResizeRefreshRows,
 } from "../src/tui/stream-commit.ts";
 import { selectMessageViewport, streamingAssistantRows } from "../src/tui/message-viewport.ts";
+import { messagePhysicalRows } from "../src/tui/message-rows.ts";
 import { IncrementalTerminalRenderer } from "../src/tui/incremental-renderer.ts";
 import { resolveTuiLayoutMode } from "../src/tui/layout-mode.ts";
 import { headerStaticText } from "../src/tui/components/Header.tsx";
@@ -174,10 +175,132 @@ describe("document layout viewport (committed streaming rows)", () => {
     assert.ok(textItem && textItem.kind === "streaming_text");
     assert.ok(textItem.rows.some((row) => row.key.startsWith("streaming-text-")), "legacy preview keys");
   });
+
+  it("keeps reasoning and the uncommitted tail after an un-sealable subagent entry", () => {
+    const rows = messagePhysicalRows({
+      kind: "assistant",
+      text: "first line\nsecond line\nopen tail",
+      reasoning: "plan",
+    }, 0, { width: 80, thinkingMode: "summary", expanded: false, focused: false });
+    const committed = rowTexts(streamingAssistantRows("first line\nsecond line", {
+      width: 80,
+      thinkingMode: "summary",
+    }));
+    const viewport = selectMessageViewport({
+      messages: [],
+      streamingText: "first line\nsecond line\nopen tail",
+      streamingReasoning: "plan",
+      busy: true,
+      thinkingMode: "summary",
+      expandedThinking: [],
+      scrollOffset: 0,
+      availableHeight: 10,
+      width: 80,
+      documentMode: true,
+      committedStreamingRows: 3,
+      sealedAssistantRows: rows,
+      committedAssistantTexts: committed,
+    });
+    const textItem = viewport.items.find((item) => item.kind === "streaming_text");
+    assert.ok(textItem && textItem.kind === "streaming_text");
+    assert.deepEqual(
+      textItem.rows.map((row) => row.text),
+      ["∴ Thinking…", "plan", "open tail"],
+    );
+  });
+
+  it("keeps a full unsealed assistant when no streamed rows were committed", () => {
+    const rows = messagePhysicalRows({
+      kind: "assistant",
+      text: "answer",
+      reasoning: "plan",
+    }, 0, { width: 40, thinkingMode: "summary", expanded: false, focused: false });
+    const viewport = selectMessageViewport({
+      messages: [],
+      streamingText: "answer",
+      streamingReasoning: "plan",
+      busy: true,
+      thinkingMode: "summary",
+      expandedThinking: [],
+      scrollOffset: 0,
+      availableHeight: 10,
+      width: 40,
+      documentMode: true,
+      committedStreamingRows: 0,
+      sealedAssistantRows: rows,
+      committedAssistantTexts: [],
+    });
+    const textItem = viewport.items.find((item) => item.kind === "streaming_text");
+    assert.ok(textItem && textItem.kind === "streaming_text");
+    assert.deepEqual(textItem.rows.map((row) => row.text), rowTexts(rows));
+  });
+
+  it("keeps only reasoning when the complete assistant body was committed", () => {
+    const rows = messagePhysicalRows({
+      kind: "assistant",
+      text: "answer\n",
+      reasoning: "plan",
+    }, 0, { width: 40, thinkingMode: "summary", expanded: false, focused: false });
+    const committed = rowTexts(streamingAssistantRows("answer\n", {
+      width: 40,
+      thinkingMode: "summary",
+    }));
+    const viewport = selectMessageViewport({
+      messages: [],
+      streamingText: "answer\n",
+      streamingReasoning: "plan",
+      busy: true,
+      thinkingMode: "summary",
+      expandedThinking: [],
+      scrollOffset: 0,
+      availableHeight: 10,
+      width: 40,
+      documentMode: true,
+      committedStreamingRows: committed.length,
+      sealedAssistantRows: rows,
+      committedAssistantTexts: committed,
+    });
+    const textItem = viewport.items.find((item) => item.kind === "streaming_text");
+    assert.ok(textItem && textItem.kind === "streaming_text");
+    assert.deepEqual(textItem.rows.map((row) => row.text), ["∴ Thinking…", "plan"]);
+  });
+
+  it("drops committed body rows from an unsealed assistant message in history", () => {
+    const assistantMessage = {
+      kind: "assistant" as const,
+      text: "first line\nsecond line\nopen tail",
+      reasoning: "plan",
+    };
+    const committed = rowTexts(streamingAssistantRows("first line\nsecond line", {
+      width: 80,
+      thinkingMode: "summary",
+    }));
+    const viewport = selectMessageViewport({
+      messages: [assistantMessage],
+      streamingText: "",
+      streamingReasoning: "",
+      busy: false,
+      thinkingMode: "summary",
+      expandedThinking: [],
+      scrollOffset: 0,
+      availableHeight: 10,
+      width: 80,
+      documentMode: true,
+      historyStartIndex: 0,
+      streamSealPendingIndex: 0,
+      committedAssistantTexts: committed,
+    });
+    const messageItem = viewport.items.find((item) => item.kind === "message" && item.index === 0);
+    assert.ok(messageItem && messageItem.kind === "message");
+    assert.deepEqual(
+      messageItem.rows.map((row) => row.text),
+      ["", "∴ Thinking…", "plan", "open tail"],
+    );
+  });
 });
 
 describe("document layout renderer (anchor pipeline)", () => {
-  it("shares the inline anchor pipeline: erase, burst, repaint below", () => {
+  it("shares the inline anchor pipeline without freezing the old frame", () => {
     const output = sizedSink(10);
     const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "document" });
     renderer.write("a\nb\nc");
@@ -186,8 +309,8 @@ describe("document layout renderer (anchor pipeline)", () => {
     renderer.emitStaticBurst("hello\n");
     const painted = output.writes.join("");
     assert.ok(painted.includes("\x1b[8;1Hhello\n"), "burst written raw at the anchor");
-    assert.match(painted, /\x1b\[8;1H\x1b\[2Ka/);
-    assert.match(painted, /\x1b\[10;1H\x1b\[2Kc/);
+    assert.ok(!painted.includes("a"), "old frame is not repainted");
+    assert.ok(!painted.includes("c"), "old frame is not repainted");
   });
 });
 

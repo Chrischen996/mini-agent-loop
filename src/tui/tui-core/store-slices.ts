@@ -98,6 +98,8 @@ export type RuntimeSlice = Pick<
   | "contextTokens"
   | "cacheReadTokens"
   | "spinnerMessage"
+  | "streamRetryCommittedText"
+  | "streamSealPending"
 >;
 
 // ── Slice 7: view (presentation-only, no agent semantics) ────────────
@@ -149,6 +151,7 @@ const SLICE_KEYS: Array<[
     "streamingReasoningParts", "turnStartedAt", "lastStreamAt", "busy",
     "autoContinueCount", "modelName", "usedTokens", "contextTokens",
     "cacheReadTokens", "spinnerMessage",
+    "streamRetryCommittedText", "streamSealPending",
   ]],
   ["view", ["expandedThinking", "focusedMessageIndex", "scrollOffset", "maxScrollOffset", "pendingImages"]],
   ["notices", ["status", "thinkingMode"]],
