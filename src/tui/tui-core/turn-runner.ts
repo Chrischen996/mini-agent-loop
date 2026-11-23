@@ -28,6 +28,7 @@ import type { SkillRegistry } from "../../skills/types.ts";
 import { TurnEventBuffer } from "../stream-buffer.ts";
 import { resolveAtRefs } from "../at-refs-resolver.ts";
 import { imageAttachmentToPart } from "../image-attachments.ts";
+import { formatLlmTimeoutMessage } from "../turn-messages.ts";
 import type { ImageAttachment, TuiAction, TuiStore } from "../state.ts";
 
 export type TerminalSubmitOptions = {
@@ -415,20 +416,4 @@ export class TurnRunner {
     }
     return { type: "aborted", messages: history };
   }
-}
-
-function formatLlmTimeoutMessage(error: LlmTimeoutError): string {
-  const phase =
-    error.phase === "first_response"
-      ? "first response"
-      : error.phase === "stream_idle"
-        ? "stream idle"
-        : error.phase === "total"
-          ? "total request"
-          : "request";
-  const duration = error.timeoutMs === undefined ? "" : `, ${Math.ceil(error.timeoutMs / 1000)}s`;
-  const preview = error.partialContent?.replace(/\s+/g, " ").trim().slice(0, 80);
-  return preview
-    ? `LLM timeout (${phase}${duration}) - partial response saved: ${preview}`
-    : `LLM timeout (${phase}${duration}) - no partial response received`;
 }

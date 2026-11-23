@@ -255,4 +255,22 @@ describe("store slices 对拍 (sliced vs monolithic reducer)", () => {
       { type: "TOGGLE_SUBAGENT_EXPAND", id: "sa-1" },
     ]);
   });
+  it("the runtime slice contract includes document-layout sealing fields", () => {
+    let state = initial();
+    state = tuiReducer(state, { type: "USER_MESSAGE", text: "seal" });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant_delta", kind: "answer", text: "answer" },
+    });
+    state = tuiReducer(state, {
+      type: "LOOP_EVENT",
+      event: { type: "assistant", message: { role: "assistant", content: "answer" } },
+    });
+
+    const runtime = projectToSlices(state).runtime;
+    assert.ok(runtime.streamSealPending);
+    const roundTripped = combineSlices(projectToSlices(state));
+    deepEqualValues("pending-seal round-trip", state, roundTripped);
+  });
+
 });

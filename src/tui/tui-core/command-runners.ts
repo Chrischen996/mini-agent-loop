@@ -2,7 +2,7 @@
 //
 // Each body receives parsed command arguments and a CommandContext, and
 // returns true when handled locally. The Ink UI keeps overlay-specific
-// command routing in App.tsx; the shared command catalog stays in
+// command routing in session/command-cascade.ts; the shared command catalog stays in
 // slash-commands.ts.
 
 import type { SlashCommand } from "../slash-commands.ts";

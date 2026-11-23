@@ -64,7 +64,7 @@ npx tsx --test test/bg-tasks.test.ts test/bg-tasks.integration.test.ts
 ## TUI surface
 
 `/bg-tasks` slash command (registered in `src/tui/slash-commands.ts`, handled
-in `src/tui/App.tsx`): opens the **live panel** (B) —
+in `src/tui/session/command-cascade.ts`): opens the **live panel** (B) —
 `src/tui/components/BgTaskLivePanel.tsx` — a persistent floating panel with
 arrow-key task selection, an inline log tail for the selected task, `r` to
 force a refresh, `Esc` to close, and an adaptive auto-refresh (1s while a task

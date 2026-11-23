@@ -2,7 +2,7 @@
 //
 // The shipped Ink UI and this registry both use `slash-commands.ts` as the
 // command metadata catalog (palette, /help, unknown-command guard). Ink
-// handles its UI-specific commands in App.tsx; this registry supplies
+// handles its UI-specific commands in session/command-cascade.ts; this registry supplies
 // renderer-independent execution bodies for other consumers.
 
 import type { SlashCommand } from "../slash-commands.ts";

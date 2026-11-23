@@ -45,7 +45,7 @@ user prompt -> LLM -> tool_calls -> 逐个校验/执行 -> 回填 tool 结果 ->
 
 | # | 问题 | 状态 | 处理方式 |
 |---|---|---|---|
-| 1 | 巨型文件（server.ts 2862 行等） | ✅ 部分完成 | `server.ts` 拆到 2091 行，11 个路由域移入 `src/server/routes/*`，每个模块只接收窄化的 context。剩余 `loop.ts` / `App.tsx` / `subagent/tool.ts` 未拆 |
+| 1 | 巨型文件（server.ts 2862 行等） | ✅ 部分完成 | `server.ts` 拆到 2091 行，11 个路由域移入 `src/server/routes/*`，每个模块只接收窄化的 context。`src/tui/App.tsx` 已从 3402 行拆到 197 行（会话视图 → `AgentSessionApp.tsx`；命令分发 → `session/command-cascade.ts`；回合执行 → `session/turn-execution.ts`；流式输出 → `hooks/useStreamBursts.ts`；布局预算 → `hooks/useSessionLayout.ts`）。剩余 `loop.ts` / `subagent/tool.ts` 未拆 |
 | 2 | 模型目录硬编码上万行 | ✅ 完成 | 1080 个模型抽成 `src/pi-ai/providers/data/*.json`；补上了文件头一直声称却不存在的 `scripts/generate-models.ts`；`npm run generate-models[:check]` |
 | 3 | `src/pi-ai` 与 npm 依赖边界不清 | ✅ 完成 | 查明 `pi-agent-core` / `pi-ai` / `pi-coding-agent` **从未被 import**，已从 dependencies 移除（TUI 使用 Ink；`pi-web-access` 可能间接安装 `pi-tui`）；新增 `src/pi-ai/README.md` 说明这是完整 vendor fork |
 | 4 | README 30KB 混杂、Layout 严重过期 | ✅ 完成 | 新增 `docs/architecture.md`（真实目录图 + 路由模块表），README Layout 替换为摘要 + 链接 |
