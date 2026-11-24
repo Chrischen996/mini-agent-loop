@@ -818,6 +818,44 @@ describe("the single Ink terminal", () => {
     }
   });
 
+  it("clears the main screen around the dashboard in flow layouts", async () => {
+    // Document layout: the dashboard panel is a full-viewport overlay that
+    // cannot reach the session content above the bottom-anchored frame, so
+    // opening/closing it must clear the visible screen (the Ctrl+L path).
+    let clearCalls = 0;
+    const view = open(undefined, undefined, {
+      layoutMode: "document",
+      requestClearScreen: () => { clearCalls += 1; },
+    });
+    try {
+      await submit(view, "/dashboard");
+      assert.equal(clearCalls, 1, "opening the dashboard clears the screen");
+      assert.match(view.lastFrame() ?? "", /Agent dashboard/);
+
+      view.stdin.write("\x1b");
+      await waitForRender();
+      assert.equal(clearCalls, 2, "closing the dashboard clears the screen");
+    } finally {
+      view.cleanup();
+    }
+  });
+
+  it("does not clear the screen around the dashboard in the alternate layout", async () => {
+    let clearCalls = 0;
+    const view = open(undefined, undefined, {
+      requestClearScreen: () => { clearCalls += 1; },
+    });
+    try {
+      await submit(view, "/dashboard");
+      assert.match(view.lastFrame() ?? "", /Agent dashboard/);
+      view.stdin.write("\x1b");
+      await waitForRender();
+      assert.equal(clearCalls, 0, "alternate layout owns its own screen buffer");
+    } finally {
+      view.cleanup();
+    }
+  });
+
   it("toggles dashboard worktree isolation without dispatching a task", async () => {
     const view = open({}, undefined, { worktreeIsolation: true });
     try {

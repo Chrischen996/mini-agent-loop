@@ -9,9 +9,11 @@
 import type { LlmConfig, ChatFn } from "../../llm/index.ts";
 import {
   createAgentHistory,
+  toolProviderAdvertisesModeRequest,
   type AgentRuntimeRef,
   type LoopEvent,
 } from "../../loop.ts";
+import { applyPermissionModePrompt } from "../../loop/prompt.ts";
 import { runTuiAgentTurn, tuiContinuationPrompt, type TuiTurnStop } from "../agent-turn.ts";
 import { LlmTimeoutError } from "../../llm/retry.ts";
 import {
@@ -111,7 +113,11 @@ export class TurnRunner {
     this.activeLlm = options.llm;
     this.activeThinkingMode = options.thinkingMode ?? "fixed";
     this.activeSessionId = options.sessionId;
-    this.history = options.history ?? createAgentHistory(undefined, options.permissionManager.getMode());
+    this.history = options.history ?? createAgentHistory(
+      undefined,
+      options.permissionManager.getMode(),
+      { modeRequest: toolProviderAdvertisesModeRequest(options.tools) },
+    );
     this.streamBuffer = new TurnEventBuffer((event) => this.dispatch({ type: "LOOP_EVENT", event }));
   }
 
@@ -146,7 +152,7 @@ export class TurnRunner {
   }
 
   resetHistory(mode = this.options.permissionManager.getMode()): void {
-    this.history = createAgentHistory(undefined, mode);
+    this.history = createAgentHistory(undefined, mode, this.systemPromptCapabilities());
   }
 
   replaceHistory(history: AgentMessage[]): void {
@@ -258,8 +264,42 @@ export class TurnRunner {
     return resolved;
   }
 
+  /**
+   * Answer a model-initiated permission-mode request.
+   *
+   * Headless parity with the Ink client's `A`/`D` handling: the model only
+   * asks, so the mode changes here and nowhere else. Returns whether the mode
+   * actually changed (`false` for a dismiss, a missing card, or a no-op).
+   *
+   * A mid-turn switch aborts the running turn with `PermissionModeChangedError`
+   * by design; callers that want the task resumed should submit the
+   * continuation prompt afterwards (see `modeRequestContinuationPrompt`).
+   */
+  resolveModeRequest(decision: "switch" | "dismiss"): boolean {
+    const pending = this.options.store.getState().pendingModeRequest;
+    if (!pending) return false;
+    if (decision === "dismiss") {
+      this.dispatch({ type: "CLEAR_MODE_REQUEST" });
+      return false;
+    }
+    const manager = this.options.permissionManager;
+    const changed = manager.getMode() !== pending.mode;
+    if (changed) {
+      manager.setMode(pending.mode, "model_request", pending.reason);
+      applyPermissionModePrompt(this.history, pending.mode);
+    }
+    this.dispatch({ type: "SET_PERMISSION_MODE", mode: pending.mode });
+    this.dispatch({ type: "CLEAR_MODE_REQUEST" });
+    return changed;
+  }
+
   private dispatch(action: TuiAction): void {
     this.options.store.dispatch(action);
+  }
+
+  /** Capabilities the headless history's system prompt must reflect. */
+  private systemPromptCapabilities(): { modeRequest: boolean } {
+    return { modeRequest: toolProviderAdvertisesModeRequest(this.options.tools) };
   }
 
   private async run(prompt: string, submitOptions: TerminalSubmitOptions): Promise<TerminalTurnResult> {

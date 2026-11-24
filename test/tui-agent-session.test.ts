@@ -7,6 +7,8 @@ import type { LlmConfig } from "../src/llm/index.ts";
 import { PermissionManager, type PermissionRequest, type PermissionTurnContext } from "../src/permissions.ts";
 import { createInitialState, createTuiStore } from "../src/tui/state.ts";
 import { createAgentSession } from "../src/tui/tui-core/index.ts";
+import { createRequestPermissionModeTool } from "../src/tools/mode-request.ts";
+import type { Tool } from "../src/tools/types.ts";
 
 function testLlm(): LlmConfig {
   return {
@@ -324,5 +326,124 @@ describe("createAgentSession", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("applies a model mode request only when the caller answers it", async () => {
+    const store = createTuiStore(createInitialState("test-model"));
+    const permissionManager = new PermissionManager("plan");
+    const service = createAgentSession({
+      store,
+      llm: testLlm(),
+      tools: [],
+      permissionManager,
+      chat: async () => ({ role: "assistant", content: "done" }),
+    });
+
+    // The model asks; nothing changes on its own.
+    store.dispatch({
+      type: "LOOP_EVENT",
+      event: { type: "permission_mode_requested", mode: "bypass", reason: "needs to write files" },
+    });
+    assert.equal(permissionManager.getMode(), "plan");
+    assert.deepEqual(store.getState().pendingModeRequest, { mode: "bypass", reason: "needs to write files" });
+
+    assert.equal(service.resolveModeRequest("switch"), true);
+    assert.equal(permissionManager.getMode(), "bypass");
+    assert.equal(store.getState().permissionMode, "bypass");
+    assert.equal(store.getState().pendingModeRequest, undefined);
+  });
+
+  it("keeps the current mode when a headless caller dismisses the request", async () => {
+    const store = createTuiStore(createInitialState("test-model"));
+    const permissionManager = new PermissionManager("plan");
+    const service = createAgentSession({
+      store,
+      llm: testLlm(),
+      tools: [],
+      permissionManager,
+      chat: async () => ({ role: "assistant", content: "done" }),
+    });
+    store.dispatch({
+      type: "LOOP_EVENT",
+      event: { type: "permission_mode_requested", mode: "bypass", reason: "needs to write files" },
+    });
+
+    assert.equal(service.resolveModeRequest("dismiss"), false);
+    assert.equal(permissionManager.getMode(), "plan");
+    assert.equal(store.getState().pendingModeRequest, undefined);
+  });
+
+  it("records the model as the source when a headless caller accepts", async () => {
+    const store = createTuiStore(createInitialState("test-model"));
+    const permissionManager = new PermissionManager("plan");
+    const audit: Array<{ source: string; reason?: string }> = [];
+    permissionManager.onModeChange = (event) => {
+      audit.push({
+        source: event.source,
+        ...(event.reason !== undefined ? { reason: event.reason } : {}),
+      });
+    };
+    const service = createAgentSession({
+      store,
+      llm: testLlm(),
+      tools: [],
+      permissionManager,
+      chat: async () => ({ role: "assistant", content: "done" }),
+    });
+    store.dispatch({
+      type: "LOOP_EVENT",
+      event: { type: "permission_mode_requested", mode: "bypass", reason: "needs to write files" },
+    });
+
+    service.resolveModeRequest("switch");
+    assert.deepEqual(audit, [{ source: "model_request", reason: "needs to write files" }]);
+  });
+
+  it("is a no-op when no mode request is pending", async () => {
+    const store = createTuiStore(createInitialState("test-model"));
+    const permissionManager = new PermissionManager("plan");
+    const service = createAgentSession({
+      store,
+      llm: testLlm(),
+      tools: [],
+      permissionManager,
+      chat: async () => ({ role: "assistant", content: "done" }),
+    });
+
+    assert.equal(service.resolveModeRequest("switch"), false);
+    assert.equal(permissionManager.getMode(), "plan");
+  });
+
+  it("names the mode-request tool in the system prompt only when the tool set has it", () => {
+    const withTool = createAgentSession({
+      store: createTuiStore(createInitialState("test-model")),
+      llm: testLlm(),
+      tools: [createRequestPermissionModeTool() as Tool],
+      permissionManager: new PermissionManager("plan"),
+    });
+    const withoutTool = createAgentSession({
+      store: createTuiStore(createInitialState("test-model")),
+      llm: testLlm(),
+      tools: [],
+      permissionManager: new PermissionManager("plan"),
+    });
+
+    const systemOf = (service: ReturnType<typeof createAgentSession>) =>
+      String(service.getHistory()[0]?.content ?? "");
+    assert.match(systemOf(withTool), /request_permission_mode/);
+    assert.doesNotMatch(systemOf(withoutTool), /request_permission_mode/);
+  });
+
+  it("keeps the prompt in sync after resetHistory", () => {
+    const service = createAgentSession({
+      store: createTuiStore(createInitialState("test-model")),
+      llm: testLlm(),
+      tools: [createRequestPermissionModeTool() as Tool],
+      permissionManager: new PermissionManager("plan"),
+    });
+    service.resetHistory("bypass");
+    const system = String(service.getHistory()[0]?.content ?? "");
+    assert.match(system, /mode=bypass/);
+    assert.match(system, /request_permission_mode/);
   });
 });

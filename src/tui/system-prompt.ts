@@ -24,7 +24,9 @@ export function buildTuiSystemPrompt(
   permissionMode: PermissionMode,
   context: TuiSystemPromptContext = {},
 ): string {
-  return buildSystemPrompt(permissionMode, context.agentsMd, context.memorySection);
+  // The Ink client renders the one-key confirmation card, so it is the one
+  // interactive entry point that may name `request_permission_mode`.
+  return buildSystemPrompt(permissionMode, context.agentsMd, context.memorySection, { modeRequest: true });
 }
 
 export function createTuiAgentHistory(

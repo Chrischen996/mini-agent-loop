@@ -37,6 +37,9 @@ export function toolVisualName(name: string): string {
     bg_wait: "BgWait",
     bg_kill: "BgKill",
     git_diff: "GitDiff",
+    // Without this label the transcript row shows the raw snake_case name
+    // right next to a nicely formatted confirmation card.
+    request_permission_mode: "RequestMode",
   };
   return labels[normalized.toLowerCase()] ?? normalized;
 }

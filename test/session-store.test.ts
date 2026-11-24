@@ -10,6 +10,56 @@ import type { TodoItem } from "../src/tools/todo.ts";
 import type { ExecutionPlan } from "../src/plan-act/types.ts";
 
 describe("SessionStore", () => {
+  it("round-trips an unanswered mode request across a restart", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-mode-request-"));
+    try {
+      const store = new SessionStore(root);
+      await store.save({
+        id: "pending-mode",
+        createdAt: Date.now(),
+        permissionMode: "plan",
+        pendingModeRequest: { mode: "bypass", reason: "needs to write files" },
+        messages: [{ role: "user", content: "fix the bug" }],
+      });
+
+      // A fresh instance simulates the next TUI launch reading from disk.
+      const restored = await new SessionStore(root).load("pending-mode");
+      assert.deepEqual(restored?.pendingModeRequest, {
+        mode: "bypass",
+        reason: "needs to write files",
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("clears a persisted mode request once a later snapshot answers it", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-mode-request-clear-"));
+    try {
+      const store = new SessionStore(root);
+      await store.save({
+        id: "cleared-mode",
+        createdAt: Date.now(),
+        permissionMode: "plan",
+        pendingModeRequest: { mode: "bypass", reason: "needs to write files" },
+        messages: [{ role: "user", content: "fix the bug" }],
+      });
+      // The user accepted: the mode moved and the card is gone.
+      await store.save({
+        id: "cleared-mode",
+        createdAt: Date.now(),
+        permissionMode: "bypass",
+        messages: [{ role: "user", content: "fix the bug" }],
+      });
+
+      const restored = await new SessionStore(root).load("cleared-mode");
+      assert.equal(restored?.permissionMode, "bypass");
+      assert.equal(restored?.pendingModeRequest, undefined, "a resolved request must not come back");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("round-trips TUI model snapshots without exposing API keys in session metadata", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "mini-agent-session-model-snapshot-"));
     try {

@@ -70,6 +70,8 @@ type SessionCreatedEvent = {
   thinkingLevel?: ModelThinkingLevel;
   thinkingMode?: ThinkingMode;
   permissionMode?: PermissionMode;
+  /** Unanswered model mode request, so a restart keeps the card answerable. */
+  pendingModeRequest?: { mode: PermissionMode; reason: string };
   skillNames?: string[];
   phase?: SessionPhase;
   currentPlan?: ExecutionPlan;
@@ -95,6 +97,8 @@ type SessionSnapshotEvent = {
   thinkingLevel?: ModelThinkingLevel;
   thinkingMode?: ThinkingMode;
   permissionMode?: PermissionMode;
+  /** Unanswered model mode request, so a restart keeps the card answerable. */
+  pendingModeRequest?: { mode: PermissionMode; reason: string };
   skillNames?: string[];
   phase?: SessionPhase;
   currentPlan?: ExecutionPlan | null;
@@ -134,6 +138,12 @@ export type PersistedSession = {
   thinkingLevel?: ModelThinkingLevel;
   thinkingMode?: ThinkingMode;
   permissionMode?: PermissionMode;
+  /**
+   * A model-initiated mode request that was still awaiting the user's A/D when
+   * the snapshot was written. Persisted so a restart does not strand the
+   * transcript with a "Requested a switch" tool result and no way to answer it.
+   */
+  pendingModeRequest?: { mode: PermissionMode; reason: string };
   /** Set when a legacy approval-mode session was safely restored as plan. */
   permissionModeMigratedFrom?: "approval";
   /** Currently active Skill names for this session. */
@@ -502,6 +512,7 @@ export class SessionStore {
       thinkingLevel: session.thinkingLevel,
       thinkingMode: session.thinkingMode,
       permissionMode: session.permissionMode,
+      pendingModeRequest: session.pendingModeRequest,
       skillNames: session.skillNames,
       phase: session.phase,
       currentPlan: session.currentPlan,
@@ -542,6 +553,7 @@ export class SessionStore {
       thinkingLevel: session.thinkingLevel,
       thinkingMode: session.thinkingMode,
       permissionMode: session.permissionMode,
+      pendingModeRequest: session.pendingModeRequest,
       skillNames: session.skillNames,
       phase: session.phase,
       currentPlan: session.currentPlan ?? null,
@@ -609,6 +621,7 @@ export class SessionStore {
       thinkingLevel: session.thinkingLevel,
       thinkingMode: session.thinkingMode,
       permissionMode: session.permissionMode,
+      pendingModeRequest: session.pendingModeRequest,
       skillNames: session.skillNames,
       phase: session.phase,
       messages: session.messages,
@@ -656,6 +669,7 @@ export class SessionStore {
               ? { permissionModeMigratedFrom: "approval" as const }
               : {}),
             skillNames: parsed.skillNames,
+            pendingModeRequest: parsed.pendingModeRequest,
             phase: parsed.phase,
             currentPlan: parsed.currentPlan,
             messages: [],
@@ -684,6 +698,9 @@ export class SessionStore {
               ? { permissionModeMigratedFrom: "approval" as const }
               : {}),
             skillNames: parsed.skillNames ?? current?.skillNames,
+            // A newer snapshot that resolved the request omits the field, which
+            // must clear the older pending card rather than keep it alive.
+            pendingModeRequest: parsed.pendingModeRequest,
             phase: parsed.phase ?? current?.phase,
             currentPlan: parsed.currentPlan === null ? undefined : parsed.currentPlan ?? current?.currentPlan,
             messages: parsed.messages,

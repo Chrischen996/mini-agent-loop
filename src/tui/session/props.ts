@@ -48,8 +48,17 @@ export type AppProps = {
    * native scrollback through it, bypassing Ink's frame pipeline.
    */
   writeStaticBurst?: (text: string) => void;
-  /** Ctrl+L: clear the visible screen while keeping the native scrollback. */
+  /**
+   * Ctrl+L: clear the visible screen while keeping the native scrollback.
+   */
   requestClearScreen?: () => void;
+  /**
+   * Flow layouts only: report how many bottom rows of the dynamic frame are
+   * pinned chrome (approval cards, todo panel, input box, status bar). The
+   * renderer keeps safe streaming bursts from blanking or re-emitting those
+   * rows, so the input box does not flicker while LLM lines commit.
+   */
+  setPinnedRows?: (rows: number) => void;
 };
 
 /** Snapshot the root container consumes from a session for the dashboard. */

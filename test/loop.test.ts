@@ -1093,7 +1093,10 @@ describe("runAgentTurn", () => {
     assert.ok(!prompt.includes("manual mode"));
     assert.ok(!prompt.includes("auto mode"));
     assert.ok(prompt.includes("CANNOT write"));
-    assert.ok(prompt.includes("requires a different permission mode"));
+    // The mode-request tool is client-gated: a headless prompt must not name a
+    // tool it cannot call (see test/prompt-mode-request.test.ts).
+    assert.ok(!prompt.includes("request_permission_mode"));
+    assert.ok(prompt.includes("tell the user which mode to switch to"));
     for (const mode of ["plan", "bypass"] as const) {
       assert.ok(buildSystemPrompt(mode).includes(`mode=${mode}`));
     }

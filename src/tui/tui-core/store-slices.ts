@@ -145,7 +145,7 @@ const SLICE_KEYS: Array<[
   ]],
   ["todos", ["todos", "todoPlan", "todoItems", "todoRevision", "todoViewMode"]],
   ["plan", ["phase", "currentPlan"]],
-  ["permission", ["permissionMode", "pendingPermission"]],
+  ["permission", ["permissionMode", "pendingPermission", "pendingModeRequest"]],
   ["runtime", [
     "streamingText", "streamingReasoning", "streamingTextParts",
     "streamingReasoningParts", "turnStartedAt", "lastStreamAt", "busy",

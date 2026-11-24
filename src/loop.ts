@@ -444,6 +444,12 @@ export type LoopEvent =
       permissionMode?: PermissionMode;
     }
   | { type: "permission_required"; request: PermissionRequest }
+  /**
+   * The model asked to switch permission mode (see the `request_permission_mode`
+   * tool). It is a *request*: the client shows a confirmation card and only the
+   * permission manager performs the switch.
+   */
+  | { type: "permission_mode_requested"; mode: PermissionMode; reason: string }
   | { type: "plan_act_event"; event: PlanActEvent }
   | { type: "done"; messages: AgentMessage[] }
   | { type: "attempt_reset"; reason: "reasoning_only" | "stream_truncated"; attempt: number }
@@ -573,6 +579,22 @@ function truncateToolResult(content: MessageContent): MessageContent {
   return `${head}\n\n[... ${omitted.toLocaleString()} characters omitted ...]\n\n${tail}`;
 }
 
+/**
+ * Whether a tool provider advertises `request_permission_mode`.
+ *
+ * The system prompt names that tool only when the model can actually call it.
+ * Resolving the provider is cheap (it is a plain array or a memoized factory)
+ * and avoids threading a capability flag through every entry point.
+ */
+export function toolProviderAdvertisesModeRequest(provider: ToolProvider): boolean {
+  try {
+    return resolveToolProvider(provider).some((tool) => tool.name === "request_permission_mode");
+  } catch {
+    // A provider that throws must not break prompt construction.
+    return false;
+  }
+}
+
 export async function runAgentLoop(
   userText: string,
   options: AgentLoopOptions,
@@ -581,7 +603,14 @@ export async function runAgentLoop(
   const activePermissionMode = permissionTurn?.mode ?? permissionMode;
   const prompt =
     systemPrompt ??
-    buildSystemPrompt(activePermissionMode, turnOptions.agentsMd, memorySection);
+    buildSystemPrompt(
+      activePermissionMode,
+      turnOptions.agentsMd,
+      memorySection,
+      // Auto-detect instead of asking every caller to declare it: the tool set
+      // is the ground truth for whether the confirmation card can exist.
+      { modeRequest: toolProviderAdvertisesModeRequest(turnOptions.tools) },
+    );
   let history: AgentMessage[];
   if (turnOptions._parentHistory) {
     history = inheritHistoryWithPrompt(turnOptions._parentHistory, prompt);

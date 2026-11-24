@@ -1073,6 +1073,16 @@ The former `approval` permission mode was removed. It must not be silently
 mapped to `bypass`; use `plan` for safe analysis or the plan workflow for
 reviewing a complete plan before execution.
 
+In plan mode the agent can call `request_permission_mode` instead of only asking
+in prose. That opens a `⇄ Mode switch requested` card: `A` switches the session
+(and resumes the task), `D`/Enter/Esc keeps the current mode. The model never
+switches the mode itself — see [security model](docs/security-model.md#11-model-initiated-mode-requests).
+
+The tool exists only where a confirmation card can be rendered: the Ink TUI and
+the headless `tui-core` runtime (`TurnRunner.resolveModeRequest`). The CLI and
+HTTP clients have neither, so they do not advertise the tool and their system
+prompt does not mention it; their models ask for a mode switch in prose instead.
+
 ```bash
 npm run tui
 ```

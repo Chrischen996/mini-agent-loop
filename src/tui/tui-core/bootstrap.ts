@@ -173,6 +173,11 @@ export async function bootstrapTui(options: TuiBootstrapOptions = {}): Promise<T
       codebaseStore: codebase.store,
       codebaseProvider: codebase.semanticProvider,
       sandboxRunner,
+      // `tui-core` owns the same reducer as the Ink client, so it can carry the
+      // mode-request card and resolve it through `TurnRunner.resolveModeRequest`.
+      // Headless consumers that do not call that method still never switch the
+      // mode themselves: the card just stays pending until they answer it.
+      modeRequest: true,
     }),
   );
   const allTools = mcp.toolProvider(createAllTools(cwd, { sandboxRunner }));

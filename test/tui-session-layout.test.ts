@@ -6,6 +6,14 @@ import { getWelcomeHeaderHeight } from "../src/tui/welcome-panel.ts";
 import { getTodoPanelRows } from "../src/tui/todo-format.ts";
 import { terminalStringWidth } from "../src/tui/terminal-width.ts";
 import { estimatePromptInputRows } from "../src/tui/components/PromptInput.tsx";
+import {
+  MODE_REQUEST_CARD_ROWS,
+  PERMISSION_CARD_ROWS,
+  modeRequestRenderLines,
+  permissionPanelRenderLines,
+  planApprovalCardRows,
+  planApprovalRenderLines,
+} from "../src/tui/terminal-overlay-lines.ts";
 
 /**
  * `useSessionLayout` is a thin `useMemo` wrapper over these pure builders.
@@ -20,6 +28,7 @@ function budgets(options: {
   prompt: string;
   queuedCount?: number;
   pendingPermission?: boolean;
+  pendingModeRequest?: boolean;
   pendingTodoRun?: boolean;
   reviewPlan?: boolean;
   pickerItems?: number;
@@ -33,7 +42,11 @@ function budgets(options: {
   );
   const promptRows = estimatePromptInputRows(options.prompt, promptWidth, promptPlaceholder);
   const todoRows = getTodoPanelRows({ plan: state.todoPlan, todos: state.todoItems }, state.todoViewMode);
-  const permissionRows = (options.pendingPermission ? 4 : 0) + (options.pendingTodoRun ? 5 : 0);
+  // Mirrors `useSessionLayout`: reserve the card's real footprint, not a
+  // hand-written number, so a renderer change cannot silently overflow.
+  const permissionRows = (options.pendingPermission ? PERMISSION_CARD_ROWS : 0)
+    + (options.pendingModeRequest ? MODE_REQUEST_CARD_ROWS : 0)
+    + (options.pendingTodoRun ? 5 : 0);
   const planApprovalRows = options.reviewPlan ? 3 : 0;
   const headerRows = options.welcome ? getWelcomeHeaderHeight(WIDTH, true) : undefined;
   const pickerLayout = getPickerLayout({
@@ -88,10 +101,64 @@ describe("session layout budgets", () => {
     const base = budgets({ prompt: "hello" });
     const permission = budgets({ prompt: "hello", pendingPermission: true });
     const todoRun = budgets({ prompt: "hello", pendingTodoRun: true });
-    assert.equal(permission.permissionRows, 4);
+    assert.equal(permission.permissionRows, PERMISSION_CARD_ROWS);
     assert.equal(todoRun.permissionRows, 5);
     assert.ok(permission.feedHeight < base.feedHeight);
-    assert.ok(todoRun.feedHeight < permission.feedHeight);
+    // Both panels shrink the feed; the todo-run panel is the smaller of the two.
+    assert.ok(todoRun.feedHeight < base.feedHeight);
+    assert.ok(permission.feedHeight < todoRun.feedHeight);
+  });
+
+  it("reserves the mode-request card's real footprint", () => {
+    const base = budgets({ prompt: "hello" });
+    const modeRequest = budgets({ prompt: "hello", pendingModeRequest: true });
+    assert.equal(modeRequest.permissionRows, MODE_REQUEST_CARD_ROWS);
+    assert.ok(modeRequest.feedHeight < base.feedHeight);
+  });
+
+  it("reserves exactly as many rows as the cards render", () => {
+    // The previous budget was a hand-written 4 for a 6-row card, so the frame
+    // overflowed whenever a permission request appeared. Pin the two numbers
+    // to each other instead of to a literal.
+    const permission = permissionPanelRenderLines({
+      requestId: "req",
+      sessionId: "sess",
+      tool: "bash",
+      arguments: { command: "ls" },
+      risk: "high",
+    }, 80);
+    const modeRequest = modeRequestRenderLines({ mode: "bypass", reason: "apply the fix" }, 80);
+    assert.equal(permission.length, PERMISSION_CARD_ROWS);
+    assert.equal(modeRequest.length, MODE_REQUEST_CARD_ROWS);
+  });
+
+  it("reserves the plan approval card's variable height", () => {
+    const plan = (steps: number) => ({
+      id: "plan-1",
+      sessionId: "s1",
+      createdAt: 0,
+      summary: "summary",
+      steps: Array.from({ length: steps }, (_, index) => ({
+        id: `s${index}`,
+        order: index + 1,
+        description: `step ${index + 1}`,
+        tool: "edit",
+        arguments: {},
+        risk: "medium" as const,
+        rationale: "because",
+        status: "pending" as const,
+      })),
+      risks: [],
+      requiredTools: ["edit"],
+      status: "pending_review" as const,
+    });
+    // The reservation must equal what the renderer emits at every step count;
+    // reserving a flat 3 rows under-reserved by eight and overflowed the frame.
+    for (const steps of [0, 1, 4, 5, 12]) {
+      const card = plan(steps);
+      assert.equal(planApprovalCardRows(card), planApprovalRenderLines(card, 80).length, `steps=${steps}`);
+    }
+    assert.equal(planApprovalCardRows(undefined), 0);
   });
 
   it("reserves rows for the plan approval bar", () => {

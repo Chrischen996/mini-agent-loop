@@ -10,7 +10,7 @@ import { toolVisualName, toolVisualStatusIcon } from "./tool-lines.ts";
 import { RESULT_GUTTER } from "./render-lines.ts";
 import { buildToolResultRows } from "./tool-result-lines.ts";
 import { terminalStringWidth } from "./terminal-width.ts";
-import { autocompleteRenderLines, permissionPanelRenderLines, planApprovalRenderLines, todoEditorRenderLines } from "./terminal-overlay-lines.ts";
+import { autocompleteRenderLines, modeRequestRenderLines, permissionPanelRenderLines, planApprovalRenderLines, todoEditorRenderLines } from "./terminal-overlay-lines.ts";
 import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
 import { pickerChromeRows } from "./picker-window.ts";
 import { promptPlaceholder } from "./input-utils.ts";
@@ -230,6 +230,7 @@ export function buildTerminalRenderLines(
   const overlaySlot = footer.length;
   if (options.todoEditor) footer.push(...todoEditorRenderLines(options.todoEditor, width));
   footer.push(...permissionPanelRenderLines(state.pendingPermission, width));
+  footer.push(...modeRequestRenderLines(state.pendingModeRequest, width));
   footer.push(...planApprovalRenderLines(state.phase === "review" ? state.currentPlan : undefined, width));
   for (const [index, image] of state.pendingImages.entries()) {
     footer.push({

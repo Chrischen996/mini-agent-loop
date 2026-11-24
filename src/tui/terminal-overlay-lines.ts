@@ -1,5 +1,5 @@
 import type { ExecutionPlan } from "../plan-act/types.ts";
-import type { PendingPermissionState } from "./state.ts";
+import type { PendingModeRequestState, PendingPermissionState } from "./state.ts";
 import type { RenderLine } from "./render-lines.ts";
 import { PICKER_HEADING_PREFIX } from "./render-lines.ts";
 import type { TerminalAutocompleteState } from "./terminal-autocomplete-controller.ts";
@@ -12,6 +12,7 @@ import { panelBorderGlyphs } from "./pixel-glyphs.ts";
 import { executionStepStatusToTodoStatus, todoIcon } from "./todo-format.ts";
 import { SESSION_PICKER_HINT } from "./session-serialization.ts";
 import { commandUsageColumn } from "./slash-commands.ts";
+import { modeRequestLabel } from "./mode-request.ts";
 import {
   modelNameColumn,
   modelNameLabel,
@@ -102,6 +103,33 @@ export function panelBottomLine(key: string, width?: number): RenderLine {
 }
 
 /**
+ * Row budget for the cards that render between the feed and the input row.
+ *
+ * Derived from the render functions themselves instead of a hand-written
+ * number: `useSessionLayout` used to reserve 4 rows for a 6-row card, so the
+ * frame overflowed by two rows every time a permission request appeared.
+ * Both the Ink components and these headless rows are top border + 4 content
+ * rows + bottom border.
+ */
+export const PERMISSION_CARD_ROWS = 6;
+export const MODE_REQUEST_CARD_ROWS = 6;
+
+/**
+ * Exact row count for the plan approval card.
+ *
+ * The card is variable: top + summary + up to 4 steps + optional "more" row +
+ * risks + options + keys + bottom. Reserving a flat 3 rows under-reserved by
+ * eight, so the frame overflowed (and Ink clears the whole screen on overflow)
+ * every time a plan went up for review.
+ */
+export function planApprovalCardRows(plan: ExecutionPlan | undefined): number {
+  if (!plan) return 0;
+  const stepRows = Math.min(plan.steps.length, 4) + (plan.steps.length > 4 ? 1 : 0);
+  // top + summary + steps + risks + options + keys + bottom
+  return 6 + stepRows;
+}
+
+/**
  * Headless row model for the permission card rendered by Ink.
  * The caption lives in the border, followed by the tool, risk, question,
  * and one options row with its key hints.
@@ -112,7 +140,7 @@ export function permissionPanelRenderLines(request?: PendingPermissionState, wid
   const target = argument ? ` (${argument})` : "";
   const risk = permissionRiskLabel(request.risk);
   const tone: PanelTone = request.risk === "high" ? "error" : "running";
-  return [
+  const rows = [
     panelTopLine("permission-top", `⚠ Permission required`, width, tone),
     panelContentLine("permission-title", `${toolVisualName(request.tool)}${target}`, "assistant", { width, tone, bold: true }),
     panelContentLine("permission-risk", `Risk: ${risk}`, "muted", { width, dim: true }),
@@ -120,10 +148,35 @@ export function permissionPanelRenderLines(request?: PendingPermissionState, wid
     panelContentLine("permission-options", `❯ A Allow  ·  D/Enter Deny  ·  Esc cancel`, "assistant", { width, tone: "running", bold: true }),
     panelBottomLine("permission-bottom", width),
   ];
+  if (rows.length !== PERMISSION_CARD_ROWS) {
+    throw new Error(`permission card row budget drifted: rendered ${rows.length}, reserved ${PERMISSION_CARD_ROWS}`);
+  }
+  return rows;
 }
 
-/** Terminal row model for the same plan approval summary rendered by Ink. */
-export function planApprovalRenderLines(plan?: ExecutionPlan, width?: number): RenderLine[] {
+/**
+ * Headless row model for the model-initiated mode-switch card.
+ *
+ * Same 6-row footprint as the permission card so both renderers reserve the
+ * same feed height (see `useSessionLayout.permissionRows`).
+ */
+export function modeRequestRenderLines(request?: PendingModeRequestState, width?: number): RenderLine[] {
+  if (!request) return [];
+  const rows = [
+    panelTopLine("mode-request-top", `⇄ Mode switch requested`, width, "running"),
+    panelContentLine("mode-request-target", modeRequestLabel(request.mode), "assistant", { width, tone: "running", bold: true }),
+    panelContentLine("mode-request-reason", request.reason, "muted", { width, dim: true }),
+    panelContentLine("mode-request-options", `❯ A Switch  ·  D/Enter/Esc keep current`, "assistant", { width, tone: "running", bold: true }),
+    panelContentLine("mode-request-hint", "The model asked; nothing changes until you accept.", "muted", { width, dim: true }),
+    panelBottomLine("mode-request-bottom", width),
+  ];
+  if (rows.length !== MODE_REQUEST_CARD_ROWS) {
+    throw new Error(`mode request card row budget drifted: rendered ${rows.length}, reserved ${MODE_REQUEST_CARD_ROWS}`);
+  }
+  return rows;
+}
+
+/** Terminal row model for the same plan approval summary rendered by Ink. */export function planApprovalRenderLines(plan?: ExecutionPlan, width?: number): RenderLine[] {
   if (!plan) return [];
   let high = 0;
   let medium = 0;
@@ -156,6 +209,10 @@ export function planApprovalRenderLines(plan?: ExecutionPlan, width?: number): R
     panelContentLine("plan-keys", "A approve  ·  R reject", "muted", { width, dim: true }),
     panelBottomLine("plan-bottom", width),
   );
+  const budget = planApprovalCardRows(plan);
+  if (rows.length !== budget) {
+    throw new Error(`plan approval card row budget drifted: rendered ${rows.length}, reserved ${budget}`);
+  }
   return rows;
 }
 

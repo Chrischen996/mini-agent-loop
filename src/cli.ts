@@ -352,6 +352,10 @@ export function parseCliArgs(argv: string[]): ParsedCliArgs {
     "subagent", "git_status", "git_diff", "git_checkpoint", "git_undo", "git_branch_isolate",
     "validate_workspace",
   ]);
+  // NOTE: `request_permission_mode` is intentionally absent. The CLI has no
+  // confirmation card, so it must not be selectable with `--tools`. The tool
+  // list is also the source of truth for the system prompt (see
+  // `toolProviderAdvertisesModeRequest` in loop.ts).
   const parseToolList = (value: string, flag: string): ToolName[] => {
     const names = value.split(",").map((name) => name.trim()).filter(Boolean);
     for (const name of names) {

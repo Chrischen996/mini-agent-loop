@@ -43,6 +43,11 @@ export type BackgroundWakeupsOptions = {
   /** Busy/pending state read at call time, not at render time. */
   busy: boolean;
   pendingPermission: boolean;
+  /**
+   * A model-initiated mode switch is waiting for A/D. Queued prompts must not
+   * start a turn and hide the card before the user answers.
+   */
+  pendingModeRequest?: boolean;
   /** Plan-Act progress, used to decide whether a goal loop is still running. */
   planPhase: string;
   planStatus: string | undefined;
@@ -71,6 +76,7 @@ export function useBackgroundWakeups(options: BackgroundWakeupsOptions): void {
     handleSubmitRef,
     busy,
     pendingPermission,
+    pendingModeRequest = false,
     planPhase,
     planStatus,
   } = options;
@@ -118,7 +124,7 @@ export function useBackgroundWakeups(options: BackgroundWakeupsOptions): void {
           outputLabel,
           outputText,
         });
-        if (stateRef.current.busy || stateRef.current.pendingPermission) {
+        if (stateRef.current.busy || stateRef.current.pendingPermission || stateRef.current.pendingModeRequest) {
           promptQueueRef.current.push(completionPrompt);
           setQueuedCount(promptQueueRef.current.length);
         } else {
@@ -168,7 +174,7 @@ export function useBackgroundWakeups(options: BackgroundWakeupsOptions): void {
               : []),
           ].join("\n"),
         });
-        if (stateRef.current.busy || stateRef.current.pendingPermission) {
+        if (stateRef.current.busy || stateRef.current.pendingPermission || stateRef.current.pendingModeRequest) {
           promptQueueRef.current.push(prompt);
           setQueuedCount(promptQueueRef.current.length);
         } else {
@@ -206,9 +212,11 @@ export function useBackgroundWakeups(options: BackgroundWakeupsOptions): void {
 
   // ── 3. drain the prompt queue once the turn finishes ─────────────────────
   useEffect(() => {
-    if (busy || pendingPermission) return;
+    // A pending mode request also blocks the drain: starting a queued turn
+    // would clear the card before the user answers A/D.
+    if (busy || pendingPermission || pendingModeRequest) return;
     void (async () => {
-      while (!stateRef.current.busy && !stateRef.current.pendingPermission) {
+      while (!stateRef.current.busy && !stateRef.current.pendingPermission && !stateRef.current.pendingModeRequest) {
         let next = promptQueueRef.current.shift();
         if (!next) {
           const pending = pendingSubagentPromptsRef.current.get(conversationId);
@@ -229,5 +237,5 @@ export function useBackgroundWakeups(options: BackgroundWakeupsOptions): void {
         text: error instanceof Error ? error.message : String(error),
       });
     });
-  }, [busy, pendingPermission, handleSubmit, conversationId, subagentTaskRegistry, stateRef, promptQueueRef, pendingSubagentPromptsRef, setQueuedCount, dispatch]);
+  }, [busy, pendingPermission, pendingModeRequest, handleSubmit, conversationId, subagentTaskRegistry, stateRef, promptQueueRef, pendingSubagentPromptsRef, setQueuedCount, dispatch]);
 }

@@ -183,6 +183,7 @@ async function runMain(): Promise<void> {
         codebaseProvider: codebaseRuntime.semanticProvider,
         sandboxRunner,
         backgroundTaskManager: bgManagerForCwd(workspaceCwd),
+        modeRequest: true,
       }),
       ...bgToolsForCwd(workspaceCwd),
     ]);
@@ -229,6 +230,7 @@ async function runMain(): Promise<void> {
         layoutMode={layoutMode}
         writeStaticBurst={layoutMode === "inline" || layoutMode === "document" ? (text: string) => incrementalRenderer.emitStaticBurst(text) : undefined}
         requestClearScreen={() => incrementalRenderer.clearScreen()}
+        setPinnedRows={(rows: number) => incrementalRenderer.setPinnedRows(rows)}
       />,
       { stdout: incrementalStdout, stdin: terminalStdin },
     );

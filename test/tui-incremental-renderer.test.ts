@@ -457,3 +457,105 @@ describe("incremental renderer alternate mode", () => {
     assert.match(painted, /\x1b\[2;1H\x1b\[2Ktwo/);
   });
 });
+
+describe("incremental renderer pinned chrome (the input box must not flicker)", () => {
+  function sizedSink(rows: number, columns = 40) {
+    const writes: string[] = [];
+    const target = {
+      rows,
+      columns,
+      write(value: string) {
+        writes.push(value);
+        return true;
+      },
+    };
+    return { writes, target };
+  }
+
+  it("never blanks the frame on a safe streaming burst; chrome is re-asserted in one write", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "document" });
+    renderer.setPinnedRows(2);
+    renderer.write("L1\nL2\nC1\nC2"); // 2 content rows + 2 pinned chrome rows
+    output.writes.length = 0;
+
+    renderer.emitStaticBurst("S1\n"); // one committed line: fits the content rows
+
+    const burstWrite = output.writes.join("");
+    assert.ok(burstWrite.includes("S1\n"), "the burst row is written");
+    assert.doesNotMatch(burstWrite, /\x1b\[2K/, "a safe burst erases no frame row (no blank gap)");
+    assert.doesNotMatch(burstWrite, /\x1b\[2J/, "no full-screen clear");
+
+    output.writes.length = 0;
+    renderer.write("L3\nC1\nC2"); // the committed row drops out of the frame
+    const frameWrite = output.writes.join("");
+    assert.ok(frameWrite.includes("L3"), "the new live row is painted");
+    assert.ok(frameWrite.includes("C1") && frameWrite.includes("C2"),
+      "chrome rows are re-asserted in the same write (atomic, no flicker)");
+  });
+
+  it("emits zero bytes for a settled frame: stable chrome is diffed, not re-emitted", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "document" });
+    renderer.setPinnedRows(2);
+    renderer.write("L1\nL2\nC1\nC2");
+    renderer.emitStaticBurst("S1\n");
+    renderer.write("L3\nC1\nC2");
+    output.writes.length = 0;
+
+    renderer.write("L3\nC1\nC2"); // e.g. a spinner tick with an unchanged frame
+
+    assert.deepEqual(output.writes, [],
+      "an unchanged frame — including the input box — emits nothing");
+  });
+
+  it("coalesces several safe bursts that land before the next frame", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "document" });
+    renderer.setPinnedRows(2);
+    renderer.write("L1\nL2\nL3\nC1\nC2");
+    output.writes.length = 0;
+
+    renderer.emitStaticBurst("A\n");
+    renderer.emitStaticBurst("B\n");
+    const burstWrites = output.writes.join("");
+    assert.ok(burstWrites.includes("A\n") && burstWrites.includes("B\n"), "both bursts are written");
+    assert.doesNotMatch(burstWrites, /\x1b\[2K/, "neither burst blanks the frame");
+
+    output.writes.length = 0;
+    renderer.write("L4\nC1\nC2");
+    const frameWrite = output.writes.join("");
+    assert.ok(frameWrite.includes("L4"), "the advanced live row is painted");
+  });
+
+  it("falls back to the legacy blank + forced repaint for oversized seal bursts", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+    renderer.setPinnedRows(2);
+    renderer.write("L1\nL2\nC1\nC2");
+    output.writes.length = 0;
+
+    renderer.emitStaticBurst("a\nb\nc\n"); // 3 rows > 2 content rows → legacy path
+
+    const burstWrite = output.writes.join("");
+    assert.match(burstWrite, /\x1b\[\d+;1H\x1b\[2K/, "the legacy path blanks the frame region");
+
+    output.writes.length = 0;
+    renderer.write("L1\nL2\nC1\nC2");
+    const frameWrite = output.writes.join("");
+    assert.ok(frameWrite.includes("L1") && frameWrite.includes("C2"),
+      "the next frame repaints the whole frame against the empty baseline");
+  });
+
+  it("keeps the no-blank behavior when no pinned rows are reported", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "document" });
+    renderer.write("L1\nL2\nC1\nC2");
+    output.writes.length = 0;
+
+    renderer.emitStaticBurst("S1\n"); // P=0 → the whole frame is content, still no erase
+
+    const burstWrite = output.writes.join("");
+    assert.doesNotMatch(burstWrite, /\x1b\[2K/, "no erasure even without a pinned chrome report");
+  });
+});

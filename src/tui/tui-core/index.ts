@@ -96,6 +96,8 @@ export type AgentSession = {
   setSkillNames(names: string[]): void;
   resetHistory(mode?: PermissionMode): void;
   replaceHistory(history: AgentMessage[]): void;
+  /** Apply or dismiss the model's pending permission-mode request. */
+  resolveModeRequest(decision: "switch" | "dismiss"): boolean;
   recordDirectToolTurn(prompt: string, call: ToolCall, result: ToolResult): Promise<TerminalTurnResult>;
   setSessionId(sessionId: string): void;
   isBusy(): boolean;
@@ -124,6 +126,7 @@ export function createAgentSession(options: AgentSessionOptions): AgentSession {
     setSkillNames: (names) => runner.setSkillNames(names),
     resetHistory: (mode?) => runner.resetHistory(mode),
     replaceHistory: (hist) => runner.replaceHistory(hist),
+    resolveModeRequest: (decision) => runner.resolveModeRequest(decision),
     recordDirectToolTurn: (prompt, call, result) => runner.recordDirectToolTurn(prompt, call, result),
     setSessionId: (id) => runner.setSessionId(id),
     isBusy: () => runner.isBusy(),

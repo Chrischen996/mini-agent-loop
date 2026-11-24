@@ -53,6 +53,18 @@ export type PendingPermissionState = {
   risk: "safe" | "medium" | "high";
 };
 
+/**
+ * A model-initiated permission-mode request awaiting a one-key decision.
+ *
+ * The model cannot switch the mode itself: it calls `request_permission_mode`,
+ * which lands here. `A` applies the switch through the `PermissionManager`,
+ * `D`/Esc dismisses it and keeps the current mode.
+ */
+export type PendingModeRequestState = {
+  mode: PermissionMode;
+  reason: string;
+};
+
 export type WorkflowStep = {
   id: string;
   label: string;
@@ -170,6 +182,8 @@ export type TuiState = {
   spinnerMessage?: string;
   /** Pending permission request shown to the user while execution waits. */
   pendingPermission?: PendingPermissionState;
+  /** Pending model-initiated mode switch awaiting A/D. */
+  pendingModeRequest?: PendingModeRequestState;
   /** Pending todo run plan awaiting user confirmation before execution. */
   pendingTodoRunPlan?: PendingTodoRunPlan;
   /**
@@ -202,6 +216,8 @@ export type TuiAction =
       currentPlan?: ExecutionPlan;
       todos?: TodoItem[];
       todoRevision?: number;
+      /** Unanswered model mode request that survived the restart. */
+      pendingModeRequest?: PendingModeRequestState;
     }
   | { type: "LOOP_EVENT"; event: LoopEvent }
   | { type: "PLAN_ACT_EVENT"; event: PlanActEvent }
@@ -223,6 +239,7 @@ export type TuiAction =
   | { type: "SET_TODO_VIEW_MODE"; mode: TodoViewMode }
   | { type: "CLEAR_SPINNER_MESSAGE" }
   | { type: "CLEAR_PENDING_PERMISSION" }
+  | { type: "CLEAR_MODE_REQUEST" }
   | { type: "SET_TODO_RUN_PLAN"; plan: PendingTodoRunPlan }
   | { type: "CLEAR_TODO_RUN_PLAN" }
   | { type: "TOGGLE_MESSAGE_THINKING"; index?: number }
@@ -349,6 +366,7 @@ export function createInitialState(modelName: string): TuiState {
     thinkingMode: "summary",
     permissionMode: "plan",
     pendingPermission: undefined,
+    pendingModeRequest: undefined,
     pendingTodoRunPlan: undefined,
     expandedThinking: [],
     focusedMessageIndex: -1,
@@ -739,6 +757,13 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         taskTokens: 0,
         phase: action.phase ?? "planning",
         currentPlan: action.currentPlan,
+        // A card restored from disk must not offer a switch that already
+        // happened while the process was down (e.g. the user changed the mode
+        // from another client). Drop it when it matches the restored mode.
+        pendingModeRequest: action.pendingModeRequest
+          && action.pendingModeRequest.mode !== action.permissionMode
+          ? action.pendingModeRequest
+          : undefined,
         todoPlan: state.todoPlan,
         todos: action.todos ?? [],
         todoItems: action.todos && action.todos.length > 0 ? action.todos : undefined,
@@ -876,6 +901,16 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         status: state.pendingPermission ? `Running ${state.pendingPermission.tool}…` : state.status,
       };
 
+    case "CLEAR_MODE_REQUEST":
+      return {
+        ...state,
+        pendingModeRequest: undefined,
+        // The card is gone, so a status that only described the card would be
+        // stale ("Mode switch requested: bypass" surviving a Shift+Tab that
+        // already changed the mode).
+        status: state.status.startsWith("Mode switch requested") ? "Ready" : state.status,
+      };
+
     case "SET_TODO_RUN_PLAN": {
       return {
         ...state,
@@ -919,7 +954,13 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
         ...state,
         permissionMode: action.mode,
         pendingPermission: undefined,
-        status: state.status.startsWith("Permission mode:") ? "Ready" : state.status,
+        // Any explicit mode change answers a pending model request: keeping the
+        // card would offer a switch that already happened (for example after
+        // `/plan-run` forces bypass while the model asked for bypass).
+        pendingModeRequest: undefined,
+        status: state.status.startsWith("Permission mode:") || state.status.startsWith("Mode switch requested")
+          ? "Ready"
+          : state.status,
       };
     }
 

@@ -12,6 +12,18 @@ export type ToolResult = {
   files?: FileArtifact[];
   /** Structured session-state update consumed by the agent loop. */
   todoUpdate?: TodoItem[];
+  /**
+   * Structured request to change the session permission mode. The tool never
+   * switches the mode itself: the client surfaces a one-key confirmation and
+   * the permission manager performs the switch, so plan mode stays a human
+   * decision instead of something the model can grant itself.
+   */
+  modeRequest?: {
+    /** Mode the model asks the user to enable. */
+    mode: "plan" | "bypass";
+    /** One-line justification shown in the confirmation card. */
+    reason: string;
+  };
 };
 
 /** Caller-owned execution identity passed to tools at invocation time. */

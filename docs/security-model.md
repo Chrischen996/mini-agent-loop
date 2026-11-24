@@ -29,6 +29,38 @@ Mode is inspected and changed over HTTP with
 `GET|PUT /api/sessions/:id/permission-mode`, and pending requests are resolved
 with `POST /api/sessions/:id/permissions/:requestId`.
 
+### 1.1 Model-initiated mode requests
+
+Interactive clients may advertise the `request_permission_mode` tool so the
+model can ask for an escalation instead of stopping to ask in prose. The tool is
+a **request**, not an escalation primitive:
+
+- its `execute` never touches the `PermissionManager`; it only returns a
+  `modeRequest` payload,
+- the loop projects that payload as a `permission_mode_requested` event,
+- the client renders a confirmation card and only the user's `A` calls
+  `setMode()`; `D`/Enter/Esc keep the current mode,
+- the tool is read-only for the policy analyzer, so plan mode can ask to leave
+  plan mode without a chicken-and-egg denial,
+- subagents never receive it (`SESSION_ONLY_TOOL_NAMES` in `src/subagent/tool.ts`),
+- the CLI and HTTP entry points do not advertise it (`modeRequest` off); only
+  clients that can render the card opt in — the Ink TUI and the headless
+  `tui-core` runtime (`TurnRunner.resolveModeRequest`),
+- the system prompt names it **only** when the resolved tool provider advertises
+  it (`toolProviderAdvertisesModeRequest` in `src/loop.ts`). The guidance used to
+  live in the shared `MODE_SUFFIX`, which made the CLI, HTTP and every subagent
+  instruct the model to call a tool they could not see,
+- asking for the mode already active never opens a card.
+
+Accepted switches are not auto-reverted; the session stays in the new mode
+until the user changes it. Because a mid-turn switch aborts the turn, a request
+accepted while the turn is still streaming is applied when that turn ends.
+
+Every accepted switch is audited through `PermissionManager.onModeChange` with
+`source: "model_request"` plus the model's reason, so an audit log can tell a
+human-initiated `Shift+Tab` apart from a model request the human confirmed.
+Audit sinks that throw cannot fail the policy change they record.
+
 ## 2. Default tool permission matrix
 
 A high-risk call is blocked in `plan` and auto-allowed in `bypass`. Human review
@@ -43,6 +75,7 @@ is provided by the separate plan workflow, not by a per-tool permission mode.
 | `validate_workspace` | Process | **blocked** | allowed | Runs the project's own test/typecheck/build commands. |
 | `git_status`, `git_diff`, `git_checkpoint`, `git_undo`, `git_branch_isolate` | VCS | allowed | allowed | `git_undo` restores a prior checkpoint; it does not delete history. |
 | `TodoWrite` | Session state | allowed | allowed | No filesystem or network effect. |
+| `request_permission_mode` | Session state | allowed | allowed | Only asks the human; never changes the mode itself. See §1.1. |
 | `web_search`, `fetch_content`, `get_search_content`, `source_check` | Network | allowed | allowed | Egress — see §4. Off unless web-access tools are registered. |
 | `codebase_open`, `codebase_search`, `codebase_read`, `codebase_explain` | Network | allowed | allowed | Egress to GitHub / DeepWiki — see §4. |
 | **any MCP tool** | Remote | **blocked** | allowed | Always high risk regardless of the name it advertises. |

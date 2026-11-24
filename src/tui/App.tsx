@@ -14,6 +14,7 @@ import { AgentDashboard, type DashboardAgent } from "./components/AgentDashboard
 import { AgentSessionApp } from "./AgentSessionApp.tsx";
 import { useTerminalSize } from "./hooks/useTerminalSize.ts";
 import { getTuiViewportHeight } from "./layout.ts";
+import { DEFAULT_TUI_LAYOUT_MODE } from "./layout-mode.ts";
 import { bootProbe } from "./boot-trace.ts";
 import { GitWorkflow } from "../git/workflow.ts";
 import { startupSessionCwd } from "./session-workspace.ts";
@@ -84,15 +85,29 @@ export function App(props: AppProps): React.ReactElement {
       ? { ...agent, cwd, workspace: cwd, branch, launching: false }
       : agent));
   }, []);
-  const openDashboard = useCallback(() => setDashboardOpen(true), []);
-  const closeDashboard = useCallback(() => setDashboardOpen(false), []);
+  // Flow layouts (document / inline) paint the session as a bottom-anchored
+  // frame on the terminal's main screen, so a full-viewport dashboard panel
+  // cannot reach the session content above the frame — opening it would
+  // leave the two "displayed together". Clear the visible screen (the Ctrl+L
+  // path: keeps native scrollback, re-anchors the frame) around the
+  // dashboard so it takes the screen cleanly. Alternate layout runs the
+  // whole UI in the alternate screen buffer and needs no clear.
+  const flowLayout = (props.layoutMode ?? DEFAULT_TUI_LAYOUT_MODE) !== "alternate";
+  const openDashboard = useCallback(() => {
+    if (flowLayout) props.requestClearScreen?.();
+    setDashboardOpen(true);
+  }, [flowLayout, props.requestClearScreen]);
+  const closeDashboard = useCallback(() => {
+    if (flowLayout) props.requestClearScreen?.();
+    setDashboardOpen(false);
+  }, [flowLayout, props.requestClearScreen]);
 
   /** Attach a dispatched agent and leave the dashboard, if requested. */
   const attachAgent = useCallback((id: string, attach: boolean) => {
     if (!attach) return;
     setActiveAgentId(id);
-    setDashboardOpen(false);
-  }, []);
+    closeDashboard();
+  }, [closeDashboard]);
 
   const dispatchAgent = useCallback((prompt: string, attach: boolean) => {
     const id = randomUUID();
@@ -153,8 +168,8 @@ export function App(props: AppProps): React.ReactElement {
     const agent = agents.find((candidate) => candidate.id === id);
     if (!agent?.cwd) return;
     setActiveAgentId(id);
-    setDashboardOpen(false);
-  }, [agents]);
+    closeDashboard();
+  }, [agents, closeDashboard]);
   const toggleWorktreeIsolation = useCallback(() => {
     setWorktreeIsolation((current) => !current);
   }, []);

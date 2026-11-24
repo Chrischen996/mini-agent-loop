@@ -62,6 +62,15 @@ const DEFAULT_SUBAGENT_AWAIT_BUDGET_MS = 10 * 60_000;
 const MAX_SUBAGENT_AWAIT_BUDGET_MS = 2_147_483_647;
 const SUBAGENT_TOOL_NAME = "subagent";
 const SUBAGENT_TOOL_NAMES = new Set(["subagent", "subagent_batch", "subagent_tasks", "subagent_output", "subagent_wait", "subagent_kill"]);
+
+/**
+ * Session-level tools a child agent must never receive.
+ *
+ * `request_permission_mode` asks the *human* to change the session policy. A
+ * subagent has no client to render that card, and a child silently widening
+ * its parent's permissions would defeat plan mode.
+ */
+const SESSION_ONLY_TOOL_NAMES = new Set(["request_permission_mode"]);
 const MAX_PARTIAL_TOOL_SNIPPETS = 4;
 const MAX_PARTIAL_TOOL_CHARS = 400;
 
@@ -171,6 +180,9 @@ function buildChildTools(
   if (!allowRecursion) {
     filtered = filtered.filter((t) => !SUBAGENT_TOOL_NAMES.has(t.name));
   }
+
+  // Session policy belongs to the parent's human, never to a child agent.
+  filtered = filtered.filter((t) => !SESSION_ONLY_TOOL_NAMES.has(t.name));
 
   if (readOnly) {
     const blockedNames = new Set([

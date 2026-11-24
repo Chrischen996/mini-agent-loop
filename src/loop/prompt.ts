@@ -5,11 +5,42 @@ import type { AgentMessage } from "../types.ts";
 
 export const PERMISSION_MODE_MARKER = "\n[MODE]\n";
 
-/** Mode-specific suffix appended to the system prompt. */
+/**
+ * Client capabilities that change which system-prompt guidance is truthful.
+ *
+ * These are *client* facts, not model facts: a headless CLI cannot render a
+ * confirmation card, so telling its model to call `request_permission_mode`
+ * would make it call a tool that is not in its tool list.
+ */
+export type SystemPromptCapabilities = {
+  /** The client advertises `request_permission_mode` and can confirm it. */
+  modeRequest?: boolean;
+};
+
+/**
+ * Mode-specific suffix appended to the system prompt.
+ *
+ * Deliberately says nothing about `request_permission_mode`: this suffix is
+ * shared by every client (TUI, CLI, HTTP) and every subagent, and only the
+ * interactive TUI advertises that tool. Naming it here made headless clients
+ * and child agents instruct the model to call a tool they cannot see.
+ */
 export const MODE_SUFFIX: Record<PermissionMode, string> = {
   plan: "mode=plan. Read-only tools only. No writes, dangerous bash, or MCP. Output a plan first.",
   bypass: "mode=bypass. All tools run without approval; sandbox rules still apply.",
 };
+
+/**
+ * Extra guidance appended only when the client advertises
+ * `request_permission_mode` (see `ToolClientCapabilities.modeRequest`).
+ *
+ * Kept out of `MODE_SUFFIX` so a client that cannot render the confirmation
+ * card never receives it.
+ */
+export const MODE_REQUEST_PROMPT_LINES: readonly string[] = [
+  "- When the plan is ready and the work needs writes or shell execution, call `request_permission_mode` with the mode you need and a one-line reason instead of only asking in prose. The user gets a one-key confirmation card; the mode only changes if they accept.",
+  "- `request_permission_mode` is the one exception to the end-of-turn rule below: after it returns, stop and end your turn. Do not call write/exec tools in the same turn; the switch happens between turns.",
+];
 
 /** Phase-specific suffix appended to the system prompt. */
 export const PHASE_SUFFIX: Record<SessionPhase, string> = {
@@ -69,7 +100,18 @@ export function compactRepositoryInstructions(instructions: string): string {
   ].join("\n\n");
 }
 
-export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string, memorySection?: string): string {
+export function buildSystemPrompt(
+  mode?: PermissionMode,
+  agentsMd?: string,
+  memorySection?: string,
+  /**
+   * Client capabilities that change which guidance is truthful. Only an
+   * interactive client that advertises `request_permission_mode` may set
+   * `modeRequest`, because only it can render the confirmation card.
+   */
+  capabilities: SystemPromptCapabilities = {},
+): string {
+  const modeRequestEnabled = capabilities.modeRequest === true;
   const parts: string[] = [];
   if (agentsMd) {
     parts.push(`# Repository Agent Instructions (from AGENT.MD)\n${compactRepositoryInstructions(agentsMd)}\n`);
@@ -100,7 +142,11 @@ export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string, memo
     "",
     "### Permission Mode Awareness",
     '- plan mode: you CANNOT write. Say "我当前处于计划模式，无权限改代码。" and output a clear plan for user review.',
-    "- If a requested action requires a different permission mode, tell the user to switch to a suitable mode, such as bypass, before continuing.",
+    // Only clients that advertise `request_permission_mode` get these lines;
+    // everything else falls back to asking in prose.
+    ...(modeRequestEnabled ? MODE_REQUEST_PROMPT_LINES : [
+      "- If a requested action needs a different permission mode, tell the user which mode to switch to before continuing.",
+    ]),
     "- bypass mode: all registered tools may run without approval; sandbox rules still apply.",
     "- When a tool call is blocked, adapt and inform the user about the mode constraint.",
     "",
@@ -111,7 +157,9 @@ export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string, memo
     "Never send secrets to MCP tools unless the user explicitly approved that call.",
     "",
     "### Task Execution",
-    "Complete ALL steps in a single response. Do not stop mid-task to report progress.",
+    modeRequestEnabled
+      ? "Complete ALL steps in a single response. Do not stop mid-task to report progress. The only exception is a pending `request_permission_mode` answer, which ends the turn by design."
+      : "Complete ALL steps in a single response. Do not stop mid-task to report progress.",
     "For multi-step tasks, use TodoWrite to keep a concise task list updated. Use one in_progress task at a time, mark completed tasks as completed, and replace the full list on each update.",
     "Only produce a final text response (without tool calls) when the entire task is truly done.",
     "Use clear markdown formatting: headers, lists, code blocks, bold for file names.",
@@ -126,8 +174,9 @@ export function buildSystemPrompt(mode?: PermissionMode, agentsMd?: string, memo
 export function createAgentHistory(
   systemPrompt?: string,
   mode?: PermissionMode,
+  capabilities?: SystemPromptCapabilities,
 ): AgentMessage[] {
-  const prompt = systemPrompt ?? buildSystemPrompt(mode);
+  const prompt = systemPrompt ?? buildSystemPrompt(mode, undefined, undefined, capabilities);
   return [{ role: "system", content: prompt }];
 }
 
@@ -146,8 +195,13 @@ export function restoreAgentHistory(
 }
 
 /** Get the default system prompt for a given permission mode. */
-export function getDefaultSystemPrompt(mode?: PermissionMode, agentsMd?: string, memorySection?: string): string {
-  return buildSystemPrompt(mode, agentsMd, memorySection);
+export function getDefaultSystemPrompt(
+  mode?: PermissionMode,
+  agentsMd?: string,
+  memorySection?: string,
+  capabilities?: SystemPromptCapabilities,
+): string {
+  return buildSystemPrompt(mode, agentsMd, memorySection, capabilities);
 }
 
 export function inheritHistoryWithPrompt(history: AgentMessage[], childPrompt: string): AgentMessage[] {

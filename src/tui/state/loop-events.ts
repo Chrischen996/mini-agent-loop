@@ -13,6 +13,7 @@ import type { LoopEvent } from "../../loop.ts";
 import { computeCommitBoundary } from "../stream-commit.ts";
 import { compactText } from "../text-utils.ts";
 import { isTodoRevisionNewer, TODO_WRITE_TOOL_NAME } from "../../todo.ts";
+import { MODE_REQUEST_TOOL_NAME } from "../../tools/mode-request.ts";
 import {
   appendStreamingParts,
   appendStreamingPreview,
@@ -399,6 +400,30 @@ export function reduceLoopEvent(
             status: event.result.isError ? "Todo update failed" : "Todos updated",
           };
         }
+        // The mode-request tool's own name contains "permission", which the
+        // generic status translator maps to "Waiting for permission". Give it
+        // dedicated wording so the status row does not claim a tool approval
+        // is pending when only a mode switch is.
+        if (event.call.name === MODE_REQUEST_TOOL_NAME) {
+          const nextState = updateToolMessage(state, event.call.id, (message) => ({
+            ...message,
+            status: (event.result.isError ? "error" : "done") as ToolState,
+            result: resultContent(event.result.content),
+            durationMs: Date.now() - message.startedAt,
+          }));
+          return {
+            ...nextState,
+            toolCards: state.toolCards.map((card) => card.id === event.call.id
+              ? { ...card, status: event.result.isError ? "error" : "done" } satisfies ToolCardState
+              : card),
+            status: event.result.isError
+              ? "Mode request rejected"
+              : state.pendingModeRequest
+                ? `Mode switch requested: ${state.pendingModeRequest.mode}`
+                : "Mode request recorded",
+            spinnerMessage: undefined,
+          };
+        }
         if (event.call.name === "validate_workspace") {
           return {
             ...state,
@@ -451,6 +476,22 @@ export function reduceLoopEvent(
           status: `Waiting for permission: ${event.request.tool} (${event.request.risk}) [A allow / D deny / Enter deny / Esc cancel]`,
         };
 
+      case "permission_mode_requested":
+        // The model only *asked*; the mode is unchanged until the user accepts.
+        // Asking for the mode that is already active would show a card whose
+        // only possible outcome is "nothing changes", so it never opens.
+        if (state.permissionMode === event.mode) {
+          return {
+            ...state,
+            status: `Already in ${event.mode} mode`,
+          };
+        }
+        return {
+          ...state,
+          pendingModeRequest: { mode: event.mode, reason: event.reason },
+          status: `Mode switch requested: ${event.mode}`,
+        };
+
       case "aborted":
         return {
           ...state,
@@ -464,6 +505,7 @@ export function reduceLoopEvent(
           turnStartedAt: undefined,
           lastStreamAt: undefined,
           pendingPermission: undefined,
+          pendingModeRequest: undefined,
           spinnerMessage: undefined,
           status: "Aborted",
           taskStatus: "cancelled",
@@ -484,7 +526,11 @@ export function reduceLoopEvent(
           lastStreamAt: undefined,
           pendingPermission: undefined,
           spinnerMessage: undefined,
-          status: "Ready",
+          // A mode request outlives the turn on purpose: the model asks, ends
+          // its turn, and the card must stay until the user answers A/D.
+          status: state.pendingModeRequest
+            ? `Mode switch requested: ${state.pendingModeRequest.mode}`
+            : "Ready",
           taskStatus: state.taskStatus === "failed" || state.taskStatus === "cancelled" ? state.taskStatus : "completed",
           taskDurationMs: taskDuration(state.taskStartedAt),
         };

@@ -15,6 +15,7 @@ import { getWelcomeHeaderHeight } from "../welcome-panel.ts";
 import { getTodoPanelRows } from "../todo-format.ts";
 import { terminalStringWidth } from "../terminal-width.ts";
 import { estimatePromptInputRows } from "../components/PromptInput.tsx";
+import { MODE_REQUEST_CARD_ROWS, PERMISSION_CARD_ROWS, planApprovalCardRows } from "../terminal-overlay-lines.ts";
 
 export type SessionLayoutInput = {
   state: TuiState;
@@ -111,7 +112,7 @@ export function useSessionLayout(input: SessionLayoutInput): SessionLayout {
   return useMemo(() => {
     // While a picker overlay is open the welcome panel yields its rows so the
     // picker, prompt, and status chrome all stay visible.
-    const showWelcome = state.messages.length === 0 && !state.busy && !state.pendingPermission && !acMode;
+    const showWelcome = state.messages.length === 0 && !state.busy && !state.pendingPermission && !state.pendingModeRequest && !acMode;
     const promptPlaceholder = resolvePromptPlaceholder({
       state, acMode, modelSetup, queuedCount, foregroundCommandWaiting, sendableWaitWaiting,
     });
@@ -127,8 +128,15 @@ export function useSessionLayout(input: SessionLayoutInput): SessionLayout {
     );
     // Approval chrome: the permission card / plan approval bar render between
     // the feed and the input row; reserve their rows in every height budget.
-    const permissionRows = (state.pendingPermission ? 4 : 0) + (pendingTodoRunPlan ? 5 : 0);
-    const planApprovalRows = state.phase === "review" && state.currentPlan ? 3 : 0;
+    // The constants come from the renderers themselves — reserving 4 rows for a
+    // 6-row card made the frame overflow (and Ink clears the screen on overflow).
+    const permissionRows = (state.pendingPermission ? PERMISSION_CARD_ROWS : 0)
+      + (state.pendingModeRequest ? MODE_REQUEST_CARD_ROWS : 0)
+      + (pendingTodoRunPlan ? 5 : 0);
+    // The plan approval card is variable (11-12 rows): reserve what it renders.
+    const planApprovalRows = planApprovalCardRows(
+      state.phase === "review" ? state.currentPlan : undefined,
+    );
     const headerRows = showWelcome ? getWelcomeHeaderHeight(termWidth, true) : undefined;
     const pickerLayout = getPickerLayout({
       termRows,

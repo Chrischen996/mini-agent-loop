@@ -165,6 +165,7 @@ export async function resumeSessionInTui(
       currentPlan: session.currentPlan,
       todos: restored.todos,
       todoRevision: restored.todoRevision,
+      ...(session.pendingModeRequest ? { pendingModeRequest: session.pendingModeRequest } : {}),
     });
     return true;
   } catch (error) {

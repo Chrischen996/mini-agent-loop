@@ -50,6 +50,15 @@ export type PermissionModeChange = {
   interrupted: boolean;
 };
 
+/**
+ * Who asked for a permission-mode change.
+ *
+ * Audit needs to distinguish "the human pressed Shift+Tab" from "the model
+ * asked and the human confirmed", because only the second one means the
+ * transcript influenced the policy.
+ */
+export type PermissionModeChangeSource = "user" | "model_request" | "workflow" | "restore";
+
 export type PermissionTurnContext = {
   readonly mode: PermissionMode;
   readonly revision: number;
@@ -357,11 +366,29 @@ export class PermissionManager {
   /** Optional callback for permission audit logging. */
   onPermissionEvent?: (event: { type: "request" | "allow" | "deny"; request: PermissionRequest }) => void;
 
+  /**
+   * Optional callback for permission-mode changes.
+   *
+   * Separate from `onPermissionEvent` because a mode change is a policy
+   * decision, not a tool approval: it has no request id and it can be triggered
+   * by a model request that the human then confirmed.
+   */
+  onModeChange?: (event: {
+    previousMode: PermissionMode;
+    mode: PermissionMode;
+    previousRevision: number;
+    revision: number;
+    interrupted: boolean;
+    source: PermissionModeChangeSource;
+    /** Model-supplied justification, present when `source === "model_request"`. */
+    reason?: string;
+  }) => void;
+
   constructor(mode: PermissionMode = "plan") {
     this.mode = mode;
   }
 
-  setMode(mode: PermissionMode): PermissionModeChange {
+  setMode(mode: PermissionMode, source: PermissionModeChangeSource = "user", reason?: string): PermissionModeChange {
     const previousMode = this.mode;
     const previousRevision = this.revision;
     if (this.mode === mode) {
@@ -376,17 +403,30 @@ export class PermissionManager {
     }
     this.mode = mode;
     this.revision += 1;
-    const reason = new PermissionModeChangedError(previousMode, mode, previousRevision, this.revision);
+    const reason_ = new PermissionModeChangedError(previousMode, mode, previousRevision, this.revision);
     let interrupted = false;
     for (const [requestId, pending] of this.pending) {
       this.pending.delete(requestId);
       pending.cleanup?.();
-      pending.reject(reason);
+      pending.reject(reason_);
       interrupted = true;
     }
     for (const active of this.activeTurns) {
       interrupted = true;
-      if (!active.controller.signal.aborted) active.controller.abort(reason);
+      if (!active.controller.signal.aborted) active.controller.abort(reason_);
+    }
+    try {
+      this.onModeChange?.({
+        previousMode,
+        mode,
+        previousRevision,
+        revision: this.revision,
+        interrupted,
+        source,
+        ...(reason !== undefined ? { reason } : {}),
+      });
+    } catch {
+      // An audit sink must never fail the policy change it records.
     }
     return {
       changed: true,

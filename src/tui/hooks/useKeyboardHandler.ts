@@ -1,5 +1,6 @@
 import { useInput, type Key } from "ink";
 import { resolvePendingPermissionDecision } from "../pending-permission.ts";
+import { resolveModeRequestDecision } from "../mode-request.ts";
 import { nextPermissionMode, switchPermissionMode } from "../permission-utils.ts";
 import { kittyScrollAction } from "../kitty-scroll.ts";
 import { applyPermissionModePrompt } from "../../loop.ts";
@@ -16,13 +17,15 @@ export type UseKeyboardHandlerDeps = {
   historyRef: React.MutableRefObject<import("../../types.ts").AgentMessage[]>;
   adjustThinkingLevel: (direction: "increase" | "decrease", wrap?: boolean) => void;
   resolvePendingPermission: (decision: PermissionDecision) => boolean;
+  /** Apply or dismiss the model's pending permission-mode request. */
+  resolveModeRequest?: (decision: "switch" | "dismiss") => void;
   dispatch: Dispatch<TuiAction>;
   scrollBy?: (delta: number) => void;
   jumpToBottom?: () => void;
   /** Ctrl+L: clear the visible screen, keep the native scrollback, repaint the frame. */
   clearScreen?: () => void;
   acMode: string | null;
-  state: { busy: boolean; pendingPermission?: unknown; phase: string; currentPlan?: { id: string } };
+  state: { busy: boolean; pendingPermission?: unknown; pendingModeRequest?: unknown; phase: string; currentPlan?: { id: string } };
   feedHeight: number;
   handleAutocompleteKey: (key: Key) => boolean;
   suppressInputEchoRef: React.MutableRefObject<boolean>;
@@ -43,7 +46,7 @@ export type UseKeyboardHandlerDeps = {
 export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
   const {
     exit, abortRef, copyResolvedText, pasteImage, getPermissionManager, historyRef,
-    adjustThinkingLevel, resolvePendingPermission, dispatch, scrollBy, jumpToBottom, clearScreen,
+    adjustThinkingLevel, resolvePendingPermission, resolveModeRequest, dispatch, scrollBy, jumpToBottom, clearScreen,
     acMode, state, feedHeight, handleAutocompleteKey,
     suppressInputEchoRef, pendingPermissionRef, bgPanelOpen, onCloseBgPanel,
     backgroundForegroundTask,
@@ -119,6 +122,8 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
       switchPermissionMode(permissionManager, next);
       // Always sync React state so the StatusBar reflects the new mode.
       dispatch({ type: "SET_PERMISSION_MODE", mode: next });
+      // An explicit manual switch answers any pending model request.
+      dispatch({ type: "CLEAR_MODE_REQUEST" });
       if (historyRef?.current && historyRef.current.length > 0) {
         applyPermissionModePrompt(historyRef.current, next);
       }
@@ -136,6 +141,19 @@ export function useKeyboardHandler(deps: UseKeyboardHandlerDeps): void {
       return;
     }
     pendingPermissionRef.current = false;
+
+    // Model-initiated permission-mode request: A switches, D/Enter/Esc keeps
+    // the current mode. This sits before the plan-approval shortcuts so the
+    // same "A" key cannot be mistaken for approving a plan.
+    if (state.pendingModeRequest) {
+      const decision = resolveModeRequestDecision(_ch, key);
+      if (decision) {
+        suppressInputEchoRef.current = true;
+        resolveModeRequest?.(decision);
+        return;
+      }
+      return;
+    }
 
     // Plan approval shortcuts
     if (!acMode && !state.busy && state.phase === "review" && state.currentPlan) {

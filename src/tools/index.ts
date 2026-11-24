@@ -10,6 +10,7 @@ import { createWebAccessTools } from "../web-access/index.ts";
 import { createGitTools } from "./git.ts";
 import { createValidationTool } from "./validation.ts";
 import { createTodoWriteTool } from "./todo-write.ts";
+import { createRequestPermissionModeTool } from "./mode-request.ts";
 import { createSandboxRunner, DEFAULT_SANDBOX_CONFIG, type SandboxConfig, type SandboxRunner } from "../sandbox/index.ts";
 import { createBgTaskTools } from "../bg-tasks/tools.js";
 import { BgTaskManager, stableBgTaskInstanceId } from "../bg-tasks/manager.js";
@@ -48,7 +49,7 @@ export type ToolName =
   | "codebase_open" | "codebase_search" | "codebase_read" | "codebase_explain"
   | "web_search" | "fetch_content" | "get_search_content" | "source_check"
   | "subagent" | "git_status" | "git_diff" | "git_checkpoint" | "git_undo" | "git_branch_isolate"
-  | "validate_workspace" | "TodoWrite";
+  | "validate_workspace" | "TodoWrite" | "request_permission_mode";
 
 const WEB_ACCESS_TOOL_NAMES = new Set<ToolName>([
   "web_search",
@@ -124,6 +125,12 @@ export function createTools(
     sandbox?: SandboxConfig;
     /** Enables `bash` with `is_background` in the same task manager as bg_* tools. */
     backgroundTaskManager?: BgTaskManager;
+    /**
+     * Advertise `request_permission_mode` to the model. Interactive clients that
+     * can render a one-key confirmation set this; headless entry points leave it
+     * off because they have nowhere to ask.
+     */
+    modeRequest?: boolean;
   } = {},
 ): Tool[] {
   const baseTools = createCoreTools(cwd, {
@@ -133,6 +140,13 @@ export function createTools(
   });
 
   const tools = selectTools(baseTools, options);
+  if (
+    options.modeRequest
+    && !options.excludeTools?.includes("request_permission_mode")
+    && !tools.some((tool) => tool.name === "request_permission_mode")
+  ) {
+    tools.push(createRequestPermissionModeTool() as Tool);
+  }
 
   const selectedGit = options.tools
     ? options.tools.filter((name) => name.startsWith("git_") || name === "validate_workspace")

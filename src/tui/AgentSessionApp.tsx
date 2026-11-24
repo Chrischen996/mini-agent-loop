@@ -38,6 +38,8 @@ import { isExactSlashCommand } from "./autocomplete.ts";
 import { useAutocomplete } from "./hooks/useAutocomplete.ts";
 import { tuiReducer, createInitialState } from "./state.ts";
 import { type AgentRuntimeRef } from "../loop.ts";
+import { applyPermissionModePrompt } from "../loop/prompt.ts";
+import { modeRequestContinuationPrompt, modeRequestLabel } from "./mode-request.ts";
 import { loadLlmConfigFromEnv, type LlmConfig, type ModelSwitchOverrides } from "../llm/index.ts";
 import {
   cycleThinkingLevel,
@@ -60,7 +62,7 @@ import type { ImageAttachment } from "./state.ts";
 import { loadAutoSubagentOptionsFromEnv } from "../subagent/index.ts";
 import { SubagentTaskRegistry } from "../subagent/task-registry.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
-import { PermissionManager, type PermissionDecision, type PermissionTurnContext } from "../permissions.ts";
+import { PermissionManager, type PermissionDecision, type PermissionMode, type PermissionTurnContext } from "../permissions.ts";
 import { TurnEventBuffer } from "./stream-buffer.ts";
 import { getTuiViewportHeight } from "./layout.ts";
 import { inputContainerBorderColor, usesInputBorder } from "./input-container.ts";
@@ -110,6 +112,7 @@ import { discoverWorkspaceSkills, loadSkillNamesFromEnv } from "../skills/index.
 import { Overlays } from "./components/Overlays.tsx";
 import { ThemeDialog } from "./components/ThemeDialog.tsx";
 import { PermissionPanel } from "./components/PermissionPanel.tsx";
+import { ModeRequestPanel } from "./components/ModeRequestPanel.tsx";
 import { PlanApprovalBar } from "./components/PlanApprovalBar.tsx";
 import {
   loadGlobalConcurrencyLimitFromEnv,
@@ -134,7 +137,7 @@ import type { AgentSessionAppProps } from "./session/props.ts";
 
 const DEFAULT_IMAGE_PROMPT = "Analyze the attached image";
 
-export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSessionRequest, agentTools, allTools, agentToolsForCwd, allToolsForCwd, bgManagerForCwd, mcpStatuses, mcpTools, mcpFailure, layoutMode, writeStaticBurst, requestClearScreen, agentId, initialSessionId, initialPrompt, active, dashboardOpen, onOpenDashboard, onCloseDashboard, onSnapshot, onWorkspaceChange }: AgentSessionAppProps): React.ReactElement | null {
+export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, startupSessionRequest, agentTools, allTools, agentToolsForCwd, allToolsForCwd, bgManagerForCwd, mcpStatuses, mcpTools, mcpFailure, layoutMode, writeStaticBurst, requestClearScreen, setPinnedRows, agentId, initialSessionId, initialPrompt, active, dashboardOpen, onOpenDashboard, onCloseDashboard, onSnapshot, onWorkspaceChange }: AgentSessionAppProps): React.ReactElement | null {
   bootProbe("session-render");
   const effectiveLayoutMode = layoutMode ?? resolveTuiLayoutMode();
   // Document layout shares the inline burst pipeline; only its frame policy,
@@ -166,7 +169,12 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
   const skillNamesRef = useRef(skillNames);
   skillNamesRef.current = skillNames;
   const allToolsRef = useLazyRef(() => allToolsForCwd?.(cwd) ?? allTools ?? createAllTools(cwd));
-  const agentToolsRef = useLazyRef(() => agentToolsForCwd?.(cwd) ?? agentTools ?? createTools(cwd, { codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0" }));
+  const agentToolsRef = useLazyRef(() => agentToolsForCwd?.(cwd) ?? agentTools ?? createTools(cwd, {
+    codebase: process.env.EXTERNAL_CODEBASE_ENABLED !== "0",
+    // The Ink client can render the one-key confirmation card, so the model may
+    // ask for a mode switch here. Headless entry points leave this off.
+    modeRequest: true,
+  }));
   useEffect(() => {
     if (allToolsForCwd) allToolsRef.current = allToolsForCwd(cwd);
     if (agentToolsForCwd) agentToolsRef.current = agentToolsForCwd(cwd);
@@ -291,7 +299,7 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
                 : []),
             ].join("\n"),
           });
-          if (stateRef.current.busy || stateRef.current.pendingPermission) {
+          if (stateRef.current.busy || stateRef.current.pendingPermission || stateRef.current.pendingModeRequest) {
             promptQueueRef.current.push(completionPrompt);
             setQueuedCount(promptQueueRef.current.length);
           } else {
@@ -557,7 +565,7 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
   }, []);
 
   const setInputSafe = useCallback((value: string) => {
-    if (pendingPermissionRef.current) return;
+    if (pendingPermissionRef.current || stateRef.current.pendingModeRequest) return;
     // PromptInput ignores Ctrl/Meta chords, so do not swallow the next character.
     suppressInputEchoRef.current = false;
     setInput(sanitizeInput(value));
@@ -694,6 +702,9 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
       thinkingLevel: (modelOverride ?? llmRef.current).thinkingLevel,
       thinkingMode: thinkingPolicyModeRef.current,
       permissionMode: getPermissionManager().getMode(),
+      // Persist the unanswered card so a restart does not leave a
+      // "Requested a switch" tool result with no way to answer it.
+      ...(current.pendingModeRequest ? { pendingModeRequest: current.pendingModeRequest } : {}),
       skillNames: [...skillNamesRef.current],
       phase: current.phase,
       currentPlan: current.currentPlan,
@@ -835,6 +846,75 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
     return resolved;
   }, [dispatch, state.pendingPermission]);
 
+  /**
+   * Apply or dismiss the model's permission-mode request.
+   *
+   * Accepting calls `PermissionManager.setMode`, which aborts the in-flight
+   * turn with `PermissionModeChangedError` (turns must never straddle two
+   * policies). The model is instructed to end its turn right after asking, so
+   * the normal path is: card appears, turn finishes, user presses A, the mode
+   * changes and a follow-up prompt resumes the task.
+   *
+   * If the user presses A while the turn is still streaming, the switch is
+   * deferred to the moment the turn ends (`autoSwitchModeRef`); switching now
+   * would abort the turn and its late `aborted` event would clobber the
+   * follow-up turn.
+   */
+  const autoSwitchModeRef = useRef(false);
+  const applyModeRequest = useCallback((mode: PermissionMode, reason?: string) => {
+    const manager = getPermissionManager();
+    if (manager.getMode() !== mode) {
+      // `model_request` keeps the audit trail honest: the model asked, the
+      // human confirmed, and the manager is the only thing that changed state.
+      manager.setMode(mode, "model_request", reason);
+      if (historyRef.current.length > 0) applyPermissionModePrompt(historyRef.current, mode);
+    }
+    dispatch({ type: "SET_PERMISSION_MODE", mode });
+    dispatch({ type: "CLEAR_MODE_REQUEST" });
+    dispatch({
+      type: "ADD_NOTICE",
+      title: "Permission mode",
+      text: `Switched to ${modeRequestLabel(mode)}. Continuing the task.`,
+    });
+    // Resume through the prompt queue instead of calling handleSubmit here:
+    // clearing the card wakes the queue drain in the same commit, and two
+    // independent submits would race into two overlapping turns. Unshift so
+    // the resume runs before any completion prompt that arrived while the
+    // card was waiting.
+    promptQueueRef.current.unshift(modeRequestContinuationPrompt(mode));
+    setQueuedCount(promptQueueRef.current.length);
+  }, [dispatch, getPermissionManager]);
+
+  const resolveModeRequest = useCallback((decision: "switch" | "dismiss") => {
+    const pending = stateRef.current.pendingModeRequest;
+    if (!pending) return;
+    if (decision === "dismiss") {
+      autoSwitchModeRef.current = false;
+      dispatch({ type: "CLEAR_MODE_REQUEST" });
+      dispatch({ type: "ADD_NOTICE", title: "Mode request dismissed", text: `Staying in ${stateRef.current.permissionMode} mode.` });
+      return;
+    }
+    if (stateRef.current.busy) {
+      autoSwitchModeRef.current = true;
+      dispatch({
+        type: "ADD_NOTICE",
+        title: "Mode switch queued",
+        text: `Will switch to ${modeRequestLabel(pending.mode)} as soon as the current turn finishes.`,
+      });
+      return;
+    }
+    applyModeRequest(pending.mode, pending.reason);
+  }, [applyModeRequest, dispatch]);
+
+  // Deferred switch: the user accepted while the turn was still streaming.
+  useEffect(() => {
+    if (!autoSwitchModeRef.current || state.busy) return;
+    const pending = state.pendingModeRequest;
+    autoSwitchModeRef.current = false;
+    if (!pending) return;
+    applyModeRequest(pending.mode, pending.reason);
+  }, [state.busy, state.pendingModeRequest, applyModeRequest]);
+
   useEffect(() => {
     void discoverWorkspaceSkills(cwd).catch(() => { /* non-fatal */ });
   }, [cwd]);
@@ -968,6 +1048,9 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
   const {
     showWelcome,
     promptPlaceholder,
+    promptRows,
+    permissionRows,
+    planApprovalRows,
     todoRows,
     pickerLayout,
     feedHeight,
@@ -991,6 +1074,24 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
     isDocumentLayout,
     hasInputBorder: useClaudeStyleInputBorder,
   });
+
+  // Pinned bottom chrome of the dynamic frame: approval cards, the todo
+  // panel, pending images, the input container (prompt rows + optional
+  // border), and the bordered status bar. The renderer keeps safe streaming
+  // bursts from blanking or re-emitting these rows, so the input box does
+  // not flicker while LLM lines commit one by one.
+  const pinnedChromeRows =
+    permissionRows +
+    planApprovalRows +
+    todoRows +
+    state.pendingImages.length +
+    promptRows +
+    (useClaudeStyleInputBorder ? 2 : 0) +
+    3; // bordered status bar
+  useLayoutEffect(() => {
+    if (!active) return;
+    setPinnedRows?.(pinnedChromeRows);
+  }, [active, pinnedChromeRows, setPinnedRows]);
 
   const copyResolvedText = useCallback(async (target: import("./copy-text.ts").CopyTarget = "auto") => {
     const selection = resolveCopyTarget({
@@ -1037,7 +1138,7 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
 
   useKeyboardHandler({
     exit, abortRef, copyResolvedText, pasteImage: handlePasteImageRef, getPermissionManager,
-    adjustThinkingLevel, resolvePendingPermission, dispatch, scrollBy, jumpToBottom,
+    adjustThinkingLevel, resolvePendingPermission, resolveModeRequest, dispatch, scrollBy, jumpToBottom,
     clearScreen: requestClearScreen,
     acMode, state, feedHeight, handleAutocompleteKey, historyRef,
     suppressInputEchoRef, pendingPermissionRef,
@@ -1475,6 +1576,7 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
     handleSubmitRef,
     busy: state.busy,
     pendingPermission: Boolean(state.pendingPermission),
+    pendingModeRequest: Boolean(state.pendingModeRequest),
     planPhase: state.phase,
     planStatus: state.currentPlan?.status,
   });
@@ -1558,7 +1660,7 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
   }, [dispatch, viewportContentHeight, state.scrollOffset]);
 
   useEffect(() => {
-    const status = state.pendingPermission ? "Needs input"
+    const status = state.pendingPermission || state.pendingModeRequest ? "Needs input"
       : state.busy ? "Working"
         : state.taskStatus === "failed" ? "Failed"
           : state.taskStatus === "cancelled" ? "Cancelled"
@@ -1572,7 +1674,7 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
       activity: state.activeToolId
         ? state.toolById[state.activeToolId]?.name ?? state.status
         : state.status,
-      active: state.busy || Boolean(state.pendingPermission),
+      active: state.busy || Boolean(state.pendingPermission) || Boolean(state.pendingModeRequest),
       failed: state.taskStatus === "failed",
       startedAt: state.taskStartedAt,
       workspace: cwd,
@@ -1675,6 +1777,9 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
         {state.pendingPermission && (
           <PermissionPanel request={state.pendingPermission} />
         )}
+        {state.pendingModeRequest && (
+          <ModeRequestPanel request={state.pendingModeRequest} />
+        )}
         {state.phase === "review" && state.currentPlan && (
           <PlanApprovalBar plan={state.currentPlan} />
         )}
@@ -1736,8 +1841,8 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
                 }
                 return false;
               }}
-              pasteEnabled={!state.pendingPermission && !pendingTodoRunPlan}
-              focus={active && !state.pendingPermission && !pendingTodoRunPlan && !bgPanelOpen && !tasksPaneOpen && !dashboardOpen && acMode !== "effort-picker" && !themeDialogOpen}
+              pasteEnabled={!state.pendingPermission && !state.pendingModeRequest && !pendingTodoRunPlan}
+              focus={active && !state.pendingPermission && !state.pendingModeRequest && !pendingTodoRunPlan && !bgPanelOpen && !tasksPaneOpen && !dashboardOpen && acMode !== "effort-picker" && !themeDialogOpen}
               mask={acMode === "model-setup" && modelSetup?.field === "apiKey" ? "*" : undefined}
               onSubmit={(val) => {
                 if (acMode === "session-list") return;
