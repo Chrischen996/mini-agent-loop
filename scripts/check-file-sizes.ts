@@ -8,9 +8,9 @@
  * - A baselined file must not grow beyond its recorded line count.
  *   (Shrinking files are fine; run with --update-baseline to prune them.)
  *
- * Generated model catalogs (src/pi-ai/providers/**/*.models.ts) are excluded
- * because they are produced by `pnpm run generate-models` and checked for
- * drift by `generate-models:check`.
+ * Generated model catalogs (files under a `providers/` directory ending in
+ * `.models.ts`) are excluded because they are produced by
+ * `npm run generate-models` and checked for drift by `generate-models:check`.
  *
  * Usage:
  *   tsx scripts/check-file-sizes.ts                # verify (CI)
@@ -77,9 +77,15 @@ function main(): void {
   }
 
   const baselinePath = resolve(cwd, BASELINE_PATH);
-  const baseline: BaselineEntry[] = existsSync(baselinePath)
-    ? (JSON.parse(readFileSync(baselinePath, "utf8")) as BaselineEntry[])
-    : [];
+  // The file stores `{ limit, entries }`; tolerate the legacy bare-array shape
+  // so an older baseline does not crash the guard.
+  const baselineFile: { limit?: number; entries?: BaselineEntry[] } | BaselineEntry[] | undefined =
+    existsSync(baselinePath)
+      ? (JSON.parse(readFileSync(baselinePath, "utf8")) as { limit?: number; entries?: BaselineEntry[] } | BaselineEntry[])
+      : undefined;
+  const baseline: BaselineEntry[] = Array.isArray(baselineFile)
+    ? baselineFile
+    : baselineFile?.entries ?? [];
 
   if (updateBaseline) {
     const entries: BaselineEntry[] = offenders.map((entry) => {
@@ -114,10 +120,9 @@ function main(): void {
       errors.push(
         `${file}: ${lines} lines (grew beyond baselined ${entry.lines} — split the file, or run with --update-baseline to accept the growth)`,
       );
-    } else if (lines <= limit) {
-      // Cannot happen: offender means lines > limit.
-    } else {
-      shrunken.push(`${file}: ${lines} lines (baselined at ${entry.lines}, below limit — candidate for baseline cleanup)`);
+    } else if (lines < entry.lines) {
+      // Shrunk but still above the limit: fine, just report the smaller count.
+      shrunken.push(`${file}: ${lines} lines (baselined at ${entry.lines}, run --update-baseline to lock in the reduction)`);
     }
   }
 

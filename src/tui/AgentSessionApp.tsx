@@ -10,7 +10,6 @@
 // and height budgets in `hooks/useSessionLayout.ts`.
 
 import { randomUUID } from "node:crypto";
-import { stat } from "node:fs/promises";
 import React, { useReducer, useState, useCallback, useRef, useEffect, useMemo, useLayoutEffect, useSyncExternalStore } from "react";
 import {
   Box,
@@ -24,14 +23,12 @@ import { useGoalStatusTicker } from "./hooks/useGoalStatusTicker.ts";
 import { runCommandCascade, type CommandCascadeContext } from "./session/command-cascade.ts";
 import { importForeignSessionInTui, resumeSessionInTui, type SessionRestoreDeps } from "./session/session-restore.ts";
 import { runSessionTurn } from "./session/turn-execution.ts";
+import { useBackgroundWakeups } from "./hooks/useBackgroundWakeups.ts";
 import { useStreamBursts } from "./hooks/useStreamBursts.ts";
 import { useSessionLayout } from "./hooks/useSessionLayout.ts";
 import {
   autoWakeEnabled,
-  COMPLETION_OUTPUT_LIMIT_BYTES,
-  makeBgTaskCompletionPrompt,
-  makeSubagentCompletionPrompt,
-  subagentWakeId
+  makeSubagentCompletionPrompt
 } from "./subagent-prompts.ts";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
@@ -89,7 +86,6 @@ import { SessionManager } from "../session-manager.ts";
 import type { PersistedSession } from "../session-store.ts";
 import { formatMcpStatus } from "../mcp/status.ts";
 import { BgTaskManager, stableBgTaskInstanceId } from "../bg-tasks/manager.js";
-import type { BgTaskSummary } from "../bg-tasks/manager.js";
 import { GitWorkflow } from "../git/workflow.ts";
 import { BgTaskLivePanel } from "./components/BgTaskLivePanel.tsx";
 import { TasksPane } from "./components/TasksPane.tsx";
@@ -1464,132 +1460,25 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
 
   handleSubmitRef.current = handleSubmit;
 
-  useEffect(() => {
-    const manager = getBgManager();
-    if (!manager) return;
-    const onCompletion = (task: BgTaskSummary) => {
-      const wasActivelyWaited = manager.isActivelyWaited(task.taskId, conversationId)
-        || manager.wasWaitedToCompletion(task.taskId, conversationId);
-      void (async () => {
-        let output = "";
-        let outputOmitted = false;
-        try {
-          const size = (await stat(task.logPath)).size;
-          const offset = Math.max(0, size - COMPLETION_OUTPUT_LIMIT_BYTES);
-          if (size > 0) {
-            const chunk = await manager.logs(task.taskId, offset, Math.max(4, size - offset));
-            output = chunk.text.trimEnd();
-            outputOmitted = offset > 0;
-          }
-        } catch {
-          // Keep the completion notice useful even if its output log disappeared.
-        }
+  useBackgroundWakeups({
+    active,
+    conversationId,
+    dispatch,
+    stateRef,
+    getBgManager,
+    refreshBgTaskCount,
+    subagentTaskRegistry,
+    promptQueueRef,
+    pendingSubagentPromptsRef,
+    setQueuedCount,
+    handleSubmit,
+    handleSubmitRef,
+    busy: state.busy,
+    pendingPermission: Boolean(state.pendingPermission),
+    planPhase: state.phase,
+    planStatus: state.currentPlan?.status,
+  });
 
-        const exit = task.exitCode === 0 || task.exitCode === null || task.exitCode === undefined
-          ? ""
-          : ` (exit ${task.exitCode})`;
-        const outputLabel = outputOmitted ? "Output (final 4 kB)" : "Output";
-        const outputText = output || "(no output)";
-        dispatch({
-          type: "ADD_NOTICE",
-          title: "Background task completed",
-          text: `${task.name}: ${task.status}${exit}\nTask ID: ${task.taskId}\n${outputLabel}:\n${outputText}`,
-        });
-        void refreshBgTaskCount();
-
-        if (wasActivelyWaited) return;
-        const completionPrompt = makeBgTaskCompletionPrompt({
-          taskName: task.name,
-          taskId: task.taskId,
-          status: task.status,
-          exit,
-          outputLabel,
-          outputText,
-        });
-        if (stateRef.current.busy || stateRef.current.pendingPermission) {
-          promptQueueRef.current.push(completionPrompt);
-          setQueuedCount(promptQueueRef.current.length);
-        } else {
-          void handleSubmitRef.current(completionPrompt);
-        }
-      })().catch((error) => {
-        dispatch({
-          type: "ADD_NOTICE",
-          title: "Background task notification failed",
-          text: error instanceof Error ? error.message : String(error),
-        });
-      });
-    };
-    const unsubscribe = manager.onCompletion(onCompletion, conversationId, () => active);
-    return unsubscribe;
-  }, [active, conversationId, dispatch, getBgManager, refreshBgTaskCount]);
-
-  useEffect(() => {
-    if (!active) return;
-    let cancelled = false;
-    let wakeRefreshTimer: ReturnType<typeof setTimeout> | undefined;
-    const drainPendingWakeups = () => (async () => {
-      const pending = await subagentTaskRegistry.pendingWakeups(conversationId);
-      for (const record of pending) {
-        const goalLoopActive = stateRef.current.phase === "acting" || stateRef.current.currentPlan?.status === "executing";
-        const shouldWake = await subagentTaskRegistry.claimAutoWake(record.taskId, conversationId, autoWakeEnabled(), goalLoopActive);
-        if (!shouldWake) continue;
-        const status = record.status === "failed" ? "failed" : record.partial ? "completed with partial results" : "completed";
-        const prompt = makeSubagentCompletionPrompt(record.taskId, record.task, record.result ?? record.error ?? "(no output)", status, {
-          worktreePath: record.worktreePath,
-          worktreeBranch: record.worktreeBranch,
-        });
-        if (cancelled) {
-          const queued = pendingSubagentPromptsRef.current.get(conversationId) ?? [];
-          queued.push(prompt);
-          pendingSubagentPromptsRef.current.set(conversationId, queued);
-          continue;
-        }
-        dispatch({
-          type: "ADD_NOTICE",
-          title: "Background sub-agent completed",
-          text: [
-            `${record.task}: ${status}\nTask ID: ${record.taskId}`,
-            ...(record.worktreePath && record.worktreeBranch
-              ? [`Worktree: ${record.worktreePath}\nBranch: ${record.worktreeBranch}`]
-              : []),
-          ].join("\n"),
-        });
-        if (stateRef.current.busy || stateRef.current.pendingPermission) {
-          promptQueueRef.current.push(prompt);
-          setQueuedCount(promptQueueRef.current.length);
-        } else {
-          await subagentTaskRegistry.markAutoWakeDelivered(record.taskId, conversationId);
-          void handleSubmitRef.current(prompt);
-        }
-      }
-    })().catch((error) => {
-      if (cancelled) return;
-      dispatch({
-        type: "ADD_NOTICE",
-        title: "Sub-agent completion recovery failed",
-        text: error instanceof Error ? error.message : String(error),
-      });
-    });
-    void drainPendingWakeups();
-    // Detached workers (including /goal --bg) finish in another process, so
-    // registry disk changes are the completion signal. In-process onChange
-    // cannot see a different process, so poll until the wake is claimed, then
-    // rely on onChange for local subagent events again.
-    const unsubscribe = subagentTaskRegistry.onChange(() => void drainPendingWakeups());
-    const hasPendingGoalWake = async (): Promise<boolean> =>
-      (await subagentTaskRegistry.pendingWakeups(conversationId)).length > 0;
-    wakeRefreshTimer = setTimeout(() => {
-      void hasPendingGoalWake().then((pending) => {
-        if (pending) void drainPendingWakeups();
-      }).catch(() => undefined);
-    }, 1_000);
-    return () => {
-      cancelled = true;
-      unsubscribe();
-      if (wakeRefreshTimer !== undefined) clearTimeout(wakeRefreshTimer);
-    };
-  }, [active, conversationId, dispatch, state.currentPlan?.status, state.phase, subagentTaskRegistry]);
 
   const initialPromptStartedRef = useRef(false);
   useEffect(() => {
@@ -1597,33 +1486,6 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
     initialPromptStartedRef.current = true;
     void handleSubmit(initialPrompt);
   }, [handleSubmit, initialPrompt]);
-
-  // Start the next queued prompt only after the current turn has emitted done/error/aborted.
-  useEffect(() => {
-    if (state.busy || state.pendingPermission) return;
-    void (async () => {
-      while (!stateRef.current.busy && !stateRef.current.pendingPermission) {
-        let next = promptQueueRef.current.shift();
-        if (!next) {
-          const pending = pendingSubagentPromptsRef.current.get(conversationId);
-          next = pending?.shift();
-          if (pending && pending.length === 0) pendingSubagentPromptsRef.current.delete(conversationId);
-        }
-        if (!next) break;
-        setQueuedCount(promptQueueRef.current.length);
-        const wakeId = subagentWakeId(next);
-        if (wakeId && !(await subagentTaskRegistry.markAutoWakeDelivered(wakeId, conversationId))) continue;
-        void handleSubmit(next);
-        break;
-      }
-    })().catch((error) => {
-      dispatch({
-        type: "ADD_NOTICE",
-        title: "Queued prompt handling failed",
-        text: error instanceof Error ? error.message : String(error),
-      });
-    });
-  }, [state.busy, state.pendingPermission, handleSubmit, conversationId, subagentTaskRegistry]);
 
   // ── render ────────────────────────────────────────────────────────────────
 

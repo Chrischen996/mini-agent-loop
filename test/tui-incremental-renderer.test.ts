@@ -16,13 +16,15 @@ function sink(): { writes: string[]; target: EventEmitter & { write(value: strin
 }
 
 describe("incremental terminal renderer", () => {
-  it("anchors the first frame at a primed cursor row instead of the screen bottom", () => {
+  it("paints flow frames at the cursor instead of a primed absolute row", () => {
     const output = sink();
     const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "document" });
     renderer.setInitialAnchor(5);
     renderer.write("frame line one\nframe line two\n");
-    assert.match(output.writes.join(""), /\x1b\[5;1H/, "paint starts at the prompt row");
-    assert.doesNotMatch(output.writes.join(""), /\x1b\[23;1H/, "no bottom-anchored placement");
+    const painted = output.writes.join("");
+    assert.ok(painted.includes("frame line one"));
+    assert.doesNotMatch(painted, /\x1b\[5;1H/, "no absolute row is addressed");
+    assert.doesNotMatch(painted, /\x1b\[23;1H/, "no bottom-anchored placement");
   });
 
   it("ignores a cursor prime once the frame has painted", () => {
@@ -33,7 +35,8 @@ describe("incremental terminal renderer", () => {
     renderer.setInitialAnchor(3);
     renderer.write("one\ntwo\n");
     const painted = output.writes.slice(before).join("");
-    assert.match(painted, /\x1b\[24;1H/, "anchor stays at the bottom-derived position after first paint");
+    assert.ok(painted.includes("two"));
+    assert.doesNotMatch(painted, /\x1b\[\d+;1H/, "relative addressing only");
   });
 
 
@@ -214,7 +217,7 @@ describe("incremental terminal renderer", () => {
   });
 });
 
-describe("incremental renderer inline mode", () => {
+describe("incremental renderer flow mode (inline/document)", () => {
   function sizedSink(rows: number, columns = 40) {
     const writes: string[] = [];
     const target = {
@@ -228,99 +231,188 @@ describe("incremental renderer inline mode", () => {
     return { writes, target };
   }
 
-  it("anchors the first inline frame at the screen bottom", () => {
+  // The invariant that fixes the "composer/status bar duplicated over the
+  // history" corruption: flow paints must never address an absolute row,
+  // because that is a VIEWPORT row and the user may have scrolled back.
+  /** Paint text with per-row erase codes removed (rows are still separated by \\n). */
+  function visibleText(writes: readonly string[]): string {
+    return writes.join("").split("\x1b[2K").join("");
+  }
+
+  function assertNoAbsoluteRows(writes: readonly string[]) {
+    for (const value of writes) {
+      assert.doesNotMatch(value, /\x1b\[\d+;1H/, `absolute row write: ${JSON.stringify(value)}`);
+    }
+  }
+
+  it("paints the first flow frame with relative cursor moves only", () => {
     const output = sizedSink(10);
     const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
 
     renderer.write("a\nb\nc");
 
     const painted = output.writes.join("");
-    assert.match(painted, /\x1b\[8;1H\x1b\[2Ka/);
-    assert.match(painted, /\x1b\[9;1H\x1b\[2Kb/);
-    assert.match(painted, /\x1b\[10;1H\x1b\[2Kc/);
-    assert.ok(!painted.includes("\x1b[7;1H"), "rows above the anchor stay untouched");
+    assertNoAbsoluteRows(output.writes);
+    assert.ok(visibleText(output.writes).includes("a\nb\nc"), "frame rows are written in order");
+    assert.ok(painted.endsWith("\x1b[?7h"), "autowrap is restored after the paint");
   });
 
-  it("erases the frame region without freezing the old frame into scrollback", () => {
+  it("never addresses absolute rows when the frame is repainted", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "document" });
+    renderer.write("a\nb\nc");
+    output.writes.length = 0;
+
+    renderer.write("a\nchanged\nc");
+
+    assertNoAbsoluteRows(output.writes);
+    assert.ok(output.writes.join("").includes("changed"));
+  });
+
+  it("erases the previously painted block before rewriting it", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+    renderer.write("a\nb\nc");
+    output.writes.length = 0;
+
+    renderer.write("a\nb\nx");
+
+    const painted = output.writes.join("");
+    assertNoAbsoluteRows(output.writes);
+    // Three painted lines + the cursor line below them.
+    assert.ok(painted.includes("\x1b[2K\x1b[1A\x1b[2K\x1b[1A\x1b[2K\x1b[1A\x1b[2K\x1b[G"),
+      `expected erase of the painted block, got ${JSON.stringify(painted)}`);
+  });
+
+  it("repaints nothing when the frame is unchanged", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+    renderer.write("a\nb\nc");
+    output.writes.length = 0;
+
+    renderer.write("a\nb\nc");
+
+    assert.deepEqual(output.writes, []);
+  });
+
+  it("clears a taller previous frame when the frame shrinks", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+    renderer.write("a\nb\nc");
+    output.writes.length = 0;
+
+    renderer.write("a\n");
+
+    const painted = output.writes.join("");
+    assertNoAbsoluteRows(output.writes);
+    // The whole 3-line block is erased, then only "a" is written back.
+    assert.ok(painted.includes("\x1b[2K\x1b[1A\x1b[2K\x1b[1A\x1b[2K\x1b[1A\x1b[2K\x1b[G"));
+    assert.ok(painted.includes("\x1b[2Ka"));
+    assert.ok(!visibleText(output.writes).includes("b"), "the stale second row is not rewritten");
+  });
+
+  it("clips a frame taller than the screen to one screen minus the cursor row", () => {
+    const output = sizedSink(4);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+
+    renderer.write("1\n2\n3\n4\n5\n6");
+
+    const painted = output.writes.join("");
+    assertNoAbsoluteRows(output.writes);
+    assert.ok(!painted.includes("1"), "rows above the budget are not painted");
+    assert.ok(painted.includes("4") && painted.includes("6"));
+  });
+
+  it("emits a static burst above the frame without absolute addressing", () => {
     const output = sizedSink(10);
     const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
     renderer.write("a\nb\nc");
     output.writes.length = 0;
 
     renderer.emitStaticBurst("hello\n");
-    const painted = output.writes.join("");
-    // Old frame region erased, burst printed at the anchor...
-    assert.match(painted, /\x1b\[8;1H\x1b\[2K/);
-    assert.match(painted, /\x1b\[10;1H\x1b\[2K/);
-    assert.ok(painted.includes("\x1b[8;1Hhello\n"));
-    // The old frame must not be repainted before React commits the post-burst
-    // frame; that would scroll the pre-burst composer into native scrollback.
-    assert.ok(!painted.includes("a"), "old frame is not repainted");
-    assert.ok(!painted.includes("b"), "old frame is not repainted");
-    assert.ok(!painted.includes("c"), "old frame is not repainted");
 
-    // A following frame force-redraws below the burst.
-    output.writes.length = 0;
-    renderer.write("a\nb\nx\n");
-    const next = output.writes.join("");
-    assert.match(next, /\x1b\[8;1H\x1b\[2Ka/);
-    assert.match(next, /\x1b\[9;1H\x1b\[2Kb/);
-    assert.match(next, /\x1b\[10;1H\x1b\[2Kx/);
+    const painted = output.writes.join("");
+    assertNoAbsoluteRows(output.writes);
+    assert.ok(painted.includes("hello\n"), "burst is written verbatim");
+    assert.ok(!painted.includes("a\nb\nc"), "the old frame is not frozen into the burst");
   });
 
-  it("scrolls the deficit so an overflowing frame fits below static bursts", () => {
-    const output = sizedSink(4);
-    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
-    renderer.write("a\nb");
-    output.writes.length = 0;
-
-    // The next frame deficit-scrolls so it fits below the burst.
-    renderer.emitStaticBurst("s1\ns2\ns3\n");
-    assert.ok(output.writes.some((value) => value.includes("s1\ns2\ns3\n")), "burst written raw at the anchor");
-    assert.ok(!output.writes.some((value) => value.startsWith("\x1b[4;1H\n")), "old frame is not scrolled into scrollback");
-
-    output.writes.length = 0;
-    renderer.write("x\ny\nz\n");
-    const painted = output.writes.join("");
-    assert.match(painted, /\x1b\[2;1H\x1b\[2Kx/);
-    assert.match(painted, /\x1b\[3;1H\x1b\[2Ky/);
-    assert.match(painted, /\x1b\[4;1H\x1b\[2Kz/);
-  });
-
-  it("blanks the screen for a burst emitted before the first frame", () => {
+  it("prints a burst emitted before the first frame, then lets the frame follow", () => {
     const output = sizedSink(10);
     const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
 
-    // Unknown anchor (e.g. resumed session): the burst flows into scrollback,
-    // then the screen clears so the first frame anchors on a clean surface.
     renderer.emitStaticBurst("blob\n");
-    assert.equal(output.writes[0], "\x1b[10;1H\nblob\n");
-    assert.equal(output.writes[1], `\x1b[10;1H${"\n".repeat(10)}`);
+    const burstWrites = output.writes.join("");
+    assertNoAbsoluteRows(output.writes);
+    assert.ok(burstWrites.includes("blob\n"));
 
     output.writes.length = 0;
     renderer.write("a\nb\n");
-    const painted = output.writes.join("");
-    assert.match(painted, /\x1b\[9;1H\x1b\[2Ka/, "first frame bottom-anchors on the clean screen");
-    assert.match(painted, /\x1b\[10;1H\x1b\[2Kb/);
+    assertNoAbsoluteRows(output.writes);
+    assert.ok(visibleText(output.writes).includes("a\nb\n"));
   });
 
-  it("skips unchanged rows and clears rows left by a shorter frame", () => {
-    const output = sizedSink(10);
+  it("truncates an over-wide burst row instead of wrapping the terminal", () => {
+    const output = sizedSink(10, 40);
     const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
     renderer.write("a\nb\nc");
     output.writes.length = 0;
 
-    renderer.write("a\nb\nc");
-    assert.deepEqual(output.writes, [], "identical frame at the same anchor repaints nothing");
+    renderer.emitStaticBurst(`${"x".repeat(120)}\n`);
 
-    renderer.write("a\n");
-    const painted = output.writes.join("");
-    assert.match(painted, /\x1b\[9;1H\x1b\[2K/);
-    assert.match(painted, /\x1b\[10;1H\x1b\[2K/);
-    assert.ok(!painted.includes("a\n"), "unchanged first row is not rewritten");
+    assertNoAbsoluteRows(output.writes);
+    assert.ok(output.writes.some((value) => value.includes("\x1b[?7l")), "burst write disables autowrap");
+    assert.ok(output.writes.some((value) => value.includes("…")), "over-wide burst row is truncated");
   });
 
-  it("clearScreen wipes the visible screen and repaints the frame below", () => {
+  it("keeps the burst tail when the next frame repaints below it", () => {
+    const output = sizedSink(10, 40);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+    renderer.write("a\nb\nc");
+    output.writes.length = 0;
+
+    renderer.emitStaticBurst("s1\ns2\n");
+    output.writes.length = 0;
+
+    renderer.write("a\nb\nc");
+
+    const painted = output.writes.join("");
+    assertNoAbsoluteRows(output.writes);
+    // The burst is already in the buffer; the frame must not walk up over it.
+    assert.ok(!visibleText(output.writes).includes("s2"), "burst tail is not erased by the next frame");
+    assert.ok(visibleText(output.writes).includes("a\nb\nc"), "frame repaints below the burst");
+  });
+
+  it("normalizes a burst that lacks a trailing newline", () => {
+    const output = sizedSink(10, 40);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+    renderer.write("a\nb\nc");
+    output.writes.length = 0;
+
+    renderer.emitStaticBurst("hello");
+
+    const painted = output.writes.join("");
+    assertNoAbsoluteRows(output.writes);
+    assert.ok(painted.includes("hello\n"), "burst normalized with a trailing newline");
+  });
+
+  it("re-anchors after a resize without absolute addressing", () => {
+    const output = sizedSink(10);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
+    renderer.write("a\nb\nc\nd");
+    output.writes.length = 0;
+
+    renderer.emitStaticBurst("s1\ns2\n");
+    output.writes.length = 0;
+
+    output.target.rows = 8;
+    renderer.write("a\nb\nc\nd");
+
+    assertNoAbsoluteRows(output.writes);
+    assert.ok(visibleText(output.writes).includes("a\nb\nc\nd"), "frame repaints after the resize");
+  });
+
+  it("clearScreen wipes the screen and repaints the frame relatively", () => {
     const output = sizedSink(10);
     const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
     renderer.write("a\nb\nc");
@@ -328,83 +420,40 @@ describe("incremental renderer inline mode", () => {
     output.writes.length = 0;
 
     renderer.clearScreen();
+
     const cleared = output.writes.join("");
     assert.ok(cleared.includes("\x1b[2J\x1b[H"), "clear screen then home");
-    assert.match(cleared, /\x1b\[8;1H\x1b\[2Ka/);
-    assert.match(cleared, /\x1b\[9;1H\x1b\[2Kb/);
-    assert.match(cleared, /\x1b\[10;1H\x1b\[2Kx/);
+    assert.ok(visibleText(output.writes).includes("a\nb\nx"), "frame is repainted");
+    assertNoAbsoluteRows(output.writes);
 
-    // The repaint becomes the diff baseline again: unchanged frames write nothing.
     output.writes.length = 0;
     renderer.write("a\nb\nx\n");
     assert.deepEqual(output.writes, [], "post-clear frames diff against the repainted baseline");
   });
+});
 
-  it("keeps the legacy trailing-newline-as-frame behavior in alternate mode", () => {
+describe("incremental renderer alternate mode", () => {
+  function sizedSink(rows: number, columns = 40) {
+    const writes: string[] = [];
+    const target = {
+      rows,
+      columns,
+      write(value: string) {
+        writes.push(value);
+        return true;
+      },
+    };
+    return { writes, target };
+  }
+
+  it("keeps absolute top-anchored rows (no scrollback in the alternate screen)", () => {
     const output = sizedSink(10);
     const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "alternate" });
 
     renderer.write("one\ntwo\n");
+
     const painted = output.writes.join("");
-    assert.match(painted, /\x1b\[1;1H\x1b\[2Kone/, "alternate mode top-anchors bare writes as frames");
+    assert.match(painted, /\x1b\[1;1H\x1b\[2Kone/, "alternate mode top-anchors rows");
     assert.match(painted, /\x1b\[2;1H\x1b\[2Ktwo/);
   });
-
-  it("clamps over-wide burst rows so the frame never paints over the burst tail", () => {
-    const output = sizedSink(10, 40);
-    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
-    renderer.write("a\nb\nc");
-    output.writes.length = 0;
-
-    // A 120-column burst line would autowrap into three physical rows and
-    // desynchronize the anchor; it must be clamped to one physical row.
-    renderer.emitStaticBurst(`${"x".repeat(120)}\n`);
-    const painted = output.writes.join("");
-    assert.ok(output.writes.some((value) => value.includes("\x1b[?7l")), "burst write disables autowrap");
-    assert.ok(output.writes.some((value) => value.includes("…")), "over-wide burst row is truncated");
-    assert.ok(!output.writes.some((value) => value.startsWith("\x1b[10;1H\n")), "old frame is not scrolled into scrollback");
-    assert.ok(!painted.includes("a"), "old frame is not repainted");
-    assert.ok(!painted.includes("b"), "old frame is not repainted");
-    assert.ok(!painted.includes("c"), "old frame is not repainted");
-  });
-
-  it("advances the anchor past a burst that lacks a trailing newline", () => {
-    const output = sizedSink(10, 40);
-    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "inline" });
-    renderer.write("a\nb\nc");
-    output.writes.length = 0;
-
-    renderer.emitStaticBurst("hello");
-    const painted = output.writes.join("");
-    assert.ok(painted.includes("\x1b[8;1Hhello\n"), "burst normalized with a trailing newline");
-    assert.ok(!output.writes.some((value) => value.startsWith("\x1b[10;1H\n")), "old frame is not scrolled into scrollback");
-    assert.ok(!painted.includes("a"), "old frame is not repainted");
-    assert.ok(!painted.includes("b"), "old frame is not repainted");
-    assert.ok(!painted.includes("c"), "old frame is not repainted");
-  });
-
-  it("re-anchoring after a shrink never paints over the last burst", () => {
-    const writes: string[] = [];
-    const target = {
-      rows: 10,
-      columns: 40,
-      write(value: string) { writes.push(value); return true; },
-    };
-    const renderer = new IncrementalTerminalRenderer(target as never, { mode: "inline" });
-    renderer.write("a\nb\nc\nd");
-    writes.length = 0;
-
-    renderer.emitStaticBurst("s1\ns2\n");
-    // The burst sits at rows 7/8; the next frame owns 9/10 until resize.
-    writes.length = 0;
-
-    target.rows = 8; // screen shrinks: the bottom-anchored window would land inside the burst
-    renderer.write("a\nb\nc\nd");
-    const painted = writes.join("");
-    assert.ok(writes.some((value) => value === "\x1b[8;1H\n\n\n\n"), "deficit scroll keeps the burst clear of the frame");
-    assert.match(painted, /\x1b\[5;1H\x1b\[2Ka/, "frame re-anchors below the burst");
-    assert.match(painted, /\x1b\[6;1H\x1b\[2Kb/);
-    assert.ok(!painted.includes("\x1b[4;1H"), "frame does not overwrite the burst");
-  });
 });
-

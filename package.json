@@ -42,6 +42,7 @@
     "build": "tsx build.ts",
     "generate-models": "tsx scripts/generate-models.ts",
     "generate-models:check": "tsx scripts/generate-models.ts --check",
+    "check:file-sizes": "tsx scripts/check-file-sizes.ts",
     "build:package": "tsx build.ts && npm run web:build && node -e \"const fs=require('node:fs'); for (const file of ['dist/cli.js', 'dist/tui.js', 'dist/web-launcher.js']) fs.chmodSync(file, 0o755)\"",
     "prepack": "npm run build:package",
     "dev:inspect": "node --inspect=0.0.0.0:8888 --import tsx src/tui/ink-main.tsx",

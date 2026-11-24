@@ -299,8 +299,8 @@ describe("document layout viewport (committed streaming rows)", () => {
   });
 });
 
-describe("document layout renderer (anchor pipeline)", () => {
-  it("shares the inline anchor pipeline without freezing the old frame", () => {
+describe("document layout renderer (flow pipeline)", () => {
+  it("emits the burst above the frame without absolute addressing", () => {
     const output = sizedSink(10);
     const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "document" });
     renderer.write("a\nb\nc");
@@ -308,7 +308,10 @@ describe("document layout renderer (anchor pipeline)", () => {
 
     renderer.emitStaticBurst("hello\n");
     const painted = output.writes.join("");
-    assert.ok(painted.includes("\x1b[8;1Hhello\n"), "burst written raw at the anchor");
+    assert.ok(painted.includes("hello\n"), "burst written verbatim");
+    // Absolute rows are viewport rows: addressing them would paint over the
+    // transcript the user scrolled back to.
+    assert.doesNotMatch(painted, /\x1b\[\d+;1H/, "no absolute row addressing");
     assert.ok(!painted.includes("a"), "old frame is not repainted");
     assert.ok(!painted.includes("c"), "old frame is not repainted");
   });

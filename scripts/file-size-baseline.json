@@ -1,0 +1,49 @@
+{
+  "limit": 1000,
+  "entries": [
+    {
+      "path": "src/server.ts",
+      "lines": 2717
+    },
+    {
+      "path": "src/subagent/tool.ts",
+      "lines": 1914
+    },
+    {
+      "path": "src/tui/AgentSessionApp.tsx",
+      "lines": 1857
+    },
+    {
+      "path": "src/cli.ts",
+      "lines": 1842
+    },
+    {
+      "path": "src/loop.ts",
+      "lines": 1655
+    },
+    {
+      "path": "src/pi-ai/api/openai-codex-responses.ts",
+      "lines": 1573
+    },
+    {
+      "path": "src/orchestration/pipeline/orchestrator.ts",
+      "lines": 1413
+    },
+    {
+      "path": "src/pi-ai/api/anthropic-messages.ts",
+      "lines": 1321
+    },
+    {
+      "path": "src/tui/state.ts",
+      "lines": 1279
+    },
+    {
+      "path": "src/pi-ai/api/openai-completions.ts",
+      "lines": 1214
+    },
+    {
+      "path": "src/pi-ai/api/bedrock-converse-stream.ts",
+      "lines": 1109
+    }
+  ]
+}
