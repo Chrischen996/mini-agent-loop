@@ -133,7 +133,9 @@ import { registerSkillRoutes } from "./server/routes/skills.ts";
 import { ForeignSessionError, formatForeignSessionList, importForeignSession, listForeignSessions, type ForeignSessionSource } from "./foreign-session.ts";
 import { registerFileRoutes } from "./server/routes/files.ts";
 import { registerPlanDocumentRoutes, planHttpError } from "./server/routes/plan-document.ts";
+import { registerSessionRoutes } from "./server/routes/sessions.ts";
 import { registerBackgroundTaskRoutes } from "./server/routes/background-tasks.ts";
+import { safeEvent, safeMessage, isRetryableError } from "./server/serialization.ts";
 import { WorkspaceRegistry } from "./workspaces.ts";
 import {
   DEFAULT_MAX_AUTO_CONTINUES,
@@ -220,7 +222,7 @@ function planSummaryPayload(plan: PlanDocument): Record<string, unknown> {
   };
 }
 
-type Session = {
+export type Session = {
   id: string;
   workspaceId?: string;
   /** Session-bound project cwd, supplied to each filesystem tool call. */
@@ -332,248 +334,6 @@ export type AgentServerOptions = {
   /** Per-session subagent concurrency cap (Grok Build coordinator admission, session scope). */
   sessionConcurrencyLimit?: number;
 };
-
-function safeMessage(message: AgentMessage): Record<string, unknown> {
-  if (message.role === "system" || message.role === "assistant") {
-    return {
-      role: message.role,
-      ...(message.id ? { id: message.id } : {}),
-      content: message.content,
-      ...(message.role === "assistant" && message.toolCalls
-        ? {
-            toolCalls: message.toolCalls.map((call) => ({
-              id: call.id,
-              name: call.name,
-              arguments: redactSensitiveArguments(call.arguments),
-            })),
-          }
-        : {}),
-    };
-  }
-  if (message.role === "user") {
-    return {
-      role: "user",
-      ...(message.id ? { id: message.id } : {}),
-      content: contentAsString(message.content),
-    };
-  }
-  return {
-    role: "tool",
-    ...(message.id ? { id: message.id } : {}),
-    toolCallId: message.toolCallId,
-    name: message.name,
-    content: contentAsString(message.content),
-    isError: Boolean(message.isError),
-  };
-}
-
-function safeEvent(event: LoopEvent): Record<string, unknown> {
-  switch (event.type) {
-    case "assistant_delta":
-      return {
-        type: "assistant_delta",
-        text: event.text,
-        kind: event.kind,
-      };
-    case "context_compacted":
-      return {
-        type: "context_compacted",
-        beforeTokens: event.beforeTokens,
-        afterTokens: event.afterTokens,
-        reason: event.reason,
-      };
-    case "assistant":
-      return {
-        type: "assistant",
-        content: event.message.content,
-        tools: event.message.toolCalls?.map((call) => call.name) ?? [],
-      };
-    case "error":
-      return { type: "error", message: event.message };
-    case "max_turns":
-      return {
-        type: "max_turns",
-        maxTurns: event.maxTurns,
-        message: (event as { message?: string }).message,
-        messageCount: event.messages.length,
-      };
-    case "run_stopped":
-      return {
-        type: "run_stopped",
-        stopReason: event.stopReason,
-        details: event.details,
-        message: event.message ?? event.details ?? `Run stopped: ${event.stopReason}`,
-        budgetUsage: event.budgetUsage,
-        cumulativeBudgetUsage: event.cumulativeBudgetUsage,
-        budgetPolicy: event.budgetPolicy,
-        messageCount: event.messages.length,
-      };
-    case "tool_start":
-      return {
-        type: "tool_start",
-        id: event.call.id,
-        name: event.call.name,
-        arguments: redactSensitiveArguments(event.call.arguments),
-      };
-    case "tool_end":
-      return {
-        type: "tool_end",
-        id: event.call.id,
-        name: event.call.name,
-        isError: Boolean(event.result.isError),
-        preview: contentAsString(event.result.content).slice(0, 500),
-      };
-    case "auto_subagent":
-      return {
-        type: "auto_subagent",
-        shouldDelegate: event.shouldDelegate,
-        executed: event.executed,
-        coordinatorMode: event.coordinatorMode,
-        score: event.score,
-        profile: event.profile,
-        reasons: event.reasons.slice(0, 12),
-      };
-    case "coordinator_mode":
-      return {
-        type: "coordinator_mode",
-        active: event.active,
-        profile: event.profile,
-        preflightExecuted: event.preflightExecuted,
-        maxDirectExploration: event.maxDirectExploration,
-        directExplorationUsed: event.directExplorationUsed,
-        reasons: event.reasons.slice(0, 12),
-      };
-    case "thinking_policy":
-      return {
-        type: "thinking_policy",
-        mode: event.mode,
-        phase: event.phase,
-        previousLevel: event.previousLevel,
-        level: event.level,
-        score: event.score,
-        reasons: event.reasons.slice(0, 12),
-      };
-    case "permission_required":
-      return {
-        type: "permission_required",
-        requestId: event.request.id,
-        tool: event.request.tool,
-        arguments: redactSensitiveArguments(event.request.arguments),
-        risk: event.request.risk,
-        source: event.request.source,
-      };
-    case "aborted":
-      return {
-        type: "aborted",
-        message: "已停止生成",
-        messageCount: event.messages.length,
-        ...(event.reason ? {
-          reason: event.reason,
-          previousMode: event.previousMode,
-          permissionMode: event.permissionMode,
-        } : {}),
-      };
-    case "plan_act_event":
-      return { eventType: event.event.type, ...event.event };
-    case "done":
-      return { type: "done", messageCount: event.messages.length };
-    case "attempt_reset":
-      return {
-        type: "attempt_reset",
-        reason: event.reason,
-        attempt: event.attempt,
-      };
-    case "model_switched":
-      return {
-        type: "model_switched",
-        previousModel: event.previousModel,
-        nextModel: event.nextModel,
-        turn: event.turn,
-      };
-    case "retry_attempt":
-      return {
-        type: "retry_attempt",
-        errorType: event.errorType,
-        attempt: event.attempt,
-        maxRetries: event.maxRetries,
-        delayMs: event.delayMs,
-        errorMessage: event.errorMessage.slice(0, 200),
-      };
-    case "goal_updated":
-      return {
-        type: "goal_updated",
-        goal: event.goal,
-        reason: event.reason,
-      };
-    case "subagent_start":
-      return {
-        type: "subagent_start",
-        id: event.id,
-        task: event.task.slice(0, 500),
-        profile: event.profile,
-        depth: event.depth,
-        runtime: event.runtime,
-      };
-    case "subagent_event":
-      return {
-        type: "subagent_event",
-        id: event.id,
-        depth: event.depth,
-        inner: safeEvent(event.inner),
-      };
-    case "budget_warning":
-      return {
-        type: "budget_warning",
-        id: event.id,
-        used: event.used,
-        limit: event.limit,
-        percentage: event.percentage,
-        depth: event.depth,
-      };
-    case "subagent_end":
-      return {
-        type: "subagent_end",
-        id: event.id,
-        success: event.success,
-        depth: event.depth,
-        turns: event.turns,
-        totalTokens: event.totalTokens,
-        resultPreview: event.result.slice(0, 300),
-        runtime: event.runtime,
-        autoDelegationInherited: event.autoDelegationInherited,
-        ...(event.tokenBreakdown ? { tokenBreakdown: event.tokenBreakdown } : {}),
-        ...(event.estimatedCost ? { estimatedCost: event.estimatedCost } : {}),
-        ...(event.errors ? {
-          errors: event.errors.map((error) => ({
-            kind: error.kind,
-            message: error.message.slice(0, 500),
-          })),
-        } : {}),
-      };
-    default: {
-      const exhaustive = event as { type: string };
-      return { type: exhaustive.type };
-    }
-  }
-}
-
-function redactSensitiveArguments(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactSensitiveArguments);
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, child]) => [
-    key,
-    /authorization|cookie|password|secret|token|api[_-]?key/i.test(key)
-      ? "[REDACTED]"
-      : redactSensitiveArguments(child),
-  ]));
-}
-
-function isRetryableError(message: string): boolean {
-  return /Vision provider .* is busy|Vision network error|Vision HTTP (429|502|503|504)/i.test(
-    message,
-  );
-}
-
 
 export function createAgentServer(options: AgentServerOptions): Express {
   const effectiveRunPolicy = options.runPolicy
@@ -1420,46 +1180,58 @@ export function createAgentServer(options: AgentServerOptions): Express {
     });
   });
 
-  /** Persistent thread goal; enabled by default, disable via MINI_AGENT_GOALS=0. */
-  app.get("/api/sessions/:id/goal", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) { response.status(404).json({ error: "Session not found" }); return; }
-    if (!goalConfig.enabled) { response.status(403).json({ error: "Goals are disabled" }); return; }
-    const current = await goalSessionFor(session.id)!.manager.get();
-    response.json({ goal: current ? goalSnapshot(current.raw) : null });
+  // Session lifecycle / configuration routes (goal, model, thinking-level,
+  // list/create/fork/rewind/tree/detail/delete, foreign sessions) live in
+  // src/server/routes/sessions.ts; the factory keeps only the streaming
+  // turn runners that close over the session loop wiring.
+  registerPermissionRoutes(app, { getSession: (id) => sessions.get(id), saveSession });
+
+  // Plan-Act workflow and the on-disk plan kernel stay registered before the
+  // streaming plan runners. They were previously adjacent to the session CRUD
+  // routes and must not be dropped when those routes move.
+  registerPlanActRoutes(app, {
+    getSession: (id) => sessions.get(id),
+    reserveSession,
+    releaseSession,
+    saveSession,
+  });
+  registerPlanDocumentRoutes(app, {
+    getSession: (id) => sessions.get(id),
+    reserveSession,
+    releaseSession,
+    sessionPlanRoot: (sessionId) => sessionPlanRoot(dataRoot, sessionId),
   });
 
-  app.put("/api/sessions/:id/goal", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) { response.status(404).json({ error: "Session not found" }); return; }
-    if (!goalConfig.enabled) { response.status(403).json({ error: "Goals are disabled" }); return; }
-    const body = request.body as Record<string, unknown> | undefined;
-    if (!body || typeof body !== "object" || Array.isArray(body)) {
-      response.status(400).json({ error: "Expected a goal object" }); return;
-    }
-    if (body.status !== undefined && !isGoalStatus(body.status)) {
-      response.status(400).json({ error: "Invalid goal status" }); return;
-    }
-    try {
-      const updated = await goalSessionFor(session.id)!.manager.setFromUser({
-        ...(body.clear === true ? { clear: true } : {}),
-        ...(typeof body.objective === "string" ? { objective: body.objective } : {}),
-        ...(isGoalStatus(body.status) ? { status: body.status } : {}),
-        ...(body.tokenBudget === null || typeof body.tokenBudget === "number"
-          ? { tokenBudget: body.tokenBudget as number | null } : {}),
-      });
-      response.json({ goal: updated ? goalSnapshot(updated) : null });
-    } catch (error) {
-      response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
-    }
-  });
-
-  app.delete("/api/sessions/:id/goal", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) { response.status(404).json({ error: "Session not found" }); return; }
-    if (!goalConfig.enabled) { response.status(403).json({ error: "Goals are disabled" }); return; }
-    await goalSessionFor(session.id)!.manager.setFromUser({ clear: true });
-    response.json({ ok: true });
+  registerSessionRoutes(app, {
+    sessions,
+    workspaceRegistry,
+    defaultWorkspace,
+    workspace,
+    dataRoot,
+    sessionPresentation,
+    goalConfig,
+    goalSessions,
+    goalSessionFor,
+    isSessionBusy,
+    reserveSession,
+    releaseSession,
+    saveSession,
+    persistedSession,
+    sessionManagerForSession,
+    sessionManagerForWorkspace,
+    documentStore,
+    sessionLlmConfig,
+    resolveSessionModel,
+    customProviderForModel,
+    workspaceIdForSession,
+    workspaceForSession,
+    resolveSessionSkillNames,
+    defaultPermissionMode,
+    defaultSkillNames,
+    defaultThinkingMode: options.thinkingMode ?? loadThinkingModeFromEnv(),
+    instructionContent: () => instructionContent,
+    memorySectionContent: () => memorySectionContent,
+    defaultLlm: options.llm,
   });
 
   registerGitRoutes(app, {
@@ -1485,87 +1257,6 @@ export function createAgentServer(options: AgentServerOptions): Express {
     storePath: options.modelConfigPath,
   });
 
-  app.put("/api/sessions/:id/model", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const modelId = String(request.body?.model ?? "").trim();
-    if (!modelId) {
-      response.status(400).json({ error: "model is required" });
-      return;
-    }
-    const lease = reserveSession(session, "model");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const previousLlm = sessionLlmConfig(session);
-      const newLlm = resolveSessionModel(modelId, previousLlm);
-      // Persist a provider-safe transcript at the switch boundary. This is
-      // important for a later request/restart: the next model must not be
-      // handed tool calls or images it cannot consume.
-      session.messages = mergeConsecutiveSameRole(adaptHistoryForModel(session.messages, {
-        targetCapabilities: newLlm.capabilities,
-        sourceCapabilities: previousLlm.capabilities,
-      }));
-      session.modelId = `${newLlm.provider}/${newLlm.model}`;
-      session.llmOverride = newLlm;
-      session.thinkingLevel = newLlm.thinkingLevel;
-      await saveSession(session);
-      const resolved = customProviderForModel(session.modelId)?.model
-        ?? resolveModel(newLlm.model, newLlm.baseUrl);
-      response.json({
-        model: newLlm.model,
-        qualifiedId: session.modelId,
-        provider: newLlm.provider,
-        capabilities: newLlm.capabilities,
-        contextWindow: resolved.contextWindow,
-        maxTokens: newLlm.maxTokens,
-        thinkingLevel: newLlm.thinkingLevel ?? (newLlm.reasoning ? "medium" : "off"),
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      response.status(400).json({ error: message });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
-  app.put("/api/sessions/:id/thinking-level", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const level = String(request.body?.thinkingLevel ?? "").trim() as ModelThinkingLevel;
-    const lease = reserveSession(session, "thinking-level");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      const currentLlm = sessionLlmConfig(session);
-      const availableLevels = getSelectableThinkingLevels(currentLlm);
-      if (!availableLevels.includes(level)) {
-        response.status(400).json({ error: "thinkingLevel is not supported by the selected model" });
-        return;
-      }
-      const updatedLlm = withThinkingLevel(currentLlm, level);
-      session.llmOverride = updatedLlm;
-      session.thinkingLevel = updatedLlm.thinkingLevel;
-      await saveSession(session);
-      response.json({
-        thinkingLevel: updatedLlm.thinkingLevel,
-        thinkingLevels: availableLevels,
-      });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
-
   // ── Subagent profile hot-update API ────────────────────────────────────────
 
   registerSubagentProfileRoutes(app, {
@@ -1573,336 +1264,13 @@ export function createAgentServer(options: AgentServerOptions): Express {
     setProfiles: (profiles) => { options.subagentProfiles = profiles; },
   });
 
-  // ── Sessions ────────────────────────────────────────────────────────────────
-
-  app.get("/api/sessions", (request, response) => {
-    const requestedWorkspaceId = typeof request.query.workspaceId === "string"
-      ? request.query.workspaceId
-      : undefined;
-    if (requestedWorkspaceId && !workspaceRegistry.get(requestedWorkspaceId)) {
-      response.status(404).json({ error: "Workspace not found" });
-      return;
-    }
-    const items = [...sessions.values()]
-      .filter((session) => !requestedWorkspaceId || workspaceIdForSession(session) === requestedWorkspaceId)
-      .sort((a, b) =>
-        (b.lastActiveAt ?? b.createdAt) - (a.lastActiveAt ?? a.createdAt),
-      )
-      .map((session) => {
-        sessionLlmConfig(session);
-        return {
-          id: session.id,
-          workspaceId: workspaceIdForSession(session),
-          workspaceName: workspaceRegistry.get(workspaceIdForSession(session))?.name ?? path.basename(workspace),
-          ...sessionPresentation.get(session.id),
-          permissionMode: session.permissionManager.getMode(),
-          createdAt: session.createdAt,
-          lastActiveAt: session.lastActiveAt ?? session.createdAt,
-          busy: isSessionBusy(session),
-          parentSessionId: session.parentSessionId ?? null,
-          forkedFromMessage: session.forkedFromMessage ?? null,
-          forkedFromMessageId: session.forkedFromMessageId ?? null,
-          messageCount: visibleMessageCount(session.messages),
-          preview: contentAsString(session.messages.find((message) => message.role === "user")?.content ?? "").slice(0, 80),
-          modelId: session.modelId,
-          thinkingLevel: session.thinkingLevel ?? (session.llmOverride ?? options.llm).thinkingLevel ?? "off",
-          thinkingMode: session.thinkingMode ?? loadThinkingModeFromEnv(),
-        };
-      });
-    response.json({ sessions: items });
-  });
   registerSessionPresentationRoutes(app, { hasSession: (id) => sessions.has(id), store: sessionPresentation });
 
-  app.get("/api/foreign-sessions", async (request, response) => {
-    const source = request.query.source === "codex" ? "codex" : request.query.source === "claude" ? "claude" : undefined;
-    if (!source) {
-      response.status(400).json({ error: "source must be claude or codex" });
-      return;
-    }
-    const selected = typeof request.query.workspaceId === "string"
-      ? workspaceRegistry.get(request.query.workspaceId)
-      : defaultWorkspace();
-    if (!selected) {
-      response.status(404).json({ error: "Workspace not found" });
-      return;
-    }
-    try {
-      const listed = await listForeignSessions(source, selected.path);
-      response.json({
-        source,
-        cwd: selected.path,
-        configDir: listed.configDir,
-        configDirExists: listed.configDirExists,
-        sessions: listed.sessions,
-      });
-    } catch (error) {
-      const status = error instanceof ForeignSessionError && error.exitCode === 2 ? 409 : 400;
-      response.status(status).json({
-        error: error instanceof Error ? error.message : String(error),
-        matches: error instanceof ForeignSessionError ? error.matches : [],
-      });
-    }
-  });
 
-  app.post("/api/sessions/import", async (request, response) => {
-    const source = request.body?.source === "codex" ? "codex" as const : request.body?.source === "claude" ? "claude" as const : undefined;
-    if (!source) {
-      response.status(400).json({ error: "source must be claude or codex" });
-      return;
-    }
-    const selected = request.body?.workspaceId
-      ? workspaceRegistry.get(String(request.body.workspaceId))
-      : defaultWorkspace();
-    if (!selected) {
-      response.status(400).json({ error: "Unknown workspaceId" });
-      return;
-    }
-    const reference = typeof request.body?.reference === "string" ? request.body.reference : "";
-    try {
-      const imported = await importForeignSession(
-        sessionManagerForWorkspace(selected),
-        source satisfies ForeignSessionSource,
-        selected.path,
-        reference,
-        selected.id,
-      );
-      const existing = sessions.get(imported.session.id);
-      if (!imported.created && existing) {
-        response.status(200).json({
-          id: existing.id,
-          created: false,
-          workspaceId: workspaceIdForSession(existing),
-          sourceSessionId: imported.transcript.session_id,
-          title: imported.transcript.title,
-          preview: imported.transcript.summary.last_user_request ?? "",
-        });
-        return;
-      }
-      const instructions = selected.path === workspace
-        ? instructionContent
-        : (await loadInstructionBundle(selected.path)).content;
-      const session: Session = {
-        id: imported.session.id,
-        workspaceId: selected.id,
-        cwd: selected.path,
-        messages: restoreAgentHistory(
-          imported.session.messages,
-          buildSystemPrompt(defaultPermissionMode, instructions || undefined, memorySectionContent || undefined),
-        ),
-        createdAt: imported.session.createdAt,
-        lastActiveAt: imported.session.lastActiveAt,
-        busy: false,
-        permissionManager: new PermissionManager("plan"),
-        skillNames: [...defaultSkillNames],
-        todos: [],
-        todoVersion: 0,
-        origin: imported.session.origin,
-      };
-      sessions.set(session.id, session);
-      response.status(imported.created ? 201 : 200).json({
-        id: session.id,
-        created: imported.created,
-        workspaceId: session.workspaceId,
-        sourceSessionId: imported.transcript.session_id,
-        title: imported.transcript.title,
-        preview: formatForeignSessionList(source, [{
-          tool: source,
-          source: imported.transcript.source,
-          session_id: imported.transcript.session_id,
-          path: imported.transcript.path,
-          title: imported.transcript.title,
-        }]).split("\n").slice(1).join("\n"),
-      });
-    } catch (error) {
-      const status = error instanceof ForeignSessionError && error.exitCode === 2 ? 409 : 400;
-      response.status(status).json({
-        error: error instanceof Error ? error.message : String(error),
-        matches: error instanceof ForeignSessionError ? error.matches : [],
-      });
-    }
-  });
 
-  app.post("/api/sessions", async (request, response) => {
-    const selectedWorkspace = request.body?.workspaceId
-      ? workspaceRegistry.get(String(request.body.workspaceId))
-      : defaultWorkspace();
-    if (!selectedWorkspace) {
-      response.status(400).json({ error: "Unknown workspaceId" });
-      return;
-    }
-    const id = randomUUID();
-    const instructions = selectedWorkspace.path === workspace
-      ? instructionContent
-      : (await loadInstructionBundle(selectedWorkspace.path)).content;
-    const session: Session = {
-      id,
-      workspaceId: selectedWorkspace.id,
-      cwd: selectedWorkspace.path,
-      messages: createAgentHistory(
-        buildSystemPrompt(
-          defaultPermissionMode,
-          instructions || undefined,
-          memorySectionContent || undefined,
-        ),
-        defaultPermissionMode,
-      ),
-      createdAt: Date.now(),
-      busy: false,
-      thinkingMode: options.thinkingMode ?? loadThinkingModeFromEnv(),
-      permissionManager: new PermissionManager(defaultPermissionMode),
-      skillNames: [...defaultSkillNames],
-      todos: [],
-      todoVersion: 0,
-    };
-    sessions.set(id, session);
-    await sessionManagerForSession(session).save(persistedSession(session));
-    void documentStore.createSession(id);
-    response.status(201).json({ id, workspaceId: session.workspaceId, createdAt: session.createdAt, permissionMode: session.permissionManager.getMode() });
-  });
 
-  app.post("/api/sessions/:id/fork", async (request, response) => {
-    const parent = sessions.get(request.params.id);
-    if (!parent) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const visibleMessages = parent.messages.filter((message) => message.role !== "system");
-    const boundary = resolveMessageBoundary(visibleMessages, request.body, true);
-    if ("error" in boundary) {
-      response.status(400).json({ error: boundary.error });
-      return;
-    }
-    const messageIndex = boundary.messageIndex;
-    const lease = reserveSession(parent, "fork");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      // Keep the fork fully independent: later tool/result updates must not
-      // mutate message content or nested tool arguments in the parent.
-      const messages = structuredClone(truncateSessionMessages(parent.messages, messageIndex));
-      const safeMessageIndex = visibleMessageCount(messages);
-      const forkedFromMessageId = messageIdAtBoundary(messages, safeMessageIndex);
-      const id = randomUUID();
-      const childPlan = parent.currentPlan
-        ? planManager.clonePlan(parent.currentPlan, id)
-        : undefined;
-      const child: Session = {
-        id,
-        workspaceId: workspaceIdForSession(parent),
-        cwd: workspaceForSession(parent),
-        messages,
-        createdAt: Date.now(),
-        busy: false,
-        modelId: parent.modelId,
-        llmOverride: parent.llmOverride,
-        thinkingLevel: parent.thinkingLevel,
-        thinkingMode: parent.thinkingMode,
-        permissionManager: new PermissionManager(parent.permissionManager.getMode()),
-        phase: parent.phase,
-        currentPlan: childPlan,
-        todos: parent.todos.map((todo) => ({ ...todo })),
-        todoVersion: parent.todoVersion,
-        parentSessionId: parent.id,
-        forkedFromMessage: safeMessageIndex,
-        forkedFromMessageId,
-        skillNames: [...(parent.skillNames ?? [])],
-      };
-      try {
-        await sessionManagerForSession(child).save(persistedSession(child));
-      } catch (error) {
-        if (childPlan) planManager.deletePlan(childPlan.id);
-        throw error;
-      }
-      sessions.set(id, child);
-      await documentStore.createSession(id);
-      response.status(201).json({
-        id,
-        parentSessionId: parent.id,
-        forkedFromMessage: safeMessageIndex,
-        forkedFromMessageId: forkedFromMessageId ?? null,
-        createdAt: child.createdAt,
-        messageCount: safeMessageIndex,
-      });
-    } finally {
-      releaseSession(parent, lease);
-    }
-  });
 
-  app.post("/api/sessions/:id/rewind", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const visibleMessages = session.messages.filter((message) => message.role !== "system");
-    const boundary = resolveMessageBoundary(visibleMessages, request.body, false);
-    if ("error" in boundary) {
-      response.status(400).json({ error: boundary.error });
-      return;
-    }
-    const messageIndex = boundary.messageIndex;
-    const lease = reserveSession(session, "rewind");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      session.messages = truncateSessionMessages(session.messages, messageIndex);
-      const safeMessageIndex = visibleMessageCount(session.messages);
-      await saveSession(session);
-      response.json({
-        id: session.id,
-        messageIndex: safeMessageIndex,
-        messageId: messageIdAtBoundary(session.messages, safeMessageIndex) ?? null,
-        messageCount: safeMessageIndex,
-      });
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
 
-  app.get("/api/sessions/tree", (_request, response) => {
-    const nodes = [...sessions.values()].map((session) => ({
-      id: session.id,
-      createdAt: session.createdAt,
-      parentSessionId: session.parentSessionId ?? null,
-      forkedFromMessage: session.forkedFromMessage ?? null,
-      forkedFromMessageId: session.forkedFromMessageId ?? null,
-      messageCount: visibleMessageCount(session.messages),
-      busy: isSessionBusy(session),
-      children: [] as string[],
-    }));
-    const byId = new Map(nodes.map((node) => [node.id, node]));
-    const roots: string[] = [];
-    for (const node of nodes) {
-      const parent = node.parentSessionId ? byId.get(node.parentSessionId) : undefined;
-      if (parent && parent !== node) parent.children.push(node.id);
-      else roots.push(node.id);
-    }
-    response.json({ sessions: nodes, roots });
-  });
-
-  registerPermissionRoutes(app, { getSession: (id) => sessions.get(id), saveSession });
-
-  // ─── Plan-Act Workflow API ──────────────────────────────────────────────────
-
-  registerPlanActRoutes(app, {
-    getSession: (id) => sessions.get(id),
-    reserveSession,
-    releaseSession,
-    saveSession,
-  });
-
-  // ── Session plan API (per-session plan kernel root) ─────────────────────────
-
-  registerPlanDocumentRoutes(app, {
-    getSession: (id) => sessions.get(id),
-    reserveSession,
-    releaseSession,
-    sessionPlanRoot: (sessionId) => sessionPlanRoot(dataRoot, sessionId),
-  });
 
   app.post("/api/sessions/:id/plan/generate", async (request, response) => {
     const session = sessions.get(request.params.id);
@@ -2209,48 +1577,6 @@ export function createAgentServer(options: AgentServerOptions): Express {
     await runPlanExecution(request, response, true);
   });
 
-  app.get("/api/sessions/:id", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const effectiveLlm = sessionLlmConfig(session);
-    const resolved = customProviderForModel(`${effectiveLlm.provider}/${effectiveLlm.model}`)?.model
-      ?? resolveModel(effectiveLlm.model, effectiveLlm.baseUrl);
-    let planStatus: string | null = null;
-    try {
-      const plan = await loadPlanDocument(sessionPlanRoot(dataRoot, session.id));
-      planStatus = plan?.status ?? null;
-    } catch {
-      planStatus = null;
-    }
-    response.json({
-      id: session.id,
-      workspaceId: workspaceIdForSession(session),
-      busy: isSessionBusy(session),
-      activeJobId: session.activeJobId ?? null,
-      modelId: session.modelId,
-      thinkingMode: session.thinkingMode ?? loadThinkingModeFromEnv(),
-      parentSessionId: session.parentSessionId ?? null,
-      forkedFromMessage: session.forkedFromMessage ?? null,
-      forkedFromMessageId: session.forkedFromMessageId ?? null,
-      permissionMode: session.permissionManager.getMode(),
-      planStatus,
-      model: effectiveLlm.model,
-      thinkingLevel: effectiveLlm.thinkingLevel ?? (effectiveLlm.reasoning ? "medium" : "off"),
-      contextWindow: resolved.contextWindow,
-      capabilities: effectiveLlm.capabilities,
-      skillNames: resolveSessionSkillNames(session),
-      todos: session.todos,
-      todoVersion: session.todoVersion,
-      runState: session.runState ?? null,
-      messages: session.messages
-        .filter((message) => message.role !== "system")
-        .map(safeMessage),
-    });
-  });
-
   registerSkillRoutes(app, {
     getSession: (id) => sessions.get(id),
     reserveSession,
@@ -2259,29 +1585,6 @@ export function createAgentServer(options: AgentServerOptions): Express {
     skillRegistry,
   });
 
-  app.delete("/api/sessions/:id", async (request, response) => {
-    const session = sessions.get(request.params.id);
-    if (!session) {
-      response.status(404).json({ error: "Session not found" });
-      return;
-    }
-    const lease = reserveSession(session, "session:delete");
-    if (!lease) {
-      response.status(409).json({ error: "Session is busy" });
-      return;
-    }
-    try {
-      sessions.delete(request.params.id);
-      await goalSessions.get(request.params.id)?.store.clear(request.params.id);
-      goalSessions.delete(request.params.id);
-      await sessionManagerForSession(session).remove(request.params.id);
-      await sessionPresentation.remove(request.params.id);
-      void documentStore.removeSession(request.params.id);
-      response.status(204).end();
-    } finally {
-      releaseSession(session, lease);
-    }
-  });
 
   registerFileRoutes(app, { hasSession: (id) => sessions.has(id), documentStore });
 
