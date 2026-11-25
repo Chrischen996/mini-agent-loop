@@ -47,6 +47,8 @@ import type {
 import { calculateSubagentCost } from "./cost.ts";
 import { claimAsyncBatchWorker, getAsyncBatchWorkerOptions, readAsyncBatch, resumeAsyncBatches, setAsyncBatchWorkerPid, submitAsyncBatch, validateAsyncDag, waitAsyncBatch } from "./async-batch.ts";
 import { createSubagentTaskId, type SubagentTaskRecord } from "./task-registry.ts";
+import { checkLaunchBudgets } from "./tool-launch.ts";
+import { buildSubagentParameters, buildSubagentBatchParameters } from "./tool-schemas.ts";
 import { createSubagentTaskTools } from "./task-tools.ts";
 import { resolveSubagentWorktree, subagentWorktreeHint } from "./worktree.ts";
 import type { PermissionTurnContext } from "../permissions.ts";
@@ -533,98 +535,11 @@ export function createSubagentTool(options: SubagentToolOptions): Tool<SubagentA
       idempotentHint: false,
       openWorldHint: false,
     },
-    parameters: {
-      type: "object",
-      properties: {
-        task: {
-          type: "string",
-          description: "The task description / prompt for the sub-agent.",
-        },
-        runInBackground: {
-          type: "boolean",
-          description: "Return immediately with a task ID. Defaults to true when background task management is available.",
-        },
-        resumeFrom: {
-          type: "string",
-          description: "Continue a completed sub-agent transcript. The task prompt is appended to its prior conversation and the same task ID is retained.",
-        },
-        ...(profileEnum
-          ? {
-              profile: {
-                type: "string",
-                description: `Name of a pre-defined sub-agent profile. ${profileDescription}`,
-                enum: profileEnum,
-              },
-            }
-          : {}),
-        systemPrompt: {
-          type: "string",
-          description:
-            "Custom system prompt for the sub-agent (ignored when a profile is used).",
-        },
-        tools: {
-          type: "array",
-          items: { type: "string" },
-          description:
-            "List of tool names the sub-agent may use. Omit to inherit all parent tools (except subagent itself).",
-        },
-        maxTurns: {
-          type: "integer",
-          minimum: 1,
-          description: `Maximum turns for the sub-agent loop. Default: ${DEFAULT_MAX_TURNS}.`,
-        },
-        model: {
-          type: "string",
-          description:
-            "Model identifier for this sub-agent (e.g. 'openai/gpt-4o-mini'). Overrides profile and parent model.",
-        },
-        sharedContext: {
-          type: "string",
-          description:
-            "Background context from the parent agent. Prepended to the sub-agent's system prompt.",
-        },
-        thinkingMode: {
-          type: "string",
-          enum: ["fixed", "adaptive"],
-          description:
-            "Thinking mode for the sub-agent loop. 'adaptive' enables explainable effort escalation after tool failures.",
-        },
-        maxThinkingEscalations: {
-          type: "integer",
-          minimum: 0,
-          description:
-            "Maximum adaptive effort increases after tool or validation failures. Default: 2.",
-        },
-        contextPolicy: {
-          type: "object",
-          description:
-            "Optional context compaction policy (same shape as parent loop's context option).",
-        },
-        skillNames: {
-          type: "array",
-          items: { type: "string" },
-          description:
-            "Skill names to activate for this sub-agent loop.",
-        },
-        inheritContextHistory: {
-          type: "boolean",
-          description: "Whether to include the parent agent's current message history.",
-        },
-        tokenBudget: {
-          type: "integer",
-          minimum: 1,
-          description: "Maximum token budget for this sub-agent loop.",
-        },
-        isolation: {
-          type: "string",
-          enum: ["none", "worktree"],
-          description:
-            "Filesystem isolation for this sub-agent. \"none\" (default) shares the parent workspace; \"worktree\" runs the sub-agent in a dedicated git worktree so its edits do not touch the parent workspace until the branch is merged. Ignored when resuming a task that had no worktree; creation failures fall back to the shared workspace.",
-        },
-      },
-      required: ["task"],
-      additionalProperties: false,
-    },
+    parameters: buildSubagentParameters({
+      profileEnum,
+      profileDescription,
+      defaultMaxTurns: DEFAULT_MAX_TURNS,
+    }),
 
     execute: async (args: SubagentArgs, execSignal?: AbortSignal, execution?: ToolExecutionOptions): Promise<import("../tools/types.ts").ToolResult> => {
       // ── Depth check ─────────────────────────────────────────────
@@ -775,33 +690,8 @@ ${args.sharedContext}
       }
 
       const globalBudgetState = resolveGlobalBudgetState();
-      if (globalBudgetState?.tokenLedger) {
-        globalBudgetState.used = await globalBudgetState.tokenLedger.readTokens();
-      }
-      if (globalBudgetState?.callLedger) {
-        globalBudgetState.callsUsed = await globalBudgetState.callLedger.readCalls();
-      }
-      if (globalBudgetState?.limit !== undefined && globalBudgetState.used >= globalBudgetState.limit) {
-        return {
-          content: `Sub-agent global token budget exhausted (${globalBudgetState.limit}).`,
-          isError: true,
-        };
-      }
-      // Call budget (Grok Build-style agent_budget): reject the launch when
-      // the shared invocation cap is exhausted, otherwise count this launch.
-      if (globalBudgetState?.callsLimit !== undefined && !args._callBudgetReserved) {
-        const callsUsed = globalBudgetState.callsUsed ?? 0;
-        const reservedCalls = globalBudgetState.callLedger
-          ? await globalBudgetState.callLedger.reserveCalls(1, globalBudgetState.callsLimit)
-          : callsUsed < globalBudgetState.callsLimit ? callsUsed + 1 : undefined;
-        if (reservedCalls === undefined) {
-          return {
-            content: `Sub-agent call budget exhausted (${callsUsed}/${globalBudgetState.callsLimit}). No further sub-agents will be launched.`,
-            isError: true,
-          };
-        }
-        globalBudgetState.callsUsed = reservedCalls;
-      }
+      const budgetRejection = await checkLaunchBudgets(globalBudgetState, args);
+      if (budgetRejection) return budgetRejection;
 
       const backgroundPermissionTurn = getBackgroundPermissionTurn?.();
       const childPermissionTurn = backgroundPermissionTurn ?? getPermissionTurn?.() ?? permissionTurn;
@@ -1562,96 +1452,7 @@ export function createSubagentBatchTool(options: SubagentToolOptions): Tool<Suba
       idempotentHint: false,
       openWorldHint: false,
     },
-    parameters: {
-      type: "object",
-      properties: {
-        mode: { type: "string", enum: ["sync", "async"], description: "Use async to submit a background DAG job and return immediately; sync waits for results." },
-        action: { type: "string", enum: ["submit", "status", "result", "wait"], description: "Async job action. Defaults to submit in async mode." },
-        jobId: { type: "string", description: "Existing async job identifier for status/result/wait." },
-        waitTimeoutMs: { type: "integer", minimum: 0, description: "Maximum time to wait for completion; defaults to 30000ms." },
-        tasks: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              label: { type: "string", description: "Unique label for this task." },
-              dependsOn: { type: "array", items: { type: "string" }, description: "Task labels that must succeed before this task starts." },
-              task: { type: "string", description: "Task prompt for the sub-agent." },
-              ...(profileEnum
-                ? { profile: { type: "string", enum: profileEnum, description: "Profile to use." } }
-                : {}),
-              model: { type: "string", description: "Optional model override." },
-              maxTurns: { type: "integer", minimum: 1, description: "Max turns override." },
-              sharedContext: { type: "string", description: "Shared context for this task." },
-              thinkingMode: {
-                type: "string",
-                enum: ["fixed", "adaptive"],
-                description: "Thinking mode override.",
-              },
-              maxThinkingEscalations: {
-                type: "integer",
-                minimum: 0,
-                description: "Max adaptive escalations override.",
-              },
-              contextPolicy: {
-                type: "object",
-                description: "Context compaction policy override.",
-              },
-              skillNames: {
-                type: "array",
-                items: { type: "string" },
-                description: "Skill names override.",
-              },
-              inheritContextHistory: {
-                type: "boolean",
-                description: "Whether to include the parent's current message history.",
-              },
-              isolation: {
-                type: "string",
-                enum: ["none", "worktree"],
-                description: "Filesystem isolation for this task. \"worktree\" runs it in a dedicated git worktree; defaults to the shared workspace.",
-              },
-              tokenBudget: {
-                type: "integer",
-                minimum: 1,
-                description: "Token budget limit for this task.",
-              },
-            },
-            required: ["label", "task"],
-          },
-          description: "Array of tasks to run in parallel.",
-          minItems: 1,
-          maxItems: 10,
-        },
-        maxConcurrency: {
-          type: "integer",
-          minimum: 0,
-          description: "Maximum concurrent sub-agents. 0 or omitted means all run concurrently.",
-        },
-        budgetAllocation: {
-          type: "object",
-          description:
-            "Optional strategy for allocating the remaining global token budget across batch tasks.",
-          properties: {
-            strategy: {
-              type: "string",
-              enum: ["equal", "priority", "dynamic"],
-              description:
-                "Allocation strategy. equal/dynamic split remaining budget evenly; priority reserves explicit task.tokenBudget first.",
-            },
-            perTaskLimit: {
-              type: "integer",
-              minimum: 1,
-              description: "Hard ceiling applied to each task after strategy allocation.",
-            },
-          },
-          required: ["strategy"],
-          additionalProperties: false,
-        },
-      },
-      required: [],
-      additionalProperties: false,
-    },
+    parameters: buildSubagentBatchParameters({ profileEnum }),
 
     execute: async (args: SubagentBatchArgs, execSignal?: AbortSignal, execution?: ToolExecutionOptions): Promise<import("../tools/types.ts").ToolResult> => {
       const ownerSessionId = execution?.sessionId ?? normalizedOptions.parentRuntime?.executionContext?.sessionId;
