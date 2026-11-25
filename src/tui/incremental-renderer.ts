@@ -165,18 +165,58 @@ export class IncrementalTerminalRenderer {
         bootProbe(`burst lines=${emittedLines} anchor=${anchor} -> top=${this.frameTopRow} rows=${rows} no-erase\n`);
       } else {
         // Large burst (a whole message sealed at once): it would overwrite
-        // the pinned chrome or run past the bottom row, so keep the legacy
-        // blank + forced full repaint. One visible jump at a message
-        // boundary is acceptable; per-line streaming commits never get here.
-        let erase = "";
-        for (let physical = anchor; physical <= Math.min(rows, anchor + previousVisible - 1); physical++) {
-          erase += `\x1b[${physical};1H${ANSI_ERASE_LINE}`;
+        // the pinned chrome or run past the bottom row, so it cannot land
+        // in place. Repaint the affected region in ONE terminal write — a
+        // deficit scroll when burst + chrome exceed the space below the
+        // anchor, the erase of the stale frame region, the burst itself,
+        // and a re-assertion of the pinned chrome rows right below the
+        // burst. The old code erased the chrome and deferred its
+        // restoration to Ink's next frame, but Ink skips writes when a
+        // frame's output is unchanged, so the composer stayed blank for as
+        // long as the stream stayed quiet (the "input box hidden after
+        // send" report). One visible jump at a message boundary is
+        // acceptable; a blank composer is not.
+        const pinnedVisible = Math.min(this.pinnedRows, previousVisible);
+        // Scroll just enough for burst + chrome to end at the screen
+        // bottom; an anchor near the screen top caps the scroll.
+        const wantedScroll = Math.max(0, anchor + emittedLines + pinnedVisible - 1 - rows);
+        const scroll = Math.min(wantedScroll, Math.max(0, anchor - 1));
+        const base = anchor - scroll;
+        let output = "";
+        if (scroll > 0) {
+          output += `\x1b[${rows};1H${"\n".repeat(scroll)}`;
+          if (this.lastBurstBottomRow !== undefined) {
+            // The scroll shifts any earlier burst up as well.
+            const shifted = this.lastBurstBottomRow - scroll;
+            this.lastBurstBottomRow = shifted > 0 ? shifted : undefined;
+          }
         }
-        if (erase) this.target.write(erase);
-        this.target.write(`${DISABLE_AUTOWRAP}\x1b[${anchor};1H${burst}${ENABLE_AUTOWRAP}`);
-        this.frameTopRow = Math.min(rows, anchor + Math.max(0, emittedLines));
-        this.lastBurstBottomRow = emittedLines > 0 ? anchor + emittedLines - 1 : undefined;
-        bootProbe(`burst lines=${emittedLines} anchor=${anchor} -> top=${this.frameTopRow} rows=${rows} erased\n`);
+        for (let physical = base; physical <= Math.min(rows, base + previousVisible - 1); physical++) {
+          output += `\x1b[${physical};1H${ANSI_ERASE_LINE}`;
+        }
+        output += `${DISABLE_AUTOWRAP}\x1b[${base};1H${burst}${ENABLE_AUTOWRAP}`;
+        if (pinnedVisible > 0 && emittedLines > 0) {
+          // Re-assert the chrome rows right below the burst so the composer
+          // is never blank while the stream is quiet. The chrome texts are
+          // the tail of the saved frame baseline. When the burst is too
+          // tall for the whole chrome to fit below it, the chrome is
+          // bottom-anchored — its TAIL (prompt input, status bar) stays
+          // visible and only the block's head rows wait for the forced
+          // repaint; a blank composer bottom is far worse than a briefly
+          // missing card border.
+          const chromeTexts = previous.slice(Math.max(0, previous.length - pinnedVisible));
+          const inlineRoom = Math.max(0, Math.min(pinnedVisible, rows - (base + emittedLines) + 1));
+          const skipHead = pinnedVisible - inlineRoom;
+          for (let index = skipHead; index < pinnedVisible; index++) {
+            const physical = base + emittedLines + (index - skipHead);
+            output += `\x1b[${physical};1H${ANSI_ERASE_LINE}${safeRowText(chromeTexts[index] ?? "", columns)}`;
+          }
+        }
+        this.target.write(output);
+        this.frameTopRow = Math.min(rows, base + Math.max(0, emittedLines));
+        if (emittedLines > 0) this.lastBurstBottomRow = base + emittedLines - 1;
+        this.lastPaintAnchor = this.frameTopRow;
+        bootProbe(`burst lines=${emittedLines} anchor=${anchor} -> top=${this.frameTopRow} rows=${rows} scroll=${scroll} erased+chrome\n`);
         // Force the next Ink frame to repaint against an empty baseline. Ink
         // may consider its output unchanged, but its renderer still receives
         // the frame after the state change that emitted this burst.
@@ -335,26 +375,33 @@ export class IncrementalTerminalRenderer {
     }
 
     // A safe burst overwrote the frame's top content rows in place; the
-    // pinned chrome below it never moved. Repaint the shifted content rows,
-    // but DIFF the pinned rows so an unchanged input box emits zero bytes
-    // instead of being erased and re-emitted (the input-box flicker).
-    const pinnedStart = !forceRedraw && this.burstRepaintPending
-      ? nextLines.length - Math.min(this.pinnedRows, nextLines.length)
-      : -1;
+    // frame then shifts DOWN by the burst on screen. Rows are diffed
+    // against the baseline at the same PHYSICAL screen row (index shifted
+    // by the anchor delta), not the same index: an unchanged input box
+    // still emits zero bytes, while rows that moved onto new screen rows
+    // — e.g. the chrome after the welcome panel collapses on submit — are
+    // repainted instead of being silently skipped and left blank.
+    const diffByPosition = !forceRedraw && this.burstRepaintPending;
+    const paintFromOld = Math.max(0, previous.length - rows);
+    const baselineOffset = diffByPosition
+      ? (this.frameTopRow - (this.lastPaintAnchor ?? this.frameTopRow)) - (paintFrom - paintFromOld)
+      : 0;
 
     let output = "";
     for (let index = 0; index < nextLines.length; index++) {
-      const pinnedRow = index >= pinnedStart;
-      if (!forceRedraw && pinnedRow && nextLines[index] === previous[index]) continue;
+      const baselineIndex = index + baselineOffset;
+      if (
+        diffByPosition
+          ? baselineIndex >= 0 && baselineIndex < previous.length &&
+            nextLines[index] === previous[baselineIndex]
+          : !forceRedraw && nextLines[index] === previous[index]
+      ) continue;
       if (index < paintFrom) continue;
       const physical = this.frameTopRow + index - paintFrom;
       if (physical > rows) continue;
       const text = safeRowText(nextLines[index] ?? "", columns);
       output += `\x1b[${physical};1H${ANSI_ERASE_LINE}${text}`;
       onPaint();
-      // Burst-shift rewrites of content rows and forced repaints are
-      // legitimate; only organic pinned-row repaints feed the flicker detector.
-      if (!forceRedraw && pinnedStart >= 0 && pinnedRow) recordRowRepaint(physical);
     }
     // Clear physical rows the previous frame occupied but the next one does
     // not (shorter frame while pinned to the same anchor). Rows at or above

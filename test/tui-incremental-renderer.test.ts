@@ -490,8 +490,11 @@ describe("incremental renderer pinned chrome (the input box must not flicker)", 
     renderer.write("L3\nC1\nC2"); // the committed row drops out of the frame
     const frameWrite = output.writes.join("");
     assert.ok(frameWrite.includes("L3"), "the new live row is painted");
-    assert.ok(frameWrite.includes("C1") && frameWrite.includes("C2"),
-      "chrome rows are re-asserted in the same write (atomic, no flicker)");
+    // After a safe burst the frame sits one row lower on screen; chrome that
+    // did NOT move on screen emits zero bytes (diffed by physical position,
+    // not by frame index). No bytes for stable chrome = no flicker at all.
+    assert.ok(!frameWrite.includes("C1") && !frameWrite.includes("C2"),
+      "chrome that stayed on its physical row is diffed to zero bytes");
   });
 
   it("emits zero bytes for a settled frame: stable chrome is diffed, not re-emitted", () => {
@@ -557,5 +560,61 @@ describe("incremental renderer pinned chrome (the input box must not flicker)", 
 
     const burstWrite = output.writes.join("");
     assert.doesNotMatch(burstWrite, /\x1b\[2K/, "no erasure even without a pinned chrome report");
+  });
+
+  it("repaints chrome that moved on screen when the frame shrinks after a safe burst (submit collapse)", () => {
+    const output = sizedSink(12);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "document" });
+    renderer.setPinnedRows(4);
+    const chrome = ["ST", "IN", "IN", "IN"];
+    renderer.write(["W1","W2","W3","W4","W5","W6","W7","W8", ...chrome].join("\n"));
+    output.writes.length = 0;
+
+    // The user message seals as a safe burst...
+    renderer.emitStaticBurst("U1\n");
+    assert.doesNotMatch(output.writes.join(""), /\x1b\[2K/, "the burst itself erases nothing");
+
+    // ...and the welcome panel collapses in the same commit: the frame is
+    // shorter, so every chrome row sits at a NEW physical screen row. The
+    // diff must repaint them instead of skipping them (the composer would
+    // otherwise stay blank until a much later frame).
+    output.writes.length = 0;
+    renderer.write(["M1", ...chrome].join("\n"));
+    const frameWrite = output.writes.join("");
+    assert.ok(frameWrite.includes("ST") && frameWrite.includes("IN"),
+      "chrome rows that moved onto new screen rows are repainted");
+  });
+
+  it("re-asserts the pinned chrome in the same write for oversized seal bursts", () => {
+    const output = sizedSink(20);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "document" });
+    renderer.setPinnedRows(3);
+    renderer.write(["c1","c2","c3","c4","c5","c6","c7","c8","c9","c10", "ST", "IN1", "IN2"].join("\n"));
+    output.writes.length = 0;
+
+    // 12 burst rows > 10 content rows -> oversized path. The burst plus the
+    // chrome must land in ONE write: no gap where the composer is blank.
+    renderer.emitStaticBurst(`${Array.from({ length: 12 }, (_, i) => `U${i + 1}`).join("\n")}\n`);
+    const burstWrite = output.writes.join("");
+    assert.ok(burstWrite.includes("U12"), "the burst is written");
+    assert.ok(burstWrite.includes("ST") && burstWrite.includes("IN1") && burstWrite.includes("IN2"),
+      "the composer chrome is re-asserted atomically with the burst");
+    assert.doesNotMatch(burstWrite, /\x1b\[2J/, "no full-screen clear");
+  });
+
+  it("bottom-anchors the chrome tail when an oversized burst leaves no room below", () => {
+    const output = sizedSink(20);
+    const renderer = new IncrementalTerminalRenderer(output.target as never, { mode: "document" });
+    renderer.setPinnedRows(10);
+    renderer.write(["c1","c2","c3","c4","c5","c6","c7","c8","c9","c10", "ST", "IN1", "IN2", "IN3", "IN4", "IN5", "IN6", "IN7", "IN8", "IN9"].join("\n"));
+    output.writes.length = 0;
+
+    // 12 burst rows + 10 chrome rows cannot both fit below the anchor: the
+    // TAIL of the chrome (status bar, prompt input) must stay visible.
+    renderer.emitStaticBurst(`${Array.from({ length: 12 }, (_, i) => `U${i + 1}`).join("\n")}\n`);
+    const burstWrite = output.writes.join("");
+    assert.ok(burstWrite.includes("U12"), "the burst is written");
+    assert.ok(burstWrite.includes("IN9") && burstWrite.includes("IN8"),
+      "the composer tail (input rows) is re-asserted, its head may wait for the repaint");
   });
 });
