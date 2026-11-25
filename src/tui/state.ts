@@ -13,11 +13,15 @@ import {
   type TodoItem,
   type TodoViewMode
 } from "../todo.ts";
-import { executionPlanToTodoItems } from "./todo-format.ts";
 import { reduceLoopEvent } from "./state/loop-events.ts";
-import { toolArgumentSummary } from "./claude-style.ts";
-import { toolVisualName } from "./tool-lines.ts";
-import { STATUS_DONE, STATUS_ERROR } from "./render-lines.ts";
+import { reduceSubagentEvent, toggleSubagentExpand } from "./state/subagent-events.ts";
+import { reducePlanActEvent } from "./state/plan-events.ts";
+import {
+  reduceAutoContinue,
+  reduceCancelGeneration,
+  reduceContinueTurn,
+  reduceUserMessage
+} from "./state/turn-actions.ts";
 import { compactText } from "./text-utils.ts";
 
 export type { PermissionMode } from "../permissions.ts";
@@ -279,24 +283,6 @@ export function toolPaths(args: Record<string, unknown>): string[] {
     }
   }
   return paths;
-}
-
-function updateExecutionTodo(
-  state: TuiState,
-  stepId: string,
-  status: TodoItem["status"],
-  error?: string,
-): TuiState {
-  const items = state.todoItems ?? (state.currentPlan ? executionPlanToTodoItems(state.currentPlan) : []);
-  if (items.length === 0) return state;
-  const next = items.map((item) => item.id === stepId ? { ...item, status, ...(error ? { error } : {}) } : item);
-  return {
-    ...state,
-    todos: next,
-    todoItems: next,
-    todoRevision: nextTodoRevision(),
-    spinnerMessage: todoSpinnerMessage(next),
-  };
 }
 
 export function resultPreview(content: unknown): string {
@@ -611,8 +597,6 @@ export function todoSpinnerMessage(todos: readonly TodoItem[]): string | undefin
   return activeTodo ? `▶ ${activeTodo.activeForm}` : undefined;
 }
 
-const MAX_SUBAGENT_INNER_EVENTS = 100;
-
 export function messageIndices(messages: readonly ChatMessage[]): {
   subagent: Record<string, number>;
   tools: Record<string, number>;
@@ -697,45 +681,10 @@ export function updateToolMessage(
   };
 }
 
-function isHighFrequencySubagentEvent(type: string): boolean {
-  return type === "assistant_delta" || type === "assistant_deltas";
-}
-
 export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
   switch (action.type) {
-    case "USER_MESSAGE": {
-      const appendedMsg: ChatMessage = {
-        kind: "user",
-        text: action.text,
-        ...(action.displayText !== undefined ? { displayText: action.displayText } : {}),
-        ...(action.images?.length ? { images: action.images } : {}),
-      };
-      const baseNext: TuiState = {
-        ...state,
-        messages: [...state.messages, appendedMsg],
-        goal: state.goal || action.text,
-        taskTitle: action.text,
-        taskStatus: "running",
-        taskStartedAt: Date.now(),
-        taskDurationMs: undefined,
-        taskTokens: 0,
-        busy: true,
-        status: "Thinking…",
-        streamingText: "",
-        streamingReasoning: "",
-        streamingTextParts: [],
-        streamingReasoningParts: [],
-        streamRetryCommittedText: undefined,
-        streamSealPending: undefined,
-        turnStartedAt: Date.now(),
-        lastStreamAt: undefined,
-        spinnerMessage: undefined,
-        autoContinueCount: 0,
-        // New user turns always re-pin the feed to the latest content.
-        scrollOffset: 0,
-      };
-      return pruneTranscriptAndDictionaries(baseNext);
-    }
+    case "USER_MESSAGE":
+      return reduceUserMessage(state, action);
 
     case "RESTORE_SESSION": {
       const messages = chatMessagesFromAgentHistory(action.history);
@@ -836,61 +785,13 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       };
 
     case "CANCEL_GENERATION":
-      return {
-        ...state,
-        busy: false,
-        streamingText: "",
-        streamingReasoning: "",
-        streamingTextParts: [],
-        streamingReasoningParts: [],
-        streamRetryCommittedText: undefined,
-        streamSealPending: undefined,
-        turnStartedAt: undefined,
-        lastStreamAt: undefined,
-        spinnerMessage: undefined,
-        status: "Generation cancelled (ESC)",
-        taskStatus: "cancelled",
-        taskDurationMs: taskDuration(state.taskStartedAt),
-      };
+      return reduceCancelGeneration(state);
 
     case "CONTINUE_TURN":
-      return {
-        ...state,
-        busy: true,
-        taskStatus: "running",
-        taskStartedAt: Date.now(),
-        taskDurationMs: undefined,
-        turnStartedAt: Date.now(),
-        streamingText: "",
-        streamingReasoning: "",
-        streamingTextParts: [],
-        streamingReasoningParts: [],
-        streamRetryCommittedText: undefined,
-        streamSealPending: undefined,
-        lastStreamAt: undefined,
-        pendingPermission: undefined,
-        spinnerMessage: undefined,
-        autoContinueCount: 0,
-        status: "Continuing…",
-        scrollOffset: 0,
-      };
+      return reduceContinueTurn(state);
 
-    case "AUTO_CONTINUE": {
-      const baseNext: TuiState = {
-        ...state,
-        busy: true,
-        streamingText: "",
-        streamingReasoning: "",
-        streamingTextParts: [],
-        streamingReasoningParts: [],
-        streamRetryCommittedText: undefined,
-        streamSealPending: undefined,
-        lastStreamAt: undefined,
-        autoContinueCount: action.count,
-        status: `Continuing… (${action.count}/${action.max})`,
-      };
-      return pruneTranscriptAndDictionaries(baseNext);
-    }
+    case "AUTO_CONTINUE":
+      return reduceAutoContinue(state, action);
 
     case "CLEAR_PENDING_PERMISSION":
       return {
@@ -1003,94 +904,8 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
     case "LOOP_EVENT":
       return reduceLoopEvent(state, action.event, tuiReducer);
 
-    case "PLAN_ACT_EVENT": {
-      const event = action.event;
-      switch (event.type) {
-        case "planning_started":
-          return { ...state, phase: "planning", status: "Planning…" };
-        case "plan_generated":
-          return {
-            ...state,
-            phase: "review",
-            currentPlan: event.plan,
-            todos: executionPlanToTodoItems(event.plan),
-            todoItems: executionPlanToTodoItems(event.plan),
-            todoRevision: nextTodoRevision(),
-            spinnerMessage: todoSpinnerMessage(executionPlanToTodoItems(event.plan)),
-            status: "Plan ready for review (A approve / R reject)",
-          };
-        case "plan_approved":
-          return {
-            ...state,
-            phase: "acting",
-            currentPlan: state.currentPlan?.status === "approved"
-              ? state.currentPlan
-              : state.currentPlan
-                ? { ...state.currentPlan, status: "approved" as const }
-                : undefined,
-            status: "Executing…",
-          };
-        case "plan_rejected":
-          return {
-            ...state,
-            phase: "cancelled",
-            currentPlan: undefined,
-            status: "Plan rejected",
-          };
-        case "plan_modified":
-          return {
-            ...state,
-            phase: "review",
-            currentPlan: event.plan,
-            status: "Plan revised, waiting for review (A approve / R reject)",
-          };
-        case "acting_started":
-          return { ...state, phase: "acting", status: "Executing plan…" };
-        case "step_started":
-          return {
-            ...updateExecutionTodo(state, event.stepId, "in_progress"),
-            status: `Running: ${event.step.description.slice(0, 30)}…`,
-          };
-        case "step_completed":
-          return {
-            ...updateExecutionTodo(state, event.stepId, "completed"),
-            status: "Step completed",
-          };
-        case "step_failed":
-          return {
-            ...updateExecutionTodo(state, event.stepId, "failed", event.error),
-            status: `Step failed: ${event.error.slice(0, 50)}`,
-          };
-        case "all_steps_completed":
-          return {
-            ...state,
-            phase: "completed",
-            currentPlan: state.currentPlan
-              ? { ...state.currentPlan, status: "completed" as const }
-              : undefined,
-            todos: (state.todoItems ?? state.todos).map((item) => ({ ...item, status: "completed" as const })),
-            todoItems: (state.todoItems ?? state.todos).map((item) => ({ ...item, status: "completed" as const })),
-            todoRevision: nextTodoRevision(),
-            spinnerMessage: undefined,
-            status: "Plan execution completed",
-          };
-        case "execution_failed":
-          return {
-            ...state,
-            phase: "failed",
-            currentPlan: state.currentPlan
-              ? { ...state.currentPlan, status: "failed" as const }
-              : undefined,
-            todos: (state.todoItems ?? state.todos).map((item) => item.status === "completed" ? item : { ...item, status: "failed" as const }),
-            todoItems: (state.todoItems ?? state.todos).map((item) => item.status === "completed" ? item : { ...item, status: "failed" as const }),
-            todoRevision: nextTodoRevision(),
-            spinnerMessage: undefined,
-            status: "Execution failed",
-          };
-        default:
-          return state;
-      }
-    }
+    case "PLAN_ACT_EVENT":
+      return reducePlanActEvent(state, action.event);
 
     case "APPROVE_PLAN": {
       const plan = state.currentPlan;
@@ -1114,102 +929,11 @@ export function tuiReducer(state: TuiState, action: TuiAction): TuiState {
       };
     }
 
-    case "SUBAGENT_EVENT": {
-      const evt = action.event;
-      switch (evt.type) {
-        case "subagent_start": {
-          const card: ChatMessage = {
-            kind: "subagent_call",
-            id: evt.id,
-            task: evt.task,
-            profile: evt.profile,
-            depth: evt.depth,
-            status: "running",
-            innerEvents: [],
-            toolCallCount: 0,
-            startedAt: Date.now(),
-            expanded: false,
-          };
-          const newMessages: ChatMessage[] = [...state.messages, card];
-          const revision = state.subagentRevision + 1;
-          const baseNext: TuiState = {
-            ...state,
-            messages: newMessages,
-            subagentById: { ...state.subagentById, [evt.id]: card },
-            subagentIndexById: { ...state.subagentIndexById, [evt.id]: newMessages.length - 1 },
-            subagentRevision: revision,
-            subagentChange: { id: evt.id, index: newMessages.length - 1, revision },
-            status: `Delegating (depth ${evt.depth})…`,
-          };
-          return pruneTranscriptAndDictionaries(baseNext);
-        }
-        case "subagent_event": {
-          const inner = evt.inner;
-          // Child answer deltas are useful to the parent model, but they are
-          // too frequent and too verbose for the transcript. The child result
-          // and concrete tool lifecycle events remain visible below.
-          if (isHighFrequencySubagentEvent(inner.type)) return state;
-          const label =
-            inner.type === "tool_start" ? `▶ ${inner.call.name}`
-            : inner.type === "tool_end" ? `${inner.result.isError ? STATUS_ERROR : STATUS_DONE} ${inner.call.name}`
-            : inner.type === "assistant" ? "💬 assistant"
-            : inner.type === "error" ? `${STATUS_ERROR} ${inner.message}`
-            : inner.type;
-          const detail =
-            inner.type === "tool_start" ? compactText(JSON.stringify(inner.call.arguments), 80, "…")
-            : inner.type === "tool_end" ? compactText(typeof inner.result.content === "string" ? inner.result.content : "[complex]", 80, "…")
-            : undefined;
-          const isToolEnd = inner.type === "tool_end";
-          const lastToolInfo = inner.type === "tool_start"
-            ? (() => {
-                const summary = toolArgumentSummary(inner.call.name, inner.call.arguments, JSON.stringify(inner.call.arguments)).replace(/^\$\s*/, "");
-                return `${toolVisualName(inner.call.name)}${summary ? `(${summary})` : ""}`;
-              })()
-            : undefined;
-          return updateSubagentMessage(state, evt.id, (message) => ({
-            ...message,
-            innerEvents: [...message.innerEvents, { type: inner.type, label, detail }].slice(-MAX_SUBAGENT_INNER_EVENTS),
-            toolCallCount: message.toolCallCount + (isToolEnd ? 1 : 0),
-            ...(lastToolInfo ? { lastToolInfo } : {}),
-          }));
-        }
-        case "budget_warning": {
-          const next = updateSubagentMessage(state, evt.id, (message) => ({
-            ...message,
-            innerEvents: [...message.innerEvents, {
-              type: "budget_warning",
-              label: `⚠ budget ${evt.percentage}% (${evt.used}/${evt.limit})`,
-            }].slice(-MAX_SUBAGENT_INNER_EVENTS),
-          }));
-          return next === state ? state : { ...next, status: `Budget warning ${evt.percentage}%` };
-        }
-        case "subagent_end": {
-          const now = Date.now();
-          const next = updateSubagentMessage(state, evt.id, (message) => ({
-            ...message,
-            status: evt.success ? "done" as const : (evt.partial ? "partial" as const : "error" as const),
-            result: evt.result,
-            turns: evt.turns,
-            totalTokens: evt.totalTokens || undefined,
-            tokenBreakdown: evt.tokenBreakdown,
-            estimatedCost: evt.estimatedCost,
-            durationMs: now - message.startedAt,
-          }));
-          return next === state ? state : {
-            ...next,
-            status: evt.success ? "Subagent done" : (evt.partial ? "Subagent partial result" : "Subagent failed"),
-          };
-        }
-        default:
-          return state;
-      }
-    }
+    case "SUBAGENT_EVENT":
+      return reduceSubagentEvent(state, action.event);
 
     case "TOGGLE_SUBAGENT_EXPAND":
-      return updateSubagentMessage(state, action.id, (message) => ({
-        ...message,
-        expanded: !message.expanded,
-      }));
+      return toggleSubagentExpand(state, action.id);
 
     case "ADD_PENDING_IMAGE": {
       const exists = state.pendingImages.some((img) => img.path === action.image.path);

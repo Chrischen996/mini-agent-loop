@@ -48,14 +48,11 @@ import {
 } from "./thinking-policy.ts";
 import type { MessagePreprocessor } from "./preprocessors/index.ts";
 import {
-  buildCoordinatorPromptFragment,
   decideAutoSubagent,
   DEFAULT_MAX_DIRECT_EXPLORATION,
-  DELEGATION_TOOL_NAMES,
-  EXPLORATION_TOOL_NAMES,
-  type AutoSubagentDecision,
   type AutoSubagentOptions,
 } from "./subagent/auto.ts";
+import { CoordinatorController } from "./loop/coordinator.ts";
 import { resolveToolProvider, type Tool, type ToolProvider, type ToolResult } from "./tools/types.ts";
 import { nextTodoRevision, type TodoItem } from "./todo.ts";
 import type { SubagentEvent } from "./subagent/types.ts";
@@ -782,75 +779,14 @@ async function runAgentTurnInternal(
     checkpointPromise = new GitWorkflow(validationWorkspace).createCheckpoint(`before-turn-${Date.now()}`);
     await checkpointPromise;
   };
-  let coordinatorActive = false;
-  let coordinatorProfile = "researcher";
-  let coordinatorPreflightExecuted = false;
-  let coordinatorReasons: string[] = [];
-  let maxDirectExploration = DEFAULT_MAX_DIRECT_EXPLORATION;
-  let directExplorationUsed = 0;
-
-  const injectCoordinatorPrompt = (decision: AutoSubagentDecision, preflightExecuted: boolean): void => {
-    if (!decision.coordinatorMode) return;
-    const fragment = buildCoordinatorPromptFragment({
-      profile: decision.profile,
-      preflightExecuted,
-      maxDirectExploration,
-    });
-    const systemMsg = messages.find((message) => message.role === "system");
-    if (systemMsg && typeof systemMsg.content === "string" && !systemMsg.content.includes("### Coordinator Mode")) {
-      systemMsg.content = `${systemMsg.content}\n\n${fragment}`;
-    }
-    coordinatorActive = true;
-    coordinatorProfile = decision.profile;
-    coordinatorPreflightExecuted = preflightExecuted;
-    coordinatorReasons = decision.reasons;
-    onEvent?.({
-      type: "coordinator_mode",
-      active: true,
-      profile: decision.profile,
-      preflightExecuted,
-      maxDirectExploration,
-      directExplorationUsed,
-      reasons: decision.reasons,
-    });
-  };
+  const coordinator = new CoordinatorController();
 
   const executeTool = async (tool: Tool, args: Record<string, unknown>): Promise<ToolResult> => {
     await pauseGate?.wait(activeSignal);
-    if (coordinatorActive && EXPLORATION_TOOL_NAMES.has(tool.name)) {
-      if (directExplorationUsed >= maxDirectExploration) {
-        return {
-          content: [
-            `Coordinator mode blocked direct exploration tool \`${tool.name}\`.`,
-            `Budget exhausted (${directExplorationUsed}/${maxDirectExploration}).`,
-            "Use `subagent` or `subagent_batch` for deeper exploration/implementation, then synthesize the results.",
-            `Suggested profile: ${coordinatorProfile}.`,
-          ].join(" "),
-          isError: true,
-        };
-      }
-      directExplorationUsed += 1;
-      onEvent?.({
-        type: "coordinator_mode",
-        active: true,
-        profile: coordinatorProfile,
-        preflightExecuted: coordinatorPreflightExecuted,
-        maxDirectExploration,
-        directExplorationUsed,
-        reasons: coordinatorReasons,
-      });
-    } else if (coordinatorActive && DELEGATION_TOOL_NAMES.has(tool.name)) {
-      // Successful delegation is the intended path; keep mode active for later turns.
-      onEvent?.({
-        type: "coordinator_mode",
-        active: true,
-        profile: coordinatorProfile,
-        preflightExecuted: coordinatorPreflightExecuted,
-        maxDirectExploration,
-        directExplorationUsed,
-        reasons: [...coordinatorReasons, "delegated via " + tool.name],
-      });
-    }
+    // Coordinator-mode guard: refuse exploration tools once the direct
+    // exploration budget is spent, record delegation bookkeeping.
+    const guard = coordinator.guardToolCall(tool, onEvent);
+    if (guard.blocked) return guard.blocked;
 
     return executeToolWithBroker({
       broker: executionBroker,
@@ -1046,8 +982,9 @@ async function runAgentTurnInternal(
   let emptyAssistantResponses = 0;
   let autoSubagentAttempted = false;
   let thinkingEscalations = 0;
-  maxDirectExploration =
-    options.autoSubagent?.maxDirectExploration ?? DEFAULT_MAX_DIRECT_EXPLORATION;
+  coordinator.setMaxDirectExploration(
+    options.autoSubagent?.maxDirectExploration ?? DEFAULT_MAX_DIRECT_EXPLORATION,
+  );
   let reasoningOnlyRetries = 0;
   const retryCoordinator = new LlmRetryCoordinator();
   let timeoutRetries = 0;
@@ -1329,7 +1266,7 @@ async function runAgentTurnInternal(
         // (for example when subagent tool is missing). Budget enforcement only
         // matters when the parent still has exploration tools.
         if (decision.coordinatorMode) {
-          injectCoordinatorPrompt(decision, false);
+          coordinator.injectPrompt(decision, false, messages, onEvent);
         }
 
         if (canExecute && subagentTool) {
@@ -1395,32 +1332,10 @@ async function runAgentTurnInternal(
       content: truncateToolResult(message.content),
     })));
           onEvent?.({ type: "tool_end", call, result });
-          coordinatorPreflightExecuted = true;
+          coordinator.markPreflightExecuted();
           // Refresh coordinator prompt now that preflight has actually run.
           if (decision.coordinatorMode) {
-            const systemMsg = messages.find((message) => message.role === "system");
-            if (systemMsg && typeof systemMsg.content === "string") {
-              const fragment = buildCoordinatorPromptFragment({
-                profile: decision.profile,
-                preflightExecuted: true,
-                maxDirectExploration,
-              });
-              systemMsg.content = systemMsg.content.includes("### Coordinator Mode")
-                ? systemMsg.content.replace(
-                    /### Coordinator Mode[\s\S]*$/,
-                    fragment,
-                  )
-                : `${systemMsg.content}\n\n${fragment}`;
-            }
-            onEvent?.({
-              type: "coordinator_mode",
-              active: true,
-              profile: decision.profile,
-              preflightExecuted: true,
-              maxDirectExploration,
-              directExplorationUsed,
-              reasons: decision.reasons,
-            });
+            coordinator.refreshPrompt(decision, messages, onEvent);
           }
           onEvent?.({
             type: "auto_subagent",
