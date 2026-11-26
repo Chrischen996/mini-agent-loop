@@ -27,6 +27,7 @@ import { useBackgroundWakeups } from "./hooks/useBackgroundWakeups.ts";
 import { useStreamBursts } from "./hooks/useStreamBursts.ts";
 import { useSessionLayout } from "./hooks/useSessionLayout.ts";
 import { SubagentEventRouter } from "./subagent-event-router.ts";
+import { buildSubagentToolsDeps } from "./subagent-tools-deps.ts";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
@@ -243,11 +244,11 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
   const subagentRuntimeRef = useRef<AgentRuntimeRef>({});
   const subagentEventRouter = useRef<SubagentEventRouter | null>(null);
   const getSubagentTools = useCallback((parentLlm = llm): Tool[] => {
-    return subagentFactory.getTools({
+    return subagentFactory.getTools(buildSubagentToolsDeps({
       parentLlm,
       parentTools: agentToolsRef.current,
       taskRegistry: subagentTaskRegistry,
-      visionPreprocessors: vision ? [createVisionPreprocessor(vision)] : [],
+      vision,
       onSubagentEvent: (event: SubagentEvent) => {
         // The router is built later in the render (after its refs are ready);
         // it is guaranteed to exist by the time sub-agent tools fire events.
@@ -261,11 +262,11 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
       parentRuntime: subagentRuntimeRef.current,
       globalTokenBudget,
       globalConcurrencyLimit,
-      ...(sessionConcurrencyLimit ? { sessionConcurrencyLimit } : {}),
+      sessionConcurrencyLimit,
       roleLlmConfigs: globalRoleLlmConfigs,
       sessionRoleLlmConfigs: localRoleLlmConfigsRef.current,
       worktreeSourceCwd: projectCwd,
-    });
+    }));
   }, [llm, vision, subagentTaskRegistry, projectCwd, sessionConcurrencyLimit]);
 
   // Executors for `/tasks run --parallel` (subagent + background tasks).
