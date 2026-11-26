@@ -28,6 +28,7 @@ import { useStreamBursts } from "./hooks/useStreamBursts.ts";
 import { useSessionLayout } from "./hooks/useSessionLayout.ts";
 import { SubagentEventRouter } from "./subagent-event-router.ts";
 import { buildSubagentToolsDeps } from "./subagent-tools-deps.ts";
+import { buildTodosRunContext, resolveTodosRunArgs } from "./todos-run-context.ts";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
@@ -346,33 +347,25 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
       jumpToBottomRef.current();
       dispatch({ type: "USER_MESSAGE", text: input });
       await runTodos(
-        {
-          store: {
-            getState: () => stateRef.current,
-            dispatch: (action: import("./state.ts").TuiAction) =>
-              dispatchRef.current(action),
-            subscribe: () => () => undefined,
-          },
-          sessionRef: { current: conversationIdRef.current },
+        buildTodosRunContext({
+          getState: () => stateRef.current,
+          dispatch: (action) => dispatchRef.current(action),
+          sessionId: conversationIdRef.current,
           permissionManager: getPermissionManagerRef.current(),
           cwd,
           allTools: agentToolsRef.current,
-          recordSubmission: (text) => void text,
-          clearInput: () => setInputRef.current(""),
           abortSignal: abortControllerRef.current.signal,
-          persistTodoState: (todos) => void todos,
           todosRunExecutors: getTodosRunExecutors(),
+          clearInput: () => setInputRef.current(""),
           onConfirmTodoRun: (pending) => {
             confirmedTodoRunRef.current = pending;
             setPendingTodoRunPlan(pending);
           },
           todoRunConfirmed: confirmed,
           todoRunSnapshot: approvedPlan?.todos,
-        },
-        {
-          cmd: "todos-run",
-          args: approvedPlan?.parsed ?? parsed.args,
-        },
+          rawParsedArgs: parsed.args,
+        }),
+        resolveTodosRunArgs(approvedPlan?.parsed, parsed.args),
       );
       confirmedTodoRunRef.current = undefined;
       dispatchRef.current({ type: "LOOP_EVENT", event: { type: "done", messages: historyRef.current } });
