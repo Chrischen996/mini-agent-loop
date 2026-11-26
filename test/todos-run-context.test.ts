@@ -76,6 +76,16 @@ describe("buildTodosRunContext", () => {
     assert.deepEqual(confirmed, ["/tasks run --parallel"]);
   });
 
+  it("forwards a newly added runner-context field without the builder knowing it", () => {
+    // The input type is derived from TodosRunCommandContext, so a field added
+    // to the runner context must flow through automatically instead of being
+    // silently dropped by a hand-copied list.
+    const ctx = buildTodosRunContext(baseInput({
+      futureRunnerField: "forwarded",
+    } as Partial<TodosRunContextInput>)) as unknown as Record<string, unknown>;
+    assert.equal(ctx.futureRunnerField, "forwarded");
+  });
+
   it("resolveTodosRunArgs prefers the approved plan over raw args", () => {
     const approved = { ...parsedArgs, raw: "/tasks run --parallel --only a" };
     assert.deepEqual(resolveTodosRunArgs(approved, parsedArgs), { cmd: "todos-run", args: approved });

@@ -20,27 +20,35 @@ import type { ToolProvider } from "../tools/types.ts";
 import type { PermissionManager } from "../permissions.ts";
 import type { TodoItem } from "../todo.ts";
 import type { SlashCommand } from "./slash-commands.ts";
-export type TodosRunContextInput = {
-  /** Live reducer state (read through `stateRef.current`). */
-  getState: () => TuiState;
-  /** Live dispatch (read through `dispatchRef.current`). */
-  dispatch: (action: TuiAction) => void;
-  /** Owning session id as of this call. */
-  sessionId: string;
-  permissionManager: PermissionManager;
-  cwd: string;
-  allTools: ToolProvider;
-  abortSignal: AbortSignal;
-  todosRunExecutors: TodosRunExecutors;
-  /** Live input clear (the component's `setInputRef.current("")`). */
-  clearInput: () => void;
-  /** Stores the plan awaiting user confirmation and mirrors it to UI state. */
-  onConfirmTodoRun: (pending: PendingTodoRunPlan) => void;
-  /** True only when the user accepted the displayed plan. */
-  todoRunConfirmed: boolean;
-  /** Frozen todos snapshot from the confirmed plan (undefined otherwise). */
-  todoRunSnapshot?: TodoItem[];
-};
+
+/**
+ * Everything the component needs to hand the runner.
+ *
+ * Derived from `TodosRunCommandContext` rather than re-declared: a field added
+ * to the runner context is accepted and forwarded automatically, so it can
+ * never be silently dropped here. Only the pieces the component builds (the
+ * store adapter, the session ref, and the two fire-and-forget no-ops) are
+ * omitted and supplied as their live inputs.
+ */
+export type TodosRunContextInput =
+  Omit<
+    TodosRunCommandContext,
+    "store" | "sessionRef" | "recordSubmission" | "persistTodoState"
+    | "todosRunExecutors" | "onConfirmTodoRun" | "todoRunConfirmed"
+  > & {
+    /** Live reducer state (read through `stateRef.current`). */
+    getState: () => TuiState;
+    /** Live dispatch (read through `dispatchRef.current`). */
+    dispatch: (action: TuiAction) => void;
+    /** Owning session id as of this call. */
+    sessionId: string;
+    /** Executors wiring the runner to subagents + background tasks. */
+    todosRunExecutors: TodosRunExecutors;
+    /** Stores the plan awaiting user confirmation and mirrors it to UI state. */
+    onConfirmTodoRun: (pending: PendingTodoRunPlan) => void;
+    /** True only when the user accepted the displayed plan. */
+    todoRunConfirmed: boolean;
+  };
 
 /**
  * Assemble the runner context exactly as the inline `runTodosCommand` did.
@@ -48,26 +56,19 @@ export type TodosRunContextInput = {
  * forwarder or the one-liner the component used to inline.
  */
 export function buildTodosRunContext(input: TodosRunContextInput): TodosRunCommandContext {
+  const { getState, dispatch, sessionId, ...rest } = input;
   return {
+    ...rest,
     store: {
-      getState: input.getState,
-      dispatch: (action: TuiAction) => input.dispatch(action),
+      getState,
+      dispatch: (action: TuiAction) => dispatch(action),
       // The component never subscribed to store changes; the runner only
       // needs the subscription API to exist.
       subscribe: () => () => undefined,
     },
-    sessionRef: { current: input.sessionId },
-    permissionManager: input.permissionManager,
-    cwd: input.cwd,
-    allTools: input.allTools,
+    sessionRef: { current: sessionId },
     recordSubmission: (text) => void text,
-    clearInput: input.clearInput,
-    abortSignal: input.abortSignal,
     persistTodoState: (todos) => void todos,
-    todosRunExecutors: input.todosRunExecutors,
-    onConfirmTodoRun: input.onConfirmTodoRun,
-    todoRunConfirmed: input.todoRunConfirmed,
-    todoRunSnapshot: input.todoRunSnapshot,
   };
 }
 

@@ -71,4 +71,15 @@ describe("buildSubagentToolsDeps", () => {
     assert.ok(deps.getBackgroundPermissionTurn!());
     assert.ok(deps.taskRegistry);
   });
+
+  it("forwards a newly added factory dep without the builder knowing it", () => {
+    // The input type is derived from SubagentToolsFactoryDeps, so adding a dep
+    // to the factory must flow through automatically. This guards the old
+    // hand-copied field list, where a new optional dep was silently dropped.
+    const deps = buildSubagentToolsDeps(baseInput({
+      // Not a field the builder mentions by name.
+      futureOptionalDep: "forwarded",
+    } as Partial<SubagentToolsDepsInput>)) as unknown as Record<string, unknown>;
+    assert.equal(deps.futureOptionalDep, "forwarded");
+  });
 });
