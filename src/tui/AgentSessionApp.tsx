@@ -26,13 +26,7 @@ import { runSessionTurn } from "./session/turn-execution.ts";
 import { useBackgroundWakeups } from "./hooks/useBackgroundWakeups.ts";
 import { useStreamBursts } from "./hooks/useStreamBursts.ts";
 import { useSessionLayout } from "./hooks/useSessionLayout.ts";
-import {
-  autoWakeEnabled,
-} from "./subagent-prompts.ts";
-import {
-  goalLoopActive,
-  planSubagentCompletion,
-} from "./subagent-event-route.ts";
+import { SubagentEventRouter } from "./subagent-event-router.ts";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
@@ -247,7 +241,7 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
   const globalRoleLlmConfigs = useMemo(() => buildRoleLlmConfigs(llm), []);
   const localRoleLlmConfigsRef = useRef<Record<string, LlmConfig>>({});
   const subagentRuntimeRef = useRef<AgentRuntimeRef>({});
-  const backgroundSubagentsRef = useRef(new Map<string, { task: string; ownerSessionId?: string }>());
+  const subagentEventRouter = useRef<SubagentEventRouter | null>(null);
   const getSubagentTools = useCallback((parentLlm = llm): Tool[] => {
     return subagentFactory.getTools({
       parentLlm,
@@ -255,65 +249,9 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
       taskRegistry: subagentTaskRegistry,
       visionPreprocessors: vision ? [createVisionPreprocessor(vision)] : [],
       onSubagentEvent: (event: SubagentEvent) => {
-        if (event.type === "subagent_backgrounded") {
-          backgroundSubagentsRef.current.set(event.id, {
-            task: event.task,
-            ...(event.ownerSessionId ? { ownerSessionId: event.ownerSessionId } : {}),
-          });
-          return;
-        }
-        const background = backgroundSubagentsRef.current.get(event.id);
-        const ownerSessionId = background?.ownerSessionId ?? conversationIdRef.current;
-        const belongsToOtherSession = ownerSessionId !== conversationIdRef.current;
-        if (event.type !== "subagent_end") {
-          if (!belongsToOtherSession) dispatch({ type: "SUBAGENT_EVENT", event });
-          return;
-        }
-        if (!background) {
-          dispatch({ type: "SUBAGENT_EVENT", event });
-          return;
-        }
-        backgroundSubagentsRef.current.delete(event.id);
-
-        if (!belongsToOtherSession) dispatch({ type: "SUBAGENT_EVENT", event });
-
-        void (async () => {
-          const shouldWake = await subagentTaskRegistry.claimAutoWake(event.id, ownerSessionId, autoWakeEnabled(), goalLoopActive(stateRef.current));
-          if (!shouldWake) return;
-          // The queue/deliver decision reads live state AFTER the claim (the
-          // original read `stateRef.current.busy` post-await); keep that timing.
-          const plan = planSubagentCompletion({
-            event,
-            background,
-            ownerSessionId,
-            belongsToOtherSession,
-            state: stateRef.current,
-          });
-          if (plan.kind === "other-session") {
-            const queued = pendingSubagentPromptsRef.current.get(ownerSessionId) ?? [];
-            queued.push(plan.prompt);
-            pendingSubagentPromptsRef.current.set(ownerSessionId, queued);
-            return;
-          }
-          dispatch({
-            type: "ADD_NOTICE",
-            title: plan.notice.title,
-            text: plan.notice.text,
-          });
-          if (plan.kind === "queue") {
-            promptQueueRef.current.push(plan.prompt);
-            setQueuedCount(promptQueueRef.current.length);
-          } else {
-            await subagentTaskRegistry.markAutoWakeDelivered(event.id, ownerSessionId);
-            void handleSubmitRef.current(plan.prompt);
-          }
-        })().catch((error) => {
-          dispatch({
-            type: "ADD_NOTICE",
-            title: "Sub-agent completion handling failed",
-            text: error instanceof Error ? error.message : String(error),
-          });
-        });
+        // The router is built later in the render (after its refs are ready);
+        // it is guaranteed to exist by the time sub-agent tools fire events.
+        subagentEventRouter.current?.handle(event);
       },
       getPermissionTurn: () => permissionTurnRef.current ?? undefined,
       getBackgroundPermissionTurn: () => getPermissionManagerRef.current().beginTurn(
@@ -503,6 +441,20 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
   dispatchRef.current = dispatch;
   conversationIdRef.current = conversationId;
   setInputRef.current = setInput;
+
+  // Build the background-sub-agent event router once, after every ref it
+  // depends on is declared. The queue arrays/maps and refs are captured by
+  // identity (never reassigned as a whole), so the instance stays valid.
+  subagentEventRouter.current ??= new SubagentEventRouter({
+    conversationId: () => conversationIdRef.current,
+    getState: () => stateRef.current,
+    dispatch,
+    registry: subagentTaskRegistry,
+    pendingSubagentPrompts: pendingSubagentPromptsRef.current,
+    promptQueue: promptQueueRef.current,
+    setQueuedCount,
+    submitPrompt: (text) => handleSubmitRef.current(text),
+  });
   useEffect(() => {
     if (!goalConfig.enabled) return;
     void getGoalSession()?.manager.get().then((current) => {
