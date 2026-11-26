@@ -28,8 +28,11 @@ import { useStreamBursts } from "./hooks/useStreamBursts.ts";
 import { useSessionLayout } from "./hooks/useSessionLayout.ts";
 import {
   autoWakeEnabled,
-  makeSubagentCompletionPrompt
 } from "./subagent-prompts.ts";
+import {
+  goalLoopActive,
+  planSubagentCompletion,
+} from "./subagent-event-route.ts";
 import { MessageFeed } from "./components/MessageFeed.tsx";
 import { Header } from "./components/Header.tsx";
 import { StatusBar } from "./components/StatusBar.tsx";
@@ -274,37 +277,35 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
 
         if (!belongsToOtherSession) dispatch({ type: "SUBAGENT_EVENT", event });
 
-        const status = event.success ? "completed" : event.partial ? "completed with partial results" : "failed";
         void (async () => {
-          const goalLoopActive = stateRef.current.phase === "acting" || stateRef.current.currentPlan?.status === "executing";
-          const shouldWake = await subagentTaskRegistry.claimAutoWake(event.id, ownerSessionId, autoWakeEnabled(), goalLoopActive);
+          const shouldWake = await subagentTaskRegistry.claimAutoWake(event.id, ownerSessionId, autoWakeEnabled(), goalLoopActive(stateRef.current));
           if (!shouldWake) return;
-          const completionPrompt = makeSubagentCompletionPrompt(event.id, background.task, event.result, status, {
-            worktreePath: event.worktreePath,
-            worktreeBranch: event.worktreeBranch,
+          // The queue/deliver decision reads live state AFTER the claim (the
+          // original read `stateRef.current.busy` post-await); keep that timing.
+          const plan = planSubagentCompletion({
+            event,
+            background,
+            ownerSessionId,
+            belongsToOtherSession,
+            state: stateRef.current,
           });
-          if (belongsToOtherSession) {
+          if (plan.kind === "other-session") {
             const queued = pendingSubagentPromptsRef.current.get(ownerSessionId) ?? [];
-            queued.push(completionPrompt);
+            queued.push(plan.prompt);
             pendingSubagentPromptsRef.current.set(ownerSessionId, queued);
             return;
           }
           dispatch({
             type: "ADD_NOTICE",
-            title: "Background sub-agent completed",
-            text: [
-              `${background.task}: ${status}\nTask ID: ${event.id}`,
-              ...(event.worktreePath && event.worktreeBranch
-                ? [`Worktree: ${event.worktreePath}\nBranch: ${event.worktreeBranch}`]
-                : []),
-            ].join("\n"),
+            title: plan.notice.title,
+            text: plan.notice.text,
           });
-          if (stateRef.current.busy || stateRef.current.pendingPermission || stateRef.current.pendingModeRequest) {
-            promptQueueRef.current.push(completionPrompt);
+          if (plan.kind === "queue") {
+            promptQueueRef.current.push(plan.prompt);
             setQueuedCount(promptQueueRef.current.length);
           } else {
             await subagentTaskRegistry.markAutoWakeDelivered(event.id, ownerSessionId);
-            void handleSubmitRef.current(completionPrompt);
+            void handleSubmitRef.current(plan.prompt);
           }
         })().catch((error) => {
           dispatch({
