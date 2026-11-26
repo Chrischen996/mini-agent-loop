@@ -12,7 +12,7 @@ import { makeLlmConfig } from "../src/llm/index.ts";
 const llm = makeLlmConfig({ apiKey: "k", baseUrl: "http://localhost/v1", model: "faux" });
 const state = createInitialState(llm.model) as TuiState;
 
-const parsedArgs = { parallel: true, dryRun: true, raw: "/tasks run --parallel", only: [], deps: {}, model: {}, files: {}, maxConcurrency: 2, confirm: false } as TodosRunContextInput["rawParsedArgs"];
+const parsedArgs = { parallel: true, dryRun: true, raw: "/tasks run --parallel", only: [], deps: {}, model: {}, files: {}, maxConcurrency: 2, confirm: false } as Parameters<typeof resolveTodosRunArgs>[1];
 
 function baseInput(overrides: Partial<TodosRunContextInput> = {}): TodosRunContextInput & { dispatched: TuiAction[] } {
   const dispatched: TuiAction[] = [];
@@ -28,7 +28,6 @@ function baseInput(overrides: Partial<TodosRunContextInput> = {}): TodosRunConte
     clearInput: () => undefined,
     onConfirmTodoRun: () => undefined,
     todoRunConfirmed: false,
-    rawParsedArgs: parsedArgs,
     ...overrides,
   };
   return Object.assign(input, { dispatched });

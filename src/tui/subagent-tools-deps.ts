@@ -10,7 +10,7 @@
 
 import type { AgentRuntimeRef } from "../loop.ts";
 import type { LlmConfig } from "../llm/index.ts";
-import type { Tool, ToolProvider } from "../tools/types.ts";
+import type { ToolProvider } from "../tools/types.ts";
 import type { MessagePreprocessor } from "../preprocessors/types.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
 import type { SubagentTaskRegistry } from "../subagent/task-registry.ts";
@@ -66,6 +66,3 @@ export function buildSubagentToolsDeps(input: SubagentToolsDepsInput): SubagentT
     worktreeSourceCwd: input.worktreeSourceCwd,
   };
 }
-
-/** Type-only helper so callers keep the exact Tool[] shape. */
-export type SubagentTools = Tool[];

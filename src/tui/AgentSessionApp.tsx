@@ -253,7 +253,9 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
       onSubagentEvent: (event: SubagentEvent) => {
         // The router is built later in the render (after its refs are ready);
         // it is guaranteed to exist by the time sub-agent tools fire events.
-        subagentEventRouter.current?.handle(event);
+        const router = subagentEventRouter.current;
+        if (!router) throw new Error("SubagentEventRouter is not initialized; sub-agent events cannot be routed.");
+        router.handle(event);
       },
       getPermissionTurn: () => permissionTurnRef.current ?? undefined,
       getBackgroundPermissionTurn: () => getPermissionManagerRef.current().beginTurn(
@@ -363,7 +365,6 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
           },
           todoRunConfirmed: confirmed,
           todoRunSnapshot: approvedPlan?.todos,
-          rawParsedArgs: parsed.args,
         }),
         resolveTodosRunArgs(approvedPlan?.parsed, parsed.args),
       );
@@ -437,15 +438,16 @@ export function AgentSessionApp({ cwd, projectCwd, systemPromptContext = {}, sta
   setInputRef.current = setInput;
 
   // Build the background-sub-agent event router once, after every ref it
-  // depends on is declared. The queue arrays/maps and refs are captured by
-  // identity (never reassigned as a whole), so the instance stays valid.
+  // depends on is declared. The queues are read through getters (not captured
+  // instances), so reassigning a ref later cannot leave the router writing
+  // into a stale array or map.
   subagentEventRouter.current ??= new SubagentEventRouter({
     conversationId: () => conversationIdRef.current,
     getState: () => stateRef.current,
     dispatch,
     registry: subagentTaskRegistry,
-    pendingSubagentPrompts: pendingSubagentPromptsRef.current,
-    promptQueue: promptQueueRef.current,
+    pendingSubagentPrompts: () => pendingSubagentPromptsRef.current,
+    promptQueue: () => promptQueueRef.current,
     setQueuedCount,
     submitPrompt: (text) => handleSubmitRef.current(text),
   });

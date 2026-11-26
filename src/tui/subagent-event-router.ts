@@ -10,8 +10,9 @@
 // state that was tangled with it — the id->background-task map — plus the
 // side-effect ordering (claim auto-wake, then queue or deliver).
 //
-// All deps are stable refs / setters, so the component builds the router
-// once (useLazyRef) and its `onSubagentEvent` collapses to `router.handle(e)`.
+// Every dep is either a live getter or a stable ref/setter, so the component
+// builds the router once (`useRef` + `??=`, after the refs it reads exist) and
+// its `onSubagentEvent` collapses to `router.handle(e)`.
 
 import type { TuiAction, TuiState } from "./state.ts";
 import type { SubagentEvent } from "../subagent/types.ts";
@@ -30,10 +31,10 @@ export type SubagentEventRouterDeps = {
   dispatch: (action: TuiAction) => void;
   /** Auto-wake ledger / delivery tracker. */
   registry: Registry;
-  /** Cross-session completion-prompt queue (mutable map, shared by ref). */
-  pendingSubagentPrompts: Map<string, string[]>;
-  /** Local-session prompt queue (mutable array, shared by ref). */
-  promptQueue: string[];
+  /** Cross-session completion-prompt queue (live read of the component's ref). */
+  pendingSubagentPrompts: () => Map<string, string[]>;
+  /** Local-session prompt queue (live read of the component's ref). */
+  promptQueue: () => string[];
   /** Keep the queued-count badge in sync with the local prompt queue. */
   setQueuedCount: (count: number) => void;
   /** Deliver a completion prompt into the local session now. */
@@ -94,9 +95,10 @@ export class SubagentEventRouter {
         state: getState(),
       });
       if (plan.kind === "other-session") {
-        const queued = this.deps.pendingSubagentPrompts.get(ownerSessionId) ?? [];
+        const prompts = this.deps.pendingSubagentPrompts();
+        const queued = prompts.get(ownerSessionId) ?? [];
         queued.push(plan.prompt);
-        this.deps.pendingSubagentPrompts.set(ownerSessionId, queued);
+        prompts.set(ownerSessionId, queued);
         return;
       }
       dispatch({
@@ -105,8 +107,9 @@ export class SubagentEventRouter {
         text: plan.notice.text,
       });
       if (plan.kind === "queue") {
-        this.deps.promptQueue.push(plan.prompt);
-        this.deps.setQueuedCount(this.deps.promptQueue.length);
+        const queue = this.deps.promptQueue();
+        queue.push(plan.prompt);
+        this.deps.setQueuedCount(queue.length);
       } else {
         await registry.markAutoWakeDelivered(event.id, ownerSessionId);
         void this.deps.submitPrompt(plan.prompt);
@@ -118,10 +121,5 @@ export class SubagentEventRouter {
         text: error instanceof Error ? error.message : String(error),
       });
     });
-  }
-
-  /** Drop every tracked background task (session switch / unmount). */
-  clear(): void {
-    this.background.clear();
   }
 }

@@ -20,7 +20,6 @@ import type { ToolProvider } from "../tools/types.ts";
 import type { PermissionManager } from "../permissions.ts";
 import type { TodoItem } from "../todo.ts";
 import type { SlashCommand } from "./slash-commands.ts";
-
 export type TodosRunContextInput = {
   /** Live reducer state (read through `stateRef.current`). */
   getState: () => TuiState;
@@ -41,8 +40,6 @@ export type TodosRunContextInput = {
   todoRunConfirmed: boolean;
   /** Frozen todos snapshot from the confirmed plan (undefined otherwise). */
   todoRunSnapshot?: TodoItem[];
-  /** Parsed args from the slash command. */
-  rawParsedArgs: Extract<SlashCommand, { cmd: "todos-run" }>["args"];
 };
 
 /**

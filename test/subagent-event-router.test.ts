@@ -48,6 +48,11 @@ function makeHarness(options: {
   const queuedCounts: number[] = [];
   const pendingSubagentPrompts = new Map<string, string[]>();
   const promptQueue: string[] = [];
+  // The component hands the router live getters, so the router must follow a
+  // ref that is reassigned to a new array/map instead of writing into the old
+  // one. Tests swap these to prove the read is live.
+  const pendingSubagentPromptsRef = { current: pendingSubagentPrompts };
+  const promptQueueRef = { current: promptQueue };
   const delivered: Array<{ taskId: string; owner?: string }> = [];
   const stateReads: Array<"before-claim" | "after-claim"> = [];
 
@@ -80,8 +85,8 @@ function makeHarness(options: {
         return true;
       },
     },
-    pendingSubagentPrompts,
-    promptQueue,
+    pendingSubagentPrompts: () => pendingSubagentPromptsRef.current,
+    promptQueue: () => promptQueueRef.current,
     setQueuedCount: (count) => { queuedCounts.push(count); },
     submitPrompt: async (text) => { submitted.push(text); },
   };
@@ -100,6 +105,8 @@ function makeHarness(options: {
     queuedCounts,
     pendingSubagentPrompts,
     promptQueue,
+    pendingSubagentPromptsRef,
+    promptQueueRef,
     delivered,
     stateReads,
     releaseClaim: (value: boolean) => { claimResolved = true; releaseClaim(value); },
@@ -252,5 +259,46 @@ describe("SubagentEventRouter", () => {
 
     assert.deepEqual(h.stateReads, ["before-claim", "after-claim"]);
     assert.equal(h.submitted.length, 1, "idle delivery executed after the claim");
+  });
+
+  it("writes into the queue the component's ref points at now, not the one it captured", async () => {
+    const h = makeHarness({ state: busyState, claimResult: true });
+    // Simulate a ref reassignment (e.g. a session switch replacing the queue):
+    // the router must follow the live ref, not keep pushing into the old array.
+    const replacement: string[] = [];
+    h.promptQueueRef.current = replacement;
+
+    h.router.handle({
+      type: "subagent_backgrounded",
+      id: "sub_live1",
+      task: "live queue work",
+      depth: 1,
+    } as SubagentEvent);
+    h.router.handle(endEvent({ id: "sub_live1" }));
+    await h.flush();
+
+    assert.equal(replacement.length, 1, "the current queue received the prompt");
+    assert.match(replacement[0]!, /live queue work/);
+    assert.equal(h.promptQueue.length, 0, "the stale queue captured at construction stays empty");
+    assert.deepEqual(h.queuedCounts, [1]);
+  });
+
+  it("parks a foreign-session prompt in the map the ref points at now", async () => {
+    const h = makeHarness({ claimResult: true });
+    const replacement = new Map<string, string[]>();
+    h.pendingSubagentPromptsRef.current = replacement;
+
+    h.router.handle({
+      type: "subagent_backgrounded",
+      id: "sub_live2",
+      task: "foreign live work",
+      depth: 1,
+      ownerSessionId: "other-session",
+    } as SubagentEvent);
+    h.router.handle(endEvent({ id: "sub_live2" }));
+    await h.flush();
+
+    assert.match(replacement.get("other-session")?.[0] ?? "", /foreign live work/);
+    assert.equal(h.pendingSubagentPrompts.size, 0, "the stale map captured at construction stays empty");
   });
 });
