@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { SubagentEventRouter, type SubagentEventRouterDeps } from "../src/tui/subagent-event-router.ts";
-import type { SubagentEvent } from "../src/subagent/types.ts";
-import type { TuiAction, TuiState } from "../src/tui/state.ts";
+import type { LoopEvent } from "../src/loop.ts";
+import type { SubagentEvent, SubagentRuntimeInfo } from "../src/subagent/types.ts";
+import { createInitialState, type TuiAction, type TuiState } from "../src/tui/state.ts";
 
 type SubagentEnd = Extract<SubagentEvent, { type: "subagent_end" }>;
 
-const runtime = { model: "m", provider: "p" } as never;
+const runtime: SubagentRuntimeInfo = {
+  model: "m",
+  provider: "p",
+  baseUrl: "http://localhost/v1",
+  thinkingMode: "fixed",
+  modelSwitchSucceeded: true,
+};
+
+/** A minimal inner loop event for the non-end dispatch paths. */
+const innerDone: LoopEvent = { type: "done", messages: [] };
 
 function endEvent(overrides: Partial<SubagentEnd> = {}): SubagentEvent {
   return {
@@ -23,18 +33,13 @@ function endEvent(overrides: Partial<SubagentEnd> = {}): SubagentEvent {
   };
 }
 
-const idleState = {
-  busy: false,
-  pendingPermission: undefined,
-  pendingModeRequest: undefined,
-  phase: "planning",
-  currentPlan: undefined,
-} as unknown as TuiState;
+/** Properly typed initial state; tests only override the fields they read. */
+function initialState(overrides: Partial<TuiState> = {}): TuiState {
+  return { ...createInitialState("test-model"), ...overrides };
+}
 
-const busyState = {
-  ...idleState,
-  busy: true,
-} as unknown as TuiState;
+const idleState = initialState({ busy: false });
+const busyState = initialState({ busy: true });
 
 /** Harness with a controllable claimAutoWake promise so the async flow and
  *  its state-read timing can be asserted deterministically. */
@@ -92,10 +97,14 @@ function makeHarness(options: {
   };
 
   const router = new SubagentEventRouter(deps);
+  // Wait for the router's async claim/queue IIFE to settle. Each setImmediate
+  // turn drains the whole microtask queue, and a few rounds tolerate the
+  // router gaining further awaits (a fixed microtask count would silently
+  // stop testing anything once the flow grows one more await).
   const flush = async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    for (let round = 0; round < 3; round += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
   };
 
   return {
@@ -146,11 +155,11 @@ describe("SubagentEventRouter", () => {
       depth: 1,
       ownerSessionId: "elsewhere",
     } as SubagentEvent);
-    h.router.handle({ type: "subagent_event", id: "sub_f1", inner: { type: "done", messages: [] } as never, depth: 1 } as SubagentEvent);
+    h.router.handle({ type: "subagent_event", id: "sub_f1", inner: innerDone, depth: 1 });
     assert.equal(h.subagentEvents().length, 0, "foreign sub-agent stream is not dispatched locally");
 
     const h2 = makeHarness();
-    h2.router.handle({ type: "subagent_event", id: "sub_local", inner: { type: "done", messages: [] } as never, depth: 1 } as SubagentEvent);
+    h2.router.handle({ type: "subagent_event", id: "sub_local", inner: innerDone, depth: 1 });
     assert.equal(h2.subagentEvents().length, 1);
   });
 
@@ -259,6 +268,59 @@ describe("SubagentEventRouter", () => {
 
     assert.deepEqual(h.stateReads, ["before-claim", "after-claim"]);
     assert.equal(h.submitted.length, 1, "idle delivery executed after the claim");
+  });
+
+  it("queues when only a pending mode request is blocking, with no busy turn", async () => {
+    // The busy check is `busy || pendingPermission || pendingModeRequest`.
+    // Nothing else covers the third term on its own: a mode card awaiting A/D
+    // must also hold the completion prompt back.
+    const h = makeHarness({
+      state: initialState({ busy: false, pendingModeRequest: { mode: "bypass", reason: "model asked to switch" } }),
+      claimResult: true,
+    });
+    h.router.handle({
+      type: "subagent_backgrounded",
+      id: "sub_mode1",
+      task: "mode-gated work",
+      depth: 1,
+    } as SubagentEvent);
+    h.router.handle(endEvent({ id: "sub_mode1" }));
+    await h.flush();
+
+    assert.equal(h.promptQueue.length, 1, "a pending mode request queues the prompt");
+    assert.equal(h.submitted.length, 0);
+    assert.equal(h.delivered.length, 0);
+  });
+
+  it("mentions the worktree only when a branch is also present", async () => {
+    const withBranch = makeHarness({ claimResult: true });
+    withBranch.router.handle({
+      type: "subagent_backgrounded",
+      id: "sub_wt1",
+      task: "worktree work",
+      depth: 1,
+    } as SubagentEvent);
+    withBranch.router.handle(endEvent({
+      id: "sub_wt1",
+      worktreePath: "/tmp/wt-a",
+      worktreeBranch: "agent-1",
+    }));
+    await withBranch.flush();
+    assert.match(withBranch.notices()[0]!.text, /Worktree: \/tmp\/wt-a\nBranch: agent-1/);
+    assert.match(withBranch.submitted[0]!, /isolated git worktree \/tmp\/wt-a on branch agent-1/);
+
+    // A path without a branch must not print a half-formed worktree line.
+    const pathOnly = makeHarness({ claimResult: true });
+    pathOnly.router.handle({
+      type: "subagent_backgrounded",
+      id: "sub_wt2",
+      task: "worktree work",
+      depth: 1,
+    } as SubagentEvent);
+    pathOnly.router.handle(endEvent({ id: "sub_wt2", worktreePath: "/tmp/wt-b" }));
+    await pathOnly.flush();
+    assert.doesNotMatch(pathOnly.notices()[0]!.text, /Worktree:/);
+    assert.doesNotMatch(pathOnly.submitted[0]!, /isolated git worktree/);
   });
 
   it("writes into the queue the component's ref points at now, not the one it captured", async () => {
