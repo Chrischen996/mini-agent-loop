@@ -1,11 +1,11 @@
 // Owns the mutable background-task map and the I/O orchestration for routing
 // background sub-agent events, split out of AgentSessionApp.tsx.
 //
-// The React component closed over 21 variables in its `onSubagentEvent`
-// handler (the background map, refs to live state/conversation, dispatch,
-// the two prompt queues, the registry, the submit callback, and a status
-// setter). That is exactly the kind of wide closure this refactor targets:
-// the decision lives in the pure `planSubagentCompletion` (see
+// The React component's `onSubagentEvent` handler reached into a wide set of
+// component values (the background map, refs to live state/conversation,
+// dispatch, the two prompt queues, the registry, the submit callback, and a
+// status setter). That is exactly the kind of implicit closure this refactor
+// targets: the decision lives in the pure `planSubagentCompletion` (see
 // subagent-event-route.ts), and this class owns the one piece of mutable
 // state that was tangled with it — the id->background-task map — plus the
 // side-effect ordering (claim auto-wake, then queue or deliver).
